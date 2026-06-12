@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-quality:
+    name: Windows quality gates
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Show toolchain
+        shell: pwsh
+        run: rustup show
+
+      - name: Install security tools
+        shell: pwsh
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: Format check
+        shell: pwsh
+        run: cargo fmt --check
+
+      - name: Typecheck
+        shell: pwsh
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Test
+        shell: pwsh
+        run: cargo test --workspace --all-targets --all-features
+
+      - name: Lint
+        shell: pwsh
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Security audit
+        shell: pwsh
+        run: cargo audit
+
+      - name: Dependency policy
+        shell: pwsh
+        run: cargo deny check
+
+      - name: Release build
+        shell: pwsh
+        run: cargo build --workspace --release
+
+      - name: Build portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\WinAppMigrator | Out-Null
+          Copy-Item target\release\winappmigrator.exe dist\WinAppMigrator\
+          Copy-Item target\release\winappmigrator-gui.exe dist\WinAppMigrator\
+          Copy-Item README.md,CHANGELOG.md,PLAN.md,AGENTS.md dist\WinAppMigrator\
+          if (Test-Path docs) { Copy-Item docs dist\WinAppMigrator\docs -Recurse }
+          Compress-Archive -Path dist\WinAppMigrator\* -DestinationPath dist\WinAppMigrator-portable-windows-x64.zip -Force
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinAppMigrator-portable-windows-x64
+          path: dist/WinAppMigrator-portable-windows-x64.zip
+          if-no-files-found: error

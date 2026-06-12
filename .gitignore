@@ -1,0 +1,13 @@
+/target/
+/dist/
+/scan-output/
+/scan-output-*/
+/.env
+/.env.*
+!/.env.example
+*.pdb
+*.log
+*.tmp
+*.bak
+Thumbs.db
+Desktop.ini
