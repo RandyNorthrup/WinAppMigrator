@@ -116,6 +116,7 @@ Footprint discovery engine, console GUI, and docs are committed (4da43ef). Most 
 - [x] Deepen MSIX (`AppxManifest` identity → `%LOCALAPPDATA%\Packages\<id>_*`) and Squirrel (authoritative root + latest `app-*`) enumeration.
 - [x] Restore user data back to the real `%AppData%`/`%ProgramData%` on the target machine (opt-in `--restore-user-data`; routing centralized in `file_discovery::restore_destination_for_entry`; ProgramData apply requires elevation).
 - [x] Harden EXE reverse-engineering: delay-load imports (manual data-dir[13] RVA walk, since `pelite` has no delay API), embedded `RT_MANIFEST` (`requestedExecutionLevel` + SxS `<dependentAssembly>`), managed .NET detection (COR20 data-dir[14]), and runtime-prerequisite breadth (.NET Framework/self-contained, Java, Python, Electron/Node). Validated against mmc.exe (323 delay imports), regedit.exe (SxS Common-Controls), InstallUtil.exe (managed .NET).
+- [x] Optional user-data backup as a first-class capability: separate `MachineAppData` (ProgramData) from genuine per-user data via `include_program_data`/`--skip-program-data`; expand user-data discovery to Documents (incl. `My Games\<App>`) and Saved Games with `User Shell Folders` redirection resolution; skip online-only cloud placeholders (OneDrive Files On-Demand).
 
 ### CLI
 

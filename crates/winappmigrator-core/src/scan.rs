@@ -152,6 +152,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             publisher,
             include_hashes: options.include_hashes,
             include_user_data: options.include_user_data,
+            include_program_data: options.include_program_data,
             extra_roots,
         });
 

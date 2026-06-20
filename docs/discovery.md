@@ -157,8 +157,9 @@ file inventory plus a `FootprintLocation` summary. Roots come from:
   dirs, app shortcut targets, the uninstaller directory, App Paths dirs, and the
   authoritative MSI/Inno roots.
 - Token-matched directories under `Program Files`, `Program Files (x86)`,
-  `ProgramW6432`, `ProgramData`, and every user profile's
-  `AppData\{Roaming,Local,LocalLow}`.
+  `ProgramW6432`, `ProgramData`, every user profile's
+  `AppData\{Roaming,Local,LocalLow}`, and the current user's `Documents`
+  (including `My Games\<App>`) and `Saved Games`.
 
 ### Matching (avoiding false positives)
 
@@ -181,9 +182,21 @@ and install dir leaf/parent. Guards:
 `FileClassification` per file:
 
 - `AppOwned` — under an install directory (copied).
-- `UserData` — under ProgramData/AppData (copied when `include_user_data`).
+- `UserData` — genuine **per-user** data: Roaming/Local/LocalLow AppData,
+  `Documents` (including nested `My Games\<App>`), and `Saved Games`. Copied
+  when `include_user_data`.
+- `MachineAppData` — **machine-wide** `ProgramData` application data shared by
+  all users. This is deliberately distinct from per-user data and is copied
+  under its own `include_program_data` toggle.
 - `ManualRuntimeInstall` — `.sys` drivers (never copied).
 - `WindowsSystem` / others — reported, not copied.
+
+Per-user `Documents`/`Saved Games` are resolved through the `User Shell Folders`
+registry key first (so OneDrive/folder-redirection targets are followed) before
+falling back to the profile path. **Online-only cloud placeholders** (OneDrive
+Files On-Demand, detected via the `OFFLINE`/`RECALL_ON_DATA_ACCESS` file
+attributes) are reported but never copied, so a backup cannot silently hydrate
+or fail on files whose data is not present locally.
 
 `FootprintLocation { path, kind, scope, file_count, total_bytes,
 copyable_bytes, included }` groups the inventory by root for display.
@@ -193,8 +206,12 @@ copyable_bytes, included }` groups the inventory by root for display.
 ## Options
 
 - `ScanOptions.include_user_data` / `PackageOptions.include_user_data`
-  (default `true`) — when false, ProgramData/AppData files are discovered and
-  reported but not copied. CLI: `--skip-user-data` on `scan` and `package`.
+  (default `true`) — when false, genuine per-user data (Roaming/Local/LocalLow
+  AppData, Documents, Saved Games) is discovered and reported but not copied.
+  CLI: `--skip-user-data` on `scan` and `package`.
+- `ScanOptions.include_program_data` / `PackageOptions.include_program_data`
+  (default `true`) — controls machine-wide `ProgramData` separately from
+  per-user data. CLI: `--skip-program-data` on `scan` and `package`.
 - `ScanOptions.include_hashes` — SHA-256 of copyable files. This dominates scan
   time for large apps; a GUI toggle exists ("Compute SHA-256 hashes").
 

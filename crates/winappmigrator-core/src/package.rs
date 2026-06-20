@@ -48,6 +48,7 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         recursive_dependencies: true,
         include_hashes: true,
         include_user_data: options.include_user_data,
+        include_program_data: options.include_program_data,
     };
     let report = scan_and_write_reports(&scan_options)?;
     let mut warnings = report.warnings.clone();

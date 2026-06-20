@@ -121,8 +121,14 @@ pub struct ScanOptions {
     pub current_directory: Option<PathBuf>,
     pub recursive_dependencies: bool,
     pub include_hashes: bool,
+    /// Include genuine per-user data (Roaming/Local/LocalLow, Documents, Saved
+    /// Games). Machine-wide `ProgramData` is controlled separately by
+    /// `include_program_data`.
     #[serde(default = "default_true")]
     pub include_user_data: bool,
+    /// Include machine-wide `ProgramData` application data.
+    #[serde(default = "default_true")]
+    pub include_program_data: bool,
 }
 
 fn default_true() -> bool {
@@ -141,6 +147,7 @@ impl ScanOptions {
             recursive_dependencies: true,
             include_hashes: true,
             include_user_data: true,
+            include_program_data: true,
         }
     }
 }
@@ -272,6 +279,8 @@ pub struct PackageOptions {
     pub self_extracting_stub: Option<PathBuf>,
     #[serde(default = "default_true")]
     pub include_user_data: bool,
+    #[serde(default = "default_true")]
+    pub include_program_data: bool,
 }
 
 impl PackageOptions {
@@ -287,6 +296,7 @@ impl PackageOptions {
             create_self_extracting_archive: false,
             self_extracting_stub: None,
             include_user_data: true,
+            include_program_data: true,
         }
     }
 }
@@ -325,7 +335,13 @@ pub struct FileEntry {
 #[serde(rename_all = "snake_case")]
 pub enum FileClassification {
     AppOwned,
+    /// Per-user application data (Roaming/Local/LocalLow settings, Documents,
+    /// Saved Games). Copied when user-data backup is enabled.
     UserData,
+    /// Machine-wide application data under `ProgramData`. Shared by all users
+    /// and distinct from per-user data; copied when ProgramData backup is
+    /// enabled.
+    MachineAppData,
     SharedRuntime,
     WindowsSystem,
     Missing,
@@ -354,6 +370,8 @@ pub enum FootprintKind {
     RoamingAppData,
     LocalAppData,
     LocalLowAppData,
+    Documents,
+    SavedGames,
     RegistryReference,
     Other,
 }
@@ -366,9 +384,24 @@ impl FootprintKind {
             FootprintKind::RoamingAppData => "Roaming AppData",
             FootprintKind::LocalAppData => "Local AppData",
             FootprintKind::LocalLowAppData => "LocalLow AppData",
+            FootprintKind::Documents => "Documents",
+            FootprintKind::SavedGames => "Saved Games",
             FootprintKind::RegistryReference => "Referenced location",
             FootprintKind::Other => "Other location",
         }
+    }
+
+    /// Whether this location holds genuine per-user data (as opposed to the
+    /// machine-wide `ProgramData`, the install directory, or a bare reference).
+    pub fn is_user_data(&self) -> bool {
+        matches!(
+            self,
+            FootprintKind::RoamingAppData
+                | FootprintKind::LocalAppData
+                | FootprintKind::LocalLowAppData
+                | FootprintKind::Documents
+                | FootprintKind::SavedGames
+        )
     }
 }
 

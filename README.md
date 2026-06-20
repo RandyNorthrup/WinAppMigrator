@@ -234,7 +234,7 @@ tests/
 ## Security Notes
 
 - Scan/list operations do not intentionally modify the system. Footprint discovery and install-source reverse-engineering are read-only: they read the registry (uninstall keys, MSI Installer component database, App Paths), parse the Inno Setup uninstall log, and walk install/data directories without writing.
-- Per-user and ProgramData application data is included by default and can be excluded with `--skip-user-data` (CLI) or the "Include user data" toggle (GUI). Cache/temp/log directories are pruned and never copied.
+- Genuine per-user data (Roaming/Local/LocalLow AppData, Documents incl. `My Games`, Saved Games) is treated separately from machine-wide `ProgramData`. Each is included by default and can be excluded independently with `--skip-user-data` / `--skip-program-data` (CLI) or the corresponding toggles (GUI). `Documents`/`Saved Games` follow OneDrive/folder redirection via `User Shell Folders`. Cache/temp/log directories are pruned, and online-only cloud placeholders (OneDrive Files On-Demand) are reported but never copied.
 - Restore defaults to dry-run. File writes require explicit `--apply` or the GUI apply checkbox.
 - Restore stages user/ProgramData data under the target root by default; restoring it to the real `%AppData%`/`%ProgramData%` locations is opt-in (`--restore-user-data`), bounded to each known base, and blocks `%ProgramData%` apply when not elevated.
 - Restore blocks apply into protected Windows locations when not elevated.

@@ -1,8 +1,11 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 use walkdir::WalkDir;
+use winreg::RegKey;
+use winreg::enums::HKEY_CURRENT_USER;
 
 use crate::errors::{Result, WinAppMigratorError};
 use crate::hashing::sha256_file;
@@ -13,6 +16,19 @@ use crate::models::{
 use crate::path_utils::{file_name_string, normalize_name_for_match, path_has_extension};
 
 const MAX_WALK_DEPTH: usize = 24;
+/// `User Shell Folders` holds the (possibly redirected) per-user known-folder
+/// paths as `REG_EXPAND_SZ` values such as `%USERPROFILE%\Documents`.
+const USER_SHELL_FOLDERS_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders";
+const DOCUMENTS_VALUE: &str = "Personal";
+/// `User Shell Folders` value name (a known-folder GUID) for Saved Games.
+const SAVED_GAMES_VALUE: &str = "{4C5C32FF-BB9D-43b0-B5B4-2D72E54EAAA4}";
+const DOCUMENTS_FALLBACK: &str = "Documents";
+const SAVED_GAMES_FALLBACK: &str = "Saved Games";
+/// File data is not locally present (cloud online-only). Copying would trigger
+/// hydration or fail, so such placeholders are reported but not copied.
+const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
 const PACKAGE_FILES_ROOT: &str = "files";
 const EXTERNAL_FILES_DIR: &str = "_external";
 const DRIVER_EXTENSION: &str = "sys";
@@ -85,6 +101,7 @@ pub struct FileDiscoveryContext {
     pub publisher: Option<String>,
     pub include_hashes: bool,
     pub include_user_data: bool,
+    pub include_program_data: bool,
     /// Additional roots discovered elsewhere (service binaries, shortcut
     /// targets, scheduled task actions, App Paths) to fold into the footprint.
     pub extra_roots: Vec<PathBuf>,
@@ -121,6 +138,7 @@ pub fn discover_files(
         FootprintKind::InstallDirectory,
         context.include_hashes,
         context.include_user_data,
+        context.include_program_data,
         "Selected main executable",
         &mut warnings,
     );
@@ -133,6 +151,7 @@ pub fn discover_files(
             install_root,
             context.include_hashes,
             context.include_user_data,
+            context.include_program_data,
             &mut files,
             &mut seen,
             &mut warnings,
@@ -375,6 +394,7 @@ fn collect_roots(context: &FileDiscoveryContext, tokens: &Tokens) -> Vec<Discove
     collect_program_files_roots(tokens, &mut raw);
     collect_program_data_roots(tokens, &mut raw);
     collect_appdata_roots(tokens, &mut raw);
+    collect_known_user_folder_roots(tokens, &mut raw);
 
     // Deduplicate while preserving order so the most authoritative root (the
     // install location) owns each shared file, and drop any root nested inside a
@@ -423,6 +443,72 @@ fn collect_appdata_roots(tokens: &Tokens, roots: &mut Vec<DiscoveryRoot>) {
     for (base, kind) in appdata_bases() {
         collect_matching_dirs(&base, kind, tokens, roots);
     }
+}
+
+/// Match user-authored data folders the current user keeps outside AppData:
+/// `Documents` (including nested `My Games\<App>`) and `Saved Games`, resolving
+/// any folder redirection (OneDrive, roaming profiles) recorded in the
+/// `User Shell Folders` registry key before falling back to the profile path.
+fn collect_known_user_folder_roots(tokens: &Tokens, roots: &mut Vec<DiscoveryRoot>) {
+    if let Some(documents) = documents_dir() {
+        collect_matching_dirs(&documents, FootprintKind::Documents, tokens, roots);
+    }
+    if let Some(saved_games) = saved_games_dir() {
+        collect_matching_dirs(&saved_games, FootprintKind::SavedGames, tokens, roots);
+    }
+}
+
+fn documents_dir() -> Option<PathBuf> {
+    user_shell_folder(DOCUMENTS_VALUE).or_else(|| user_profile_join(DOCUMENTS_FALLBACK))
+}
+
+fn saved_games_dir() -> Option<PathBuf> {
+    user_shell_folder(SAVED_GAMES_VALUE).or_else(|| user_profile_join(SAVED_GAMES_FALLBACK))
+}
+
+fn user_profile_join(leaf: &str) -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .map(|profile| PathBuf::from(profile).join(leaf))
+        .filter(|path| path.is_dir())
+}
+
+/// Read a (possibly redirected) known-folder path from `User Shell Folders`,
+/// expanding the `%USERPROFILE%`-style `REG_EXPAND_SZ` value.
+fn user_shell_folder(value_name: &str) -> Option<PathBuf> {
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(USER_SHELL_FOLDERS_KEY)
+        .ok()?;
+    let raw: String = key.get_value(value_name).ok()?;
+    let path = PathBuf::from(expand_env_vars(&raw));
+    path.is_dir().then_some(path)
+}
+
+/// Expand `%VAR%` references using the current process environment. Unknown
+/// variables are left intact.
+fn expand_env_vars(value: &str) -> String {
+    let mut output = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else {
+            output.push('%');
+            output.push_str(after);
+            return output;
+        };
+        let name = &after[..end];
+        match std::env::var_os(name).and_then(|value| value.into_string().ok()) {
+            Some(resolved) => output.push_str(&resolved),
+            None => {
+                output.push('%');
+                output.push_str(name);
+                output.push('%');
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    output.push_str(rest);
+    output
 }
 
 /// Find directories under `base` whose name matches the application tokens, at
@@ -582,11 +668,13 @@ fn primary_name(display_name: &str) -> String {
         .join(" ")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn discover_tree(
     root: &DiscoveryRoot,
     install_root: Option<&Path>,
     include_hashes: bool,
     include_user_data: bool,
+    include_program_data: bool,
     files: &mut Vec<FileEntry>,
     seen: &mut BTreeSet<String>,
     warnings: &mut Vec<Warning>,
@@ -619,6 +707,7 @@ fn discover_tree(
                 root.kind.clone(),
                 include_hashes,
                 include_user_data,
+                include_program_data,
                 discovery_reason(&root.kind),
                 warnings,
             );
@@ -633,6 +722,8 @@ fn discovery_reason(kind: &FootprintKind) -> &'static str {
         FootprintKind::RoamingAppData => "Roaming user application data",
         FootprintKind::LocalAppData => "Local user application data",
         FootprintKind::LocalLowAppData => "LocalLow user application data",
+        FootprintKind::Documents => "User document data",
+        FootprintKind::SavedGames => "Saved game data",
         FootprintKind::RegistryReference => "Referenced application location",
         FootprintKind::Other => "Related application file",
     }
@@ -647,6 +738,7 @@ fn add_file(
     root_kind: FootprintKind,
     include_hashes: bool,
     include_user_data: bool,
+    include_program_data: bool,
     reason: &str,
     warnings: &mut Vec<Warning>,
 ) {
@@ -672,11 +764,16 @@ fn add_file(
     }
 
     let classification = classify_file(path, install_root, &root_kind);
-    let should_copy = match classification {
+    let online_only = is_online_only(metadata.file_attributes());
+    let base_should_copy = match classification {
         FileClassification::AppOwned => true,
         FileClassification::UserData => include_user_data,
+        FileClassification::MachineAppData => include_program_data,
         _ => false,
     };
+    // An online-only cloud placeholder has no local data; copying it would
+    // hydrate or fail, so it is reported but never copied.
+    let should_copy = base_should_copy && !online_only;
 
     let hash_sha256 = if include_hashes && should_copy {
         match sha256_file(path) {
@@ -696,21 +793,37 @@ fn add_file(
     };
 
     let package_relative_path = should_copy.then(|| package_relative_path(path, install_root));
-    let reason = match classification {
-        FileClassification::ManualRuntimeInstall => {
-            warnings.push(Warning::new(
-                "driver_file_not_copied",
-                WarningSeverity::Warning,
-                "Kernel driver files require a vendor driver installer and are not copied by package creation.",
-                Some(path.display().to_string()),
-            ));
-            "Driver or kernel component requires manual vendor installation"
+    let reason = if online_only {
+        warnings.push(Warning::new(
+            "cloud_placeholder_skipped",
+            WarningSeverity::Info,
+            "Online-only cloud file (e.g. OneDrive Files On-Demand) has no local data; pin or download it before backup. Reported but not copied.",
+            Some(path.display().to_string()),
+        ));
+        "Online-only cloud placeholder (data not downloaded); not copied"
+    } else {
+        match classification {
+            FileClassification::ManualRuntimeInstall => {
+                warnings.push(Warning::new(
+                    "driver_file_not_copied",
+                    WarningSeverity::Warning,
+                    "Kernel driver files require a vendor driver installer and are not copied by package creation.",
+                    Some(path.display().to_string()),
+                ));
+                "Driver or kernel component requires manual vendor installation"
+            }
+            FileClassification::UserData if !include_user_data => {
+                "User data found but excluded by current scan options"
+            }
+            FileClassification::UserData => "User or application data captured for restore",
+            FileClassification::MachineAppData if !include_program_data => {
+                "Machine-wide ProgramData found but excluded by current scan options"
+            }
+            FileClassification::MachineAppData => {
+                "Machine-wide ProgramData application data captured for restore"
+            }
+            _ => reason,
         }
-        FileClassification::UserData if !include_user_data => {
-            "User data found but excluded by current scan options"
-        }
-        FileClassification::UserData => "User or application data captured for restore",
-        _ => reason,
     };
 
     files.push(FileEntry {
@@ -745,14 +858,20 @@ fn classify_file(
         FootprintKind::RegistryReference | FootprintKind::Other => {
             if is_program_files_path(path) {
                 FileClassification::AppOwned
+            } else if is_program_data_path(path) {
+                FileClassification::MachineAppData
             } else {
                 FileClassification::UserData
             }
         }
-        FootprintKind::ProgramData
-        | FootprintKind::RoamingAppData
+        // ProgramData is machine-wide application data shared by all users, not
+        // per-user data.
+        FootprintKind::ProgramData => FileClassification::MachineAppData,
+        FootprintKind::RoamingAppData
         | FootprintKind::LocalAppData
-        | FootprintKind::LocalLowAppData => FileClassification::UserData,
+        | FootprintKind::LocalLowAppData
+        | FootprintKind::Documents
+        | FootprintKind::SavedGames => FileClassification::UserData,
     }
 }
 
@@ -806,6 +925,18 @@ fn is_program_files_path(path: &Path) -> bool {
     path.to_string_lossy()
         .to_ascii_lowercase()
         .contains(r"\program files")
+}
+
+fn is_program_data_path(path: &Path) -> bool {
+    path.to_string_lossy()
+        .to_ascii_lowercase()
+        .contains(r"\programdata")
+}
+
+/// True for a cloud (e.g. OneDrive Files On-Demand) placeholder whose data is
+/// not present locally, so it cannot be copied without hydrating it.
+fn is_online_only(attributes: u32) -> bool {
+    attributes & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0
 }
 
 fn is_windows_system_path(path: &Path) -> bool {
@@ -954,6 +1085,58 @@ mod tests {
     }
 
     #[test]
+    fn program_data_is_machine_app_data_not_user_data() {
+        let classification = classify_file(
+            Path::new(r"C:\ProgramData\Demo\machine.dat"),
+            Some(Path::new(r"C:\Program Files\Demo")),
+            &FootprintKind::ProgramData,
+        );
+        assert_eq!(classification, FileClassification::MachineAppData);
+    }
+
+    #[test]
+    fn documents_and_saved_games_are_user_data() {
+        let documents = classify_file(
+            Path::new(r"C:\Users\sample\Documents\Demo\save.json"),
+            None,
+            &FootprintKind::Documents,
+        );
+        let saved = classify_file(
+            Path::new(r"C:\Users\sample\Saved Games\Demo\slot1.sav"),
+            None,
+            &FootprintKind::SavedGames,
+        );
+        assert_eq!(documents, FileClassification::UserData);
+        assert_eq!(saved, FileClassification::UserData);
+    }
+
+    #[test]
+    fn expands_known_env_vars_and_keeps_unknown() {
+        // USERPROFILE is always present on Windows; avoid mutating the env.
+        if let Some(profile) = std::env::var_os("USERPROFILE").and_then(|v| v.into_string().ok()) {
+            assert_eq!(
+                expand_env_vars(r"%USERPROFILE%\Documents"),
+                format!(r"{profile}\Documents")
+            );
+        }
+        assert_eq!(
+            expand_env_vars(r"%WAM_DEFINITELY_MISSING%\x"),
+            r"%WAM_DEFINITELY_MISSING%\x"
+        );
+        assert_eq!(expand_env_vars("no-vars-here"), "no-vars-here");
+    }
+
+    #[test]
+    fn detects_online_only_cloud_placeholders() {
+        assert!(is_online_only(FILE_ATTRIBUTE_OFFLINE));
+        assert!(is_online_only(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS));
+        assert!(is_online_only(
+            FILE_ATTRIBUTE_OFFLINE | 0x20 /* archive */
+        ));
+        assert!(!is_online_only(0x20));
+    }
+
+    #[test]
     fn prunes_cache_directories() {
         assert!(is_volatile_dir(
             Path::new(r"C:\Users\me\AppData\Local\Demo\Cache"),
@@ -991,6 +1174,7 @@ mod tests {
             publisher: Some("Apple Inc.".to_owned()),
             include_hashes: false,
             include_user_data: true,
+            include_program_data: true,
             extra_roots: Vec::new(),
         };
         let tokens = Tokens::from_context(&context);
@@ -1013,6 +1197,7 @@ mod tests {
             publisher: Some("Igor Pavlov".to_owned()),
             include_hashes: false,
             include_user_data: true,
+            include_program_data: true,
             extra_roots: Vec::new(),
         };
         let tokens = Tokens::from_context(&context);
@@ -1037,6 +1222,7 @@ mod tests {
             publisher: None,
             include_hashes: false,
             include_user_data: true,
+            include_program_data: true,
             extra_roots: Vec::new(),
         };
         let anydesk_tokens = Tokens::from_context(&anydesk);
@@ -1157,6 +1343,7 @@ mod tests {
             publisher: Some("Mozilla".to_owned()),
             include_hashes: false,
             include_user_data: true,
+            include_program_data: true,
             extra_roots: Vec::new(),
         };
         let tokens = Tokens::from_context(&context);

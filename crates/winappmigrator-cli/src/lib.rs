@@ -82,9 +82,14 @@ pub struct ScanCommand {
     #[arg(long = "non-interactive")]
     pub non_interactive: bool,
 
-    /// Exclude per-user and ProgramData application data from the scan.
+    /// Exclude genuine per-user data (Roaming/Local/LocalLow, Documents, Saved
+    /// Games) from the scan.
     #[arg(long = "skip-user-data")]
     pub skip_user_data: bool,
+
+    /// Exclude machine-wide ProgramData application data from the scan.
+    #[arg(long = "skip-program-data")]
+    pub skip_program_data: bool,
 }
 
 #[derive(Debug, Args)]
@@ -116,9 +121,14 @@ pub struct PackageCommand {
     #[arg(long)]
     pub sfx: bool,
 
-    /// Exclude per-user and ProgramData application data from the package.
+    /// Exclude genuine per-user data (Roaming/Local/LocalLow, Documents, Saved
+    /// Games) from the package.
     #[arg(long = "skip-user-data")]
     pub skip_user_data: bool,
+
+    /// Exclude machine-wide ProgramData application data from the package.
+    #[arg(long = "skip-program-data")]
+    pub skip_program_data: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -279,6 +289,7 @@ fn run_scan(command: ScanCommand) -> Result<()> {
         recursive_dependencies: true,
         include_hashes: true,
         include_user_data: !command.skip_user_data,
+        include_program_data: !command.skip_program_data,
     };
 
     if let AppSelection::ExecutablePath(path) = &options.selection {
@@ -338,6 +349,7 @@ fn run_package(command: PackageCommand) -> Result<()> {
             None
         },
         include_user_data: !command.skip_user_data,
+        include_program_data: !command.skip_program_data,
     };
     let result = create_package(&options)?;
 

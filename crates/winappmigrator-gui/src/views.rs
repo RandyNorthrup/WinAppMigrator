@@ -518,7 +518,11 @@ impl WinAppMigratorApp {
             widgets::card_titled(&mut columns[1], &theme, "Scan options", None, |ui| {
                 ui.checkbox(
                     &mut self.scan_include_user_data,
-                    "Include user data (AppData, ProgramData)",
+                    "Include user data (Roaming/Local AppData, Documents, Saved Games)",
+                );
+                ui.checkbox(
+                    &mut self.scan_include_program_data,
+                    "Include ProgramData (machine-wide app data)",
                 );
                 ui.label(
                     RichText::new(
@@ -999,7 +1003,11 @@ impl WinAppMigratorApp {
             widgets::field_label(ui, &theme, "Contents");
             ui.checkbox(
                 &mut self.scan_include_user_data,
-                "Include user data (AppData, ProgramData)",
+                "Include user data (Roaming/Local AppData, Documents, Saved Games)",
+            );
+            ui.checkbox(
+                &mut self.scan_include_program_data,
+                "Include ProgramData (machine-wide app data)",
             );
             ui.add_space(10.0);
             widgets::field_label(ui, &theme, "Archive options");
@@ -1635,7 +1643,9 @@ fn footprint_role(kind: &FootprintKind) -> Role {
         FootprintKind::ProgramData => Role::Warning,
         FootprintKind::RoamingAppData
         | FootprintKind::LocalAppData
-        | FootprintKind::LocalLowAppData => Role::Success,
+        | FootprintKind::LocalLowAppData
+        | FootprintKind::Documents
+        | FootprintKind::SavedGames => Role::Success,
         FootprintKind::RegistryReference | FootprintKind::Other => Role::Neutral,
     }
 }
@@ -1948,6 +1958,7 @@ fn classification_label(classification: &FileClassification) -> &'static str {
     match classification {
         FileClassification::AppOwned => "App-owned",
         FileClassification::UserData => "User data",
+        FileClassification::MachineAppData => "Machine data",
         FileClassification::SharedRuntime => "Shared runtime",
         FileClassification::WindowsSystem => "Windows system",
         FileClassification::Missing => "Missing",
