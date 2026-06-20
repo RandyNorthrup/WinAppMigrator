@@ -439,6 +439,9 @@ Recorded on 2026-06-20 after adding opt-in real-location user-data restore (`--r
 - [x] `cargo build --workspace --release`: passed.
 - [x] `cargo audit`: passed.
 - [x] `cargo deny check`: passed.
+- [x] Disposable user-scoped package/zip restore dry-run/apply/verify E2E (`scripts\e2e-disposable-user-scope.ps1`): passed after the restore-routing centralization and user-data classification rework — `package_valid=true`, `restore_valid=true`, 488 items checked, 0 errors. Certifies the refactored restore/verify path did not regress.
+- [x] License-data E2E (`scripts\e2e-license-data.ps1`): passed — `.lic` and `.v2c` detected (`.v2c` reported machine-bound), a non-license `notes.txt` correctly ignored, and both license files copied into the package `license/` directory with `--include-license-data`.
+- [ ] Elevated machine-scoped E2E not re-run this session (requires an admin shell); rerun `scripts\e2e-disposable-machine-scope.ps1` from an elevated shell to recertify HKLM/service restore after the refactors.
 
 Recorded on 2026-06-19 after verification, driver, GUI, UI/UX polish, documentation, dependency-policy, scheduled-task scanner hardening, and elevated E2E work:
 

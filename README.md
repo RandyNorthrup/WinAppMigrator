@@ -282,6 +282,7 @@ Project-local operator scripts:
 .\scripts\e2e-elevated-machine-restore.ps1 -Package ".\AppMigrationPackage.zip" -TargetRoot "C:\Temp\WinAppMigrator-E2E-Restore"
 .\scripts\e2e-disposable-user-scope.ps1
 .\scripts\e2e-disposable-machine-scope.ps1
+.\scripts\e2e-license-data.ps1
 .\scripts\e2e-admin-guard-smoke.ps1
 .\scripts\gui-clickthrough-smoke.ps1
 .\scripts\perf-package-restore.ps1 -Exe "C:\Path\To\App.exe"
