@@ -11,15 +11,17 @@ use crate::dll_resolver::{
 use crate::env_scan::{EnvironmentScanContext, scan_environment};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{FileDiscoveryContext, discover_files};
+use crate::install_source::detect_install_source;
 use crate::models::{
-    AppSelection, DependencyEntry, RuntimePrerequisite, RuntimePrerequisiteKind,
-    SCAN_SCHEMA_VERSION, ScanOptions, ScanReport, Warning, WarningSeverity,
+    AppSelection, DependencyEntry, DriverEntry, InstalledApp, RuntimePrerequisite,
+    RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport, ScheduledTaskEntry,
+    ServiceEntry, ShortcutEntry, Warning, WarningSeverity,
 };
 use crate::path_utils::looks_like_executable;
 use crate::pe_scan::scan_pe;
-use crate::registry_scan::{RegistryScanContext, scan_registry};
+use crate::registry_scan::{RegistryScanContext, scan_registry_artifacts};
 use crate::reporting::{artifact_paths, write_scan_reports};
-use crate::service_scan::{ServiceScanContext, scan_services};
+use crate::service_scan::{ServiceScanContext, scan_drivers, scan_services};
 use crate::shortcut_scan::{ShortcutScanContext, scan_shortcuts};
 use crate::task_scan::{TaskScanContext, scan_scheduled_tasks};
 
@@ -38,6 +40,7 @@ struct ConfidenceInputs<'a> {
     external_manifest_detected: bool,
     non_exe_extension: bool,
     service_count: usize,
+    driver_count: usize,
     scheduled_task_count: usize,
     admin_registry_count: usize,
     files_not_copied_count: usize,
@@ -92,21 +95,22 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         .as_ref()
         .map(|app| app.registry_source_path.clone());
 
-    let (file_inventory, file_warnings) = discover_files(&FileDiscoveryContext {
+    // Reverse-engineer how the app was installed; for MSI products this reads
+    // the authoritative Windows Installer component database.
+    let install_source = source_app.as_ref().map(detect_install_source);
+
+    let registry_artifacts = scan_registry_artifacts(&RegistryScanContext {
         executable_path: executable_path.clone(),
         install_location: install_location.clone(),
-        app_name: app_name.clone(),
+        display_name: app_name.clone(),
         publisher: publisher.clone(),
-        include_hashes: options.include_hashes,
-    });
-    let (registry_entries, registry_warnings) = scan_registry(&RegistryScanContext {
-        executable_path: executable_path.clone(),
-        install_location: install_location.clone(),
-        display_name: app_name,
-        publisher,
         source_registry_path,
     });
     let (services, service_warnings) = scan_services(&ServiceScanContext {
+        executable_path: executable_path.clone(),
+        install_location: install_location.clone(),
+    });
+    let (drivers, driver_warnings) = scan_drivers(&ServiceScanContext {
         executable_path: executable_path.clone(),
         install_location: install_location.clone(),
     });
@@ -123,16 +127,37 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         install_location: install_location.clone(),
     });
 
+    // Fold concrete locations referenced by Windows integrations into the
+    // footprint discovery so split installs (Program Files plus a service
+    // binary or a ProgramData data tree) are captured automatically.
+    let mut extra_roots =
+        collect_extra_roots(source_app.as_ref(), &services, &scheduled_tasks, &shortcuts);
+    if let Some(source) = install_source.as_ref() {
+        extra_roots.extend(source.roots.iter().cloned());
+    }
+    let (file_inventory, footprint_locations, file_warnings) =
+        discover_files(&FileDiscoveryContext {
+            executable_path: executable_path.clone(),
+            install_location: install_location.clone(),
+            app_name,
+            publisher,
+            include_hashes: options.include_hashes,
+            include_user_data: options.include_user_data,
+            extra_roots,
+        });
+
     let runtime_prerequisites = runtime_prerequisites(&dependencies);
     let mut warnings = pe_scan.warnings;
     warnings.extend(resolver_warnings);
     warnings.extend(file_warnings);
-    warnings.extend(registry_warnings);
+    warnings.extend(registry_artifacts.warnings.clone());
     warnings.extend(service_warnings);
+    warnings.extend(driver_warnings);
     warnings.extend(task_warnings);
     warnings.extend(shortcut_warnings);
     warnings.extend(environment_warnings);
     warnings.extend(missing_dependency_warnings(&dependencies));
+    warnings.extend(driver_component_warnings(&drivers));
 
     let artifacts = artifact_paths(&options.output_dir);
 
@@ -142,8 +167,10 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         external_manifest_detected: pe_scan.metadata.external_manifest.is_some(),
         non_exe_extension: !looks_like_executable(&executable_path),
         service_count: services.len(),
+        driver_count: drivers.len(),
         scheduled_task_count: scheduled_tasks.len(),
-        admin_registry_count: registry_entries
+        admin_registry_count: registry_artifacts
+            .entries
             .iter()
             .filter(|entry| entry.requires_admin)
             .count(),
@@ -160,11 +187,24 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         main_executable: pe_scan.metadata,
         architecture: pe_scan.architecture,
         install_location,
+        install_method: install_source.as_ref().map(|source| source.method.clone()),
+        authoritative_file_count: install_source
+            .as_ref()
+            .map(|source| source.authoritative_file_count)
+            .unwrap_or(0),
+        install_evidence: install_source
+            .as_ref()
+            .map(|source| source.evidence.clone())
+            .unwrap_or_default(),
+        footprint_locations,
         file_inventory,
         dependencies,
         app_local_dlls,
-        registry_entries,
+        registry_entries: registry_artifacts.entries,
+        com_registrations: registry_artifacts.com_registrations,
+        file_associations: registry_artifacts.file_associations,
         services,
+        drivers,
         scheduled_tasks,
         shortcuts,
         environment_variables,
@@ -176,6 +216,8 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             "Non-app-owned shared files outside the app directory are never copied; shared runtimes are reported as prerequisites."
                 .to_owned(),
             "Registry, services, scheduled tasks, and shortcuts are archived for restore; apply mode remains explicit and privilege-gated."
+                .to_owned(),
+            "Driver and kernel components are reported but not copied or registered automatically; reinstall them with a signed vendor installer."
                 .to_owned(),
         ],
         confidence_score,
@@ -208,6 +250,45 @@ fn validate_scan_input(executable_path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn collect_extra_roots(
+    source_app: Option<&InstalledApp>,
+    services: &[ServiceEntry],
+    tasks: &[ScheduledTaskEntry],
+    shortcuts: &[ShortcutEntry],
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for service in services {
+        push_parent_dir(&mut roots, &service.binary_path);
+    }
+    for task in tasks {
+        push_parent_dir(&mut roots, &task.action_command);
+    }
+    for shortcut in shortcuts {
+        if shortcut.target_is_selected_app {
+            push_parent_dir(&mut roots, &shortcut.target_path);
+        }
+    }
+    if let Some(app) = source_app {
+        if let Some(location) = app.install_location.as_ref() {
+            roots.push(location.clone());
+        }
+        if let Some(executable) = app.main_executable.as_ref() {
+            push_parent_dir(&mut roots, executable);
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn push_parent_dir(roots: &mut Vec<PathBuf>, path: &Path) {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        roots.push(parent.to_path_buf());
+    }
 }
 
 fn runtime_prerequisites(dependencies: &[DependencyEntry]) -> Vec<RuntimePrerequisite> {
@@ -247,6 +328,24 @@ fn missing_dependency_warnings(dependencies: &[DependencyEntry]) -> Vec<Warning>
         .collect()
 }
 
+fn driver_component_warnings(drivers: &[DriverEntry]) -> Vec<Warning> {
+    drivers
+        .iter()
+        .map(|driver| {
+            Warning::new(
+                "driver_kernel_component_detected",
+                WarningSeverity::Warning,
+                "Driver or kernel component detected. It is archived as metadata only and must be reinstalled with a signed vendor driver package.",
+                Some(format!(
+                    "{} -> {}",
+                    driver.service_name,
+                    driver.image_path.display()
+                )),
+            )
+        })
+        .collect()
+}
+
 fn calculate_confidence_score(inputs: ConfidenceInputs<'_>) -> u8 {
     // Scoring is intentionally conservative and explainable:
     // unresolved imports are the largest immediate migration risk, runtime
@@ -262,6 +361,7 @@ fn calculate_confidence_score(inputs: ConfidenceInputs<'_>) -> u8 {
         - (inputs.runtime_prerequisite_count as i32 * RUNTIME_PREREQUISITE_PENALTY);
 
     score -= inputs.service_count as i32 * 8;
+    score -= inputs.driver_count as i32 * 12;
     score -= inputs.scheduled_task_count as i32 * 3;
     score -= inputs.admin_registry_count as i32 * 2;
     score -= inputs.files_not_copied_count.min(10) as i32;
@@ -316,6 +416,7 @@ mod tests {
             external_manifest_detected: false,
             non_exe_extension: false,
             service_count: 0,
+            driver_count: 0,
             scheduled_task_count: 0,
             admin_registry_count: 0,
             files_not_copied_count: 0,

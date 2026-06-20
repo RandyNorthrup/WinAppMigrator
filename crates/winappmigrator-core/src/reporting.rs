@@ -147,6 +147,54 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
     );
     push_line(&mut output, "");
 
+    push_line(&mut output, "## Install Source");
+    push_line(
+        &mut output,
+        &format!(
+            "- Detected install method: {}",
+            report
+                .install_method
+                .as_ref()
+                .map(|method| method.label())
+                .unwrap_or("Unknown")
+        ),
+    );
+    if report.authoritative_file_count > 0 {
+        push_line(
+            &mut output,
+            &format!(
+                "- Installer-recorded files: {}",
+                report.authoritative_file_count
+            ),
+        );
+    }
+    for signal in &report.install_evidence {
+        push_line(&mut output, &format!("- Evidence: {signal}"));
+    }
+    push_line(&mut output, "");
+
+    push_line(&mut output, "## Data Locations");
+    if report.footprint_locations.is_empty() {
+        push_line(&mut output, "- No additional data locations were found.");
+    } else {
+        push_line(&mut output, "| Location | Kind | Scope | Files | Bytes |");
+        push_line(&mut output, "| --- | --- | --- | ---: | ---: |");
+        for location in &report.footprint_locations {
+            push_line(
+                &mut output,
+                &format!(
+                    "| {} | {} | {:?} | {} | {} |",
+                    location.path.display(),
+                    location.kind.label(),
+                    location.scope,
+                    location.file_count,
+                    location.total_bytes
+                ),
+            );
+        }
+    }
+    push_line(&mut output, "");
+
     push_line(&mut output, "## Files Collected");
     if report.file_inventory.is_empty() {
         push_line(&mut output, "- No files discovered.");
@@ -217,6 +265,49 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
     }
     push_line(&mut output, "");
 
+    push_line(&mut output, "## COM Registrations");
+    if report.com_registrations.is_empty() {
+        push_line(&mut output, "- None discovered.");
+    } else {
+        for registration in &report.com_registrations {
+            push_line(
+                &mut output,
+                &format!(
+                    "- {:?} {} {:?} -> {}",
+                    registration.hive,
+                    registration.clsid,
+                    registration.server_kind,
+                    registration
+                        .server_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "Unknown server".to_owned())
+                ),
+            );
+        }
+    }
+    push_line(&mut output, "");
+
+    push_line(&mut output, "## File Associations");
+    if report.file_associations.is_empty() {
+        push_line(&mut output, "- None discovered.");
+    } else {
+        for association in &report.file_associations {
+            push_line(
+                &mut output,
+                &format!(
+                    "- {:?} extension={} prog_id={} app={} verb={}",
+                    association.hive,
+                    association.extension.as_deref().unwrap_or("Unknown"),
+                    association.prog_id.as_deref().unwrap_or("Unknown"),
+                    association.application_name.as_deref().unwrap_or("Unknown"),
+                    association.verb.as_deref().unwrap_or("Unknown")
+                ),
+            );
+        }
+    }
+    push_line(&mut output, "");
+
     push_line(&mut output, "## Services");
     if report.services.is_empty() {
         push_line(&mut output, "- None discovered.");
@@ -228,6 +319,24 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
                     "- {} -> {}",
                     service.service_name,
                     service.binary_path.display()
+                ),
+            );
+        }
+    }
+    push_line(&mut output, "");
+
+    push_line(&mut output, "## Drivers And Kernel Components");
+    if report.drivers.is_empty() {
+        push_line(&mut output, "- None discovered.");
+    } else {
+        for driver in &report.drivers {
+            push_line(
+                &mut output,
+                &format!(
+                    "- {} ({:?}) -> {}",
+                    driver.service_name,
+                    driver.driver_kind,
+                    driver.image_path.display()
                 ),
             );
         }
@@ -511,6 +620,10 @@ mod tests {
             },
             architecture: AppArchitecture::X64,
             install_location: None,
+            install_method: None,
+            authoritative_file_count: 0,
+            install_evidence: Vec::new(),
+            footprint_locations: Vec::new(),
             file_inventory: Vec::new(),
             dependencies: vec![DependencyEntry {
                 name: "custom.dll".to_owned(),
@@ -528,7 +641,10 @@ mod tests {
             }],
             app_local_dlls: Vec::new(),
             registry_entries: Vec::new(),
+            com_registrations: Vec::new(),
+            file_associations: Vec::new(),
             services: Vec::new(),
+            drivers: Vec::new(),
             scheduled_tasks: Vec::new(),
             shortcuts: Vec::new(),
             environment_variables: Vec::new(),

@@ -10,9 +10,10 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 use winappmigrator_core::{
-    AppSelection, InstalledApp, PackageArchiveFormat, PackageOptions, RestoreOptions, Result,
-    ScanOptions, WinAppMigratorError, create_package, extract_embedded_self_archive,
-    has_embedded_self_archive, list_installed_apps, restore_package, scan_and_write_reports,
+    AppSelection, InstalledApp, InventorySnapshotOptions, PackageArchiveFormat, PackageOptions,
+    RestoreOptions, Result, ScanOptions, VerificationOptions, WinAppMigratorError, create_package,
+    extract_embedded_self_archive, has_embedded_self_archive, list_installed_apps, restore_package,
+    scan_and_write_reports, verify_package, write_inventory_snapshot,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -51,11 +52,17 @@ pub enum Commands {
     /// Scan an executable or installed application name and write reports.
     Scan(ScanCommand),
 
+    /// Write a read-only installed-application inventory snapshot.
+    Snapshot(SnapshotCommand),
+
     /// Build a migration package directory.
     Package(PackageCommand),
 
     /// Restore a migration package. Defaults to dry-run unless --apply is supplied.
     Restore(RestoreCommand),
+
+    /// Verify a package and optionally verify an applied restore target.
+    Verify(VerifyCommand),
 }
 
 #[derive(Debug, Args)]
@@ -74,6 +81,16 @@ pub struct ScanCommand {
 
     #[arg(long = "non-interactive")]
     pub non_interactive: bool,
+
+    /// Exclude per-user and ProgramData application data from the scan.
+    #[arg(long = "skip-user-data")]
+    pub skip_user_data: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SnapshotCommand {
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -98,6 +115,10 @@ pub struct PackageCommand {
 
     #[arg(long)]
     pub sfx: bool,
+
+    /// Exclude per-user and ProgramData application data from the package.
+    #[arg(long = "skip-user-data")]
+    pub skip_user_data: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -121,6 +142,18 @@ pub struct RestoreCommand {
 
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyCommand {
+    #[arg(long = "package", value_name = "DIR_OR_ZIP")]
+    pub package_root: PathBuf,
+
+    #[arg(long = "target-root", value_name = "DIR")]
+    pub target_root: Option<PathBuf>,
+
+    #[arg(long = "out", value_name = "DIR")]
+    pub output_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -163,12 +196,20 @@ where
             run_scan(command)?;
             Ok(EXIT_SUCCESS)
         }
+        Commands::Snapshot(command) => {
+            run_snapshot(command)?;
+            Ok(EXIT_SUCCESS)
+        }
         Commands::Package(command) => {
             run_package(command)?;
             Ok(EXIT_SUCCESS)
         }
         Commands::Restore(command) => {
             run_restore(command)?;
+            Ok(EXIT_SUCCESS)
+        }
+        Commands::Verify(command) => {
+            run_verify(command)?;
             Ok(EXIT_SUCCESS)
         }
     }
@@ -201,6 +242,18 @@ fn run_list() -> Result<()> {
     Ok(())
 }
 
+fn run_snapshot(command: SnapshotCommand) -> Result<()> {
+    let report = write_inventory_snapshot(&InventorySnapshotOptions {
+        output_dir: command.out,
+    })?;
+
+    println!("Inventory snapshot complete.");
+    println!("Applications: {}", report.applications.len());
+    println!("Snapshot JSON: {}", report.artifacts.json.display());
+    println!("Snapshot Markdown: {}", report.artifacts.markdown.display());
+    Ok(())
+}
+
 fn run_scan(command: ScanCommand) -> Result<()> {
     let selection = resolve_scan_selection(&command)?;
     let mut options = ScanOptions {
@@ -209,6 +262,7 @@ fn run_scan(command: ScanCommand) -> Result<()> {
         current_directory: std::env::current_dir().ok(),
         recursive_dependencies: true,
         include_hashes: true,
+        include_user_data: !command.skip_user_data,
     };
 
     if let AppSelection::ExecutablePath(path) = &options.selection {
@@ -267,6 +321,7 @@ fn run_package(command: PackageCommand) -> Result<()> {
         } else {
             None
         },
+        include_user_data: !command.skip_user_data,
     };
     let result = create_package(&options)?;
 
@@ -305,6 +360,34 @@ fn run_restore(command: RestoreCommand) -> Result<()> {
     }
     if let Some(path) = result.restore_log_markdown {
         println!("Restore Markdown log: {}", path.display());
+    }
+    Ok(())
+}
+
+fn run_verify(command: VerifyCommand) -> Result<()> {
+    let report = verify_package(&VerificationOptions {
+        package_root: command.package_root,
+        target_root: command.target_root,
+        output_dir: command.output_dir,
+    })?;
+
+    println!("Verification complete.");
+    println!("Package valid: {}", report.package_valid);
+    println!(
+        "Restore valid: {}",
+        report
+            .restore_valid
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "not run".to_owned())
+    );
+    println!("Items checked: {}", report.items.len());
+    println!("Warnings: {}", report.warnings.len());
+    println!("Errors: {}", report.errors.len());
+    if let Some(path) = report.report_json {
+        println!("Verification JSON: {}", path.display());
+    }
+    if let Some(path) = report.report_markdown {
+        println!("Verification Markdown: {}", path.display());
     }
     Ok(())
 }
@@ -467,7 +550,18 @@ fn should_run_sfx_mode(args: &[OsString]) -> Result<bool> {
     let first_user_arg = args.get(1).and_then(|arg| arg.to_str());
     Ok(!matches!(
         first_user_arg,
-        Some("list" | "scan" | "package" | "restore" | "--help" | "-h" | "--version" | "-V")
+        Some(
+            "list"
+                | "scan"
+                | "snapshot"
+                | "package"
+                | "restore"
+                | "verify"
+                | "--help"
+                | "-h"
+                | "--version"
+                | "-V",
+        )
     ))
 }
 
@@ -550,6 +644,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_snapshot_command() -> Result<()> {
+        let cli = Cli::try_parse_from(["winappmigrator", "snapshot", "--out", r"C:\Out"])
+            .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))?;
+
+        match cli.command {
+            Commands::Snapshot(snapshot) => {
+                assert_eq!(snapshot.out, PathBuf::from(r"C:\Out"));
+            }
+            _ => {
+                return Err(WinAppMigratorError::InvalidInput(
+                    "expected snapshot command".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn parses_restore_default_dry_run() -> Result<()> {
         let cli = Cli::try_parse_from([
             "winappmigrator",
@@ -598,6 +710,35 @@ mod tests {
             _ => {
                 return Err(WinAppMigratorError::InvalidInput(
                     "expected package command".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parses_verify_command() -> Result<()> {
+        let cli = Cli::try_parse_from([
+            "winappmigrator",
+            "verify",
+            "--package",
+            r"C:\Pkg\App.zip",
+            "--target-root",
+            r"C:\Restored",
+            "--out",
+            r"C:\Verify",
+        ])
+        .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))?;
+
+        match cli.command {
+            Commands::Verify(verify) => {
+                assert_eq!(verify.package_root, PathBuf::from(r"C:\Pkg\App.zip"));
+                assert_eq!(verify.target_root, Some(PathBuf::from(r"C:\Restored")));
+                assert_eq!(verify.output_dir, Some(PathBuf::from(r"C:\Verify")));
+            }
+            _ => {
+                return Err(WinAppMigratorError::InvalidInput(
+                    "expected verify command".to_owned(),
                 ));
             }
         }

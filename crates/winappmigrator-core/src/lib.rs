@@ -5,6 +5,7 @@ pub mod env_scan;
 pub mod errors;
 pub mod file_discovery;
 pub mod hashing;
+pub mod install_source;
 pub mod models;
 pub mod package;
 pub mod path_utils;
@@ -16,7 +17,9 @@ pub mod restore;
 pub mod scan;
 pub mod service_scan;
 pub mod shortcut_scan;
+pub mod snapshot;
 pub mod task_scan;
+pub mod verify;
 
 pub use app_inventory::list_installed_apps;
 pub use archive::{
@@ -28,3 +31,5 @@ pub use models::*;
 pub use package::create_package;
 pub use restore::{plan_restore, restore_package};
 pub use scan::scan_and_write_reports;
+pub use snapshot::write_inventory_snapshot;
+pub use verify::verify_package;

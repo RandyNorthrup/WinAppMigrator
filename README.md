@@ -1,16 +1,18 @@
 # WinAppMigrator
 
-WinAppMigrator is a Windows 10/11 Rust desktop application migration analyzer and package builder. It inventories per-user and per-machine desktop applications, scans an executable for PE DLL dependencies, discovers related files and Windows integrations, builds migration package directories or zip archives, and restores packages with dry-run by default.
+WinAppMigrator is a Windows 10/11 Rust desktop application migration analyzer and package builder. It inventories per-user and per-machine desktop applications, reverse-engineers an application's full on-disk footprint, scans an executable for PE DLL dependencies, discovers related files and Windows integrations, builds migration package directories or zip archives, and restores packages with dry-run by default.
+
+Footprint discovery is layered: it detects *how* an app was installed and reads the authoritative installed paths where Windows records them (Windows Installer/MSI component database; Inno Setup `unins000.dat`; App Paths), then completes the picture with a conservative heuristic scan of `Program Files`, `Program Files (x86)`, `ProgramData`, and per-user `AppData` (Roaming/Local/LocalLow), including nested `Vendor\App` layouts. See [docs/discovery.md](docs/discovery.md). The native GUI is an `eframe`/`egui` console with a light/dark design system; see [docs/gui.md](docs/gui.md).
 
 This repository is not yet a signed enterprise release. GitHub Actions CI and portable `.zip` release artifacts are configured. Authenticode signing is documented but intentionally disabled until a future release.
 
 ## Stack
 
 - Rust workspace, edition 2024, current stable toolchain
-- `winappmigrator-core` shared domain logic
+- `winappmigrator-core` shared domain logic (inventory, install-source reverse-engineering, footprint discovery, packaging, restore, verification)
 - `winappmigrator-cli` command-line frontend
-- `winappmigrator-gui` native Windows GUI frontend using `eframe`/`egui`
-- `winreg` for uninstall registry inventory
+- `winappmigrator-gui` native Windows GUI frontend using `eframe`/`egui` (modules `theme`, `widgets`, `views`, `main`)
+- `winreg` for uninstall registry inventory, the MSI Installer component database, and App Paths
 - `pelite` for PE metadata and import parsing
 - `walkdir` for bounded recursive file discovery
 - `sha2` for streaming SHA-256 hashes
@@ -62,6 +64,26 @@ Scan an executable and write reports:
 cargo run -p winappmigrator-cli -- scan --exe "C:\Path\To\App.exe" --out ".\scan-output"
 ```
 
+Scan an installed application by its display name (resolves the executable,
+detects the install method, and reverse-engineers the footprint):
+
+```powershell
+cargo run -p winappmigrator-cli -- scan --name "Inkscape" --out ".\scan-output"
+```
+
+Exclude per-user/ProgramData application data (program files only) with
+`--skip-user-data` on `scan` or `package`:
+
+```powershell
+cargo run -p winappmigrator-cli -- scan --name "Inkscape" --out ".\scan-output" --skip-user-data
+```
+
+Write an installed-application inventory snapshot:
+
+```powershell
+cargo run -p winappmigrator-cli -- snapshot --out ".\inventory-snapshot"
+```
+
 Build a migration package directory:
 
 ```powershell
@@ -92,6 +114,13 @@ Apply packaged file restore:
 cargo run -p winappmigrator-cli -- restore --package ".\AppMigrationPackage" --target-root ".\RestoredApp" --apply
 ```
 
+Verify a package and an applied restore:
+
+```powershell
+cargo run -p winappmigrator-cli -- verify --package ".\AppMigrationPackage"
+cargo run -p winappmigrator-cli -- verify --package ".\AppMigrationPackage.zip" --target-root ".\RestoredApp"
+```
+
 Restore also accepts package `.zip` archives. A generated `.sfx.exe` runs as a standalone dry-run by default:
 
 ```powershell
@@ -109,11 +138,12 @@ Global logging flags:
 
 Scan output files:
 
-- `scan_report.json`
-- `scan_report.md`
+- `scan_report.json` and `scan_report.md` (include the detected `install_method`, `install_evidence`, `authoritative_file_count`, and `footprint_locations` data-location summary)
 - `dependency_graph.json`
 - `warnings.md`
-- package builds also write `manifest.json`, `restore_plan.md`, `reports\*`, `files\*`, registry/service/task/shortcut/environment artifacts, optional `.zip`, optional `.sfx.exe`, and restore logs.
+- inventory snapshots write `inventory_snapshot.json` and `inventory_snapshot.md`.
+- package builds also write `manifest.json`, `restore_plan.md`, `reports\*`, `files\*`, registry/service/driver/task/shortcut/environment artifacts, optional `.zip`, optional `.sfx.exe`, and restore logs.
+- verification writes `verification_report.json` and `verification_report.md`.
 
 Smoke-tested in this workspace against the local Cargo executable:
 
@@ -129,9 +159,23 @@ Launch the native GUI:
 cargo run -p winappmigrator-gui
 ```
 
-The GUI loads installed applications through the shared core, accepts a manual executable path and output directory, runs scan/package/zip/SFX/restore workflows on background threads, and shows status, warnings, confidence score, and report/package/restore summaries.
+The GUI is an `eframe`/`egui` console with a full-height navigation rail, a
+content header, and routed pages (Dashboard, Applications, Analyze, Package,
+Restore), plus a light/dark theme toggle. It loads installed applications through
+the shared core and runs scan/snapshot/package/zip/SFX/restore workflows on
+background threads.
 
-The release GUI executable was smoke-launched locally and remained running until the verification command stopped it.
+- **Applications**: searchable, virtualized table; selecting an app fills the
+  executable path and a default output directory and offers "Back up this app".
+- **Analyze** results surface the detected **install method** and the signals
+  used to reverse-engineer it, a **Data locations** card (every place the app
+  stores files, with sizes), the dependency graph/table, Windows integrations,
+  runtime prerequisites, and warnings.
+- Scan options toggle recursive app-local DLL scanning, SHA-256 hashing, and
+  whether to include user data (AppData/ProgramData).
+
+GUI architecture and conventions are documented in [docs/gui.md](docs/gui.md).
+The release GUI executable was smoke-launched locally.
 
 ## CI And Release
 
@@ -146,9 +190,10 @@ The CI gate runs on `windows-latest`:
 - `cargo audit`
 - `cargo deny check`
 - release build
+- conditional manual-workflow Authenticode signing when signing secrets are present
 - portable `WinAppMigrator-portable-windows-x64.zip` artifact upload
 
-Signing is disabled for this milestone. Future signing requirements are documented in `docs/signing.md`.
+Signing policy and secret names are documented in `docs/signing.md`.
 
 ## Project Structure
 
@@ -156,22 +201,37 @@ Signing is disabled for this milestone. Future signing requirements are document
 Cargo.toml
 crates/
   winappmigrator-core/
+    src/
+      app_inventory.rs    # installed-app inventory from uninstall registry
+      install_source.rs   # install-method detection + MSI/Inno authoritative paths
+      file_discovery.rs   # footprint roots, walk, classification, FootprintLocation
+      scan.rs             # scan orchestration (PE, deps, integrations, footprint)
+      package.rs / restore.rs / verify.rs / reporting.rs / models.rs ...
   winappmigrator-cli/
   winappmigrator-gui/
+    src/
+      theme.rs            # design tokens + egui style (light/dark)
+      widgets.rs          # reusable theme-aware components + vector icons
+      views.rs            # routed pages and result renderers
+      main.rs             # app state, workers, app-shell layout, routing
 docs/
+scripts/
 samples/
 tests/
 ```
 
 ## Security Notes
 
-- Scan/list operations do not intentionally modify the system.
+- Scan/list operations do not intentionally modify the system. Footprint discovery and install-source reverse-engineering are read-only: they read the registry (uninstall keys, MSI Installer component database, App Paths), parse the Inno Setup uninstall log, and walk install/data directories without writing.
+- Per-user and ProgramData application data is included by default and can be excluded with `--skip-user-data` (CLI) or the "Include user data" toggle (GUI). Cache/temp/log directories are pruned and never copied.
 - Restore defaults to dry-run. File writes require explicit `--apply` or the GUI apply checkbox.
 - Restore blocks apply into protected Windows locations when not elevated.
 - Per-machine registry, services, scheduled tasks, public desktop, common Start Menu, and protected target locations require elevation for apply.
 - DLL resolution reports system files but package creation copies only app-owned files.
 - Non-app-owned shared files outside the app directory are never copied; shared runtimes are reported as prerequisites.
 - Registry, environment variable, service, shortcut, and scheduled task restore paths are archived and apply-capable when privileges and overwrite policy allow.
+- Package and restore verification checks file hashes, rewritten registry values, environment variables, services, scheduled tasks, and shortcuts.
+- Driver and kernel components are reported as metadata-only manual reinstall items; WinAppMigrator does not copy or register drivers automatically.
 - Secrets and license material are not collected.
 
 ## Troubleshooting
@@ -189,6 +249,27 @@ Verified locally on 2026-06-12:
 
 VS Code was not used for E2E testing.
 
+Verified locally on 2026-06-19:
+
+- Full local gates passed: format, clippy, check, tests, release build, audit, and deny.
+- Release CLI package/verify/zip restore dry-run/apply/verify E2E passed against an isolated executable copy.
+- GUI click-through smoke script passed after the UI/UX polish pass.
+- Package/verify/restore dry-run performance smoke passed within documented targets.
+- Disposable user-scoped and elevated machine-scoped package/zip restore dry-run/apply/verify E2E passed, including registry, scheduled task, shortcut, environment variable, and service coverage where applicable.
+
+Project-local operator scripts:
+
+```powershell
+.\scripts\e2e-elevated-machine-restore.ps1 -Package ".\AppMigrationPackage.zip" -TargetRoot "C:\Temp\WinAppMigrator-E2E-Restore"
+.\scripts\e2e-disposable-user-scope.ps1
+.\scripts\e2e-disposable-machine-scope.ps1
+.\scripts\e2e-admin-guard-smoke.ps1
+.\scripts\gui-clickthrough-smoke.ps1
+.\scripts\perf-package-restore.ps1 -Exe "C:\Path\To\App.exe"
+```
+
+See `docs\discovery.md`, `docs\gui.md`, `docs\verification.md`, `docs\user-e2e.md`, `docs\elevated-e2e.md`, `docs\performance.md`, `docs\snapshots.md`, `docs\installer-strategy.md`, `docs\sfx.md`, and `docs\tui-decision.md`.
+
 ## Release Notes
 
-Current release format is portable `.zip`. Installer/MSIX/MSI packaging remains future work. Code signing is documented but disabled.
+Current release format is portable `.zip`. MSI/MSIX/setup installers are not selected for this release line. Authenticode signing is wired for manual CI workflows when the selected signing secrets are present.

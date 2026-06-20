@@ -28,3 +28,30 @@ All notable project changes are tracked here.
 - Verified machine-scoped E2E with existing 7-Zip 25.01: package, zip generation, per-machine scope, HKLM registry capture, and zip dry-run restore.
 - Refactored `PLAN.md` into checkbox-driven completed, remaining, milestone, gate, and definition-of-done sections.
 - Added `.gitattributes` to keep repository text line endings stable.
+- Added `verify` CLI workflow and shared core verification API for package integrity and post-restore checks.
+- Added post-apply restore verification with JSON and Markdown verification reports.
+- Added typed COM registration, file association, and driver/kernel component report models.
+- Separated driver services from normal service restore and marked driver/kernel components as metadata-only manual reinstall items.
+- Added GUI advanced scan settings and compact dependency graph visualization.
+- Added project-local elevated machine-wide restore E2E and GUI click-through smoke scripts.
+- Added project-local package/verify/restore dry-run performance regression script and guide.
+- Updated `time` to 0.3.49 after local dependency policy rejected yanked 0.3.48.
+- Added read-only inventory snapshot workflow in core, CLI, and GUI.
+- Added GUI progress detail text for background workers.
+- Added conditional manual-CI Authenticode signing hook and project-local signing helper.
+- Documented installer, SFX, snapshot, and TUI release-line decisions.
+- Added disposable user-scoped E2E harness and fixed scheduled task elevation handling so user tasks do not require admin unless the archived task is highest/SYSTEM scoped.
+- Added disposable machine-scoped E2E harness for admin-shell certification of HKLM, service, scheduled task, common shortcut, and machine environment restore.
+- Hardened scheduled task scanning against PowerShell enum/numeric JSON fields and verified both user-scoped and machine-scoped scheduled task restore E2E.
+- Hardened the disposable machine E2E fixture service creation and partial-failure cleanup path.
+- Verified elevated disposable machine-scoped restore apply E2E from an admin shell for files, HKLM registry, service, scheduled task, common Start Menu shortcut, and machine environment restore.
+- Polished the native GUI with a light enterprise theme, status chips, grouped workflow sections, safer restore mode controls, compact result metrics, artifact folder buttons, and a light-theme dependency graph.
+- Redesigned the native GUI as an `eframe`/`egui` console: full-height navigation rail, content header, routed Dashboard/Applications/Analyze/Package/Restore pages, a token-based light/dark design system (`theme.rs`), reusable theme-aware components with painter-drawn icons (`widgets.rs`), a searchable virtualized applications table, and a middle-ground guided flow ("Back up this app", default output dir) alongside the advanced controls.
+- Added layered install-source reverse-engineering (`install_source.rs`): detects the install method (Windows Installer/MSI, MSIX, Squirrel, Chocolatey, Inno Setup, NSIS, Generic) and records human-readable evidence.
+- Added authoritative MSI footprint enumeration by reading the Windows Installer component database (`Installer\UserData\<SID>\Components`) with squished/SQUID product GUIDs; validated against the `WindowsInstaller.Installer` COM `ComponentPath` results.
+- Added authoritative Inno Setup footprint extraction by parsing the `unins000.dat` uninstall log (UTF-16/ANSI resolved paths), with detection narrowed to `unins###.dat` so a plain `uninstall.exe` is not mis-detected.
+- Added App Paths registration and multi-signal install-directory roots (InstallLocation, DisplayIcon, uninstaller directory) for reliable non-MSI/EXE discovery.
+- Rebuilt file discovery to be footprint-aware: scans `Program Files`, `Program Files (x86)`, `ProgramW6432`, `ProgramData`, and per-user `AppData` (Roaming/Local/LocalLow) with nested `Vendor\App` (depth-2) matching, cache/temp/log pruning, token cleaning and a generic-token stoplist to prevent cross-app false positives, and a structured `FootprintLocation` summary.
+- Added `FootprintLocation`/`FootprintKind`/`InstallMethod` models; `install_method`, `install_evidence`, `authoritative_file_count`, and `footprint_locations` on `ScanReport`; a `UserData` file classification; an `include_user_data` option on scan/package; and a `--skip-user-data` CLI flag.
+- Improved the installed-app main-executable guess to resolve `bin\`/`app\` launcher layouts and skip uninstaller/helper executables.
+- Added `docs/discovery.md` (footprint discovery + install-source reverse-engineering) and `docs/gui.md` (GUI architecture).

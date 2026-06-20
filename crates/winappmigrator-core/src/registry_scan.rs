@@ -9,7 +9,8 @@ use winreg::enums::{
 use winreg::{RegKey, RegValue};
 
 use crate::models::{
-    MatchConfidence, RegistryEntry, RegistryHive, RegistryValueKind, Warning, WarningSeverity,
+    ComRegistrationEntry, ComServerKind, FileAssociationEntry, MatchConfidence, RegistryEntry,
+    RegistryHive, RegistryValueKind, Warning, WarningSeverity,
 };
 use crate::path_utils::{
     looks_like_executable, normalize_name_for_match, split_command_executable_path,
@@ -22,6 +23,8 @@ const HKLM_WOW6432_UNINSTALL: &str =
 const HKCU_UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const HKCU_SOFTWARE: &str = r"Software";
 const HKLM_SOFTWARE: &str = r"Software";
+const HKCU_CLASSES: &str = r"Software\Classes";
+const HKLM_CLASSES: &str = r"Software\Classes";
 const HKCU_CLASSES_APPLICATIONS: &str = r"Software\Classes\Applications";
 const HKCU_CLASSES_CLSID: &str = r"Software\Classes\CLSID";
 const HKLM_CLASSES_APPLICATIONS: &str = r"Software\Classes\Applications";
@@ -45,9 +48,23 @@ pub struct RegistryScanContext {
     pub source_registry_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RegistryScanArtifacts {
+    pub entries: Vec<RegistryEntry>,
+    pub com_registrations: Vec<ComRegistrationEntry>,
+    pub file_associations: Vec<FileAssociationEntry>,
+    pub warnings: Vec<Warning>,
+}
+
 pub fn scan_registry(context: &RegistryScanContext) -> (Vec<RegistryEntry>, Vec<Warning>) {
+    let artifacts = scan_registry_artifacts(context);
+    (artifacts.entries, artifacts.warnings)
+}
+
+pub fn scan_registry_artifacts(context: &RegistryScanContext) -> RegistryScanArtifacts {
     let mut entries = Vec::new();
     let mut warnings = Vec::new();
+    let mut file_associations = Vec::new();
 
     scan_app_paths(
         context,
@@ -141,6 +158,22 @@ pub fn scan_registry(context: &RegistryScanContext) -> (Vec<RegistryEntry>, Vec<
         &mut entries,
         &mut warnings,
     );
+    scan_file_extension_associations(
+        context,
+        RegistryHive::CurrentUser,
+        HKCU_CLASSES,
+        &mut entries,
+        &mut warnings,
+        &mut file_associations,
+    );
+    scan_file_extension_associations(
+        context,
+        RegistryHive::LocalMachine,
+        HKLM_CLASSES,
+        &mut entries,
+        &mut warnings,
+        &mut file_associations,
+    );
 
     entries.sort_by(|left, right| {
         left.key_path
@@ -154,7 +187,33 @@ pub fn scan_registry(context: &RegistryScanContext) -> (Vec<RegistryEntry>, Vec<
             && left.value_name == right.value_name
     });
 
-    (entries, warnings)
+    let com_registrations = classify_com_registrations(&entries);
+    file_associations.extend(classify_application_file_associations(&entries));
+    file_associations.sort_by(|left, right| {
+        format!(
+            "{:?}:{:?}:{:?}:{:?}",
+            left.hive, left.extension, left.prog_id, left.verb
+        )
+        .cmp(&format!(
+            "{:?}:{:?}:{:?}:{:?}",
+            right.hive, right.extension, right.prog_id, right.verb
+        ))
+    });
+    file_associations.dedup_by(|left, right| {
+        left.hive == right.hive
+            && left.extension == right.extension
+            && left.prog_id == right.prog_id
+            && left.application_name == right.application_name
+            && left.verb == right.verb
+            && left.command == right.command
+    });
+
+    RegistryScanArtifacts {
+        entries,
+        com_registrations,
+        file_associations,
+        warnings,
+    }
 }
 
 struct RegistryCaptureContext<'a> {
@@ -192,6 +251,125 @@ fn scan_class_registrations(
             );
         }
     }
+}
+
+fn scan_file_extension_associations(
+    context: &RegistryScanContext,
+    hive: RegistryHive,
+    classes_path: &str,
+    entries: &mut Vec<RegistryEntry>,
+    warnings: &mut Vec<Warning>,
+    file_associations: &mut Vec<FileAssociationEntry>,
+) {
+    let Some(root) = open_root(hive.clone()) else {
+        return;
+    };
+    let Ok(classes_key) = root.open_subkey_with_flags(classes_path, KEY_READ) else {
+        return;
+    };
+
+    for extension_name in classes_key
+        .enum_keys()
+        .flatten()
+        .filter(|name| name.starts_with('.'))
+    {
+        let extension_path = format!(r"{classes_path}\{extension_name}");
+        let Ok(extension_key) = root.open_subkey_with_flags(&extension_path, KEY_READ) else {
+            continue;
+        };
+        let Ok(default_value) = extension_key.get_raw_value("") else {
+            continue;
+        };
+        let prog_id = raw_value_to_display(&default_value);
+        if prog_id.trim().is_empty() {
+            continue;
+        }
+        let prog_id_path = format!(r"{classes_path}\{prog_id}");
+        if !registry_tree_matches_context(&root, &prog_id_path, context, 0) {
+            continue;
+        }
+
+        capture_registry_subtree(
+            &root,
+            hive.clone(),
+            &extension_path,
+            MatchConfidence::High,
+            entries,
+            warnings,
+        );
+        capture_registry_subtree(
+            &root,
+            hive.clone(),
+            &prog_id_path,
+            MatchConfidence::High,
+            entries,
+            warnings,
+        );
+        file_associations.extend(file_associations_from_prog_id(
+            &root,
+            hive.clone(),
+            classes_path,
+            &extension_name,
+            &prog_id,
+        ));
+    }
+}
+
+fn file_associations_from_prog_id(
+    root: &RegKey,
+    hive: RegistryHive,
+    classes_path: &str,
+    extension: &str,
+    prog_id: &str,
+) -> Vec<FileAssociationEntry> {
+    let shell_path = format!(r"{classes_path}\{prog_id}\shell");
+    let Ok(shell_key) = root.open_subkey_with_flags(&shell_path, KEY_READ) else {
+        return vec![FileAssociationEntry {
+            hive: hive.clone(),
+            extension: Some(extension.to_owned()),
+            prog_id: Some(prog_id.to_owned()),
+            application_name: None,
+            verb: None,
+            command: None,
+            confidence: MatchConfidence::High,
+            requires_admin: hive == RegistryHive::LocalMachine,
+        }];
+    };
+
+    let mut associations = Vec::new();
+    for verb in shell_key.enum_keys().flatten() {
+        let command_path = format!(r"{shell_path}\{verb}\command");
+        let Ok(command_key) = root.open_subkey_with_flags(&command_path, KEY_READ) else {
+            continue;
+        };
+        let command = command_key
+            .get_raw_value("")
+            .ok()
+            .map(|raw| raw_value_to_display(&raw));
+        associations.push(FileAssociationEntry {
+            hive: hive.clone(),
+            extension: Some(extension.to_owned()),
+            prog_id: Some(prog_id.to_owned()),
+            application_name: None,
+            verb: Some(verb),
+            command,
+            confidence: MatchConfidence::High,
+            requires_admin: hive == RegistryHive::LocalMachine,
+        });
+    }
+    if associations.is_empty() {
+        associations.push(FileAssociationEntry {
+            hive: hive.clone(),
+            extension: Some(extension.to_owned()),
+            prog_id: Some(prog_id.to_owned()),
+            application_name: None,
+            verb: None,
+            command: None,
+            confidence: MatchConfidence::High,
+            requires_admin: hive == RegistryHive::LocalMachine,
+        });
+    }
+    associations
 }
 
 fn scan_uninstall_entries(
@@ -647,6 +825,132 @@ fn related_tokens(context: &RegistryScanContext) -> Vec<String> {
     .map(normalize_name_for_match)
     .filter(|token| token.len() >= 3)
     .collect()
+}
+
+fn classify_com_registrations(entries: &[RegistryEntry]) -> Vec<ComRegistrationEntry> {
+    let mut registrations = Vec::new();
+    for entry in entries {
+        let lower_key = entry.key_path.to_ascii_lowercase();
+        let Some(clsid) = extract_clsid(&entry.key_path) else {
+            continue;
+        };
+        let Some(server_kind) = com_server_kind(&lower_key) else {
+            continue;
+        };
+        if !is_default_value(entry.value_name.as_deref()) {
+            continue;
+        }
+        let server_path = entry.value_data.as_deref().and_then(registry_server_path);
+        let threading_model = entries
+            .iter()
+            .find(|candidate| {
+                candidate.hive == entry.hive
+                    && candidate.key_path.eq_ignore_ascii_case(&entry.key_path)
+                    && candidate
+                        .value_name
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case("ThreadingModel"))
+            })
+            .and_then(|candidate| candidate.value_data.clone());
+
+        registrations.push(ComRegistrationEntry {
+            hive: entry.hive.clone(),
+            clsid,
+            key_path: entry.key_path.clone(),
+            server_kind,
+            server_path,
+            threading_model,
+            confidence: entry.confidence.clone(),
+            requires_admin: entry.requires_admin,
+        });
+    }
+
+    registrations.sort_by(|left, right| {
+        format!("{:?}:{}:{:?}", left.hive, left.clsid, left.server_kind).cmp(&format!(
+            "{:?}:{}:{:?}",
+            right.hive, right.clsid, right.server_kind
+        ))
+    });
+    registrations.dedup_by(|left, right| {
+        left.hive == right.hive
+            && left.clsid.eq_ignore_ascii_case(&right.clsid)
+            && left.server_kind == right.server_kind
+            && left.key_path.eq_ignore_ascii_case(&right.key_path)
+    });
+    registrations
+}
+
+fn classify_application_file_associations(entries: &[RegistryEntry]) -> Vec<FileAssociationEntry> {
+    let mut associations = Vec::new();
+    for entry in entries {
+        let lower_key = entry.key_path.to_ascii_lowercase();
+        if !lower_key.contains(r"\classes\applications\") || !lower_key.ends_with(r"\command") {
+            continue;
+        }
+        if !is_default_value(entry.value_name.as_deref()) {
+            continue;
+        }
+
+        let components = entry.key_path.split('\\').collect::<Vec<_>>();
+        let Some(applications_index) = components
+            .iter()
+            .position(|component| component.eq_ignore_ascii_case("Applications"))
+        else {
+            continue;
+        };
+        let application_name = components
+            .get(applications_index + 1)
+            .map(|value| (*value).to_owned());
+        let verb = components
+            .iter()
+            .position(|component| component.eq_ignore_ascii_case("shell"))
+            .and_then(|index| components.get(index + 1))
+            .map(|value| (*value).to_owned());
+
+        associations.push(FileAssociationEntry {
+            hive: entry.hive.clone(),
+            extension: None,
+            prog_id: None,
+            application_name,
+            verb,
+            command: entry.value_data.clone(),
+            confidence: entry.confidence.clone(),
+            requires_admin: entry.requires_admin,
+        });
+    }
+    associations
+}
+
+fn extract_clsid(key_path: &str) -> Option<String> {
+    let mut saw_clsid = false;
+    for component in key_path.split('\\') {
+        if saw_clsid {
+            return Some(component.to_owned());
+        }
+        saw_clsid = component.eq_ignore_ascii_case("CLSID");
+    }
+    None
+}
+
+fn com_server_kind(lower_key: &str) -> Option<ComServerKind> {
+    if lower_key.ends_with(r"\inprocserver32") {
+        Some(ComServerKind::InProcess)
+    } else if lower_key.ends_with(r"\localserver32") {
+        Some(ComServerKind::LocalServer)
+    } else {
+        None
+    }
+}
+
+fn is_default_value(value_name: Option<&str>) -> bool {
+    matches!(value_name, None | Some("(Default)"))
+}
+
+fn registry_server_path(value: &str) -> Option<PathBuf> {
+    split_command_executable_path(value).or_else(|| {
+        let trimmed = value.trim().trim_matches('"');
+        (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+    })
 }
 
 fn open_root(hive: RegistryHive) -> Option<RegKey> {

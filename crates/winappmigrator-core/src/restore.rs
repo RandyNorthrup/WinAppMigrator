@@ -18,10 +18,11 @@ use crate::file_discovery::{package_destination_path, safe_relative_path};
 use crate::models::{
     EnvironmentScope, EnvironmentVariableEntry, PackageManifest, RegistryEntry, RegistryHive,
     RegistryValueKind, RestoreOptions, RestorePlan, RestoreResult, ScheduledTaskEntry,
-    ServiceEntry, ShortcutEntry, Warning, WarningSeverity,
+    ServiceEntry, ShortcutEntry, VerificationOptions, Warning, WarningSeverity,
 };
 use crate::package::read_manifest;
 use crate::privilege::{is_elevated, target_requires_admin};
+use crate::verify::verify_package;
 
 const RESTORE_LOG_JSON: &str = "restore_log.json";
 const RESTORE_LOG_MARKDOWN: &str = "restore_log.md";
@@ -58,6 +59,7 @@ pub fn plan_restore(options: &RestoreOptions) -> Result<RestorePlan> {
         planned_file_writes,
         planned_registry_writes: manifest.registry_keys_exported,
         planned_service_changes: manifest.services_detected,
+        planned_driver_actions: manifest.drivers_detected,
         planned_task_changes: manifest.scheduled_tasks_detected,
         planned_shortcut_changes: manifest.shortcuts_detected,
         planned_environment_changes: manifest.environment_variables_detected,
@@ -92,6 +94,7 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     }
 
     let path_rewrites = path_rewrites(&manifest, &options.target_root)?;
+    let output_dir = restore_output_dir(&options.package_root, &effective_options.package_root);
     let mut changes_logged = Vec::new();
     let mut warnings = plan.warnings.clone();
     let mut errors = Vec::new();
@@ -119,6 +122,11 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         &mut warnings,
         &mut errors,
     );
+    restore_drivers(
+        &plan.planned_driver_actions,
+        &mut changes_logged,
+        &mut warnings,
+    );
     restore_scheduled_tasks(
         &effective_options,
         &plan.planned_task_changes,
@@ -144,13 +152,49 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         &mut errors,
     );
 
-    let restore_log_json = effective_options.package_root.join(RESTORE_LOG_JSON);
-    let restore_log_markdown = effective_options.package_root.join(RESTORE_LOG_MARKDOWN);
+    let verification = if options.apply {
+        match verify_package(&VerificationOptions {
+            package_root: effective_options.package_root.clone(),
+            target_root: Some(options.target_root.clone()),
+            output_dir: Some(output_dir.clone()),
+        }) {
+            Ok(report) => {
+                if report.restore_valid == Some(false) {
+                    errors.extend(report.errors.clone());
+                }
+                warnings.extend(report.warnings.clone());
+                changes_logged.push(format!(
+                    "post-restore verification package_valid={} restore_valid={}",
+                    report.package_valid,
+                    report
+                        .restore_valid
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "not_run".to_owned())
+                ));
+                Some(report)
+            }
+            Err(error) => {
+                errors.push(Warning::new(
+                    "post_restore_verification_failed",
+                    WarningSeverity::Error,
+                    format!("Post-restore verification could not run: {error}"),
+                    None,
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let restore_log_json = output_dir.join(RESTORE_LOG_JSON);
+    let restore_log_markdown = output_dir.join(RESTORE_LOG_MARKDOWN);
     let result = RestoreResult {
         applied: options.apply,
         changes_logged,
         warnings,
         errors,
+        verification,
         restore_log_json: Some(restore_log_json.clone()),
         restore_log_markdown: Some(restore_log_markdown.clone()),
     };
@@ -276,6 +320,26 @@ fn restore_services(
                 Some(service.service_name.clone()),
             ));
         }
+    }
+}
+
+fn restore_drivers(
+    drivers: &[crate::models::DriverEntry],
+    changes_logged: &mut Vec<String>,
+    warnings: &mut Vec<Warning>,
+) {
+    for driver in drivers {
+        changes_logged.push(format!(
+            "driver metadata archived for manual restore {} -> {}",
+            driver.service_name,
+            driver.image_path.display()
+        ));
+        warnings.push(Warning::new(
+            "driver_restore_manual",
+            WarningSeverity::Warning,
+            "Driver and kernel components are not copied or registered automatically; reinstall them with the vendor signed installer.",
+            Some(driver.service_name.clone()),
+        ));
     }
 }
 
@@ -720,6 +784,9 @@ fn write_restore_logs(
     markdown_path: &Path,
     result: &RestoreResult,
 ) -> Result<()> {
+    if let Some(parent) = json_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
+    }
     let json = serde_json::to_vec_pretty(result)?;
     fs::write(json_path, json).map_err(|error| WinAppMigratorError::io(json_path, error))?;
 
@@ -737,6 +804,21 @@ fn write_restore_logs(
             warning.severity, warning.code, warning.message
         ));
     }
+    if let Some(verification) = result.verification.as_ref() {
+        markdown.push_str("\n## Verification\n");
+        markdown.push_str(&format!(
+            "- Package valid: {}\n",
+            verification.package_valid
+        ));
+        markdown.push_str(&format!(
+            "- Restore valid: {}\n",
+            verification
+                .restore_valid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "not run".to_owned())
+        ));
+        markdown.push_str(&format!("- Items checked: {}\n", verification.items.len()));
+    }
     markdown.push_str("\n## Errors\n");
     for error in &result.errors {
         markdown.push_str(&format!(
@@ -748,12 +830,26 @@ fn write_restore_logs(
         .map_err(|error| WinAppMigratorError::io(markdown_path, error))
 }
 
+fn restore_output_dir(original_package_root: &Path, effective_package_root: &Path) -> PathBuf {
+    if original_package_root.is_file() {
+        original_package_root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| effective_package_root.to_path_buf())
+    } else {
+        effective_package_root.to_path_buf()
+    }
+}
+
 fn restore_requires_admin(plan: &RestorePlan) -> bool {
     plan.planned_registry_writes
         .iter()
         .any(|entry| entry.requires_admin)
         || !plan.planned_service_changes.is_empty()
-        || !plan.planned_task_changes.is_empty()
+        || plan
+            .planned_task_changes
+            .iter()
+            .any(|task| task.requires_admin)
         || plan
             .planned_shortcut_changes
             .iter()

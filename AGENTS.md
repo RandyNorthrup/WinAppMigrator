@@ -16,6 +16,22 @@ Use `/caveman` status updates in chat: short, direct, no filler. Keep code, docs
 - Update `CHANGELOG.md` after meaningful changes.
 - Update `PLAN.md` when scope, assumptions, dependencies, or gate status changes.
 
+## Architecture
+
+- Footprint discovery is layered: `winappmigrator-core/src/install_source.rs`
+  (install-method detection + authoritative MSI component database and Inno
+  Setup `unins000.dat` parsing + App Paths) and `file_discovery.rs` (heuristic
+  scan of Program Files/(x86)/ProgramData/AppData with nested `Vendor\App`
+  matching, cache pruning, classification, and the `FootprintLocation` summary),
+  orchestrated by `scan.rs`. Read authoritative installer records before
+  guessing; keep heuristics conservative and guarded against cross-app false
+  positives. See `docs/discovery.md`.
+- The GUI is an `eframe`/`egui` console split into `theme.rs` (design tokens +
+  style), `widgets.rs` (reusable components + painter-drawn icons), and
+  `views.rs` (routed pages). See `docs/gui.md`.
+- Verify GUI changes with `cargo` gates and a single launched-window screenshot;
+  do **not** drive the live window with scripted mouse clicks or `SendKeys`.
+
 ## Quality Gates
 
 Run the relevant local gates before claiming completion:

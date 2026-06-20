@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 pub const SCAN_SCHEMA_VERSION: &str = "winappmigrator.scan.v1";
 pub const PACKAGE_SCHEMA_VERSION: &str = "winappmigrator.package.v1";
+pub const VERIFICATION_SCHEMA_VERSION: &str = "winappmigrator.verification.v1";
+pub const INVENTORY_SNAPSHOT_SCHEMA_VERSION: &str = "winappmigrator.inventory_snapshot.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +38,42 @@ pub enum InstallScope {
     Unknown,
 }
 
+/// How an application was installed. Determines which authoritative source can
+/// be consulted to reverse-engineer its footprint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallMethod {
+    /// Installed by Windows Installer (MSI); its components are recorded in the
+    /// Installer database and can be enumerated authoritatively.
+    WindowsInstaller,
+    /// MSIX / Appx packaged application.
+    Msix,
+    /// Squirrel / Electron per-user installer (Discord, Slack, etc.).
+    Squirrel,
+    /// Installed through the Chocolatey package manager.
+    Chocolatey,
+    /// Inno Setup installer (keeps an authoritative `unins*.dat` uninstall log).
+    InnoSetup,
+    /// NSIS (Nullsoft) installer.
+    Nsis,
+    /// Any other installer (portable, custom, unknown).
+    Generic,
+}
+
+impl InstallMethod {
+    pub fn label(&self) -> &'static str {
+        match self {
+            InstallMethod::WindowsInstaller => "Windows Installer (MSI)",
+            InstallMethod::Msix => "MSIX / Appx package",
+            InstallMethod::Squirrel => "Squirrel (Electron)",
+            InstallMethod::Chocolatey => "Chocolatey package",
+            InstallMethod::InnoSetup => "Inno Setup installer",
+            InstallMethod::Nsis => "NSIS installer",
+            InstallMethod::Generic => "Generic installer",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledApp {
     pub display_name: String,
@@ -47,6 +85,26 @@ pub struct InstalledApp {
     pub registry_source_path: String,
     pub architecture: AppArchitecture,
     pub install_scope: InstallScope,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InventorySnapshotOptions {
+    pub output_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InventorySnapshotReport {
+    pub schema_version: String,
+    pub generated_at_utc: String,
+    pub applications: Vec<InstalledApp>,
+    pub warnings: Vec<Warning>,
+    pub artifacts: InventorySnapshotArtifacts,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InventorySnapshotArtifacts {
+    pub json: PathBuf,
+    pub markdown: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +121,12 @@ pub struct ScanOptions {
     pub current_directory: Option<PathBuf>,
     pub recursive_dependencies: bool,
     pub include_hashes: bool,
+    #[serde(default = "default_true")]
+    pub include_user_data: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl ScanOptions {
@@ -76,6 +140,7 @@ impl ScanOptions {
             current_directory: None,
             recursive_dependencies: true,
             include_hashes: true,
+            include_user_data: true,
         }
     }
 }
@@ -88,11 +153,25 @@ pub struct ScanReport {
     pub main_executable: ExecutableMetadata,
     pub architecture: AppArchitecture,
     pub install_location: Option<PathBuf>,
+    #[serde(default)]
+    pub install_method: Option<InstallMethod>,
+    #[serde(default)]
+    pub authoritative_file_count: usize,
+    #[serde(default)]
+    pub install_evidence: Vec<String>,
+    #[serde(default)]
+    pub footprint_locations: Vec<FootprintLocation>,
     pub file_inventory: Vec<FileEntry>,
     pub dependencies: Vec<DependencyEntry>,
     pub app_local_dlls: Vec<FileEntry>,
     pub registry_entries: Vec<RegistryEntry>,
+    #[serde(default)]
+    pub com_registrations: Vec<ComRegistrationEntry>,
+    #[serde(default)]
+    pub file_associations: Vec<FileAssociationEntry>,
     pub services: Vec<ServiceEntry>,
+    #[serde(default)]
+    pub drivers: Vec<DriverEntry>,
     pub scheduled_tasks: Vec<ScheduledTaskEntry>,
     pub shortcuts: Vec<ShortcutEntry>,
     pub environment_variables: Vec<EnvironmentVariableEntry>,
@@ -150,7 +229,13 @@ pub struct PackageManifest {
     pub application_metadata: Option<InstalledApp>,
     pub file_inventory: Vec<FileEntry>,
     pub registry_keys_exported: Vec<RegistryEntry>,
+    #[serde(default)]
+    pub com_registrations_detected: Vec<ComRegistrationEntry>,
+    #[serde(default)]
+    pub file_associations_detected: Vec<FileAssociationEntry>,
     pub services_detected: Vec<ServiceEntry>,
+    #[serde(default)]
+    pub drivers_detected: Vec<DriverEntry>,
     pub scheduled_tasks_detected: Vec<ScheduledTaskEntry>,
     pub shortcuts_detected: Vec<ShortcutEntry>,
     pub environment_variables_detected: Vec<EnvironmentVariableEntry>,
@@ -167,6 +252,8 @@ pub struct PackageOptions {
     pub archive_format: Option<PackageArchiveFormat>,
     pub create_self_extracting_archive: bool,
     pub self_extracting_stub: Option<PathBuf>,
+    #[serde(default = "default_true")]
+    pub include_user_data: bool,
 }
 
 impl PackageOptions {
@@ -181,6 +268,7 @@ impl PackageOptions {
             archive_format: None,
             create_self_extracting_archive: false,
             self_extracting_stub: None,
+            include_user_data: true,
         }
     }
 }
@@ -219,12 +307,51 @@ pub struct FileEntry {
 #[serde(rename_all = "snake_case")]
 pub enum FileClassification {
     AppOwned,
+    UserData,
     SharedRuntime,
     WindowsSystem,
     Missing,
     DoNotCopy,
     ManualRuntimeInstall,
     Unknown,
+}
+
+/// A distinct location on disk that belongs to an application's footprint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FootprintLocation {
+    pub path: PathBuf,
+    pub kind: FootprintKind,
+    pub scope: InstallScope,
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub copyable_bytes: u64,
+    pub included: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FootprintKind {
+    InstallDirectory,
+    ProgramData,
+    RoamingAppData,
+    LocalAppData,
+    LocalLowAppData,
+    RegistryReference,
+    Other,
+}
+
+impl FootprintKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            FootprintKind::InstallDirectory => "Install directory",
+            FootprintKind::ProgramData => "ProgramData",
+            FootprintKind::RoamingAppData => "Roaming AppData",
+            FootprintKind::LocalAppData => "Local AppData",
+            FootprintKind::LocalLowAppData => "LocalLow AppData",
+            FootprintKind::RegistryReference => "Referenced location",
+            FootprintKind::Other => "Other location",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +398,38 @@ pub struct RegistryEntry {
     pub requires_admin: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComRegistrationEntry {
+    pub hive: RegistryHive,
+    pub clsid: String,
+    pub key_path: String,
+    pub server_kind: ComServerKind,
+    pub server_path: Option<PathBuf>,
+    pub threading_model: Option<String>,
+    pub confidence: MatchConfidence,
+    pub requires_admin: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComServerKind {
+    InProcess,
+    LocalServer,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAssociationEntry {
+    pub hive: RegistryHive,
+    pub extension: Option<String>,
+    pub prog_id: Option<String>,
+    pub application_name: Option<String>,
+    pub verb: Option<String>,
+    pub command: Option<String>,
+    pub confidence: MatchConfidence,
+    pub requires_admin: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RegistryValueKind {
@@ -310,6 +469,28 @@ pub struct ServiceEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriverEntry {
+    pub service_name: String,
+    pub display_name: Option<String>,
+    pub image_path: PathBuf,
+    pub driver_kind: DriverKind,
+    pub start_type: Option<String>,
+    pub account_name: Option<String>,
+    pub description: Option<String>,
+    pub requires_admin: bool,
+    pub restore_instructions: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DriverKind {
+    Kernel,
+    FileSystem,
+    Recognizer,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledTaskEntry {
     pub task_name: String,
     pub task_path: String,
@@ -319,6 +500,8 @@ pub struct ScheduledTaskEntry {
     pub trigger_summary: Option<String>,
     pub run_level: Option<String>,
     pub account: Option<String>,
+    #[serde(default)]
+    pub requires_admin: bool,
     pub restore_instructions: String,
     pub definition_xml: Option<String>,
 }
@@ -402,6 +585,7 @@ pub struct RestorePlan {
     pub planned_file_writes: Vec<FileEntry>,
     pub planned_registry_writes: Vec<RegistryEntry>,
     pub planned_service_changes: Vec<ServiceEntry>,
+    pub planned_driver_actions: Vec<DriverEntry>,
     pub planned_task_changes: Vec<ScheduledTaskEntry>,
     pub planned_shortcut_changes: Vec<ShortcutEntry>,
     pub planned_environment_changes: Vec<EnvironmentVariableEntry>,
@@ -414,6 +598,8 @@ pub struct RestoreResult {
     pub changes_logged: Vec<String>,
     pub warnings: Vec<Warning>,
     pub errors: Vec<Warning>,
+    #[serde(default)]
+    pub verification: Option<VerificationReport>,
     pub restore_log_json: Option<PathBuf>,
     pub restore_log_markdown: Option<PathBuf>,
 }
@@ -425,4 +611,58 @@ pub struct RestoreOptions {
     pub dry_run: bool,
     pub apply: bool,
     pub force: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationOptions {
+    pub package_root: PathBuf,
+    pub target_root: Option<PathBuf>,
+    pub output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationReport {
+    pub schema_version: String,
+    pub verified_at_utc: String,
+    pub package_root: PathBuf,
+    pub target_root: Option<PathBuf>,
+    pub package_valid: bool,
+    pub restore_valid: Option<bool>,
+    pub items: Vec<VerificationItem>,
+    pub warnings: Vec<Warning>,
+    pub errors: Vec<Warning>,
+    pub report_json: Option<PathBuf>,
+    pub report_markdown: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationItem {
+    pub category: VerificationCategory,
+    pub name: String,
+    pub status: VerificationStatus,
+    pub message: String,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationCategory {
+    Manifest,
+    PackageFile,
+    RestoredFile,
+    Registry,
+    Environment,
+    Service,
+    Driver,
+    ScheduledTask,
+    Shortcut,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStatus {
+    Passed,
+    Warning,
+    Failed,
+    Skipped,
 }

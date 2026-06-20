@@ -1,43 +1,90 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod theme;
+mod views;
+mod widgets;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use eframe::egui;
+use eframe::egui::{self, Align, Layout, Margin, RichText, Stroke};
+
 use winappmigrator_core::{
-    InstalledApp, PackageArchiveFormat, PackageOptions, PackageResult, RestoreOptions,
-    RestoreResult, ScanOptions, ScanReport, create_package, list_installed_apps, restore_package,
-    scan_and_write_reports,
+    InstalledApp, InventorySnapshotOptions, InventorySnapshotReport, PackageArchiveFormat,
+    PackageOptions, PackageResult, RestoreOptions, RestoreResult, ScanOptions, ScanReport,
+    create_package, list_installed_apps, restore_package, scan_and_write_reports,
+    write_inventory_snapshot,
 };
 
-const DEFAULT_WINDOW_WIDTH: f32 = 980.0;
-const DEFAULT_WINDOW_HEIGHT: f32 = 700.0;
+use theme::{NAV_WIDTH, Role, Theme, ThemeMode};
+use widgets::{ButtonKind, Icon};
+
+const DEFAULT_WINDOW_WIDTH: f32 = 1240.0;
+const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
 const WINDOW_TITLE: &str = "WinAppMigrator";
+
+const NAV_ITEMS: [(View, Icon, &str); 5] = [
+    (View::Dashboard, Icon::Dashboard, "Dashboard"),
+    (View::Applications, Icon::Apps, "Applications"),
+    (View::Analyze, Icon::Analyze, "Analyze"),
+    (View::Package, Icon::Package, "Package"),
+    (View::Restore, Icon::Restore, "Restore"),
+];
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT])
-            .with_min_inner_size([760.0, 520.0]),
+            .with_min_inner_size([960.0, 640.0])
+            .with_app_id("winappmigrator"),
         ..Default::default()
     };
 
     eframe::run_native(
         WINDOW_TITLE,
         native_options,
-        Box::new(|_cc| Ok(Box::new(WinAppMigratorApp::new()))),
+        Box::new(|cc| {
+            let app = WinAppMigratorApp::new();
+            app.theme.apply(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
     )
 }
 
-struct WinAppMigratorApp {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Dashboard,
+    Applications,
+    Analyze,
+    Package,
+    Restore,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScopeFilter {
+    All,
+    PerUser,
+    PerMachine,
+}
+
+pub struct WinAppMigratorApp {
+    theme: Theme,
+    active_view: View,
     inventory_state: InventoryState,
     inventory_receiver: Option<Receiver<InventoryMessage>>,
     apps: Vec<InstalledApp>,
     selected_app_index: Option<usize>,
+    app_search: String,
+    app_scope_filter: ScopeFilter,
     executable_path: String,
     output_dir: String,
     restore_package_dir: String,
     restore_target_dir: String,
+    scan_recursive_dependencies: bool,
+    scan_include_hashes: bool,
+    scan_include_user_data: bool,
     package_zip: bool,
     package_sfx: bool,
     restore_apply: bool,
@@ -45,26 +92,40 @@ struct WinAppMigratorApp {
     scan_state: ScanState,
     package_state: OperationState,
     restore_state: OperationState,
+    snapshot_state: OperationState,
     scan_receiver: Option<Receiver<ScanMessage>>,
     package_receiver: Option<Receiver<PackageMessage>>,
     restore_receiver: Option<Receiver<RestoreMessage>>,
+    snapshot_receiver: Option<Receiver<SnapshotMessage>>,
+    scan_detail: String,
+    package_detail: String,
+    restore_detail: String,
+    snapshot_detail: String,
     last_report: Option<ScanReport>,
     last_package: Option<PackageResult>,
     last_restore: Option<RestoreResult>,
+    last_snapshot: Option<InventorySnapshotReport>,
     last_error: Option<String>,
 }
 
 impl WinAppMigratorApp {
     fn new() -> Self {
         let mut app = Self {
+            theme: Theme::new(ThemeMode::Dark),
+            active_view: View::Dashboard,
             inventory_state: InventoryState::Loading,
             inventory_receiver: None,
             apps: Vec::new(),
             selected_app_index: None,
+            app_search: String::new(),
+            app_scope_filter: ScopeFilter::All,
             executable_path: String::new(),
             output_dir: String::new(),
             restore_package_dir: String::new(),
             restore_target_dir: String::new(),
+            scan_recursive_dependencies: true,
+            scan_include_hashes: true,
+            scan_include_user_data: true,
             package_zip: false,
             package_sfx: false,
             restore_apply: false,
@@ -72,12 +133,19 @@ impl WinAppMigratorApp {
             scan_state: ScanState::Idle,
             package_state: OperationState::Idle,
             restore_state: OperationState::Idle,
+            snapshot_state: OperationState::Idle,
             scan_receiver: None,
             package_receiver: None,
             restore_receiver: None,
+            snapshot_receiver: None,
+            scan_detail: String::new(),
+            package_detail: String::new(),
+            restore_detail: String::new(),
+            snapshot_detail: String::new(),
             last_report: None,
             last_package: None,
             last_restore: None,
+            last_snapshot: None,
             last_error: None,
         };
         app.start_inventory_load();
@@ -108,11 +176,19 @@ impl WinAppMigratorApp {
         let (sender, receiver) = mpsc::channel();
         self.scan_receiver = Some(receiver);
         self.scan_state = ScanState::Running;
+        self.scan_detail =
+            "Reading PE imports, resolving DLLs, and discovering integrations…".to_owned();
         self.last_error = None;
         self.last_report = None;
+        let recursive_dependencies = self.scan_recursive_dependencies;
+        let include_hashes = self.scan_include_hashes;
+        let include_user_data = self.scan_include_user_data;
 
         thread::spawn(move || {
-            let options = ScanOptions::for_executable(executable_path, output_dir);
+            let mut options = ScanOptions::for_executable(executable_path, output_dir);
+            options.recursive_dependencies = recursive_dependencies;
+            options.include_hashes = include_hashes;
+            options.include_user_data = include_user_data;
             let message = match scan_and_write_reports(&options) {
                 Ok(report) => ScanMessage::Completed(Box::new(report)),
                 Err(error) => ScanMessage::Failed(error.to_string()),
@@ -133,15 +209,19 @@ impl WinAppMigratorApp {
         let (sender, receiver) = mpsc::channel();
         self.package_receiver = Some(receiver);
         self.package_state = OperationState::Running;
+        self.package_detail =
+            "Scanning, copying app-owned files, and writing package artifacts…".to_owned();
         self.last_error = None;
         self.last_package = None;
         let package_zip = self.package_zip;
         let package_sfx = self.package_sfx;
+        let include_user_data = self.scan_include_user_data;
         let sfx_stub = if package_sfx { cli_stub_path() } else { None };
 
         thread::spawn(move || {
             let mut options = PackageOptions::for_executable(executable_path, output_dir);
             options.current_directory = std::env::current_dir().ok();
+            options.include_user_data = include_user_data;
             options.archive_format = if package_zip || package_sfx {
                 Some(PackageArchiveFormat::Zip)
             } else {
@@ -168,10 +248,15 @@ impl WinAppMigratorApp {
         let (sender, receiver) = mpsc::channel();
         self.restore_receiver = Some(receiver);
         self.restore_state = OperationState::Running;
-        self.last_error = None;
-        self.last_restore = None;
         let apply = self.restore_apply;
         let force = self.restore_force;
+        self.restore_detail = if apply {
+            "Applying restore plan and running post-restore verification…".to_owned()
+        } else {
+            "Building dry-run restore plan…".to_owned()
+        };
+        self.last_error = None;
+        self.last_restore = None;
 
         thread::spawn(move || {
             let options = RestoreOptions {
@@ -184,6 +269,33 @@ impl WinAppMigratorApp {
             let message = match restore_package(&options) {
                 Ok(result) => RestoreMessage::Completed(Box::new(result)),
                 Err(error) => RestoreMessage::Failed(error.to_string()),
+            };
+            let _send_result = sender.send(message);
+        });
+    }
+
+    fn start_snapshot(&mut self) {
+        let output_dir = self.output_dir.trim().to_owned();
+        if output_dir.is_empty() {
+            self.last_error =
+                Some("Output directory is required for inventory snapshot.".to_owned());
+            return;
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        self.snapshot_receiver = Some(receiver);
+        self.snapshot_state = OperationState::Running;
+        self.snapshot_detail = "Reading installed application inventory…".to_owned();
+        self.last_error = None;
+        self.last_snapshot = None;
+
+        thread::spawn(move || {
+            let options = InventorySnapshotOptions {
+                output_dir: PathBuf::from(output_dir),
+            };
+            let message = match write_inventory_snapshot(&options) {
+                Ok(result) => SnapshotMessage::Completed(Box::new(result)),
+                Err(error) => SnapshotMessage::Failed(error.to_string()),
             };
             let _send_result = sender.send(message);
         });
@@ -218,10 +330,17 @@ impl WinAppMigratorApp {
                     } else {
                         ScanState::Warning
                     };
+                    self.scan_detail = format!(
+                        "Completed with {} dependencies, {} files, and {} warnings.",
+                        report.dependencies.len(),
+                        report.file_inventory.len(),
+                        report.warnings.len()
+                    );
                     self.last_report = Some(*report);
                 }
                 Ok(ScanMessage::Failed(error)) => {
                     self.scan_state = ScanState::Failed;
+                    self.scan_detail = "Failed.".to_owned();
                     self.last_error = Some(error);
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -243,11 +362,22 @@ impl WinAppMigratorApp {
                     } else {
                         OperationState::Warning
                     };
-                    self.restore_package_dir = result.package_root.display().to_string();
+                    self.package_detail = format!(
+                        "Completed with {} copied files and {} warnings.",
+                        result.files_copied,
+                        result.warnings.len()
+                    );
+                    self.restore_package_dir = result
+                        .archive_path
+                        .as_ref()
+                        .unwrap_or(&result.package_root)
+                        .display()
+                        .to_string();
                     self.last_package = Some(*result);
                 }
                 Ok(PackageMessage::Failed(error)) => {
                     self.package_state = OperationState::Failed;
+                    self.package_detail = "Failed.".to_owned();
                     self.last_error = Some(error);
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -269,10 +399,17 @@ impl WinAppMigratorApp {
                     } else {
                         OperationState::Warning
                     };
+                    self.restore_detail = format!(
+                        "Completed with {} logged changes, {} warnings, and {} errors.",
+                        result.changes_logged.len(),
+                        result.warnings.len(),
+                        result.errors.len()
+                    );
                     self.last_restore = Some(*result);
                 }
                 Ok(RestoreMessage::Failed(error)) => {
                     self.restore_state = OperationState::Failed;
+                    self.restore_detail = "Failed.".to_owned();
                     self.last_error = Some(error);
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -285,13 +422,141 @@ impl WinAppMigratorApp {
                 }
             }
         }
+
+        if let Some(receiver) = self.snapshot_receiver.take() {
+            match receiver.try_recv() {
+                Ok(SnapshotMessage::Completed(snapshot)) => {
+                    self.snapshot_state = OperationState::Completed;
+                    self.snapshot_detail = format!(
+                        "Completed with {} installed applications.",
+                        snapshot.applications.len()
+                    );
+                    self.last_snapshot = Some(*snapshot);
+                }
+                Ok(SnapshotMessage::Failed(error)) => {
+                    self.snapshot_state = OperationState::Failed;
+                    self.snapshot_detail = "Failed.".to_owned();
+                    self.last_error = Some(error);
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.snapshot_receiver = Some(receiver);
+                    ctx.request_repaint();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.snapshot_state = OperationState::Failed;
+                    self.snapshot_detail = "Snapshot worker disconnected.".to_owned();
+                    self.last_error = Some("Snapshot worker disconnected.".to_owned());
+                }
+            }
+        }
     }
 
-    fn selected_app_label(&self) -> String {
-        self.selected_app_index
-            .and_then(|index| self.apps.get(index))
-            .map(|app| app.display_name.clone())
-            .unwrap_or_else(|| "Select installed app".to_owned())
+    fn draw_nav(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme.clone();
+
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
+            widgets::paint_logo(ui.painter(), rect, &theme);
+            ui.add_space(6.0);
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new("WinAppMigrator")
+                        .size(15.0)
+                        .strong()
+                        .color(theme.text),
+                );
+                ui.label(
+                    RichText::new("Migration console")
+                        .size(11.0)
+                        .color(theme.text_subtle),
+                );
+            });
+        });
+
+        ui.add_space(18.0);
+        widgets::eyebrow(ui, &theme, "Workspace");
+        ui.add_space(8.0);
+
+        for (view, icon, label) in NAV_ITEMS {
+            if widgets::nav_item(ui, &theme, icon, label, self.active_view == view) {
+                self.active_view = view;
+            }
+            ui.add_space(2.0);
+        }
+
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(format!("v{} · local build", env!("CARGO_PKG_VERSION")))
+                    .size(11.0)
+                    .color(theme.text_subtle),
+            );
+            ui.add_space(8.0);
+            ui.separator();
+        });
+    }
+
+    fn draw_topbar(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme.clone();
+        let (title, subtitle) = view_meta(self.active_view);
+
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                widgets::eyebrow(ui, &theme, "WinAppMigrator");
+                ui.label(RichText::new(title).heading().color(theme.text));
+                ui.label(RichText::new(subtitle).size(13.0).color(theme.text_muted));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let mode_label = if theme.mode == ThemeMode::Dark {
+                    "Light mode"
+                } else {
+                    "Dark mode"
+                };
+                if widgets::button(ui, &theme, ButtonKind::Ghost, mode_label, true).clicked() {
+                    self.theme = Theme::new(theme.mode.toggled());
+                    self.theme.apply(ui.ctx());
+                }
+                if widgets::button(ui, &theme, ButtonKind::Secondary, "Reload apps", true).clicked()
+                {
+                    self.start_inventory_load();
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
+            let (inventory_label, inventory_role) = match &self.inventory_state {
+                InventoryState::Loading => ("Inventory loading".to_owned(), Role::Neutral),
+                InventoryState::Loaded => (format!("{} apps", self.apps.len()), Role::Success),
+                InventoryState::Failed(_) => ("Inventory failed".to_owned(), Role::Danger),
+            };
+            widgets::status_pill(ui, &theme, &inventory_label, inventory_role);
+            widgets::status_pill(
+                ui,
+                &theme,
+                &format!("Scan · {}", scan_text(self.scan_state)),
+                scan_role(self.scan_state),
+            );
+            widgets::status_pill(
+                ui,
+                &theme,
+                &op_text("Package", self.package_state),
+                op_role(self.package_state),
+            );
+            widgets::status_pill(
+                ui,
+                &theme,
+                &op_text("Restore", self.restore_state),
+                op_role(self.restore_state),
+            );
+            widgets::status_pill(
+                ui,
+                &theme,
+                &op_text("Snapshot", self.snapshot_state),
+                op_role(self.snapshot_state),
+            );
+        });
     }
 }
 
@@ -301,280 +566,126 @@ impl eframe::App for WinAppMigratorApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading(WINDOW_TITLE);
-                ui.separator();
-                ui.label("Scan, package, restore");
-                if ui.button("Reload apps").clicked() {
-                    self.start_inventory_load();
-                }
-            });
+        let theme = self.theme.clone();
 
-            ui.separator();
-            ui.columns(2, |columns| {
-                self.draw_selection_panel(&mut columns[0]);
-                self.draw_results_panel(&mut columns[1]);
-            });
-        });
-    }
-}
+        let nav_frame = egui::Frame::new()
+            .fill(theme.sidebar)
+            .stroke(Stroke::new(1.0, theme.border))
+            .inner_margin(Margin::symmetric(16, 18));
+        egui::Panel::left("nav")
+            .exact_size(NAV_WIDTH)
+            .resizable(false)
+            .frame(nav_frame)
+            .show_inside(ui, |ui| self.draw_nav(ui));
 
-impl WinAppMigratorApp {
-    fn draw_selection_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Selection");
-        ui.add_space(8.0);
+        let top_frame = egui::Frame::new()
+            .fill(theme.surface)
+            .inner_margin(Margin::symmetric(22, 16));
+        egui::Panel::top("topbar")
+            .frame(top_frame)
+            .show_inside(ui, |ui| self.draw_topbar(ui));
 
-        match &self.inventory_state {
-            InventoryState::Loading => {
-                ui.spinner();
-                ui.label("Loading installed applications...");
-            }
-            InventoryState::Loaded => {
-                ui.label(format!("Installed applications: {}", self.apps.len()));
-                egui::ComboBox::from_label("Installed app")
-                    .selected_text(self.selected_app_label())
-                    .show_ui(ui, |ui| {
-                        for index in 0..self.apps.len() {
-                            let app_name = self.apps[index].display_name.clone();
-                            let selected = self.selected_app_index == Some(index);
-                            if ui.selectable_label(selected, app_name).clicked() {
-                                self.selected_app_index = Some(index);
-                                if let Some(path) =
-                                    self.apps[index].main_executable.as_ref().map(PathBuf::from)
-                                {
-                                    self.executable_path = path.display().to_string();
-                                }
-                            }
-                        }
+        let central_frame = egui::Frame::new()
+            .fill(theme.bg)
+            .inner_margin(Margin::symmetric(22, 18));
+        egui::CentralPanel::default()
+            .frame(central_frame)
+            .show_inside(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_max_width(ui.available_width());
+                        self.draw_active_view(ui);
                     });
-            }
-            InventoryState::Failed(error) => {
-                ui.colored_label(egui::Color32::RED, format!("Inventory failed: {error}"));
-            }
-        }
-
-        ui.separator();
-        ui.label("Executable path");
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.executable_path);
-            if ui.button("Browse").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Executable", &["exe"])
-                    .pick_file()
-            {
-                self.executable_path = path.display().to_string();
-            }
-        });
-
-        ui.label("Output directory");
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.output_dir);
-            if ui.button("Browse").clicked()
-                && let Some(path) = rfd::FileDialog::new().pick_folder()
-            {
-                self.output_dir = path.display().to_string();
-            }
-        });
-
-        ui.add_space(8.0);
-        let scan_enabled = !matches!(self.scan_state, ScanState::Running);
-        if ui
-            .add_enabled(scan_enabled, egui::Button::new("Run scan"))
-            .clicked()
-        {
-            self.start_scan();
-        }
-        let package_enabled = !matches!(self.package_state, OperationState::Running);
-        ui.checkbox(&mut self.package_zip, "Create zip archive");
-        ui.checkbox(&mut self.package_sfx, "Create self-extracting package");
-        if ui
-            .add_enabled(package_enabled, egui::Button::new("Build package"))
-            .clicked()
-        {
-            self.start_package();
-        }
-        ui.label("Basic list/scan/package does not require admin rights.");
-
-        ui.separator();
-        ui.heading("Restore");
-        ui.label("Package root");
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.restore_package_dir);
-            if ui.button("Folder").clicked()
-                && let Some(path) = rfd::FileDialog::new().pick_folder()
-            {
-                self.restore_package_dir = path.display().to_string();
-            }
-            if ui.button("Zip").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Package zip", &["zip"])
-                    .pick_file()
-            {
-                self.restore_package_dir = path.display().to_string();
-            }
-        });
-        ui.label("Target root");
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.restore_target_dir);
-            if ui.button("Browse").clicked()
-                && let Some(path) = rfd::FileDialog::new().pick_folder()
-            {
-                self.restore_target_dir = path.display().to_string();
-            }
-        });
-        ui.checkbox(&mut self.restore_apply, "Apply changes");
-        ui.checkbox(&mut self.restore_force, "Overwrite existing files");
-        let restore_enabled = !matches!(self.restore_state, OperationState::Running);
-        let restore_label = if self.restore_apply {
-            "Restore apply"
-        } else {
-            "Restore dry-run"
-        };
-        if ui
-            .add_enabled(restore_enabled, egui::Button::new(restore_label))
-            .clicked()
-        {
-            self.start_restore();
-        }
-    }
-
-    fn draw_results_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Results");
-        ui.add_space(8.0);
-
-        match self.scan_state {
-            ScanState::Idle => {
-                ui.label("No scan has run.");
-            }
-            ScanState::Running => {
-                ui.spinner();
-                ui.label("Scan running...");
-            }
-            ScanState::Completed | ScanState::Warning => {
-                if let Some(report) = self.last_report.as_ref() {
-                    ui.label(format!(
-                        "Executable: {}",
-                        report.main_executable.path.display()
-                    ));
-                    ui.label(format!("Architecture: {:?}", report.architecture));
-                    ui.label(format!("Confidence score: {}", report.confidence_score));
-                    ui.label(format!("Dependencies: {}", report.dependencies.len()));
-                    ui.label(format!(
-                        "Missing dependencies: {}",
-                        report
-                            .dependencies
-                            .iter()
-                            .filter(|entry| entry.missing)
-                            .count()
-                    ));
-                    ui.label(format!(
-                        "Runtime prerequisites: {}",
-                        report.runtime_prerequisites.len()
-                    ));
-                    ui.label(format!("Warnings: {}", report.warnings.len()));
-
-                    if let Some(artifacts) = report.generated_artifacts.as_ref() {
-                        ui.separator();
-                        ui.label(format!(
-                            "Report: {}",
-                            artifacts.scan_report_markdown.display()
-                        ));
-                        if ui.button("Open report folder").clicked()
-                            && let Some(parent) = artifacts.scan_report_markdown.parent()
-                            && let Err(error) = open_folder(parent)
-                        {
-                            self.last_error = Some(error.to_string());
-                        }
-                    }
-
-                    if !report.warnings.is_empty() {
-                        ui.separator();
-                        ui.label("Warnings");
-                        egui::ScrollArea::vertical()
-                            .max_height(180.0)
-                            .show(ui, |ui| {
-                                for warning in &report.warnings {
-                                    ui.label(format!(
-                                        "{:?} {}: {}",
-                                        warning.severity, warning.code, warning.message
-                                    ));
-                                }
-                            });
-                    }
-                }
-            }
-            ScanState::Failed => {
-                ui.colored_label(egui::Color32::RED, "Scan failed.");
-            }
-        }
-
-        ui.separator();
-        ui.heading("Package");
-        match self.package_state {
-            OperationState::Idle => {
-                ui.label("No package has run.");
-            }
-            OperationState::Running => {
-                ui.spinner();
-                ui.label("Package running...");
-            }
-            OperationState::Completed | OperationState::Warning => {
-                if let Some(package) = self.last_package.as_ref() {
-                    ui.label(format!("Package root: {}", package.package_root.display()));
-                    ui.label(format!("Files copied: {}", package.files_copied));
-                    if let Some(path) = package.archive_path.as_ref() {
-                        ui.label(format!("Archive: {}", path.display()));
-                    }
-                    if let Some(path) = package.self_extracting_archive_path.as_ref() {
-                        ui.label(format!("Self-extracting: {}", path.display()));
-                    }
-                    ui.label(format!("Warnings: {}", package.warnings.len()));
-                }
-            }
-            OperationState::Failed => {
-                ui.colored_label(egui::Color32::RED, "Package failed.");
-            }
-        }
-
-        ui.separator();
-        ui.heading("Restore");
-        match self.restore_state {
-            OperationState::Idle => {
-                ui.label("No restore has run.");
-            }
-            OperationState::Running => {
-                ui.spinner();
-                ui.label("Restore running...");
-            }
-            OperationState::Completed | OperationState::Warning => {
-                if let Some(restore) = self.last_restore.as_ref() {
-                    ui.label(format!("Applied: {}", restore.applied));
-                    ui.label(format!("Changes logged: {}", restore.changes_logged.len()));
-                    ui.label(format!("Warnings: {}", restore.warnings.len()));
-                    ui.label(format!("Errors: {}", restore.errors.len()));
-                }
-            }
-            OperationState::Failed => {
-                ui.colored_label(egui::Color32::RED, "Restore failed.");
-            }
-        }
-
-        if let Some(error) = self.last_error.as_ref() {
-            ui.separator();
-            ui.colored_label(egui::Color32::RED, error);
-        }
+            });
     }
 }
 
-fn open_folder(path: &Path) -> std::io::Result<()> {
+pub(crate) fn open_folder(path: &Path) -> std::io::Result<()> {
     Command::new("explorer").arg(path).spawn().map(|_child| ())
 }
 
-fn cli_stub_path() -> Option<PathBuf> {
+/// A sensible default package/report output directory for an application,
+/// so the common path does not require the user to choose a folder manually.
+pub(crate) fn default_output_for(app_name: &str) -> String {
+    let safe: String = app_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = safe.trim();
+    let base = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("WinAppMigrator")
+        .join(if safe.is_empty() { "Package" } else { safe })
+        .display()
+        .to_string()
+}
+
+pub(crate) fn cli_stub_path() -> Option<PathBuf> {
     let current = std::env::current_exe().ok()?;
     let sibling = current.parent()?.join("winappmigrator.exe");
     sibling.is_file().then_some(sibling)
+}
+
+fn view_meta(view: View) -> (&'static str, &'static str) {
+    match view {
+        View::Dashboard => ("Dashboard", "Overview of inventory and migration progress"),
+        View::Applications => ("Applications", "Browse and select installed applications"),
+        View::Analyze => ("Analyze", "Resolve dependencies and Windows integrations"),
+        View::Package => ("Package", "Build a portable migration package"),
+        View::Restore => ("Restore", "Preview or apply a package on the target"),
+    }
+}
+
+pub(crate) fn scan_text(state: ScanState) -> &'static str {
+    match state {
+        ScanState::Idle => "Idle",
+        ScanState::Running => "Running",
+        ScanState::Completed => "Complete",
+        ScanState::Warning => "Warnings",
+        ScanState::Failed => "Failed",
+    }
+}
+
+pub(crate) fn scan_role(state: ScanState) -> Role {
+    match state {
+        ScanState::Idle => Role::Neutral,
+        ScanState::Running => Role::Accent,
+        ScanState::Completed => Role::Success,
+        ScanState::Warning => Role::Warning,
+        ScanState::Failed => Role::Danger,
+    }
+}
+
+pub(crate) fn op_word(state: OperationState) -> &'static str {
+    match state {
+        OperationState::Idle => "Idle",
+        OperationState::Running => "Running",
+        OperationState::Completed => "Complete",
+        OperationState::Warning => "Warnings",
+        OperationState::Failed => "Failed",
+    }
+}
+
+pub(crate) fn op_text(prefix: &str, state: OperationState) -> String {
+    format!("{prefix} · {}", op_word(state))
+}
+
+pub(crate) fn op_role(state: OperationState) -> Role {
+    match state {
+        OperationState::Idle => Role::Neutral,
+        OperationState::Running => Role::Accent,
+        OperationState::Completed => Role::Success,
+        OperationState::Warning => Role::Warning,
+        OperationState::Failed => Role::Danger,
+    }
 }
 
 enum InventoryMessage {
@@ -597,13 +708,19 @@ enum RestoreMessage {
     Failed(String),
 }
 
-enum InventoryState {
+enum SnapshotMessage {
+    Completed(Box<InventorySnapshotReport>),
+    Failed(String),
+}
+
+pub(crate) enum InventoryState {
     Loading,
     Loaded,
     Failed(String),
 }
 
-enum ScanState {
+#[derive(Clone, Copy)]
+pub(crate) enum ScanState {
     Idle,
     Running,
     Completed,
@@ -611,7 +728,8 @@ enum ScanState {
     Failed,
 }
 
-enum OperationState {
+#[derive(Clone, Copy)]
+pub(crate) enum OperationState {
     Idle,
     Running,
     Completed,

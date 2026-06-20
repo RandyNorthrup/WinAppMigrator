@@ -20,6 +20,7 @@ const FILES_DIR: &str = "files";
 const REGISTRY_DIR: &str = "registry";
 const SHORTCUTS_DIR: &str = "shortcuts";
 const SERVICES_DIR: &str = "services";
+const DRIVERS_DIR: &str = "drivers";
 const SCHEDULED_TASKS_DIR: &str = "scheduled_tasks";
 const ENVIRONMENT_DIR: &str = "environment";
 const MANIFESTS_DIR: &str = "manifests";
@@ -28,7 +29,10 @@ const MANIFEST_FILE: &str = "manifest.json";
 const RESTORE_PLAN_FILE: &str = "restore_plan.md";
 const REGISTRY_ENTRIES_FILE: &str = "registry_entries.json";
 const REGISTRY_EXPORT_FILE: &str = "registry_export.reg";
+const COM_REGISTRATIONS_FILE: &str = "com_registrations.json";
+const FILE_ASSOCIATIONS_FILE: &str = "file_associations.json";
 const SERVICES_FILE: &str = "services.json";
+const DRIVERS_FILE: &str = "drivers.json";
 const SCHEDULED_TASKS_FILE: &str = "scheduled_tasks.json";
 const SHORTCUTS_FILE: &str = "shortcuts.json";
 const ENVIRONMENT_FILE: &str = "environment_variables.json";
@@ -43,6 +47,7 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         current_directory: options.current_directory.clone(),
         recursive_dependencies: true,
         include_hashes: true,
+        include_user_data: options.include_user_data,
     };
     let report = scan_and_write_reports(&scan_options)?;
     let mut warnings = report.warnings.clone();
@@ -76,7 +81,10 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         application_metadata: report.source_app.clone(),
         file_inventory: report.file_inventory.clone(),
         registry_keys_exported: report.registry_entries.clone(),
+        com_registrations_detected: report.com_registrations.clone(),
+        file_associations_detected: report.file_associations.clone(),
         services_detected: report.services.clone(),
+        drivers_detected: report.drivers.clone(),
         scheduled_tasks_detected: report.scheduled_tasks.clone(),
         shortcuts_detected: report.shortcuts.clone(),
         environment_variables_detected: report.environment_variables.clone(),
@@ -134,6 +142,7 @@ fn create_package_dirs(root: &Path) -> Result<()> {
         root.join(REGISTRY_DIR),
         root.join(SHORTCUTS_DIR),
         root.join(SERVICES_DIR),
+        root.join(DRIVERS_DIR),
         root.join(SCHEDULED_TASKS_DIR),
         root.join(ENVIRONMENT_DIR),
         root.join(MANIFESTS_DIR),
@@ -185,8 +194,20 @@ fn write_integration_artifacts(root: &Path, manifest: &PackageManifest) -> Resul
         &manifest.registry_keys_exported,
     )?;
     write_json(
+        &root.join(REGISTRY_DIR).join(COM_REGISTRATIONS_FILE),
+        &manifest.com_registrations_detected,
+    )?;
+    write_json(
+        &root.join(REGISTRY_DIR).join(FILE_ASSOCIATIONS_FILE),
+        &manifest.file_associations_detected,
+    )?;
+    write_json(
         &root.join(SERVICES_DIR).join(SERVICES_FILE),
         &manifest.services_detected,
+    )?;
+    write_json(
+        &root.join(DRIVERS_DIR).join(DRIVERS_FILE),
+        &manifest.drivers_detected,
     )?;
     write_json(
         &root.join(SCHEDULED_TASKS_DIR).join(SCHEDULED_TASKS_FILE),

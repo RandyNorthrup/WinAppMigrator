@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::models::{ScheduledTaskEntry, Warning, WarningSeverity};
 
@@ -14,14 +14,23 @@ pub struct TaskScanContext {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct PowerShellTaskAction {
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     task_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     task_path: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     execute: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     arguments: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     working_directory: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     trigger_summary: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     run_level: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     account: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     definition_xml: Option<String>,
 }
 
@@ -38,14 +47,14 @@ $items = foreach ($task in Get-ScheduledTask) {
   $triggerSummary = ($task.Triggers | ForEach-Object { $_.CimClass.CimClassName }) -join '; '
   foreach ($action in $task.Actions) {
     [pscustomobject]@{
-      TaskName = $task.TaskName
-      TaskPath = $task.TaskPath
-      Execute = $action.Execute
-      Arguments = $action.Arguments
-      WorkingDirectory = $action.WorkingDirectory
-      TriggerSummary = $triggerSummary
-      RunLevel = $task.Principal.RunLevel
-      Account = $task.Principal.UserId
+      TaskName = [string]$task.TaskName
+      TaskPath = [string]$task.TaskPath
+      Execute = if ($null -ne $action.Execute) { [string]$action.Execute } else { $null }
+      Arguments = if ($null -ne $action.Arguments) { [string]$action.Arguments } else { $null }
+      WorkingDirectory = if ($null -ne $action.WorkingDirectory) { [string]$action.WorkingDirectory } else { $null }
+      TriggerSummary = if ($null -ne $triggerSummary) { [string]$triggerSummary } else { $null }
+      RunLevel = if ($null -ne $task.Principal.RunLevel) { [string]$task.Principal.RunLevel } else { $null }
+      Account = if ($null -ne $task.Principal.UserId) { [string]$task.Principal.UserId } else { $null }
       DefinitionXml = $definitionXml
     }
   }
@@ -94,6 +103,9 @@ fn task_from_action(
         return None;
     }
 
+    let requires_admin =
+        task_requires_admin(action.run_level.as_deref(), action.account.as_deref());
+
     Some(ScheduledTaskEntry {
         task_name: action.task_name.unwrap_or_default(),
         task_path: action.task_path.unwrap_or_default(),
@@ -103,9 +115,38 @@ fn task_from_action(
         trigger_summary: action.trigger_summary,
         run_level: action.run_level,
         account: action.account,
+        requires_admin,
         restore_instructions:
             "Restore uses Register-ScheduledTask with the archived XML definition.".to_owned(),
         definition_xml: action.definition_xml,
+    })
+}
+
+fn task_requires_admin(run_level: Option<&str>, account: Option<&str>) -> bool {
+    run_level.is_some_and(|value| {
+        let normalized = value.trim().to_ascii_lowercase();
+        normalized == "1" || normalized.contains("highest")
+    }) || account.is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "system" | "localsystem" | "nt authority\\system"
+        )
+    })
+}
+
+fn deserialize_optional_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => Some(value),
+        Some(serde_json::Value::Number(value)) => Some(value.to_string()),
+        Some(serde_json::Value::Bool(value)) => Some(value.to_string()),
+        Some(value) => Some(value.to_string()),
     })
 }
 
@@ -152,4 +193,50 @@ fn expand_env_markers(value: &str) -> String {
         expanded = expanded.replace(&marker, &val);
     }
     expanded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_highest_or_system_tasks_as_admin_only() {
+        assert!(task_requires_admin(Some("Highest"), Some("user")));
+        assert!(task_requires_admin(Some("1"), Some("user")));
+        assert!(task_requires_admin(Some("HighestAvailable"), Some("user")));
+        assert!(task_requires_admin(Some("Limited"), Some("SYSTEM")));
+        assert!(!task_requires_admin(Some("Limited"), Some("DOMAIN\\user")));
+        assert!(!task_requires_admin(None, None));
+    }
+
+    #[test]
+    fn parses_numeric_powershell_task_fields() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let actions = parse_json_array::<PowerShellTaskAction>(
+            r#"[{
+                "TaskName": "Example",
+                "TaskPath": "\\WinAppMigrator\\",
+                "Execute": "C:\\App\\app.exe",
+                "RunLevel": 1,
+                "Account": "SYSTEM"
+            }]"#,
+        )?;
+        let Some(action) = actions.into_iter().next() else {
+            return Err(std::io::Error::other("missing task action").into());
+        };
+        let Some(task) = task_from_action(
+            &TaskScanContext {
+                executable_path: PathBuf::from(r"C:\App\app.exe"),
+                install_location: None,
+            },
+            action,
+        ) else {
+            return Err(std::io::Error::other("task should match executable path").into());
+        };
+
+        assert_eq!(task.task_name, "Example");
+        assert_eq!(task.run_level.as_deref(), Some("1"));
+        assert!(task.requires_admin);
+        Ok(())
+    }
 }

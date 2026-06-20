@@ -1,0 +1,488 @@
+//! Reusable, theme-aware UI building blocks shared across every page.
+
+use std::path::PathBuf;
+
+use eframe::egui::{
+    self, Align2, Color32, CursorIcon, FontId, Margin, Rect, Response, Sense, Shape, Stroke,
+    StrokeKind, Ui,
+};
+
+use crate::theme::{self, RADIUS_LG, RADIUS_MD, RADIUS_SM, Role, Theme};
+
+/// Visual weight for action buttons.
+#[derive(Clone, Copy)]
+pub enum ButtonKind {
+    Primary,
+    Secondary,
+    Danger,
+    Ghost,
+}
+
+/// Glyphs drawn for navigation entries and empty states.
+#[derive(Clone, Copy)]
+pub enum Icon {
+    Dashboard,
+    Apps,
+    Analyze,
+    Package,
+    Restore,
+}
+
+/// A single value tile shown in a metrics row.
+pub struct Metric {
+    pub label: String,
+    pub value: String,
+    pub role: Role,
+}
+
+pub fn metric(label: impl Into<String>, value: impl Into<String>, role: Role) -> Metric {
+    Metric {
+        label: label.into(),
+        value: value.into(),
+        role,
+    }
+}
+
+/// A flat elevated container with the standard card treatment.
+pub fn card<R>(ui: &mut Ui, theme: &Theme, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(theme.card)
+        .stroke(Stroke::new(1.0, theme.border))
+        .corner_radius(RADIUS_LG)
+        .inner_margin(Margin::same(18))
+        .shadow(theme.soft_shadow())
+        .show(ui, |ui| contents(ui))
+        .inner
+}
+
+/// A card with a heading row (title + optional subtitle) above its content.
+pub fn card_titled<R>(
+    ui: &mut Ui,
+    theme: &Theme,
+    title: &str,
+    subtitle: Option<&str>,
+    contents: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    card(ui, theme, |ui| {
+        ui.label(
+            egui::RichText::new(title)
+                .size(16.0)
+                .strong()
+                .color(theme.text),
+        );
+        if let Some(subtitle) = subtitle {
+            ui.label(
+                egui::RichText::new(subtitle)
+                    .size(12.5)
+                    .color(theme.text_muted),
+            );
+        }
+        ui.add_space(12.0);
+        contents(ui)
+    })
+}
+
+/// Small uppercase tracking label used above sections.
+pub fn eyebrow(ui: &mut Ui, theme: &Theme, text: &str) {
+    ui.label(
+        egui::RichText::new(text.to_uppercase())
+            .size(11.0)
+            .strong()
+            .color(theme.text_subtle),
+    );
+}
+
+pub fn field_label(ui: &mut Ui, theme: &Theme, text: &str) {
+    ui.label(egui::RichText::new(text).size(12.5).color(theme.text_muted));
+}
+
+/// A primary/secondary/danger/ghost action button.
+pub fn button(
+    ui: &mut Ui,
+    theme: &Theme,
+    kind: ButtonKind,
+    label: &str,
+    enabled: bool,
+) -> Response {
+    let widget = match kind {
+        ButtonKind::Primary => {
+            egui::Button::new(egui::RichText::new(label).strong().color(theme.on_accent))
+                .fill(theme.accent)
+                .stroke(Stroke::NONE)
+                .corner_radius(RADIUS_SM)
+                .min_size(egui::vec2(120.0, 36.0))
+        }
+        ButtonKind::Danger => {
+            egui::Button::new(egui::RichText::new(label).strong().color(theme.on_accent))
+                .fill(theme.danger)
+                .stroke(Stroke::NONE)
+                .corner_radius(RADIUS_SM)
+                .min_size(egui::vec2(120.0, 36.0))
+        }
+        ButtonKind::Secondary => egui::Button::new(egui::RichText::new(label).color(theme.text))
+            .fill(theme.card)
+            .stroke(Stroke::new(1.0, theme.border_strong))
+            .corner_radius(RADIUS_SM)
+            .min_size(egui::vec2(92.0, 34.0)),
+        ButtonKind::Ghost => egui::Button::new(egui::RichText::new(label).color(theme.text_muted))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .frame(false),
+    };
+    ui.add_enabled(enabled, widget)
+}
+
+/// A status pill: a soft-filled rounded capsule with a leading status dot.
+pub fn status_pill(ui: &mut Ui, theme: &Theme, text: &str, role: Role) {
+    let color = theme.role(role);
+    let dark = theme.mode == theme::ThemeMode::Dark;
+    egui::Frame::new()
+        .inner_margin(Margin::symmetric(10, 5))
+        .fill(theme::alpha(color, if dark { 32 } else { 26 }))
+        .stroke(Stroke::new(1.0, theme::alpha(color, 130)))
+        .corner_radius(RADIUS_LG)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), Sense::hover());
+                ui.painter().circle_filled(rect.center(), 3.5, color);
+                ui.add_space(1.0);
+                ui.label(egui::RichText::new(text).size(12.0).color(theme.text));
+            });
+        });
+}
+
+/// A compact category badge (no dot), used for tags inside dense lists.
+pub fn badge(ui: &mut Ui, theme: &Theme, text: &str, color: Color32) {
+    let dark = theme.mode == theme::ThemeMode::Dark;
+    egui::Frame::new()
+        .inner_margin(Margin::symmetric(8, 3))
+        .fill(theme::alpha(color, if dark { 34 } else { 30 }))
+        .corner_radius(RADIUS_SM)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(text)
+                    .size(11.5)
+                    .color(strengthen(theme, color)),
+            );
+        });
+}
+
+/// Lay metric tiles out in rows of four, aligned to a uniform width.
+pub fn metric_tiles(ui: &mut Ui, theme: &Theme, metrics: &[Metric]) {
+    const PER_ROW: usize = 4;
+    for chunk in metrics.chunks(PER_ROW) {
+        ui.columns(PER_ROW, |columns| {
+            for (index, metric) in chunk.iter().enumerate() {
+                metric_tile(&mut columns[index], theme, metric);
+            }
+        });
+        ui.add_space(8.0);
+    }
+}
+
+fn metric_tile(ui: &mut Ui, theme: &Theme, metric: &Metric) {
+    egui::Frame::new()
+        .fill(theme.surface)
+        .stroke(Stroke::new(1.0, theme.border))
+        .corner_radius(RADIUS_MD)
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(56.0);
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(&metric.value)
+                        .size(23.0)
+                        .strong()
+                        .color(theme.role(metric.role)),
+                );
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(&metric.label)
+                        .size(12.0)
+                        .color(theme.text_muted),
+                );
+            });
+        });
+}
+
+/// A label/value row used in detail panels.
+pub fn kv_row(ui: &mut Ui, theme: &Theme, key: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(key).size(13.0).color(theme.text_muted));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(egui::RichText::new(value).size(13.0).color(theme.text));
+        });
+    });
+}
+
+/// A monospace path display row.
+pub fn mono_path(ui: &mut Ui, theme: &Theme, label: &str, value: &str) {
+    field_label(ui, theme, label);
+    egui::Frame::new()
+        .fill(theme.field_bg)
+        .stroke(Stroke::new(1.0, theme.border))
+        .corner_radius(RADIUS_SM)
+        .inner_margin(Margin::symmetric(10, 7))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(value)
+                    .monospace()
+                    .size(12.0)
+                    .color(theme.text),
+            );
+        });
+}
+
+/// A colored notice banner (info / warning / error).
+pub fn notice(ui: &mut Ui, theme: &Theme, role: Role, message: &str) {
+    let color = theme.role(role);
+    let dark = theme.mode == theme::ThemeMode::Dark;
+    egui::Frame::new()
+        .inner_margin(Margin::same(11))
+        .fill(theme::alpha(color, if dark { 26 } else { 22 }))
+        .stroke(Stroke::new(1.0, theme::alpha(color, 120)))
+        .corner_radius(RADIUS_MD)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 18.0), Sense::hover());
+                ui.painter().circle_filled(
+                    egui::pos2(rect.center().x, rect.center().y),
+                    4.0,
+                    color,
+                );
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(message).color(theme.text));
+            });
+        });
+}
+
+/// A centered placeholder shown when a workflow has no data yet.
+pub fn empty_state(ui: &mut Ui, theme: &Theme, icon: Icon, title: &str, body: &str) {
+    ui.add_space(8.0);
+    ui.vertical_centered(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(46.0, 46.0), Sense::hover());
+        let painter = ui.painter();
+        painter.circle_filled(rect.center(), 23.0, theme::alpha(theme.accent, 26));
+        let icon_rect = Rect::from_center_size(rect.center(), egui::vec2(22.0, 22.0));
+        paint_icon(painter, icon, icon_rect, theme.accent);
+        ui.add_space(10.0);
+        ui.label(
+            egui::RichText::new(title)
+                .size(15.0)
+                .strong()
+                .color(theme.text),
+        );
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new(body).size(13.0).color(theme.text_muted));
+    });
+    ui.add_space(8.0);
+}
+
+/// A labeled path input with a Browse button.
+pub fn path_field(
+    ui: &mut Ui,
+    theme: &Theme,
+    label: &str,
+    value: &mut String,
+    hint: &str,
+    pick: impl FnOnce() -> Option<PathBuf>,
+) {
+    field_label(ui, theme, label);
+    ui.horizontal(|ui| {
+        let width = (ui.available_width() - 104.0).max(120.0);
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .hint_text(hint)
+                .desired_width(width),
+        );
+        if button(ui, theme, ButtonKind::Secondary, "Browse", true)
+            .on_hover_text(format!("Choose {label}"))
+            .clicked()
+            && let Some(path) = pick()
+        {
+            *value = path.display().to_string();
+        }
+    });
+}
+
+/// A full-width clickable navigation entry with a vector icon.
+pub fn nav_item(ui: &mut Ui, theme: &Theme, icon: Icon, label: &str, active: bool) -> bool {
+    let height = 40.0;
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    let dark = theme.mode == theme::ThemeMode::Dark;
+
+    let painter = ui.painter();
+    let bg = if active {
+        theme.accent_soft
+    } else if response.hovered() {
+        theme::alpha(theme.text, if dark { 16 } else { 12 })
+    } else {
+        Color32::TRANSPARENT
+    };
+    if bg.a() > 0 {
+        painter.rect_filled(rect, RADIUS_SM, bg);
+    }
+    if active {
+        let bar = Rect::from_min_size(
+            egui::pos2(rect.left() + 3.0, rect.top() + 9.0),
+            egui::vec2(3.0, height - 18.0),
+        );
+        painter.rect_filled(bar, 2, theme.accent);
+    }
+
+    let icon_color = if active {
+        theme.accent
+    } else {
+        theme.text_muted
+    };
+    let icon_rect = Rect::from_center_size(
+        egui::pos2(rect.left() + 28.0, rect.center().y),
+        egui::vec2(18.0, 18.0),
+    );
+    paint_icon(painter, icon, icon_rect, icon_color);
+
+    let text_color = if active { theme.text } else { theme.text_muted };
+    painter.text(
+        egui::pos2(rect.left() + 48.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(14.0),
+        text_color,
+    );
+
+    response.clicked()
+}
+
+/// Paint the app brand mark inside `rect`.
+pub fn paint_logo(painter: &egui::Painter, rect: Rect, theme: &Theme) {
+    painter.rect_filled(rect, RADIUS_SM, theme.accent);
+    let inset = rect.shrink(rect.width() * 0.28);
+    let stroke = Stroke::new(2.0, theme.on_accent);
+    // A right-pointing migration chevron pair.
+    let mid_y = inset.center().y;
+    painter.add(Shape::line(
+        vec![
+            egui::pos2(inset.left(), inset.top()),
+            egui::pos2(inset.center().x, mid_y),
+            egui::pos2(inset.left(), inset.bottom()),
+        ],
+        stroke,
+    ));
+    painter.add(Shape::line(
+        vec![
+            egui::pos2(inset.center().x, inset.top()),
+            egui::pos2(inset.right(), mid_y),
+            egui::pos2(inset.center().x, inset.bottom()),
+        ],
+        stroke,
+    ));
+}
+
+/// Draw one of the navigation glyphs inside `rect` using vector primitives.
+pub fn paint_icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32) {
+    let stroke = Stroke::new(1.7, color);
+    match icon {
+        Icon::Dashboard => {
+            let gap = 2.4;
+            let cell = (rect.width() - gap) / 2.0;
+            for (i, j) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                let min = egui::pos2(
+                    rect.left() + i * (cell + gap),
+                    rect.top() + j * (cell + gap),
+                );
+                painter.rect_filled(Rect::from_min_size(min, egui::vec2(cell, cell)), 2, color);
+            }
+        }
+        Icon::Apps => {
+            painter.rect_stroke(rect, 3, stroke, StrokeKind::Inside);
+            let top = rect.top() + rect.height() * 0.34;
+            painter.line_segment(
+                [egui::pos2(rect.left(), top), egui::pos2(rect.right(), top)],
+                stroke,
+            );
+            for k in 1..=2 {
+                let y = top + k as f32 * (rect.height() * 0.22);
+                painter.line_segment(
+                    [
+                        egui::pos2(rect.left() + 3.0, y),
+                        egui::pos2(rect.right() - 3.0, y),
+                    ],
+                    Stroke::new(1.4, color),
+                );
+            }
+        }
+        Icon::Analyze => {
+            let center = egui::pos2(
+                rect.left() + rect.width() * 0.4,
+                rect.top() + rect.height() * 0.4,
+            );
+            let radius = rect.width() * 0.3;
+            painter.circle_stroke(center, radius, stroke);
+            let start = egui::pos2(center.x + radius * 0.7, center.y + radius * 0.7);
+            painter.line_segment(
+                [start, egui::pos2(rect.right(), rect.bottom())],
+                Stroke::new(2.0, color),
+            );
+        }
+        Icon::Package => {
+            painter.rect_stroke(rect, 2, stroke, StrokeKind::Inside);
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left(), rect.center().y),
+                    egui::pos2(rect.right(), rect.center().y),
+                ],
+                Stroke::new(1.4, color),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(rect.center().x, rect.top()),
+                    egui::pos2(rect.center().x, rect.center().y),
+                ],
+                Stroke::new(1.4, color),
+            );
+        }
+        Icon::Restore => {
+            let center = rect.center();
+            let radius = rect.width() * 0.38;
+            let mut points = Vec::new();
+            let start = 0.55_f32;
+            let end = 2.4_f32 * std::f32::consts::PI;
+            let steps = 36;
+            for step in 0..=steps {
+                let t = start + (end - start) * step as f32 / steps as f32;
+                points.push(egui::pos2(
+                    center.x + radius * t.cos(),
+                    center.y + radius * t.sin(),
+                ));
+            }
+            painter.add(Shape::line(points, stroke));
+            // Arrowhead at the arc start.
+            let tip = egui::pos2(
+                center.x + radius * start.cos(),
+                center.y + radius * start.sin(),
+            );
+            painter.add(Shape::line(
+                vec![
+                    egui::pos2(tip.x - 4.5, tip.y - 1.0),
+                    tip,
+                    egui::pos2(tip.x + 1.0, tip.y - 5.0),
+                ],
+                stroke,
+            ));
+        }
+    }
+}
+
+/// Strengthen a soft status color so badge text stays legible on its tint.
+fn strengthen(theme: &Theme, color: Color32) -> Color32 {
+    if theme.mode == theme::ThemeMode::Dark {
+        // Lighten toward white for contrast on dark tints.
+        let mix = |c: u8| -> u8 { (c as u16 + (255 - c as u16) * 35 / 100) as u8 };
+        Color32::from_rgb(mix(color.r()), mix(color.g()), mix(color.b()))
+    } else {
+        color
+    }
+}

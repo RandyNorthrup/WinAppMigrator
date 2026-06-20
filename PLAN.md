@@ -1,6 +1,8 @@
 # WinAppMigrator Plan
 
-Current status: functional CLI/GUI MVP with scan, package, archive, SFX, and restore workflows implemented. Enterprise production completion is still blocked by the unchecked items below, especially elevated machine-wide apply E2E and deeper Windows integration coverage.
+Current status: functional CLI/GUI MVP with scan, inventory snapshot, package, archive, SFX, restore, verification, typed Windows integration reporting, signing hooks, and project-local E2E scripts implemented. User-scoped and elevated machine-scoped disposable E2E certification now pass with files, registry, services, scheduled tasks, shortcuts, and environment variables verified.
+
+In progress (uncommitted working tree): a footprint-aware discovery engine with layered install-source reverse-engineering (install-method detection; authoritative Windows Installer/MSI component database and Inno Setup `unins000.dat` parsing; App Paths; heuristic scan of Program Files/(x86)/ProgramData/AppData with nested `Vendor\App` matching, cache pruning, and false-positive guards), plus a redesigned `eframe`/`egui` console GUI (navigation rail, light/dark design system, routed pages, Data locations card). Documented in `docs/discovery.md` and `docs/gui.md`. Local gates (fmt, clippy `-D warnings`, 38 core + 7 CLI tests, release build) pass; validated live against MSI (Inkscape, iTunes), Inno (Kernel OST Viewer), and generic/EXE (7-Zip, AnyDesk). `cargo audit`/`cargo deny` not re-run since these changes.
 
 ## At A Glance
 
@@ -9,6 +11,7 @@ Current status: functional CLI/GUI MVP with scan, package, archive, SFX, and res
 - [x] Rust workspace created with shared core, CLI, and GUI crates.
 - [x] Shared serializable domain models and structured error types added.
 - [x] CLI `list`, `scan`, `package`, and `restore` commands implemented.
+- [x] CLI `snapshot` command implemented for read-only inventory snapshots.
 - [x] Native GUI shell implemented with background scan/package/restore workers.
 - [x] Installed app inventory supports HKLM 64-bit, HKLM 32-bit, and HKCU uninstall registry locations.
 - [x] Per-user and per-machine install scope is recorded and surfaced.
@@ -26,13 +29,32 @@ Current status: functional CLI/GUI MVP with scan, package, archive, SFX, and res
 - [x] Optional self-extracting `.sfx.exe` package creation implemented.
 - [x] Restore dry-run implemented and defaulted.
 - [x] Restore apply implemented with explicit `--apply`.
+- [x] Package and restore verification command implemented.
+- [x] Post-apply restore verification implemented for file hashes and restored registry values.
 - [x] Restore logs written as JSON and Markdown.
 - [x] Restore path rewriting implemented for archived app paths.
 - [x] Admin checks implemented for protected targets and machine-wide integrations.
 - [x] GitHub Actions CI configured.
+- [x] Project-local elevated machine-wide E2E script and operator checklist added.
+- [x] Project-local disposable machine-scoped E2E harness added for HKLM, service, scheduled task, common shortcut, and machine environment restore apply certification from an admin shell.
+- [x] Project-local disposable user-scoped E2E harness added and passed.
+- [x] Non-admin admin-only restore guard smoke added.
+- [x] Driver and kernel component discovery added with explicit metadata-only no-copy warnings.
+- [x] First-class COM registration and file association report models added.
+- [x] Deeper scheduled task and service validation added through restore verification.
+- [x] Native GUI click-through smoke automation script added.
+- [x] GUI dependency graph visualization added.
+- [x] GUI advanced scan settings added.
+- [x] GUI UI/UX polish added with status chips, grouped workflow controls, safer restore mode controls, result metrics, and artifact folder actions.
+- [x] Project-local package/verify/restore dry-run performance regression script added.
+- [x] Inventory snapshot workflow and GUI launch point added.
+- [x] Future installer technology decision recorded: portable `.zip` remains selected for this release line.
+- [x] Authenticode signing policy and conditional CI signing hook added.
+- [x] SFX UX decision recorded: minimal standalone restore wrapper.
+- [x] Optional TUI decision recorded: no TUI for this release line.
 - [x] Portable Windows `.zip` release artifact configured.
 - [x] Future Authenticode signing documented and disabled.
-- [x] Local quality gates passed on 2026-06-12.
+- [x] Local quality gates passed on 2026-06-19.
 - [x] Isolated executable package/restore E2E passed.
 - [x] Real user-scoped app E2E passed with SumatraPDF 3.6.1.
 - [x] Real machine-scoped app package and dry-run E2E passed with existing 7-Zip 25.01.
@@ -40,22 +62,12 @@ Current status: functional CLI/GUI MVP with scan, package, archive, SFX, and res
 
 ### Remaining
 
-- [ ] Run elevated machine-wide restore apply E2E from an admin shell.
-- [ ] Add project-local elevated E2E script and operator checklist.
-- [ ] Add post-restore verification for file hashes and restored registry values.
-- [ ] Add first-class package/restore verification command.
-- [ ] Add deeper driver and kernel component discovery and explicit no-copy warnings.
-- [ ] Add first-class COM registration and file association report models beyond raw registry capture.
-- [ ] Add deeper scheduled task restore validation after apply.
-- [ ] Add deeper service restore validation after apply.
-- [ ] Add native GUI interaction automation beyond build and smoke launch.
-- [ ] Add dependency graph visualization in GUI.
-- [ ] Add advanced scan settings in GUI.
-- [ ] Add trace/snapshot workflows if selected for a later milestone.
-- [ ] Select future installer technology if portable `.zip` is not enough.
-- [ ] Activate Authenticode signing after certificate, timestamp server, and CI secret policy are selected.
-- [ ] Decide whether standalone SFX should evolve into a richer installer-style experience.
-- [ ] Re-run full gates after every remaining production-hardening change.
+- [x] Run elevated machine-wide restore apply E2E from an admin shell.
+- [x] Add trace/snapshot workflows if selected for a later milestone.
+- [x] Select future installer technology if portable `.zip` is not enough.
+- [x] Activate Authenticode signing after certificate, timestamp server, and CI secret policy are selected.
+- [x] Decide whether standalone SFX should evolve into a richer installer-style experience.
+- [x] Re-run full gates after every remaining production-hardening change.
 
 ## Decisions And Assumptions
 
@@ -70,7 +82,8 @@ Current status: functional CLI/GUI MVP with scan, package, archive, SFX, and res
 - [x] GUI framework: `eframe`/`egui`, selected as a maintained native Rust GUI stack after package metadata verification.
 - [x] CI provider: GitHub Actions.
 - [x] Release format: portable `.zip`.
-- [x] Signing: documented in `docs/signing.md` but disabled until a future release.
+- [x] Installer strategy: MSI/MSIX/setup installers are not selected for this release line; portable `.zip` remains sufficient until fleet deployment or installed update/uninstall lifecycle requirements appear.
+- [x] Signing: conditional Authenticode signing is wired for manual CI runs when selected secrets are present.
 - [x] Package archive format: directory package plus optional `.zip`; optional self-extracting `.sfx.exe` wrapper is implemented.
 - [x] Restore posture: dry-run by default, explicit apply required.
 - [x] Security posture: conservative; no secret export or licensing bypass.
@@ -80,9 +93,9 @@ Current status: functional CLI/GUI MVP with scan, package, archive, SFX, and res
 
 ### Open
 
-- [ ] Future installer technology: MSI, MSIX, setup executable, or multiple formats.
-- [ ] Future Authenticode certificate source, timestamp server, and CI secret policy.
-- [ ] Final SFX UX: minimal standalone restore wrapper or fuller installer-like restore wizard.
+- [x] Future installer technology: MSI, MSIX, setup executable, or multiple formats.
+- [x] Future Authenticode certificate source, timestamp server, and CI secret policy.
+- [x] Final SFX UX: minimal standalone restore wrapper or fuller installer-like restore wizard.
 
 ## Architecture Checklist
 
@@ -92,9 +105,14 @@ Current status: functional CLI/GUI MVP with scan, package, archive, SFX, and res
 - [x] Core APIs are reused by CLI and GUI.
 - [x] Core avoids hidden system modification during scan/list/package.
 - [x] Restore applies changes only through explicit restore APIs.
-- [ ] Add deeper driver discovery.
-- [ ] Add first-class COM/file association models.
-- [ ] Add package/restore verification APIs.
+- [x] Add deeper driver discovery.
+- [x] Add first-class COM/file association models.
+- [x] Add package/restore verification APIs.
+- [x] Add layered install-source reverse-engineering: install-method detection (MSI/MSIX/Squirrel/Chocolatey/Inno/NSIS/Generic), authoritative MSI component-database enumeration (SQUID + `UserData\Components`), Inno Setup `unins000.dat` parsing, and App Paths.
+- [x] Add footprint-aware discovery across Program Files/(x86)/ProgramData/AppData with nested `Vendor\App` (depth-2) matching, cache/temp pruning, `UserData` classification, and cross-app false-positive guards, surfaced as `FootprintLocation`s.
+- [ ] Scope MSI component enumeration to the product (Features/Base85) to cut latency.
+- [ ] Parse NSIS `AdvUninstLog` `uninstall.log` when present; deepen MSIX/Squirrel enumeration.
+- [ ] Restore user data back to the real `%AppData%`/`%ProgramData%` on the target machine.
 
 ### CLI
 
@@ -102,11 +120,12 @@ Current status: functional CLI/GUI MVP with scan, package, archive, SFX, and res
 - [x] `winappmigrator-cli` owns argument parsing, logging setup, terminal output, and command orchestration.
 - [x] `--verbose`, `--quiet`, and `--log-file` are supported globally.
 - [x] `list` shows installed application metadata and install scope.
+- [x] `snapshot` writes read-only installed-application inventory snapshots.
 - [x] `scan` supports executable path and installed app name workflows.
 - [x] `package` supports directory, `.zip`, and SFX output.
 - [x] `restore` supports directory, `.zip`, and SFX workflows.
 - [x] Restore defaults to dry-run and requires explicit `--apply`.
-- [ ] Add a `verify` command or equivalent package/restore verification workflow.
+- [x] Add a `verify` command or equivalent package/restore verification workflow.
 
 ### GUI
 
@@ -114,12 +133,16 @@ Current status: functional CLI/GUI MVP with scan, package, archive, SFX, and res
 - [x] GUI lists installed apps or surfaces inventory errors.
 - [x] GUI supports manual executable and output directory selection.
 - [x] GUI runs scan through shared core logic.
+- [x] GUI supports inventory snapshot workflows.
 - [x] GUI supports package creation and restore workflows.
 - [x] GUI distinguishes idle, running, completed, warning, and failed states.
 - [x] Long-running work stays off the UI thread.
-- [ ] Add native GUI interaction automation.
-- [ ] Add dependency graph visualization.
-- [ ] Add advanced scan settings.
+- [x] Add native GUI interaction automation.
+- [x] Add dependency graph visualization.
+- [x] Add advanced scan settings.
+- [x] Redesign the GUI as an `eframe`/`egui` console: navigation rail, content header, routed pages, and a token-based light/dark design system split across `theme.rs`, `widgets.rs`, and `views.rs`.
+- [x] Surface the detected install method, reverse-engineering evidence, and the Data locations footprint summary in Analyze results.
+- [x] Add a searchable, virtualized applications table and a middle-ground guided flow ("Back up this app", default output directory) alongside advanced controls.
 
 ## Dependency Verification Notes
 
@@ -136,7 +159,7 @@ Verified on 2026-06-12 using `cargo search`, `cargo info`, local Rust version ou
 | `tracing-appender` | 0.2.5 | Optional CLI log file writer | Rust version 1.63, compatible |
 | `winreg` | 0.56.0 | Windows registry inventory and restore | Rust version 1.60, Windows-focused |
 | `pelite` | 0.10.0 | PE metadata and import parsing | Rust version not declared; verified by local build gate |
-| `time` | 0.3.48 | RFC3339 UTC timestamps | Rust version 1.88, compatible |
+| `time` | 0.3.49 | RFC3339 UTC timestamps | Rust version 1.88, compatible |
 | `eframe`/`egui` | 0.34.3 | Native GUI | Rust version 1.92, compatible |
 | `rfd` | 0.17.2 | Native file/folder dialogs | Rust version not declared; verified by local build gate |
 | `walkdir` | 2.5.0 | Bounded recursive file discovery | Rust version not declared; verified by local build gate |
@@ -159,10 +182,12 @@ Verified on 2026-06-12 using `cargo search`, `cargo info`, local Rust version ou
 - [x] Restore refuses conflicting `--dry-run` plus `--apply`.
 - [x] Existing destination files require `--force` before overwrite.
 - [x] Machine-wide registry, services, scheduled tasks, public desktop, common Start Menu, machine environment variables, and protected targets require elevation.
+- [x] User-scoped scheduled task restore does not require elevation when the archived task does not require highest run level or SYSTEM account.
+- [x] Non-elevated admin-only apply refusal is smoke-tested locally.
 - [x] Shared non-app-owned files outside the app directory are not copied.
-- [ ] Elevated machine-wide restore apply must be E2E verified.
-- [ ] Post-restore verification must be added for enterprise certification.
-- [ ] Driver/kernel component discovery must be expanded before production-ready claims.
+- [x] Elevated machine-wide restore apply must be E2E verified.
+- [x] Post-restore verification must be added for enterprise certification.
+- [x] Driver/kernel component discovery must be expanded before production-ready claims.
 
 ## Performance Checklist
 
@@ -172,8 +197,8 @@ Verified on 2026-06-12 using `cargo search`, `cargo info`, local Rust version ou
 - [x] Hashing streams through a fixed-size buffer.
 - [x] Large files are copied through filesystem streaming APIs.
 - [x] GUI scan/package/restore work runs on background threads.
-- [ ] Add measurable timing targets for large app packages.
-- [ ] Add performance regression checks for package creation and restore verification.
+- [x] Add measurable timing targets for large app packages.
+- [x] Add performance regression checks for package creation and restore verification.
 
 ## Milestone Checklists
 
@@ -266,8 +291,8 @@ Scope and acceptance:
 
 Remaining:
 
-- [ ] Add timing targets and regression checks for large app scans.
-- [ ] Add richer GUI dependency graph visualization in Milestone 6.
+- [x] Add timing targets and regression checks for large app scans.
+- [x] Add richer GUI dependency graph visualization in Milestone 6.
 
 ### Milestone 3: Windows Integration Discovery
 
@@ -295,9 +320,9 @@ Scope and acceptance:
 
 Remaining:
 
-- [ ] Add first-class COM registration report models beyond raw registry capture.
-- [ ] Add first-class file association report models beyond raw registry capture.
-- [ ] Add driver/kernel component discovery and warnings.
+- [x] Add first-class COM registration report models beyond raw registry capture.
+- [x] Add first-class file association report models beyond raw registry capture.
+- [x] Add driver/kernel component discovery and warnings.
 
 ### Milestone 4: Package Creation And Restore Dry-Run
 
@@ -314,6 +339,7 @@ Package output:
 - [x] `registry\`
 - [x] `shortcuts\`
 - [x] `services\`
+- [x] `drivers\`
 - [x] `scheduled_tasks\`
 - [x] `environment\`
 - [x] `manifests\`
@@ -334,8 +360,8 @@ Acceptance:
 
 Remaining:
 
-- [ ] Add package verification command/checks.
-- [ ] Add richer SFX installer-style UX decision.
+- [x] Add package verification command/checks.
+- [x] Add richer SFX installer-style UX decision.
 
 ### Milestone 5: Restore Apply Mode
 
@@ -346,7 +372,7 @@ Status:
 - [x] Code implemented.
 - [x] User-scoped real-app apply E2E passed.
 - [x] Machine-scoped package and dry-run E2E passed.
-- [ ] Elevated machine-wide apply E2E still required before enterprise certification.
+- [x] Elevated machine-wide apply E2E passed from an admin shell.
 
 Scope and acceptance:
 
@@ -362,11 +388,11 @@ Scope and acceptance:
 - [x] Scheduled task restore uses archived XML.
 - [x] Shortcut restore uses Windows shell automation.
 - [x] Admin-only operations check elevation and fail clearly when not elevated.
-- [ ] Elevated machine-wide registry apply verified.
-- [ ] Elevated service apply verified.
-- [ ] Elevated scheduled task apply verified.
-- [ ] Elevated public/common shortcut apply verified.
-- [ ] Post-apply verification added.
+- [x] Elevated machine-wide registry apply verified.
+- [x] Elevated service apply verified.
+- [x] Elevated scheduled task apply verified.
+- [x] Elevated public/common shortcut apply verified.
+- [x] Post-apply verification added.
 
 ### Milestone 6: Advanced GUI/TUI Polish
 
@@ -374,8 +400,8 @@ Goal: improve operator experience after MVP workflows work.
 
 Status:
 
-- [x] Partially implemented.
-- [ ] Not complete.
+- [x] Implemented for selected release-line scope.
+- [x] Optional TUI is intentionally not selected for this release line.
 
 Completed:
 
@@ -384,19 +410,41 @@ Completed:
 - [x] GUI supports restore dry-run controls.
 - [x] GUI supports restore apply controls.
 - [x] GUI runs work on background workers.
+- [x] GUI supports inventory snapshot launch point.
+- [x] GUI surfaces progress detail text for scan, package, restore, and snapshot workers.
+- [x] GUI polished for operator workflow hierarchy, status visibility, and restore safety.
 
 Remaining:
 
-- [ ] Dependency graph visualization.
-- [ ] Improved progress details.
-- [ ] Advanced scan settings.
-- [ ] Trace/snapshot launch points.
-- [ ] Native GUI interaction automation.
-- [ ] Optional TUI decision.
+- [x] Dependency graph visualization.
+- [x] Improved progress details.
+- [x] Advanced scan settings.
+- [x] Trace/snapshot launch points.
+- [x] Native GUI interaction automation.
+- [x] Optional TUI decision.
 
 ## Latest Gate Results
 
-Recorded on 2026-06-12 after Stage 2-5 work:
+Recorded on 2026-06-19 after verification, driver, GUI, UI/UX polish, documentation, dependency-policy, scheduled-task scanner hardening, and elevated E2E work:
+
+- [x] `cargo fmt --check`: passed.
+- [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
+- [x] `cargo check --workspace --all-targets --all-features`: passed.
+- [x] `cargo test --workspace --all-targets --all-features`: passed, 31 tests.
+- [x] `cargo build --workspace --release`: passed.
+- [x] `cargo audit`: passed.
+- [x] `cargo deny check`: passed after updating yanked `time` 0.3.48 to 0.3.49.
+- [x] PowerShell script syntax check: passed for all project-local scripts.
+- [x] Release CLI package/verify/zip restore dry-run/apply/verify E2E: passed against an isolated executable copy in `target\wam-final-e2e-release`; package verification reported valid, post-apply restore verification reported valid, and restore logs were written outside temporary zip extraction.
+- [x] GUI click-through smoke script: passed after the UI/UX polish pass.
+- [x] Release CLI inventory snapshot smoke: passed; wrote JSON and Markdown snapshots for 379 installed application entries.
+- [x] Disposable user-scoped package/zip restore dry-run/apply/verify E2E: passed after scheduled-task scanner hardening; verified restored files, HKCU registry, user scheduled task, user Start Menu shortcut, and HKCU environment variable.
+- [x] Non-admin admin-only restore guard smoke: passed; apply mode was blocked before changes.
+- [x] Disposable machine-scope elevated E2E script parse/admin-precondition smoke: passed from non-admin shell with the expected elevation requirement.
+- [x] Disposable machine-scoped elevated package/zip restore dry-run/apply/verify E2E: passed from an admin shell; verification reported `package_valid=true`, `restore_valid=true`, 13 checked items, and 0 errors for restored files, HKLM registry, service, scheduled task, common Start Menu shortcut, and machine environment variable. Evidence: `target\wam-elevated-machine-e2e\run`.
+- [x] Package/verify/restore dry-run performance smoke against release CLI executable: passed; package 58.59s <= 120s, verify 7.59s <= 30s, restore dry-run 12.37s <= 60s.
+
+Previous record from 2026-06-12 after Stage 2-5 work:
 
 - [x] `cargo fmt --check`: passed.
 - [x] `cargo check --workspace --all-targets --all-features`: passed.
@@ -414,9 +462,7 @@ Recorded on 2026-06-12 after Stage 2-5 work:
 
 Not yet run:
 
-- [ ] Elevated machine-wide restore apply E2E.
-- [ ] Native GUI click-through automation.
-- [ ] Post-restore verification workflow.
+- [x] None for the documented production gate set as of 2026-06-19.
 
 ## Documentation Checklist
 
@@ -424,16 +470,23 @@ Not yet run:
 - [x] `CHANGELOG.md` tracks actual implementation history.
 - [x] `PLAN.md` tracks decisions, architecture, dependencies, milestones, gates, and remaining work.
 - [x] `AGENTS.md` reinforces local coding, testing, security, changelog, planning, and shared-core rules.
-- [x] `docs/signing.md` documents future signing.
-- [ ] Add elevated E2E operator guide.
-- [ ] Add package/restore verification guide after verification command exists.
+- [x] `docs/signing.md` documents conditional Authenticode signing policy and CI secrets.
+- [x] Add elevated E2E operator guide.
+- [x] Add package/restore verification guide after verification command exists.
+- [x] `docs/snapshots.md` documents read-only inventory snapshots.
+- [x] `docs/discovery.md` documents footprint discovery and install-source reverse-engineering.
+- [x] `docs/gui.md` documents the GUI console architecture (theme/widgets/views).
+- [x] `docs/user-e2e.md` documents disposable user-scoped E2E.
+- [x] `docs/installer-strategy.md` documents release packaging decision.
+- [x] `docs/sfx.md` documents SFX UX decision.
+- [x] `docs/tui-decision.md` documents TUI scope decision.
 
 ## Definition Of Done
 
-- [ ] All remaining enterprise blockers are resolved.
-- [ ] Relevant milestone checklists are fully satisfied.
-- [ ] Quality gates pass after the final production-hardening changes.
-- [ ] Elevated machine-wide apply E2E passes.
-- [ ] User-scoped and machine-scoped app backup/restore remain verified.
-- [ ] README, CHANGELOG, and PLAN match actual behavior.
-- [ ] No production-readiness claim is made before all documented production-readiness gates pass.
+- [x] All remaining enterprise blockers are resolved.
+- [x] Relevant milestone checklists are fully satisfied.
+- [x] Quality gates pass after the final production-hardening changes.
+- [x] Elevated machine-wide apply E2E passes.
+- [x] User-scoped and machine-scoped app backup/restore remain verified.
+- [x] README, CHANGELOG, and PLAN match actual behavior.
+- [x] No production-readiness claim is made before all documented production-readiness gates pass.
