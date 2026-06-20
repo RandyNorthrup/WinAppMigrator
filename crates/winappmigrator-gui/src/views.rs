@@ -1180,6 +1180,11 @@ impl WinAppMigratorApp {
             ui.add_enabled_ui(self.restore_apply, |ui| {
                 ui.checkbox(&mut self.restore_force, "Overwrite existing files");
             });
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut self.restore_user_data,
+                "Restore user data to real AppData/ProgramData",
+            );
 
             if self.restore_apply {
                 ui.add_space(8.0);

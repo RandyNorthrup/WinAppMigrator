@@ -89,6 +89,7 @@ pub struct WinAppMigratorApp {
     package_sfx: bool,
     restore_apply: bool,
     restore_force: bool,
+    restore_user_data: bool,
     scan_state: ScanState,
     package_state: OperationState,
     restore_state: OperationState,
@@ -130,6 +131,7 @@ impl WinAppMigratorApp {
             package_sfx: false,
             restore_apply: false,
             restore_force: false,
+            restore_user_data: false,
             scan_state: ScanState::Idle,
             package_state: OperationState::Idle,
             restore_state: OperationState::Idle,
@@ -250,6 +252,7 @@ impl WinAppMigratorApp {
         self.restore_state = OperationState::Running;
         let apply = self.restore_apply;
         let force = self.restore_force;
+        let restore_user_data = self.restore_user_data;
         self.restore_detail = if apply {
             "Applying restore plan and running post-restore verification…".to_owned()
         } else {
@@ -265,6 +268,7 @@ impl WinAppMigratorApp {
                 dry_run: !apply,
                 apply,
                 force,
+                restore_user_data,
             };
             let message = match restore_package(&options) {
                 Ok(result) => RestoreMessage::Completed(Box::new(result)),

@@ -114,6 +114,17 @@ Apply packaged file restore:
 cargo run -p winappmigrator-cli -- restore --package ".\AppMigrationPackage" --target-root ".\RestoredApp" --apply
 ```
 
+By default, packaged per-user/ProgramData application data is staged under the
+target root (`<target-root>\_external\...`). To instead restore it to the target
+machine's real `%AppData%`/`%LocalAppData%`/LocalLow/`%ProgramData%` locations,
+add `--restore-user-data` (restoring into `%ProgramData%` requires an elevated
+shell). Pass the same flag to `verify`:
+
+```powershell
+cargo run -p winappmigrator-cli -- restore --package ".\AppMigrationPackage" --target-root ".\RestoredApp" --apply --restore-user-data
+cargo run -p winappmigrator-cli -- verify --package ".\AppMigrationPackage" --target-root ".\RestoredApp" --restore-user-data
+```
+
 Verify a package and an applied restore:
 
 ```powershell
@@ -225,6 +236,7 @@ tests/
 - Scan/list operations do not intentionally modify the system. Footprint discovery and install-source reverse-engineering are read-only: they read the registry (uninstall keys, MSI Installer component database, App Paths), parse the Inno Setup uninstall log, and walk install/data directories without writing.
 - Per-user and ProgramData application data is included by default and can be excluded with `--skip-user-data` (CLI) or the "Include user data" toggle (GUI). Cache/temp/log directories are pruned and never copied.
 - Restore defaults to dry-run. File writes require explicit `--apply` or the GUI apply checkbox.
+- Restore stages user/ProgramData data under the target root by default; restoring it to the real `%AppData%`/`%ProgramData%` locations is opt-in (`--restore-user-data`), bounded to each known base, and blocks `%ProgramData%` apply when not elevated.
 - Restore blocks apply into protected Windows locations when not elevated.
 - Per-machine registry, services, scheduled tasks, public desktop, common Start Menu, and protected target locations require elevation for apply.
 - DLL resolution reports system files but package creation copies only app-owned files.

@@ -142,6 +142,12 @@ pub struct RestoreCommand {
 
     #[arg(long)]
     pub force: bool,
+
+    /// Restore packaged user/ProgramData data to the target machine's real
+    /// %AppData%/%ProgramData% locations instead of staging it under the target
+    /// root. ProgramData restore requires an elevated shell.
+    #[arg(long = "restore-user-data")]
+    pub restore_user_data: bool,
 }
 
 #[derive(Debug, Args)]
@@ -154,6 +160,11 @@ pub struct VerifyCommand {
 
     #[arg(long = "out", value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
+
+    /// Verify against the real %AppData%/%ProgramData% locations; must match the
+    /// value used at restore time.
+    #[arg(long = "restore-user-data")]
+    pub restore_user_data: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -171,6 +182,11 @@ pub struct SfxCli {
 
     #[arg(long)]
     pub force: bool,
+
+    /// Restore packaged user/ProgramData data to the real %AppData%/%ProgramData%
+    /// locations instead of staging it under the target root.
+    #[arg(long = "restore-user-data")]
+    pub restore_user_data: bool,
 }
 
 pub fn run<I, T>(args: I) -> Result<u8>
@@ -347,6 +363,7 @@ fn run_restore(command: RestoreCommand) -> Result<()> {
         dry_run: command.dry_run || !command.apply,
         apply: command.apply,
         force: command.force,
+        restore_user_data: command.restore_user_data,
     };
     let result = restore_package(&options)?;
 
@@ -369,6 +386,7 @@ fn run_verify(command: VerifyCommand) -> Result<()> {
         package_root: command.package_root,
         target_root: command.target_root,
         output_dir: command.output_dir,
+        restore_user_data: command.restore_user_data,
     })?;
 
     println!("Verification complete.");
@@ -589,6 +607,7 @@ fn run_sfx(raw_args: Vec<OsString>) -> Result<u8> {
         dry_run: sfx.dry_run || !sfx.apply,
         apply: sfx.apply,
         force: sfx.force,
+        restore_user_data: sfx.restore_user_data,
     })?;
     println!("SFX restore complete.");
     println!("Applied: {}", result.applied);
@@ -677,6 +696,34 @@ mod tests {
             Commands::Restore(restore) => {
                 assert_eq!(restore.package_root, PathBuf::from(r"C:\Pkg"));
                 assert!(!restore.apply);
+            }
+            _ => {
+                return Err(WinAppMigratorError::InvalidInput(
+                    "expected restore command".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parses_restore_user_data_flag() -> Result<()> {
+        let cli = Cli::try_parse_from([
+            "winappmigrator",
+            "restore",
+            "--package",
+            r"C:\Pkg",
+            "--target-root",
+            r"C:\Restored",
+            "--apply",
+            "--restore-user-data",
+        ])
+        .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))?;
+
+        match cli.command {
+            Commands::Restore(restore) => {
+                assert!(restore.apply);
+                assert!(restore.restore_user_data);
             }
             _ => {
                 return Err(WinAppMigratorError::InvalidInput(

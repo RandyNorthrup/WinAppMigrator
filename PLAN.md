@@ -2,7 +2,7 @@
 
 Current status: functional CLI/GUI MVP with scan, inventory snapshot, package, archive, SFX, restore, verification, typed Windows integration reporting, signing hooks, and project-local E2E scripts implemented. User-scoped and elevated machine-scoped disposable E2E certification now pass with files, registry, services, scheduled tasks, shortcuts, and environment variables verified.
 
-In progress (uncommitted working tree): a footprint-aware discovery engine with layered install-source reverse-engineering (install-method detection; authoritative Windows Installer/MSI component database and Inno Setup `unins000.dat` parsing; App Paths; heuristic scan of Program Files/(x86)/ProgramData/AppData with nested `Vendor\App` matching, cache pruning, and false-positive guards), plus a redesigned `eframe`/`egui` console GUI (navigation rail, light/dark design system, routed pages, Data locations card). Documented in `docs/discovery.md` and `docs/gui.md`. Local gates (fmt, clippy `-D warnings`, 38 core + 7 CLI tests, release build) pass; validated live against MSI (Inkscape, iTunes), Inno (Kernel OST Viewer), and generic/EXE (7-Zip, AnyDesk). `cargo audit`/`cargo deny` not re-run since these changes.
+Footprint discovery engine, console GUI, and docs are committed (4da43ef). Most recent change (2026-06-20): opt-in real-location user-data restore (`--restore-user-data`) that re-anchors packaged `%AppData%`/`%ProgramData%` data to the target machine's equivalent base, with destination routing centralized in `file_discovery::restore_destination_for_entry`/`split_user_data_relative`, ProgramData apply gated behind elevation, and the flag threaded through CLI/SFX/GUI/verification. Full local gates pass on the current workstation (rustc 1.96.0): fmt, clippy `-D warnings`, 42 core + 8 CLI tests, release build, `cargo audit`, `cargo deny`.
 
 ## At A Glance
 
@@ -110,9 +110,11 @@ In progress (uncommitted working tree): a footprint-aware discovery engine with 
 - [x] Add package/restore verification APIs.
 - [x] Add layered install-source reverse-engineering: install-method detection (MSI/MSIX/Squirrel/Chocolatey/Inno/NSIS/Generic), authoritative MSI component-database enumeration (SQUID + `UserData\Components`), Inno Setup `unins000.dat` parsing, and App Paths.
 - [x] Add footprint-aware discovery across Program Files/(x86)/ProgramData/AppData with nested `Vendor\App` (depth-2) matching, cache/temp pruning, `UserData` classification, and cross-app false-positive guards, surfaced as `FootprintLocation`s.
-- [ ] Scope MSI component enumeration to the product (Features/Base85) to cut latency.
-- [ ] Parse NSIS `AdvUninstLog` `uninstall.log` when present; deepen MSIX/Squirrel enumeration.
-- [ ] Restore user data back to the real `%AppData%`/`%ProgramData%` on the target machine.
+- [x] Narrow the MSI component sweep to product-registering SIDs (`component_sweep_sids`, with full-SID fallback) — safe, identical results, faster on multi-user machines.
+- [~] Fully scope MSI component enumeration to one product (`Features`/Base85 or MSI API): **deferred by decision**. A mis-decoded feature descriptor would silently under-report the migration footprint, and the exhaustive sweep is the COM-validated source of truth. Revisit only via `MsiGetComponentPathW` cross-checked against the exhaustive sweep, which adds a Windows FFI dependency the project avoids. See `docs/discovery.md`.
+- [x] Parse NSIS `AdvUninstLog` `uninstall.log` when present (`find_nsis_log`/`nsis_manifest_files`).
+- [x] Deepen MSIX (`AppxManifest` identity → `%LOCALAPPDATA%\Packages\<id>_*`) and Squirrel (authoritative root + latest `app-*`) enumeration.
+- [x] Restore user data back to the real `%AppData%`/`%ProgramData%` on the target machine (opt-in `--restore-user-data`; routing centralized in `file_discovery::restore_destination_for_entry`; ProgramData apply requires elevation).
 
 ### CLI
 
@@ -424,6 +426,16 @@ Remaining:
 - [x] Optional TUI decision.
 
 ## Latest Gate Results
+
+Recorded on 2026-06-20 after adding opt-in real-location user-data restore (`--restore-user-data`), centralizing restore destination routing, NSIS AdvUninstLog `uninstall.log` parsing, and MSIX/Squirrel footprint deepening, on a freshly provisioned workstation (rustc 1.96.0 via rustup):
+
+- [x] `cargo fmt --check`: passed.
+- [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
+- [x] `cargo check --workspace --all-targets --all-features`: passed.
+- [x] `cargo test --workspace --all-targets --all-features`: passed, 46 core + 8 CLI tests (added user-data anchor split, entry-aware restore destination, sandbox-fallback, app-owned routing, `--restore-user-data` CLI parse, NSIS log name/path extraction, AppxManifest identity parse, and Squirrel version-selection coverage).
+- [x] `cargo build --workspace --release`: passed.
+- [x] `cargo audit`: passed.
+- [x] `cargo deny check`: passed.
 
 Recorded on 2026-06-19 after verification, driver, GUI, UI/UX polish, documentation, dependency-policy, scheduled-task scanner hardening, and elevated E2E work:
 

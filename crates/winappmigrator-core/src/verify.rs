@@ -14,7 +14,7 @@ use winreg::{RegKey, RegValue};
 
 use crate::archive::extract_zip_archive;
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{package_destination_path, safe_relative_path};
+use crate::file_discovery::{package_destination_path, restore_destination_for_entry};
 use crate::hashing::sha256_file;
 use crate::models::{
     EnvironmentScope, EnvironmentVariableEntry, FileEntry, PackageManifest, RegistryEntry,
@@ -44,6 +44,7 @@ pub fn verify_package(options: &VerificationOptions) -> Result<VerificationRepor
         verify_restored_target(
             target_root,
             &manifest,
+            options.restore_user_data,
             &mut items,
             &mut warnings,
             &mut errors,
@@ -197,12 +198,13 @@ fn verify_one_package_file(package_root: &Path, file: &FileEntry) -> Result<Veri
 fn verify_restored_target(
     target_root: &Path,
     manifest: &PackageManifest,
+    restore_user_data: bool,
     items: &mut Vec<VerificationItem>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) -> Result<()> {
-    let path_rewrites = path_rewrites(manifest, target_root)?;
-    verify_restored_files(target_root, manifest, items, errors)?;
+    let path_rewrites = path_rewrites(manifest, target_root, restore_user_data)?;
+    verify_restored_files(target_root, manifest, restore_user_data, items, errors)?;
     verify_registry_entries(
         &manifest.registry_keys_exported,
         &path_rewrites,
@@ -218,6 +220,7 @@ fn verify_restored_target(
     verify_services(
         target_root,
         manifest,
+        restore_user_data,
         &manifest.services_detected,
         items,
         warnings,
@@ -234,6 +237,7 @@ fn verify_restored_target(
     verify_shortcuts(
         target_root,
         manifest,
+        restore_user_data,
         &manifest.shortcuts_detected,
         items,
         errors,
@@ -244,6 +248,7 @@ fn verify_restored_target(
 fn verify_restored_files(
     target_root: &Path,
     manifest: &PackageManifest,
+    restore_user_data: bool,
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) -> Result<()> {
@@ -255,7 +260,7 @@ fn verify_restored_files(
         let Some(relative) = file.package_relative_path.as_ref() else {
             continue;
         };
-        let destination = restore_destination(target_root, relative)?;
+        let destination = restore_destination_for_entry(file, target_root, restore_user_data)?;
         let item = if destination.is_file() {
             verify_file_size_and_hash(
                 VerificationCategory::RestoredFile,
@@ -453,14 +458,20 @@ fn verify_environment_variables(
 fn verify_services(
     target_root: &Path,
     manifest: &PackageManifest,
+    restore_user_data: bool,
     services: &[ServiceEntry],
     items: &mut Vec<VerificationItem>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
     for service in services {
-        let expected_binary = mapped_original_path(manifest, target_root, &service.binary_path)
-            .unwrap_or_else(|| service.binary_path.clone());
+        let expected_binary = mapped_original_path(
+            manifest,
+            target_root,
+            &service.binary_path,
+            restore_user_data,
+        )
+        .unwrap_or_else(|| service.binary_path.clone());
         let item = match read_service_image_path(&service.service_name) {
             Ok(actual) => {
                 if command_path_matches(&actual, &expected_binary) {
@@ -601,13 +612,19 @@ fn verify_scheduled_tasks(
 fn verify_shortcuts(
     target_root: &Path,
     manifest: &PackageManifest,
+    restore_user_data: bool,
     shortcuts: &[ShortcutEntry],
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) {
     for shortcut in shortcuts {
-        let expected_target = mapped_original_path(manifest, target_root, &shortcut.target_path)
-            .unwrap_or_else(|| shortcut.target_path.clone());
+        let expected_target = mapped_original_path(
+            manifest,
+            target_root,
+            &shortcut.target_path,
+            restore_user_data,
+        )
+        .unwrap_or_else(|| shortcut.target_path.clone());
         let item = match shortcut_target(&shortcut.original_lnk_path) {
             Ok(Some(actual)) => {
                 if command_path_matches(&actual, &expected_target) {
@@ -685,24 +702,20 @@ fn registry_value_matches(
     }
 }
 
-fn restore_destination(target_root: &Path, package_relative_path: &Path) -> Result<PathBuf> {
-    let relative = safe_relative_path(package_relative_path);
-    let without_files = relative.strip_prefix("files").unwrap_or(&relative);
-    let destination = target_root.join(without_files);
-    crate::file_discovery::ensure_within_root(target_root, &destination)?;
-    Ok(destination)
-}
-
-fn path_rewrites(manifest: &PackageManifest, target_root: &Path) -> Result<Vec<(String, String)>> {
+fn path_rewrites(
+    manifest: &PackageManifest,
+    target_root: &Path,
+    restore_user_data: bool,
+) -> Result<Vec<(String, String)>> {
     let mut rewrites = Vec::new();
     for file in &manifest.file_inventory {
         if !file.should_copy {
             continue;
         }
-        let Some(relative) = file.package_relative_path.as_ref() else {
+        if file.package_relative_path.is_none() {
             continue;
-        };
-        let destination = restore_destination(target_root, relative)?;
+        }
+        let destination = restore_destination_for_entry(file, target_root, restore_user_data)?;
         rewrites.push((
             file.original_path.to_string_lossy().to_string(),
             destination.to_string_lossy().to_string(),
@@ -722,6 +735,7 @@ fn mapped_original_path(
     manifest: &PackageManifest,
     target_root: &Path,
     original: &Path,
+    restore_user_data: bool,
 ) -> Option<PathBuf> {
     manifest
         .file_inventory
@@ -733,8 +747,7 @@ fn mapped_original_path(
                     .to_string_lossy()
                     .eq_ignore_ascii_case(&original.to_string_lossy())
         })
-        .and_then(|file| file.package_relative_path.as_ref())
-        .and_then(|relative| restore_destination(target_root, relative).ok())
+        .and_then(|file| restore_destination_for_entry(file, target_root, restore_user_data).ok())
 }
 
 fn rewrite_known_paths(value: &str, rewrites: &[(String, String)]) -> String {
@@ -1070,8 +1083,10 @@ mod tests {
 
     #[test]
     fn restore_destination_strips_files_root() -> Result<()> {
-        let destination =
-            restore_destination(Path::new(r"C:\Target"), Path::new(r"files\bin\app.exe"))?;
+        let destination = crate::file_discovery::restore_destination(
+            Path::new(r"C:\Target"),
+            Path::new(r"files\bin\app.exe"),
+        )?;
 
         assert_eq!(destination, PathBuf::from(r"C:\Target\bin\app.exe"));
         Ok(())

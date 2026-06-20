@@ -225,6 +225,131 @@ pub fn ensure_within_root(root: &Path, candidate: &Path) -> Result<()> {
     }
 }
 
+/// The per-user/per-machine data root an archived file originally lived under.
+/// Used to route restored user data back to the equivalent base on the target
+/// machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserDataAnchor {
+    RoamingAppData,
+    LocalAppData,
+    LocalLowAppData,
+    ProgramData,
+}
+
+/// Anchor markers, longest/most-specific first so `AppData\LocalLow` is matched
+/// before `AppData\Local`.
+const USER_DATA_ANCHORS: &[(UserDataAnchor, &str)] = &[
+    (UserDataAnchor::RoamingAppData, r"\appdata\roaming\"),
+    (UserDataAnchor::LocalLowAppData, r"\appdata\locallow\"),
+    (UserDataAnchor::LocalAppData, r"\appdata\local\"),
+    (UserDataAnchor::ProgramData, r"\programdata\"),
+];
+
+/// Sandbox restore destination: strip the package `files` root and join the
+/// remaining relative path onto `target_root`. This is the conservative default
+/// for every archived file, and the fallback for user data that cannot be
+/// re-anchored. Guards against path traversal out of `target_root`.
+pub fn restore_destination(target_root: &Path, package_relative_path: &Path) -> Result<PathBuf> {
+    let relative = safe_relative_path(package_relative_path);
+    let without_files = relative
+        .strip_prefix(PACKAGE_FILES_ROOT)
+        .unwrap_or(&relative);
+    let destination = target_root.join(without_files);
+    ensure_within_root(target_root, &destination)?;
+    Ok(destination)
+}
+
+/// Resolve where a packaged file should be written on restore.
+///
+/// App-owned install-directory files always land under `target_root`. When
+/// `restore_user_data` is set, files archived from the source machine's
+/// `%AppData%`/`%ProgramData%` (staged under `files\_external\…`) are re-anchored
+/// to the target machine's equivalent real base. Anything that cannot be
+/// re-anchored falls back to the sandbox path under `target_root`.
+pub fn restore_destination_for_entry(
+    entry: &FileEntry,
+    target_root: &Path,
+    restore_user_data: bool,
+) -> Result<PathBuf> {
+    let relative = entry.package_relative_path.as_ref().ok_or_else(|| {
+        WinAppMigratorError::InvalidInput(format!(
+            "file has no package relative path: {}",
+            entry.original_path.display()
+        ))
+    })?;
+    if restore_user_data
+        && is_external_package_path(relative)
+        && let Some(destination) = user_data_real_destination(&entry.original_path)?
+    {
+        return Ok(destination);
+    }
+    restore_destination(target_root, relative)
+}
+
+/// True when a package-relative path was staged under `files\_external\…`
+/// (data captured from outside the install directory, i.e. user/ProgramData).
+fn is_external_package_path(package_relative_path: &Path) -> bool {
+    let relative = safe_relative_path(package_relative_path);
+    relative
+        .strip_prefix(PACKAGE_FILES_ROOT)
+        .unwrap_or(&relative)
+        .components()
+        .next()
+        .is_some_and(|component| match component {
+            Component::Normal(value) => value.eq_ignore_ascii_case(EXTERNAL_FILES_DIR),
+            _ => false,
+        })
+}
+
+/// Map an archived user-data source path to its real location on the target
+/// machine, e.g. `C:\Users\alice\AppData\Roaming\App\x` →
+/// `%APPDATA%\App\x`. Returns `Ok(None)` when the path is not under a known
+/// user-data anchor or the target base cannot be resolved.
+fn user_data_real_destination(original_path: &Path) -> Result<Option<PathBuf>> {
+    let Some((anchor, tail)) = split_user_data_relative(original_path) else {
+        return Ok(None);
+    };
+    let Some(base) = user_data_base(anchor) else {
+        return Ok(None);
+    };
+    let destination = base.join(&tail);
+    ensure_within_root(&base, &destination)?;
+    Ok(Some(destination))
+}
+
+/// Split a source path into its user-data anchor and the path relative to that
+/// anchor (sanitized for safe rejoining). Pure and OS-environment independent.
+pub fn split_user_data_relative(original_path: &Path) -> Option<(UserDataAnchor, PathBuf)> {
+    let display = original_path.to_string_lossy();
+    // ASCII-lowercasing preserves byte length and positions, so a marker offset
+    // found here is a valid byte index into `display`.
+    let lower = display.to_ascii_lowercase();
+    for (anchor, marker) in USER_DATA_ANCHORS {
+        if let Some(position) = lower.find(marker) {
+            let tail_start = position + marker.len();
+            let tail = display[tail_start..].trim();
+            if tail.is_empty() {
+                continue;
+            }
+            return Some((*anchor, safe_relative_path(Path::new(tail))));
+        }
+    }
+    None
+}
+
+/// Resolve the target-machine base directory for a user-data anchor from the
+/// current process environment. LocalLow has no dedicated variable, so it is
+/// derived from the user profile.
+fn user_data_base(anchor: UserDataAnchor) -> Option<PathBuf> {
+    match anchor {
+        UserDataAnchor::RoamingAppData => std::env::var_os("APPDATA").map(PathBuf::from),
+        UserDataAnchor::LocalAppData => std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+        UserDataAnchor::LocalLowAppData => std::env::var_os("USERPROFILE")
+            .map(|profile| PathBuf::from(profile).join(APPDATA_LOCAL_LOW_SEGMENT)),
+        UserDataAnchor::ProgramData => std::env::var_os("ProgramData").map(PathBuf::from),
+    }
+}
+
 fn collect_roots(context: &FileDiscoveryContext, tokens: &Tokens) -> Vec<DiscoveryRoot> {
     let mut raw: Vec<DiscoveryRoot> = Vec::new();
 
@@ -918,6 +1043,109 @@ mod tests {
         assert!(anydesk_tokens.matches("AnyDesk"));
         assert!(!anydesk_tokens.matches("files"));
         assert!(!anydesk_tokens.matches("3uTools9"));
+    }
+
+    fn external_entry(original: &str) -> FileEntry {
+        FileEntry {
+            path: PathBuf::from(original),
+            original_path: PathBuf::from(original),
+            package_relative_path: Some(
+                PathBuf::from(PACKAGE_FILES_ROOT)
+                    .join(EXTERNAL_FILES_DIR)
+                    .join("payload.bin"),
+            ),
+            suggested_destination_path: None,
+            size_bytes: Some(1),
+            hash_sha256: None,
+            classification: FileClassification::UserData,
+            should_copy: true,
+            reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn splits_user_data_anchors() {
+        assert_eq!(
+            split_user_data_relative(Path::new(
+                r"C:\Users\alice\AppData\Roaming\Vendor\App\settings.json"
+            )),
+            Some((
+                UserDataAnchor::RoamingAppData,
+                PathBuf::from(r"Vendor\App\settings.json")
+            ))
+        );
+        assert_eq!(
+            split_user_data_relative(Path::new(
+                r"C:\Users\alice\AppData\LocalLow\Sun\Java\deployment.bin"
+            )),
+            Some((
+                UserDataAnchor::LocalLowAppData,
+                PathBuf::from(r"Sun\Java\deployment.bin")
+            )),
+            "LocalLow must win over the Local prefix"
+        );
+        assert_eq!(
+            split_user_data_relative(Path::new(r"C:\Users\alice\AppData\Local\App\cache.db")),
+            Some((UserDataAnchor::LocalAppData, PathBuf::from(r"App\cache.db")))
+        );
+        assert_eq!(
+            split_user_data_relative(Path::new(r"C:\ProgramData\App\machine.dat")),
+            Some((
+                UserDataAnchor::ProgramData,
+                PathBuf::from(r"App\machine.dat")
+            ))
+        );
+        assert_eq!(
+            split_user_data_relative(Path::new(r"C:\Program Files\App\app.exe")),
+            None
+        );
+    }
+
+    #[test]
+    fn restore_destination_falls_back_to_sandbox_when_disabled() -> Result<()> {
+        let entry = external_entry(r"C:\Users\alice\AppData\Roaming\Vendor\App\settings.json");
+        let target = std::env::temp_dir();
+        let destination = restore_destination_for_entry(&entry, &target, false)?;
+
+        assert_eq!(
+            destination,
+            target.join(EXTERNAL_FILES_DIR).join("payload.bin")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_destination_reanchors_user_data_when_enabled() -> Result<()> {
+        let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) else {
+            return Ok(());
+        };
+        let entry = external_entry(r"C:\Users\alice\AppData\Roaming\Vendor\App\settings.json");
+        let target = std::env::temp_dir();
+        let destination = restore_destination_for_entry(&entry, &target, true)?;
+
+        assert_eq!(destination, appdata.join(r"Vendor\App\settings.json"));
+        assert!(!destination.starts_with(&target));
+        Ok(())
+    }
+
+    #[test]
+    fn app_owned_files_ignore_user_data_routing() -> Result<()> {
+        let entry = FileEntry {
+            path: PathBuf::from(r"C:\Program Files\App\bin\app.exe"),
+            original_path: PathBuf::from(r"C:\Program Files\App\bin\app.exe"),
+            package_relative_path: Some(PathBuf::from(r"files\bin\app.exe")),
+            suggested_destination_path: None,
+            size_bytes: Some(1),
+            hash_sha256: None,
+            classification: FileClassification::AppOwned,
+            should_copy: true,
+            reason: String::new(),
+        };
+        let target = std::env::temp_dir();
+        let destination = restore_destination_for_entry(&entry, &target, true)?;
+
+        assert_eq!(destination, target.join(r"bin\app.exe"));
+        Ok(())
     }
 
     #[test]

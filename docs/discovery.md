@@ -69,11 +69,23 @@ results exactly (validated against Inkscape: 11,657 paths; iTunes: 4,408,
 including out-of-install-dir `Common Files\Apple` and `ProgramData\Apple
 Computer`).
 
-> Performance: iterating all components is O(installed components on the
-> machine). On a heavy developer machine (~96k components) this is ~18s; a normal
-> machine has far fewer. It runs on the GUI background thread. A future
-> optimization is to scope iteration to the product's components via
-> `Products\<squished>\Features` (requires decoding the Base85 packed GUIDs).
+> Performance: the sweep is narrowed to the SIDs that actually register the
+> product (`component_sweep_sids`: a component only records a product's key path
+> under the SID where the product is registered, so other per-user component
+> trees are skipped on multi-user machines), with a full-SID fallback if none is
+> found. Within a registering SID it still iterates that SID's components
+> (O(components-in-SID)); on a heavy developer machine (~96k machine-wide
+> components under `S-1-5-18`) this is ~18s, and it runs on the GUI background
+> thread.
+>
+> Fully scoping iteration to **one product's** components would require either
+> decoding the `Products\<squished>\Features` feature descriptors or calling the
+> Windows Installer API (`MsiGetComponentPathW`). This is **deliberately not
+> done**: a mis-decoded feature descriptor would silently *under-report* the
+> migration footprint, and the exhaustive sweep is the source that was validated
+> against the `WindowsInstaller.Installer` COM `ComponentPath` results. Revisit
+> only with the MSI API plus a cross-check against the exhaustive sweep, which
+> would add a Windows FFI dependency the project currently avoids.
 
 ### Inno Setup
 
@@ -99,19 +111,41 @@ Validated: Kernel OST Viewer → "Inno Setup uninstall log: 9 recorded paths".
 views) for the registered launcher path and the `Path` DLL search directories.
 Used for every method.
 
-### MSIX / Squirrel / Chocolatey
+### MSIX
 
-Currently **detected** (method + evidence) but not deeply enumerated. The
-heuristic layer still captures their directories. Deeper support (AppxManifest,
-`%LOCALAPPDATA%\Packages\<PFN>`, Squirrel `app-*`) is a future enhancement.
+Detected when the install location is under `\WindowsApps\`. The install payload
+there is authoritative, but the app's mutable per-user state lives at
+`%LOCALAPPDATA%\Packages\<PackageFamilyName>`, whose folder name is the package
+*identity* (not the display name) and is therefore missed by name-token
+heuristics. `appx_identity_name` reads the `Identity` `Name` from the package's
+`AppxManifest.xml` (a targeted attribute scan, no XML dependency), and
+`msix_package_data_roots` adds the matching `…\Packages\<IdentityName>_*`
+directory as a root — a prefix match that avoids computing the publisher hash.
+MSIX apps are still managed by Windows and normally need reinstallation, but
+their per-user state is now captured for backup.
+
+### Squirrel
+
+Detected from the per-user `\AppData\Local\…` layout with `Update.exe` or an
+`app-*` subdirectory. The install location is added as an authoritative root and
+`latest_squirrel_app_dir` records the current `app-<version>` directory (versions
+compared by numeric segments so `app-1.0.10` ranks above `app-1.0.9`).
+
+### Chocolatey
+
+Detected (method + evidence); the heuristic layer captures its directories.
 
 ### NSIS / generic EXE
 
 NSIS keeps **no** file manifest by default (its uninstaller has hard-coded
-delete logic). Only the optional `AdvUninstLog` writes a text `uninstall.log`.
-For these installers the **install directory** (from `InstallLocation` /
-App Paths / uninstaller directory — an authoritative *location*) plus the
-heuristic layer is the basis; there is no per-file manifest to read.
+delete logic). When the optional `AdvUninstLog` macro is used it writes a text
+`uninstall.log` of installed paths in the install directory; `find_nsis_log` /
+`nsis_manifest_files` read it with the same robust path-string scan used for
+Inno (`extract_utf16_paths` / `extract_ansi_paths`, keeping paths that exist),
+so those installs get an authoritative file count and roots. When the log is
+absent the **install directory** (from `InstallLocation` / App Paths /
+uninstaller directory — an authoritative *location*) plus the heuristic layer is
+the basis.
 
 ## Layer 3: Heuristic footprint
 
@@ -167,8 +201,34 @@ copyable_bytes, included }` groups the inventory by root for display.
 ## Known limitations / next steps
 
 - Scope the MSI component sweep to the product (Features/Base85) to cut latency.
-- Parse NSIS `AdvUninstLog` `uninstall.log` when present.
 - Deeper MSIX (`AppxManifest`, package data) and Squirrel (`app-*`) enumeration.
-- Restore currently lands all files under one `target_root` (user-data files go
-  to `target_root\_external\...`); restoring user data back to the real
-  `%APPDATA%`/`%ProgramData%` on the target is a future enhancement.
+
+## Restoring user data to real locations
+
+By default restore is conservative: every archived file (including the
+`files\_external\…` user-data staged from outside the install directory) lands
+under one `target_root`, so a restore never touches the live profile unless asked.
+
+Opting in with `--restore-user-data` (CLI `restore`/SFX, or the "Restore user
+data to real AppData/ProgramData" checkbox in the GUI) re-anchors each
+user-data file to the **target machine's** equivalent base, derived from its
+archived source path:
+
+| Source anchor | Target base |
+| --- | --- |
+| `…\AppData\Roaming\…` | `%APPDATA%` |
+| `…\AppData\Local\…` | `%LOCALAPPDATA%` |
+| `…\AppData\LocalLow\…` | `%USERPROFILE%\AppData\LocalLow` |
+| `…\ProgramData\…` | `%ProgramData%` |
+
+App-owned install-directory files always restore under `target_root` regardless
+of the flag. Routing is centralized in
+`file_discovery::restore_destination_for_entry` (with `split_user_data_relative`
+doing the anchor split) so restore and verification resolve identical
+destinations. Files that cannot be re-anchored fall back to the sandbox path.
+
+Safety: ProgramData (and other machine-wide protected roots) require an elevated
+shell on apply — `privilege::destination_requires_admin` gates this; each
+re-anchored destination is still bounded to its base by `ensure_within_root`;
+existing files are only overwritten with `--force`; and `verify` must be passed
+the same `--restore-user-data` value so it checks the real locations.

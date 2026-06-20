@@ -611,6 +611,14 @@ pub struct RestoreOptions {
     pub dry_run: bool,
     pub apply: bool,
     pub force: bool,
+    /// When true, packaged per-user/ProgramData application data is restored to
+    /// the target machine's real `%AppData%`/`%ProgramData%` locations instead
+    /// of being staged under `target_root`. Defaults to false to keep the
+    /// conservative sandbox behavior; writing into ProgramData requires
+    /// elevation. App-owned install-directory files always land under
+    /// `target_root` regardless of this flag.
+    #[serde(default)]
+    pub restore_user_data: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -618,6 +626,10 @@ pub struct VerificationOptions {
     pub package_root: PathBuf,
     pub target_root: Option<PathBuf>,
     pub output_dir: Option<PathBuf>,
+    /// Must match the `restore_user_data` value used during restore so the
+    /// verifier checks the same destinations the restore wrote to.
+    #[serde(default)]
+    pub restore_user_data: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

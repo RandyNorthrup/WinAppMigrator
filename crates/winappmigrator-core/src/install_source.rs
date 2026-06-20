@@ -27,6 +27,9 @@ use crate::path_utils::split_command_executable_path;
 const USERDATA_PATH: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
 const APP_PATHS_PREFIX: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
 const SIGNATURE_SCAN_BYTES: u64 = 2_000_000;
+const SQUIRREL_APP_PREFIX: &str = "app-";
+const APPX_MANIFEST: &str = "AppxManifest.xml";
+const MSIX_PACKAGES_DIR: &str = "Packages";
 
 /// The result of reverse-engineering how and where an application was installed.
 #[derive(Debug, Clone)]
@@ -92,15 +95,61 @@ pub fn detect_install_source(app: &InstalledApp) -> InstallSource {
         }
         InstallMethod::Nsis => {
             evidence.push("NSIS (Nullsoft) uninstaller signature".to_owned());
+            // NSIS keeps no manifest by default, but the AdvUninstLog macro
+            // writes an `uninstall.log` of installed paths in the install dir.
+            if let Some(dir) = primary_install_dir(app)
+                && let Some(log) = find_nsis_log(&dir)
+            {
+                let files = nsis_manifest_files(&log);
+                if !files.is_empty() {
+                    authoritative_file_count = files.len();
+                    let footprint: Vec<PathBuf> = files
+                        .into_iter()
+                        .filter(|path| is_app_footprint_path(path))
+                        .collect();
+                    roots.extend(minimal_install_roots(&footprint));
+                    evidence.push(format!(
+                        "NSIS AdvUninstLog uninstall.log: {authoritative_file_count} recorded paths"
+                    ));
+                }
+            }
         }
         InstallMethod::Squirrel => {
             evidence.push("Squirrel per-user layout (Update.exe / app-*)".to_owned());
+            if let Some(dir) = primary_install_dir(app) {
+                roots.push(dir.clone());
+                if let Some(app_dir) = latest_squirrel_app_dir(&dir) {
+                    if let Some(version) = app_dir.file_name().and_then(|name| name.to_str()) {
+                        evidence.push(format!("Squirrel current version: {version}"));
+                    }
+                    roots.push(app_dir);
+                }
+            }
         }
         InstallMethod::Chocolatey => {
             evidence.push("Chocolatey package metadata".to_owned());
         }
         InstallMethod::Msix => {
             evidence.push("MSIX / Appx package".to_owned());
+            // The install payload under WindowsApps is authoritative, but the
+            // app's mutable per-user state lives at
+            // %LOCALAPPDATA%\Packages\<PackageFamilyName>, whose folder name is
+            // the package identity (not the display name) and is therefore
+            // missed by name-token heuristics. Read the manifest identity to
+            // anchor it directly.
+            if let Some(dir) = primary_install_dir(app)
+                && let Some(identity) = appx_identity_name(&dir)
+            {
+                evidence.push(format!("AppxManifest identity: {identity}"));
+                let package_roots = msix_package_data_roots(&identity);
+                if !package_roots.is_empty() {
+                    evidence.push(format!(
+                        "MSIX per-user package data: {} location(s)",
+                        package_roots.len()
+                    ));
+                    roots.extend(package_roots);
+                }
+            }
         }
         InstallMethod::Generic => {}
     }
@@ -241,6 +290,45 @@ fn inno_manifest_files(log_path: &Path) -> Vec<PathBuf> {
 fn is_inno_log(data: &[u8]) -> bool {
     let head = &data[..64.min(data.len())];
     String::from_utf8_lossy(head).contains("Inno Setup Uninstall Log")
+}
+
+/// Locate an NSIS AdvUninstLog `uninstall.log` in the install directory.
+fn find_nsis_log(dir: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if is_nsis_log_name(&name) {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
+/// The default file the NSIS AdvUninstLog macro writes (`uninstall.log`).
+fn is_nsis_log_name(name: &str) -> bool {
+    name == "uninstall.log"
+}
+
+/// Extract installed file paths from an NSIS AdvUninstLog `uninstall.log`.
+/// The log has no documented stable framing, so (like the Inno reader) this
+/// scans for resolved absolute path strings and keeps the ones that exist,
+/// which is robust across AdvUninstLog versions and UTF-16/ANSI encodings.
+fn nsis_manifest_files(log_path: &Path) -> Vec<PathBuf> {
+    let Ok(data) = std::fs::read(log_path) else {
+        return Vec::new();
+    };
+    let mut seen = BTreeSet::new();
+    let mut files = Vec::new();
+    for candidate in extract_utf16_paths(&data)
+        .into_iter()
+        .chain(extract_ansi_paths(&data))
+    {
+        let path = PathBuf::from(&candidate);
+        if path.is_file() && seen.insert(candidate.to_ascii_lowercase()) {
+            files.push(path);
+        }
+    }
+    files
 }
 
 fn extract_utf16_paths(data: &[u8]) -> Vec<String> {
@@ -415,14 +503,76 @@ fn is_squirrel_layout(install_location: Option<&Path>) -> bool {
     let Ok(entries) = std::fs::read_dir(location) else {
         return false;
     };
-    entries.flatten().any(|entry| {
-        entry.path().is_dir()
-            && entry
-                .file_name()
-                .to_string_lossy()
-                .to_ascii_lowercase()
-                .starts_with("app-")
-    })
+    entries
+        .flatten()
+        .any(|entry| entry.path().is_dir() && is_squirrel_app_dir(&entry.path()))
+}
+
+fn is_squirrel_app_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with(SQUIRREL_APP_PREFIX))
+}
+
+/// The current Squirrel `app-<version>` directory (highest version) in an
+/// install location, if any. Versions are compared by their dotted numeric
+/// segments so `app-1.0.10` ranks above `app-1.0.9`.
+fn latest_squirrel_app_dir(install_dir: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(install_dir).ok()?;
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && is_squirrel_app_dir(path))
+        .max_by(|left, right| squirrel_version_key(left).cmp(&squirrel_version_key(right)))
+}
+
+fn squirrel_version_key(app_dir: &Path) -> Vec<u64> {
+    app_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            name.trim_start_matches(|character: char| !character.is_ascii_digit())
+                .split('.')
+                .map(|segment| segment.parse::<u64>().unwrap_or(0))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Read the `Identity` element `Name` from a package's `AppxManifest.xml`
+/// (for example `Microsoft.WindowsTerminal`). A targeted attribute scan avoids
+/// pulling in an XML dependency for a single well-known element.
+fn appx_identity_name(install_dir: &Path) -> Option<String> {
+    let data = std::fs::read(install_dir.join(APPX_MANIFEST)).ok()?;
+    let text = String::from_utf8_lossy(&data);
+    let identity = &text[text.find("<Identity")?..];
+    let after_name = &identity[identity.find("Name=\"")? + "Name=\"".len()..];
+    let name = after_name[..after_name.find('"')?].trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// Per-user MSIX package-data directories for an identity name. The folder is
+/// named `<IdentityName>_<publisherHash>`, so a prefix match avoids computing
+/// the publisher hash. Scoped to the current user's `%LOCALAPPDATA%\Packages`.
+fn msix_package_data_roots(identity_name: &str) -> Vec<PathBuf> {
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}_", identity_name.to_ascii_lowercase());
+    let Ok(entries) = std::fs::read_dir(local_app_data.join(MSIX_PACKAGES_DIR)) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().starts_with(&prefix))
+        })
+        .collect()
 }
 
 fn extract_product_code(app: &InstalledApp) -> Option<String> {
@@ -489,7 +639,7 @@ fn msi_component_paths(product_code: &str) -> Option<MsiComponentPaths> {
     let mut registry_count = 0;
     let mut seen = BTreeSet::new();
 
-    for sid in user_data.enum_keys().flatten() {
+    for sid in component_sweep_sids(&user_data, &squished_product) {
         let Ok(sid_key) = user_data.open_subkey_with_flags(&sid, KEY_READ | KEY_WOW64_64KEY) else {
             continue;
         };
@@ -525,6 +675,37 @@ fn msi_component_paths(product_code: &str) -> Option<MsiComponentPaths> {
         files,
         registry_count,
     })
+}
+
+/// The SIDs whose `Components` subtree to sweep for a product's key paths.
+///
+/// A component only records a product's key path under the SID where that
+/// product is registered (`UserData\<SID>\Products\<sqProduct>`), so scanning
+/// only those SIDs yields identical results while skipping unrelated per-user
+/// component trees on multi-user machines. This is a safe narrowing, not a
+/// `Features`-based component scoping: it never decodes feature descriptors, so
+/// it cannot under-report. If no SID is found to register the product (an
+/// unexpected registry state), every SID is swept as a fallback so results are
+/// never worse than the exhaustive scan.
+fn component_sweep_sids(user_data: &RegKey, squished_product: &str) -> Vec<String> {
+    let all_sids: Vec<String> = user_data.enum_keys().flatten().collect();
+    let registering: Vec<String> = all_sids
+        .iter()
+        .filter(|sid| {
+            user_data
+                .open_subkey_with_flags(
+                    format!(r"{sid}\Products\{squished_product}"),
+                    KEY_READ | KEY_WOW64_64KEY,
+                )
+                .is_ok()
+        })
+        .cloned()
+        .collect();
+    if registering.is_empty() {
+        all_sids
+    } else {
+        registering
+    }
 }
 
 /// MSI encodes registry key paths as `<root>:<path>` (for example `02:\Software\…`).
@@ -675,5 +856,94 @@ mod tests {
                 PathBuf::from(r"C:\ProgramData\Inkscape"),
             ]
         );
+    }
+
+    #[test]
+    fn recognizes_nsis_log_name() {
+        assert!(is_nsis_log_name("uninstall.log"));
+        assert!(!is_nsis_log_name("install.log"));
+        assert!(!is_nsis_log_name("unins000.dat"));
+        assert!(!is_nsis_log_name("uninstall.exe"));
+    }
+
+    #[test]
+    fn extracts_existing_paths_from_nsis_log() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let base = std::env::temp_dir().join(format!(
+            "wam-nsis-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base)?;
+        let installed = base.join("app.exe");
+        std::fs::write(&installed, b"binary")?;
+        let log = base.join("uninstall.log");
+        // AdvUninstLog-style line: a header comment plus the resolved path.
+        let content = format!(";AdvUninstLog\r\n{}\r\n", installed.display());
+        std::fs::write(&log, content.as_bytes())?;
+
+        let found = find_nsis_log(&base);
+        let files = nsis_manifest_files(&log);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(found.as_deref(), Some(log.as_path()));
+        assert!(
+            files.iter().any(|path| path == &installed),
+            "expected the installed path, got {files:?}"
+        );
+        Ok(())
+    }
+
+    fn unique_temp(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ))
+    }
+
+    #[test]
+    fn parses_appx_identity_name() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let base = unique_temp("wam-appx-test");
+        std::fs::create_dir_all(&base)?;
+        std::fs::write(
+            base.join(APPX_MANIFEST),
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+  <Identity Name="Microsoft.WindowsTerminal" Publisher="CN=Microsoft Corporation" Version="1.18.0.0" />
+</Package>"#,
+        )?;
+
+        let name = appx_identity_name(&base);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(name.as_deref(), Some("Microsoft.WindowsTerminal"));
+        Ok(())
+    }
+
+    #[test]
+    fn selects_latest_squirrel_app_dir() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let base = unique_temp("wam-squirrel-test");
+        for version in ["app-1.0.2", "app-1.0.9", "app-1.0.10"] {
+            std::fs::create_dir_all(base.join(version))?;
+        }
+        std::fs::write(base.join("Update.exe"), b"x")?;
+
+        let latest = latest_squirrel_app_dir(&base);
+        let expected = base.join("app-1.0.10");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(
+            latest.as_deref(),
+            Some(expected.as_path()),
+            "numeric version segments must rank 1.0.10 above 1.0.9"
+        );
+        Ok(())
     }
 }

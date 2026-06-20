@@ -14,14 +14,16 @@ use winreg::{RegKey, RegValue};
 
 use crate::archive::extract_zip_archive;
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{package_destination_path, safe_relative_path};
+use crate::file_discovery::{
+    package_destination_path, restore_destination_for_entry, split_user_data_relative,
+};
 use crate::models::{
     EnvironmentScope, EnvironmentVariableEntry, PackageManifest, RegistryEntry, RegistryHive,
     RegistryValueKind, RestoreOptions, RestorePlan, RestoreResult, ScheduledTaskEntry,
     ServiceEntry, ShortcutEntry, VerificationOptions, Warning, WarningSeverity,
 };
 use crate::package::read_manifest;
-use crate::privilege::{is_elevated, target_requires_admin};
+use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
 use crate::verify::verify_package;
 
 const RESTORE_LOG_JSON: &str = "restore_log.json";
@@ -92,12 +94,35 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
             options.target_root.display()
         )));
     }
+    if options.apply
+        && options.restore_user_data
+        && !is_elevated()
+        && user_data_restore_requires_admin(&effective_options, &plan)
+    {
+        return Err(WinAppMigratorError::InvalidInput(
+            "restoring user data into ProgramData or other protected locations requires elevated privileges"
+                .to_owned(),
+        ));
+    }
 
-    let path_rewrites = path_rewrites(&manifest, &options.target_root)?;
+    let path_rewrites = path_rewrites(&manifest, &options.target_root, options.restore_user_data)?;
     let output_dir = restore_output_dir(&options.package_root, &effective_options.package_root);
     let mut changes_logged = Vec::new();
     let mut warnings = plan.warnings.clone();
     let mut errors = Vec::new();
+    if options.restore_user_data
+        && plan
+            .planned_file_writes
+            .iter()
+            .any(|file| split_user_data_relative(&file.original_path).is_some())
+    {
+        warnings.push(Warning::new(
+            "restore_user_data_real_locations",
+            WarningSeverity::Info,
+            "User data is restored to this machine's real %AppData%/%ProgramData% locations instead of the target root.",
+            None,
+        ));
+    }
 
     restore_files(
         &effective_options,
@@ -157,6 +182,7 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
             package_root: effective_options.package_root.clone(),
             target_root: Some(options.target_root.clone()),
             output_dir: Some(output_dir.clone()),
+            restore_user_data: options.restore_user_data,
         }) {
             Ok(report) => {
                 if report.restore_valid == Some(false) {
@@ -214,7 +240,8 @@ fn restore_files(
             continue;
         };
         let source = package_destination_path(&options.package_root, relative)?;
-        let destination = restore_destination(&options.target_root, relative)?;
+        let destination =
+            restore_destination_for_entry(file, &options.target_root, options.restore_user_data)?;
 
         if destination.exists() && !options.force {
             let warning = Warning::new(
@@ -292,9 +319,13 @@ fn restore_services(
     errors: &mut Vec<Warning>,
 ) {
     for service in services {
-        let binary_path =
-            mapped_original_path(manifest, &options.target_root, &service.binary_path)
-                .unwrap_or_else(|| service.binary_path.clone());
+        let binary_path = mapped_original_path(
+            manifest,
+            &options.target_root,
+            &service.binary_path,
+            options.restore_user_data,
+        )
+        .unwrap_or_else(|| service.binary_path.clone());
         if !options.apply {
             changes_logged.push(format!(
                 "would restore service {} -> {}",
@@ -375,16 +406,30 @@ fn restore_shortcuts(
     errors: &mut Vec<Warning>,
 ) {
     for shortcut in shortcuts {
-        let target_path =
-            mapped_original_path(manifest, &options.target_root, &shortcut.target_path)
-                .unwrap_or_else(|| shortcut.target_path.clone());
+        let target_path = mapped_original_path(
+            manifest,
+            &options.target_root,
+            &shortcut.target_path,
+            options.restore_user_data,
+        )
+        .unwrap_or_else(|| shortcut.target_path.clone());
         let working_directory = shortcut.working_directory.as_ref().map(|working| {
-            mapped_original_path(manifest, &options.target_root, working)
-                .unwrap_or_else(|| working.clone())
+            mapped_original_path(
+                manifest,
+                &options.target_root,
+                working,
+                options.restore_user_data,
+            )
+            .unwrap_or_else(|| working.clone())
         });
         let icon_path = shortcut.icon_path.as_ref().map(|icon| {
-            mapped_original_path(manifest, &options.target_root, icon)
-                .unwrap_or_else(|| icon.clone())
+            mapped_original_path(
+                manifest,
+                &options.target_root,
+                icon,
+                options.restore_user_data,
+            )
+            .unwrap_or_else(|| icon.clone())
         });
 
         if !options.apply {
@@ -756,14 +801,6 @@ fn apply_shortcut(
         .map(|_| format!("restored shortcut {}", shortcut.original_lnk_path.display()))
 }
 
-fn restore_destination(target_root: &Path, package_relative_path: &Path) -> Result<PathBuf> {
-    let relative = safe_relative_path(package_relative_path);
-    let without_files = relative.strip_prefix("files").unwrap_or(&relative);
-    let destination = target_root.join(without_files);
-    crate::file_discovery::ensure_within_root(target_root, &destination)?;
-    Ok(destination)
-}
-
 fn copy_restore_file(source: &Path, destination: &Path) -> Result<()> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
@@ -869,16 +906,20 @@ fn shortcut_requires_admin(shortcut: &ShortcutEntry) -> bool {
         || path.contains(r"\users\public\desktop")
 }
 
-fn path_rewrites(manifest: &PackageManifest, target_root: &Path) -> Result<Vec<(String, String)>> {
+fn path_rewrites(
+    manifest: &PackageManifest,
+    target_root: &Path,
+    restore_user_data: bool,
+) -> Result<Vec<(String, String)>> {
     let mut rewrites = Vec::new();
     for file in &manifest.file_inventory {
         if !file.should_copy {
             continue;
         }
-        let Some(relative) = file.package_relative_path.as_ref() else {
+        if file.package_relative_path.is_none() {
             continue;
-        };
-        let destination = restore_destination(target_root, relative)?;
+        }
+        let destination = restore_destination_for_entry(file, target_root, restore_user_data)?;
         rewrites.push((
             file.original_path.to_string_lossy().to_string(),
             destination.to_string_lossy().to_string(),
@@ -898,6 +939,7 @@ fn mapped_original_path(
     manifest: &PackageManifest,
     target_root: &Path,
     original: &Path,
+    restore_user_data: bool,
 ) -> Option<PathBuf> {
     manifest
         .file_inventory
@@ -909,8 +951,17 @@ fn mapped_original_path(
                     .to_string_lossy()
                     .eq_ignore_ascii_case(&original.to_string_lossy())
         })
-        .and_then(|file| file.package_relative_path.as_ref())
-        .and_then(|relative| restore_destination(target_root, relative).ok())
+        .and_then(|file| restore_destination_for_entry(file, target_root, restore_user_data).ok())
+}
+
+/// True when any planned user-data file will be restored to a machine-wide
+/// protected location (for example ProgramData) and therefore needs elevation.
+fn user_data_restore_requires_admin(options: &RestoreOptions, plan: &RestorePlan) -> bool {
+    plan.planned_file_writes.iter().any(|file| {
+        restore_destination_for_entry(file, &options.target_root, options.restore_user_data)
+            .map(|destination| destination_requires_admin(&destination))
+            .unwrap_or(false)
+    })
 }
 
 fn rewrite_known_paths(value: &str, rewrites: &[(String, String)]) -> String {
@@ -1194,6 +1245,7 @@ mod tests {
             dry_run: true,
             apply: true,
             force: false,
+            restore_user_data: false,
         };
 
         assert!(restore_package(&options).is_err());

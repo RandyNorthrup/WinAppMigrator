@@ -4,6 +4,10 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- Narrowed the MSI component-database sweep to the SIDs that actually register the product (`component_sweep_sids`), with a full-SID fallback so results are never worse than the exhaustive scan; documented the decision to keep the exhaustive (COM-validated) sweep rather than scope via `Features`/Base85 descriptors, which could silently under-report the footprint.
+- Deepened MSIX and Squirrel footprint discovery: MSIX now reads the `AppxManifest.xml` `Identity` name and anchors the app's per-user state at `%LOCALAPPDATA%\Packages\<IdentityName>_*` (a location name-token heuristics miss); Squirrel adds the install location as an authoritative root and records the current `app-<version>` directory using numeric version comparison.
+- Added authoritative NSIS footprint extraction: when an NSIS install carries an `AdvUninstLog` `uninstall.log`, `install_source` reads the recorded paths (reusing the Inno UTF-16/ANSI path scan) and derives install roots and an authoritative file count instead of relying on the install directory plus heuristics alone.
+- Added opt-in real-location user-data restore: `--restore-user-data` (CLI `restore`/SFX/`verify`) and a GUI checkbox re-anchor packaged `%AppData%`/`%LocalAppData%`/LocalLow/`%ProgramData%` data to the target machine's equivalent base instead of staging it under the target root. Centralized restore destination routing in `file_discovery::restore_destination_for_entry`/`split_user_data_relative` so restore and verification resolve identical paths, gated `%ProgramData%` apply behind elevation (`privilege::destination_requires_admin`), kept each destination bounded by `ensure_within_root`, and threaded the flag through `RestoreOptions`/`VerificationOptions`.
 - Created Rust workspace foundation with shared core, CLI, and GUI crates.
 - Added Stage 1 data models, registry inventory, PE import scanning, DLL resolution, scan orchestration, and report generation.
 - Added native GUI shell using shared core scan APIs.

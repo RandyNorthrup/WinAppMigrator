@@ -411,6 +411,7 @@ mod tests {
             dry_run: true,
             apply: false,
             force: false,
+            restore_user_data: false,
         })?;
 
         assert!(result.manifest_path.is_file());
