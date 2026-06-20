@@ -12,6 +12,7 @@ use crate::env_scan::{EnvironmentScanContext, scan_environment};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{FileDiscoveryContext, discover_files};
 use crate::install_source::detect_install_source;
+use crate::license_scan::{LicenseScanContext, scan_license_artifacts};
 use crate::models::{
     AppSelection, DependencyEntry, DriverEntry, FileEntry, InstalledApp, RuntimePrerequisite,
     RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport, ScheduledTaskEntry,
@@ -162,6 +163,12 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         &file_inventory,
         pe_scan.metadata.is_dotnet,
     );
+    let (license_artifacts, license_warnings) = scan_license_artifacts(&LicenseScanContext {
+        publisher: source_app.as_ref().and_then(|app| app.publisher.as_deref()),
+        discovered_files: &file_inventory,
+        include_license_data: options.include_license_data,
+        include_hashes: options.include_hashes,
+    });
     let mut warnings = pe_scan.warnings;
     warnings.extend(resolver_warnings);
     warnings.extend(file_warnings);
@@ -173,6 +180,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     warnings.extend(environment_warnings);
     warnings.extend(missing_dependency_warnings(&dependencies));
     warnings.extend(driver_component_warnings(&drivers));
+    warnings.extend(license_warnings);
 
     let artifacts = artifact_paths(&options.output_dir);
 
@@ -226,6 +234,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         shortcuts,
         environment_variables,
         runtime_prerequisites,
+        license_artifacts,
         warnings,
         items_excluded: vec![
             "Windows directory, System32, and SysWOW64 files are reported but not copied."

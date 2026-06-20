@@ -129,6 +129,11 @@ pub struct ScanOptions {
     /// Include machine-wide `ProgramData` application data.
     #[serde(default = "default_true")]
     pub include_program_data: bool,
+    /// Detect and (for `package`) copy the application's own licensing data.
+    /// Defaults to false: license data is sensitive and may be machine-bound,
+    /// so it is opt-in.
+    #[serde(default)]
+    pub include_license_data: bool,
 }
 
 fn default_true() -> bool {
@@ -148,6 +153,7 @@ impl ScanOptions {
             include_hashes: true,
             include_user_data: true,
             include_program_data: true,
+            include_license_data: false,
         }
     }
 }
@@ -183,6 +189,8 @@ pub struct ScanReport {
     pub shortcuts: Vec<ShortcutEntry>,
     pub environment_variables: Vec<EnvironmentVariableEntry>,
     pub runtime_prerequisites: Vec<RuntimePrerequisite>,
+    #[serde(default)]
+    pub license_artifacts: Vec<LicenseArtifact>,
     pub warnings: Vec<Warning>,
     pub items_excluded: Vec<String>,
     pub confidence_score: u8,
@@ -265,6 +273,8 @@ pub struct PackageManifest {
     pub shortcuts_detected: Vec<ShortcutEntry>,
     pub environment_variables_detected: Vec<EnvironmentVariableEntry>,
     pub runtime_prerequisites: Vec<RuntimePrerequisite>,
+    #[serde(default)]
+    pub license_artifacts_detected: Vec<LicenseArtifact>,
     pub warnings: Vec<Warning>,
     pub items_intentionally_excluded: Vec<String>,
 }
@@ -281,6 +291,8 @@ pub struct PackageOptions {
     pub include_user_data: bool,
     #[serde(default = "default_true")]
     pub include_program_data: bool,
+    #[serde(default)]
+    pub include_license_data: bool,
 }
 
 impl PackageOptions {
@@ -297,6 +309,7 @@ impl PackageOptions {
             self_extracting_stub: None,
             include_user_data: true,
             include_program_data: true,
+            include_license_data: false,
         }
     }
 }
@@ -575,6 +588,84 @@ pub struct EnvironmentVariableEntry {
     pub value_kind: RegistryValueKind,
     pub requires_admin: bool,
     pub confidence: MatchConfidence,
+}
+
+/// A licensing/activation artifact discovered for an application. Captured to
+/// help an owner migrate their own license, with explicit transferability
+/// warnings. WinAppMigrator never decrypts, bypasses activation, or emulates
+/// dongles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LicenseArtifact {
+    pub kind: LicenseArtifactKind,
+    pub framework: LicenseFramework,
+    /// Filesystem path for file/framework-store artifacts.
+    pub path: Option<PathBuf>,
+    /// Registry location (`HIVE\Key\Value`) for registry-based artifacts.
+    pub registry_location: Option<String>,
+    /// Human-readable evidence for why this was flagged as licensing data.
+    pub detail: String,
+    /// True when the license is bound to this machine/hardware/user (hardware
+    /// dongle, machine-locked activation, DPAPI-encrypted) and therefore is
+    /// unlikely to work after migration without reactivation.
+    pub machine_bound: bool,
+    pub requires_admin: bool,
+    pub transferable: TransferableHint,
+    /// Whether this artifact is copied into the package (file/framework-store
+    /// artifacts only, when license backup is enabled).
+    pub should_copy: bool,
+    pub package_relative_path: Option<PathBuf>,
+    pub size_bytes: Option<u64>,
+    pub hash_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LicenseArtifactKind {
+    File,
+    FrameworkStore,
+    RegistryValue,
+    EnvironmentVariable,
+    HardwareDongle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LicenseFramework {
+    FlexLm,
+    SentinelHaspLdk,
+    CodeMeter,
+    RepriseRlm,
+    FileBased,
+    RegistryBased,
+    EnvironmentVariable,
+    HardwareDongle,
+    Unknown,
+}
+
+impl LicenseFramework {
+    pub fn label(&self) -> &'static str {
+        match self {
+            LicenseFramework::FlexLm => "FlexLM / FlexNet",
+            LicenseFramework::SentinelHaspLdk => "Sentinel HASP / LDK",
+            LicenseFramework::CodeMeter => "Wibu CodeMeter",
+            LicenseFramework::RepriseRlm => "Reprise RLM",
+            LicenseFramework::FileBased => "File-based license",
+            LicenseFramework::RegistryBased => "Registry-based license",
+            LicenseFramework::EnvironmentVariable => "License environment variable",
+            LicenseFramework::HardwareDongle => "Hardware dongle",
+            LicenseFramework::Unknown => "Unknown licensing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferableHint {
+    /// Plain license file with no obvious machine binding; may transfer.
+    Likely,
+    /// Hardware/machine-locked or encrypted; reactivation likely required.
+    Unlikely,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

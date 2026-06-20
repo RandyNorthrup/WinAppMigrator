@@ -96,6 +96,13 @@ Build a migration package directory plus portable zip archive:
 cargo run -p winappmigrator-cli -- package --exe "C:\Path\To\App.exe" --out ".\AppMigrationPackage" --archive zip
 ```
 
+Detect and copy the app's own licensing data (opt-in; many licenses are
+machine-bound and may need reactivation):
+
+```powershell
+cargo run -p winappmigrator-cli -- package --exe "C:\Path\To\App.exe" --out ".\AppMigrationPackage" --include-license-data
+```
+
 Build a self-extracting restore package:
 
 ```powershell
@@ -153,7 +160,7 @@ Scan output files:
 - `dependency_graph.json`
 - `warnings.md`
 - inventory snapshots write `inventory_snapshot.json` and `inventory_snapshot.md`.
-- package builds also write `manifest.json`, `restore_plan.md`, `reports\*`, `files\*`, registry/service/driver/task/shortcut/environment artifacts, optional `.zip`, optional `.sfx.exe`, and restore logs.
+- package builds also write `manifest.json`, `restore_plan.md`, `reports\*`, `files\*`, registry/service/driver/task/shortcut/environment artifacts, optional `license\*` (with `--include-license-data`), optional `.zip`, optional `.sfx.exe`, and restore logs.
 - verification writes `verification_report.json` and `verification_report.md`.
 
 Smoke-tested in this workspace against the local Cargo executable:
@@ -244,7 +251,7 @@ tests/
 - Registry, environment variable, service, shortcut, and scheduled task restore paths are archived and apply-capable when privileges and overwrite policy allow.
 - Package and restore verification checks file hashes, rewritten registry values, environment variables, services, scheduled tasks, and shortcuts.
 - Driver and kernel components are reported as metadata-only manual reinstall items; WinAppMigrator does not copy or register drivers automatically.
-- Secrets and license material are not collected.
+- Secrets and credentials are not collected. Licensing data is detected only to help an owner migrate their own license: it is opt-in (`--include-license-data`), reports transferability/machine-binding, copies license files only into the package `license/` directory, and is never restored automatically. WinAppMigrator never decrypts license data, bypasses or emulates activation, or emulates a hardware dongle.
 
 ## Troubleshooting
 

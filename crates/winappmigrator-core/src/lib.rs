@@ -6,6 +6,7 @@ pub mod errors;
 pub mod file_discovery;
 pub mod hashing;
 pub mod install_source;
+pub mod license_scan;
 pub mod models;
 pub mod package;
 pub mod path_utils;

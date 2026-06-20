@@ -90,6 +90,12 @@ pub struct ScanCommand {
     /// Exclude machine-wide ProgramData application data from the scan.
     #[arg(long = "skip-program-data")]
     pub skip_program_data: bool,
+
+    /// Detect the application's own licensing/activation data (files, framework
+    /// stores, environment variables, registry). Reported only; many licenses
+    /// are machine-bound and may require reactivation.
+    #[arg(long = "include-license-data")]
+    pub include_license_data: bool,
 }
 
 #[derive(Debug, Args)]
@@ -129,6 +135,12 @@ pub struct PackageCommand {
     /// Exclude machine-wide ProgramData application data from the package.
     #[arg(long = "skip-program-data")]
     pub skip_program_data: bool,
+
+    /// Detect and copy the application's own licensing data into the package
+    /// `license/` directory. Opt-in; licenses may be machine-bound and require
+    /// reactivation, and are never restored automatically.
+    #[arg(long = "include-license-data")]
+    pub include_license_data: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -290,6 +302,7 @@ fn run_scan(command: ScanCommand) -> Result<()> {
         include_hashes: true,
         include_user_data: !command.skip_user_data,
         include_program_data: !command.skip_program_data,
+        include_license_data: command.include_license_data,
     };
 
     if let AppSelection::ExecutablePath(path) = &options.selection {
@@ -315,6 +328,10 @@ fn run_scan(command: ScanCommand) -> Result<()> {
             .count()
     );
     println!("Warnings: {}", report.warnings.len());
+    println!(
+        "License artifacts detected: {}",
+        report.license_artifacts.len()
+    );
     println!("Confidence score: {}", report.confidence_score);
     if let Some(artifacts) = report.generated_artifacts {
         println!("Report JSON: {}", artifacts.scan_report_json.display());
@@ -350,6 +367,7 @@ fn run_package(command: PackageCommand) -> Result<()> {
         },
         include_user_data: !command.skip_user_data,
         include_program_data: !command.skip_program_data,
+        include_license_data: command.include_license_data,
     };
     let result = create_package(&options)?;
 
@@ -765,6 +783,35 @@ mod tests {
             Commands::Package(package) => {
                 assert!(matches!(package.archive, Some(ArchiveFormatArg::Zip)));
                 assert!(package.sfx);
+            }
+            _ => {
+                return Err(WinAppMigratorError::InvalidInput(
+                    "expected package command".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parses_package_data_and_license_flags() -> Result<()> {
+        let cli = Cli::try_parse_from([
+            "winappmigrator",
+            "package",
+            "--exe",
+            r"C:\App\App.exe",
+            "--out",
+            r"C:\Out\Pkg",
+            "--skip-program-data",
+            "--include-license-data",
+        ])
+        .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))?;
+
+        match cli.command {
+            Commands::Package(package) => {
+                assert!(package.skip_program_data);
+                assert!(package.include_license_data);
+                assert!(!package.skip_user_data);
             }
             _ => {
                 return Err(WinAppMigratorError::InvalidInput(

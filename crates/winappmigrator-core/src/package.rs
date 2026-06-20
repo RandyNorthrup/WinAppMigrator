@@ -8,11 +8,11 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::archive::{create_self_extracting_archive, create_zip_archive};
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::package_destination_path;
+use crate::file_discovery::{package_destination_path, safe_relative_path};
 use crate::models::{
-    PACKAGE_SCHEMA_VERSION, PackageArchiveFormat, PackageManifest, PackageOptions, PackageResult,
-    RegistryEntry, RegistryHive, RegistryValueKind, ScanOptions, ScheduledTaskEntry, Warning,
-    WarningSeverity,
+    LicenseArtifact, PACKAGE_SCHEMA_VERSION, PackageArchiveFormat, PackageManifest, PackageOptions,
+    PackageResult, RegistryEntry, RegistryHive, RegistryValueKind, ScanOptions, ScheduledTaskEntry,
+    Warning, WarningSeverity,
 };
 use crate::scan::scan_and_write_reports;
 
@@ -23,6 +23,7 @@ const SERVICES_DIR: &str = "services";
 const DRIVERS_DIR: &str = "drivers";
 const SCHEDULED_TASKS_DIR: &str = "scheduled_tasks";
 const ENVIRONMENT_DIR: &str = "environment";
+const LICENSE_DIR: &str = "license";
 const MANIFESTS_DIR: &str = "manifests";
 const REPORTS_DIR: &str = "reports";
 const MANIFEST_FILE: &str = "manifest.json";
@@ -49,6 +50,7 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         include_hashes: true,
         include_user_data: options.include_user_data,
         include_program_data: options.include_program_data,
+        include_license_data: options.include_license_data,
     };
     let report = scan_and_write_reports(&scan_options)?;
     let mut warnings = report.warnings.clone();
@@ -73,6 +75,12 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         files_copied += 1;
     }
 
+    let license_artifacts_detected = package_license_artifacts(
+        &options.output_dir,
+        &report.license_artifacts,
+        &mut warnings,
+    )?;
+
     let manifest = PackageManifest {
         schema_version: PACKAGE_SCHEMA_VERSION.to_owned(),
         source_computer_name: std::env::var("COMPUTERNAME").ok(),
@@ -90,6 +98,7 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         shortcuts_detected: report.shortcuts.clone(),
         environment_variables_detected: report.environment_variables.clone(),
         runtime_prerequisites: report.runtime_prerequisites.clone(),
+        license_artifacts_detected,
         warnings: warnings.clone(),
         items_intentionally_excluded: report.items_excluded.clone(),
     };
@@ -136,6 +145,42 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
     })
 }
 
+/// Copy copyable license file artifacts into the package `license/` directory
+/// and return the (possibly updated) artifact list for the manifest. Non-file
+/// artifacts (framework stores, registry, environment, dongles) are recorded as
+/// metadata only and never copied.
+fn package_license_artifacts(
+    output_dir: &Path,
+    artifacts: &[LicenseArtifact],
+    warnings: &mut Vec<Warning>,
+) -> Result<Vec<LicenseArtifact>> {
+    let mut packaged = Vec::with_capacity(artifacts.len());
+    for artifact in artifacts {
+        let mut artifact = artifact.clone();
+        if artifact.should_copy {
+            match artifact.path.as_ref() {
+                Some(source) if source.is_file() => {
+                    let relative = PathBuf::from(LICENSE_DIR).join(safe_relative_path(source));
+                    let destination = package_destination_path(output_dir, &relative)?;
+                    copy_file_preserving_basic_metadata(source, &destination)?;
+                    artifact.package_relative_path = Some(relative);
+                }
+                _ => {
+                    warnings.push(Warning::new(
+                        "license_file_not_copied",
+                        WarningSeverity::Warning,
+                        "License file could not be copied (missing or unreadable); recorded as metadata only.",
+                        artifact.path.as_ref().map(|path| path.display().to_string()),
+                    ));
+                    artifact.should_copy = false;
+                }
+            }
+        }
+        packaged.push(artifact);
+    }
+    Ok(packaged)
+}
+
 fn create_package_dirs(root: &Path) -> Result<()> {
     for directory in [
         root.to_path_buf(),
@@ -146,6 +191,7 @@ fn create_package_dirs(root: &Path) -> Result<()> {
         root.join(DRIVERS_DIR),
         root.join(SCHEDULED_TASKS_DIR),
         root.join(ENVIRONMENT_DIR),
+        root.join(LICENSE_DIR),
         root.join(MANIFESTS_DIR),
         root.join(REPORTS_DIR),
     ] {

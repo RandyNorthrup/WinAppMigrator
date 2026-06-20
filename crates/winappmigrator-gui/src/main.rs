@@ -86,6 +86,7 @@ pub struct WinAppMigratorApp {
     scan_include_hashes: bool,
     scan_include_user_data: bool,
     scan_include_program_data: bool,
+    scan_include_license_data: bool,
     package_zip: bool,
     package_sfx: bool,
     restore_apply: bool,
@@ -129,6 +130,7 @@ impl WinAppMigratorApp {
             scan_include_hashes: true,
             scan_include_user_data: true,
             scan_include_program_data: true,
+            scan_include_license_data: false,
             package_zip: false,
             package_sfx: false,
             restore_apply: false,
@@ -188,6 +190,7 @@ impl WinAppMigratorApp {
         let include_hashes = self.scan_include_hashes;
         let include_user_data = self.scan_include_user_data;
         let include_program_data = self.scan_include_program_data;
+        let include_license_data = self.scan_include_license_data;
 
         thread::spawn(move || {
             let mut options = ScanOptions::for_executable(executable_path, output_dir);
@@ -195,6 +198,7 @@ impl WinAppMigratorApp {
             options.include_hashes = include_hashes;
             options.include_user_data = include_user_data;
             options.include_program_data = include_program_data;
+            options.include_license_data = include_license_data;
             let message = match scan_and_write_reports(&options) {
                 Ok(report) => ScanMessage::Completed(Box::new(report)),
                 Err(error) => ScanMessage::Failed(error.to_string()),
@@ -223,6 +227,7 @@ impl WinAppMigratorApp {
         let package_sfx = self.package_sfx;
         let include_user_data = self.scan_include_user_data;
         let include_program_data = self.scan_include_program_data;
+        let include_license_data = self.scan_include_license_data;
         let sfx_stub = if package_sfx { cli_stub_path() } else { None };
 
         thread::spawn(move || {
@@ -230,6 +235,7 @@ impl WinAppMigratorApp {
             options.current_directory = std::env::current_dir().ok();
             options.include_user_data = include_user_data;
             options.include_program_data = include_program_data;
+            options.include_license_data = include_license_data;
             options.archive_format = if package_zip || package_sfx {
                 Some(PackageArchiveFormat::Zip)
             } else {

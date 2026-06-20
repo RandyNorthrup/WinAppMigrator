@@ -283,6 +283,42 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
     }
     push_line(&mut output, "");
 
+    push_line(&mut output, "## License Data");
+    if report.license_artifacts.is_empty() {
+        push_line(&mut output, "- No licensing data detected.");
+    } else {
+        push_line(
+            &mut output,
+            "Licensing data may be machine-bound and require reactivation. WinAppMigrator never decrypts, bypasses activation, or emulates dongles.",
+        );
+        push_line(
+            &mut output,
+            "| Framework | Kind | Location | Transferable | Machine-bound | Copied |",
+        );
+        push_line(&mut output, "| --- | --- | --- | --- | --- | --- |");
+        for artifact in &report.license_artifacts {
+            let location = artifact
+                .path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .or_else(|| artifact.registry_location.clone())
+                .unwrap_or_else(|| artifact.detail.clone());
+            push_line(
+                &mut output,
+                &format!(
+                    "| {} | {:?} | {} | {:?} | {} | {} |",
+                    artifact.framework.label(),
+                    artifact.kind,
+                    location,
+                    artifact.transferable,
+                    artifact.machine_bound,
+                    artifact.should_copy
+                ),
+            );
+        }
+    }
+    push_line(&mut output, "");
+
     push_line(&mut output, "## Registry Entries");
     if report.registry_entries.is_empty() {
         push_line(&mut output, "- None discovered.");
@@ -690,6 +726,7 @@ mod tests {
             shortcuts: Vec::new(),
             environment_variables: Vec::new(),
             runtime_prerequisites: Vec::<RuntimePrerequisite>::new(),
+            license_artifacts: Vec::new(),
             warnings: Vec::new(),
             items_excluded: Vec::new(),
             confidence_score: 92,

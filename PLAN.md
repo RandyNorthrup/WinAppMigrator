@@ -86,7 +86,7 @@ Footprint discovery engine, console GUI, and docs are committed (4da43ef). Most 
 - [x] Signing: conditional Authenticode signing is wired for manual CI runs when selected secrets are present.
 - [x] Package archive format: directory package plus optional `.zip`; optional self-extracting `.sfx.exe` wrapper is implemented.
 - [x] Restore posture: dry-run by default, explicit apply required.
-- [x] Security posture: conservative; no secret export or licensing bypass.
+- [x] Security posture: conservative; no secret export; opt-in license capture only (detect + report transferability, copy license files on `--include-license-data`, never restore them automatically), and never decrypt, bypass/emulate activation, or emulate a dongle.
 - [x] Shared-file policy: never copy non-app-owned shared files outside the app directory. Report shared runtimes as prerequisites.
 - [x] Per-user and per-machine installations must be backed up equivalently.
 - [x] Do not use VS Code as the real E2E test app.
@@ -117,6 +117,7 @@ Footprint discovery engine, console GUI, and docs are committed (4da43ef). Most 
 - [x] Restore user data back to the real `%AppData%`/`%ProgramData%` on the target machine (opt-in `--restore-user-data`; routing centralized in `file_discovery::restore_destination_for_entry`; ProgramData apply requires elevation).
 - [x] Harden EXE reverse-engineering: delay-load imports (manual data-dir[13] RVA walk, since `pelite` has no delay API), embedded `RT_MANIFEST` (`requestedExecutionLevel` + SxS `<dependentAssembly>`), managed .NET detection (COR20 data-dir[14]), and runtime-prerequisite breadth (.NET Framework/self-contained, Java, Python, Electron/Node). Validated against mmc.exe (323 delay imports), regedit.exe (SxS Common-Controls), InstallUtil.exe (managed .NET).
 - [x] Optional user-data backup as a first-class capability: separate `MachineAppData` (ProgramData) from genuine per-user data via `include_program_data`/`--skip-program-data`; expand user-data discovery to Documents (incl. `My Games\<App>`) and Saved Games with `User Shell Folders` redirection resolution; skip online-only cloud placeholders (OneDrive Files On-Demand).
+- [x] Optional license-data backup (`license_scan`): detect license files/framework stores/`*_LICENSE_FILE` env vars/vendor registry keys with transferability + machine-binding hints; opt-in `--include-license-data` copies license files into package `license/`; never decrypt/bypass/emulate; never auto-restored. Validated end-to-end with a `.lic` fixture. AGENTS.md policy updated.
 
 ### CLI
 

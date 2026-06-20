@@ -7,7 +7,8 @@ Use `/caveman` status updates in chat: short, direct, no filler. Keep code, docs
 - Build a Windows-only Rust desktop migration analyzer named `WinAppMigrator`.
 - Keep core logic in `winappmigrator-core`; CLI and GUI must call shared core APIs.
 - Do not add global tools, global IDE settings, machine-wide instructions, or global memory.
-- Do not export secrets, license bypass artifacts, credentials, or unrelated user data.
+- Do not export secrets, credentials, or unrelated user data.
+- Licensing data may be captured to help an owner migrate their **own** license: detect license files, framework stores, environment variables, and registry entries, copy license files only on explicit opt-in (`--include-license-data` / GUI toggle, default off), and always report transferability/machine-binding. Never decrypt license data, never bypass or emulate activation, and never emulate a hardware dongle. License data is never restored automatically.
 - Restore behavior must default to dry-run and require explicit apply.
 - Per-user and per-machine installations must be handled equivalently; preserve archived scope and require elevation for machine-wide registry, environment, service, task, and shortcut apply work.
 - Do not copy non-app-owned shared files outside the app directory. Report shared runtimes as prerequisites.

@@ -524,6 +524,10 @@ impl WinAppMigratorApp {
                     &mut self.scan_include_program_data,
                     "Include ProgramData (machine-wide app data)",
                 );
+                ui.checkbox(
+                    &mut self.scan_include_license_data,
+                    "Detect licensing data (may be machine-bound)",
+                );
                 ui.label(
                     RichText::new(
                         "Captures settings and data the app stores outside its install folder.",
@@ -1008,6 +1012,10 @@ impl WinAppMigratorApp {
             ui.checkbox(
                 &mut self.scan_include_program_data,
                 "Include ProgramData (machine-wide app data)",
+            );
+            ui.checkbox(
+                &mut self.scan_include_license_data,
+                "Include licensing data (license/ dir; may be machine-bound)",
             );
             ui.add_space(10.0);
             widgets::field_label(ui, &theme, "Archive options");
