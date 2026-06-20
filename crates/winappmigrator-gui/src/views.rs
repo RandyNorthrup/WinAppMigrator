@@ -656,6 +656,24 @@ impl WinAppMigratorApp {
                     "Signature",
                     signature_label(&report.main_executable.digital_signature),
                 );
+                if report.main_executable.is_dotnet {
+                    ui.add_space(4.0);
+                    widgets::kv_row(ui, theme, "Managed (.NET)", "Yes");
+                }
+                if let Some(level) = report.main_executable.requested_execution_level.as_deref() {
+                    ui.add_space(4.0);
+                    widgets::kv_row(ui, theme, "Execution level", level);
+                }
+                if !report.main_executable.sxs_dependencies.is_empty() {
+                    ui.add_space(8.0);
+                    widgets::field_label(ui, theme, "Side-by-side dependencies");
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        for dependency in &report.main_executable.sxs_dependencies {
+                            widgets::badge(ui, theme, dependency, theme.text_subtle);
+                        }
+                    });
+                }
                 if let Some(version) =
                     report
                         .main_executable
@@ -748,6 +766,44 @@ impl WinAppMigratorApp {
                         );
                     }
                 });
+            }
+
+            if !report.license_artifacts.is_empty() {
+                ui.add_space(12.0);
+                widgets::card_titled(
+                    ui,
+                    theme,
+                    &format!("Licensing · {}", report.license_artifacts.len()),
+                    None,
+                    |ui| {
+                        widgets::notice(
+                            ui,
+                            theme,
+                            Role::Warning,
+                            "License data may be machine-bound and require reactivation. WinAppMigrator never decrypts, bypasses activation, or emulates dongles.",
+                        );
+                        ui.add_space(6.0);
+                        for artifact in &report.license_artifacts {
+                            let location = artifact
+                                .path
+                                .as_ref()
+                                .map(|path| path.display().to_string())
+                                .or_else(|| artifact.registry_location.clone())
+                                .unwrap_or_else(|| artifact.detail.clone());
+                            line_item(
+                                ui,
+                                theme,
+                                artifact.framework.label(),
+                                &location,
+                                if artifact.machine_bound {
+                                    Role::Danger
+                                } else {
+                                    Role::Success
+                                },
+                            );
+                        }
+                    },
+                );
             }
 
             if !report.warnings.is_empty() {
