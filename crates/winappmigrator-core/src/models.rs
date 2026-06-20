@@ -199,6 +199,24 @@ pub struct ExecutableMetadata {
     pub version_info: Option<FileVersionInfo>,
     pub digital_signature: SignatureStatus,
     pub external_manifest: Option<PathBuf>,
+    /// True when the PE carries a CLR/COR20 data directory (a managed .NET
+    /// image). Managed assemblies resolve their dependencies through the CLR
+    /// rather than the PE import table, so this flags additional manual review.
+    #[serde(default)]
+    pub is_dotnet: bool,
+    /// True when an application manifest is embedded as an `RT_MANIFEST`
+    /// resource (distinct from an external `<exe>.manifest` file).
+    #[serde(default)]
+    pub embedded_manifest: bool,
+    /// The `requestedExecutionLevel` from the embedded/external manifest
+    /// (`asInvoker`, `highestAvailable`, `requireAdministrator`), when present.
+    #[serde(default)]
+    pub requested_execution_level: Option<String>,
+    /// Side-by-side assembly identities the manifest declares as dependencies
+    /// (for example `Microsoft.Windows.Common-Controls`). These are serviced by
+    /// WinSxS and are reported for manual review, not copied.
+    #[serde(default)]
+    pub sxs_dependencies: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -13,7 +13,7 @@ use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{FileDiscoveryContext, discover_files};
 use crate::install_source::detect_install_source;
 use crate::models::{
-    AppSelection, DependencyEntry, DriverEntry, InstalledApp, RuntimePrerequisite,
+    AppSelection, DependencyEntry, DriverEntry, FileEntry, InstalledApp, RuntimePrerequisite,
     RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport, ScheduledTaskEntry,
     ServiceEntry, ShortcutEntry, Warning, WarningSeverity,
 };
@@ -30,6 +30,13 @@ const MISSING_DLL_PENALTY: i32 = 8;
 const RUNTIME_PREREQUISITE_PENALTY: i32 = 4;
 const EXTERNAL_MANIFEST_PENALTY: i32 = 5;
 const NON_EXE_EXTENSION_PENALTY: i32 = 3;
+/// Managed .NET images carry GAC/framework dependencies the PE import table does
+/// not list, so certainty is slightly reduced.
+const MANAGED_DOTNET_PENALTY: i32 = 4;
+/// Each declared side-by-side assembly dependency is serviced by WinSxS and may
+/// need manual handling on the target.
+const SXS_DEPENDENCY_PENALTY: i32 = 2;
+const MAX_SXS_DEPENDENCY_PENALTY: i32 = 8;
 const MIN_CONFIDENCE_SCORE: i32 = 0;
 const MAX_CONFIDENCE_SCORE: i32 = 100;
 
@@ -39,6 +46,8 @@ struct ConfidenceInputs<'a> {
     runtime_prerequisite_count: usize,
     external_manifest_detected: bool,
     non_exe_extension: bool,
+    managed_dotnet: bool,
+    sxs_dependency_count: usize,
     service_count: usize,
     driver_count: usize,
     scheduled_task_count: usize,
@@ -146,7 +155,12 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             extra_roots,
         });
 
-    let runtime_prerequisites = runtime_prerequisites(&dependencies);
+    let runtime_prerequisites = runtime_prerequisites(
+        &dependencies,
+        &app_local_dlls,
+        &file_inventory,
+        pe_scan.metadata.is_dotnet,
+    );
     let mut warnings = pe_scan.warnings;
     warnings.extend(resolver_warnings);
     warnings.extend(file_warnings);
@@ -166,6 +180,8 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         runtime_prerequisite_count: runtime_prerequisites.len(),
         external_manifest_detected: pe_scan.metadata.external_manifest.is_some(),
         non_exe_extension: !looks_like_executable(&executable_path),
+        managed_dotnet: pe_scan.metadata.is_dotnet,
+        sxs_dependency_count: pe_scan.metadata.sxs_dependencies.len(),
         service_count: services.len(),
         driver_count: drivers.len(),
         scheduled_task_count: scheduled_tasks.len(),
@@ -291,23 +307,127 @@ fn push_parent_dir(roots: &mut Vec<PathBuf>, path: &Path) {
     }
 }
 
-fn runtime_prerequisites(dependencies: &[DependencyEntry]) -> Vec<RuntimePrerequisite> {
-    let mut seen = BTreeSet::new();
-    let mut prerequisites = Vec::new();
+fn runtime_prerequisites(
+    dependencies: &[DependencyEntry],
+    app_local_dlls: &[FileEntry],
+    file_inventory: &[FileEntry],
+    is_dotnet: bool,
+) -> Vec<RuntimePrerequisite> {
+    let signals = collect_runtime_signal_names(dependencies, app_local_dlls, file_inventory);
+    let vc_dependency = dependencies
+        .iter()
+        .find(|dependency| is_runtime_prerequisite_dll(&dependency.name))
+        .map(|dependency| dependency.name.clone());
+    runtime_prerequisites_from_signals(&signals, vc_dependency.as_deref(), is_dotnet)
+}
 
+/// Lowercased leaf file names that signal a bundled or required runtime:
+/// imported DLL names, app-local DLLs, and the discovered install footprint.
+fn collect_runtime_signal_names(
+    dependencies: &[DependencyEntry],
+    app_local_dlls: &[FileEntry],
+    file_inventory: &[FileEntry],
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
     for dependency in dependencies {
-        if !is_runtime_prerequisite_dll(&dependency.name) {
-            continue;
+        names.insert(dependency.name.to_ascii_lowercase());
+    }
+    for file in app_local_dlls.iter().chain(file_inventory.iter()) {
+        if let Some(leaf) = file
+            .original_path
+            .file_name()
+            .and_then(|name| name.to_str())
+        {
+            names.insert(leaf.to_ascii_lowercase());
         }
-        let key = dependency.name.to_ascii_lowercase();
-        if seen.insert(key) {
-            prerequisites.push(RuntimePrerequisite {
-                name: "Microsoft Visual C++ Redistributable".to_owned(),
-                kind: RuntimePrerequisiteKind::VisualCppRedistributable,
-                evidence: format!("Imported DLL: {}", dependency.name),
-                install_manually: true,
-            });
-        }
+    }
+    names
+}
+
+/// Derive runtime prerequisites from collected signal names. Pure so the
+/// detection rules can be unit-tested with crafted inputs. `install_manually`
+/// is false when the runtime ships with the app (bundled app-local) and true
+/// when it must be installed on the target system.
+fn runtime_prerequisites_from_signals(
+    names: &BTreeSet<String>,
+    vc_dependency: Option<&str>,
+    is_dotnet: bool,
+) -> Vec<RuntimePrerequisite> {
+    let mut prerequisites = Vec::new();
+    let has = |needle: &str| names.contains(needle);
+    let any = |needles: &[&str]| needles.iter().any(|needle| names.contains(*needle));
+
+    if let Some(name) = vc_dependency {
+        prerequisites.push(RuntimePrerequisite {
+            name: "Microsoft Visual C++ Redistributable".to_owned(),
+            kind: RuntimePrerequisiteKind::VisualCppRedistributable,
+            evidence: format!("Imported runtime DLL: {name}"),
+            install_manually: true,
+        });
+    }
+
+    let dotnet_core = any(&["coreclr.dll", "hostfxr.dll", "hostpolicy.dll", "clrjit.dll"]);
+    let dotnet_framework = any(&["mscoree.dll", "mscoreei.dll", "clr.dll"]);
+    if is_dotnet || dotnet_core || dotnet_framework {
+        let (name, evidence, install_manually) = if dotnet_core {
+            (
+                ".NET runtime (bundled)",
+                "Self-contained .NET host present (coreclr/hostfxr)",
+                false,
+            )
+        } else if dotnet_framework {
+            (
+                "Microsoft .NET Framework",
+                ".NET Framework CLR host referenced (mscoree)",
+                true,
+            )
+        } else {
+            (
+                "Microsoft .NET Desktop Runtime",
+                "Managed (.NET) image: CLR/COR20 header present",
+                true,
+            )
+        };
+        prerequisites.push(RuntimePrerequisite {
+            name: name.to_owned(),
+            kind: RuntimePrerequisiteKind::DotNetDesktopRuntime,
+            evidence: evidence.to_owned(),
+            install_manually,
+        });
+    }
+
+    if any(&["jvm.dll", "java.dll", "jli.dll", "javaw.exe", "java.exe"]) {
+        prerequisites.push(RuntimePrerequisite {
+            name: "Java Runtime Environment".to_owned(),
+            kind: RuntimePrerequisiteKind::JavaRuntime,
+            evidence: "Java runtime artifacts present (jvm/java)".to_owned(),
+            install_manually: !has("jvm.dll"),
+        });
+    }
+
+    let python = names
+        .iter()
+        .any(|name| name.starts_with("python") && name.ends_with(".dll"))
+        || any(&["python.exe", "pythonw.exe"]);
+    if python {
+        prerequisites.push(RuntimePrerequisite {
+            name: "Python Runtime".to_owned(),
+            kind: RuntimePrerequisiteKind::PythonRuntime,
+            evidence: "Python runtime artifacts present (python*.dll)".to_owned(),
+            install_manually: false,
+        });
+    }
+
+    let electron = any(&["node.dll", "libnode.dll"])
+        || (has("ffmpeg.dll")
+            && (has("resources.pak") || names.iter().any(|name| name.ends_with(".asar"))));
+    if electron {
+        prerequisites.push(RuntimePrerequisite {
+            name: "Electron / Node runtime".to_owned(),
+            kind: RuntimePrerequisiteKind::ElectronNodeRuntime,
+            evidence: "Electron/Node artifacts present (node/ffmpeg/asar)".to_owned(),
+            install_manually: false,
+        });
     }
 
     prerequisites
@@ -372,6 +492,11 @@ fn calculate_confidence_score(inputs: ConfidenceInputs<'_>) -> u8 {
     if inputs.non_exe_extension {
         score -= NON_EXE_EXTENSION_PENALTY;
     }
+    if inputs.managed_dotnet {
+        score -= MANAGED_DOTNET_PENALTY;
+    }
+    score -= (inputs.sxs_dependency_count as i32 * SXS_DEPENDENCY_PENALTY)
+        .min(MAX_SXS_DEPENDENCY_PENALTY);
 
     score.clamp(MIN_CONFIDENCE_SCORE, MAX_CONFIDENCE_SCORE) as u8
 }
@@ -415,6 +540,8 @@ mod tests {
             runtime_prerequisite_count: 0,
             external_manifest_detected: false,
             non_exe_extension: false,
+            managed_dotnet: false,
+            sxs_dependency_count: 0,
             service_count: 0,
             driver_count: 0,
             scheduled_task_count: 0,
@@ -423,5 +550,56 @@ mod tests {
         });
 
         assert_eq!(score, 92);
+    }
+
+    fn name_set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn detects_bundled_dotnet_and_electron_runtimes() {
+        let names = name_set(&["coreclr.dll", "hostfxr.dll", "ffmpeg.dll", "app.asar"]);
+        let prerequisites = runtime_prerequisites_from_signals(&names, None, true);
+
+        assert!(
+            prerequisites.iter().any(|prerequisite| {
+                prerequisite.kind == RuntimePrerequisiteKind::DotNetDesktopRuntime
+                    && !prerequisite.install_manually
+            }),
+            "self-contained .NET ships the runtime"
+        );
+        assert!(
+            prerequisites
+                .iter()
+                .any(|prerequisite| prerequisite.kind
+                    == RuntimePrerequisiteKind::ElectronNodeRuntime),
+            "ffmpeg.dll + .asar should detect Electron"
+        );
+    }
+
+    #[test]
+    fn dotnet_framework_requires_manual_install() {
+        let names = name_set(&["mscoree.dll"]);
+        let prerequisites = runtime_prerequisites_from_signals(&names, None, false);
+
+        assert!(prerequisites.iter().any(|prerequisite| {
+            prerequisite.kind == RuntimePrerequisiteKind::DotNetDesktopRuntime
+                && prerequisite.install_manually
+        }));
+    }
+
+    #[test]
+    fn detects_java_and_python_runtimes() {
+        let java = runtime_prerequisites_from_signals(&name_set(&["jvm.dll"]), None, false);
+        assert!(
+            java.iter()
+                .any(|prerequisite| prerequisite.kind == RuntimePrerequisiteKind::JavaRuntime)
+        );
+        let python = runtime_prerequisites_from_signals(&name_set(&["python311.dll"]), None, false);
+        assert!(
+            python
+                .iter()
+                .any(|prerequisite| prerequisite.kind == RuntimePrerequisiteKind::PythonRuntime)
+        );
     }
 }

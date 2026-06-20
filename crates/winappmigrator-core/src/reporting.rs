@@ -63,6 +63,17 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
     );
     push_line(
         &mut output,
+        &format!(
+            "- Delay-loaded imports: {}",
+            report
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.delay_loaded)
+                .count()
+        ),
+    );
+    push_line(
+        &mut output,
         &format!("- File inventory entries: {}", report.file_inventory.len()),
     );
     push_line(
@@ -124,6 +135,32 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             report.main_executable.digital_signature
         ),
     );
+    push_line(
+        &mut output,
+        &format!("- Managed (.NET): {}", report.main_executable.is_dotnet),
+    );
+    push_line(
+        &mut output,
+        &format!(
+            "- Embedded manifest: {}",
+            report.main_executable.embedded_manifest
+        ),
+    );
+    if let Some(level) = report.main_executable.requested_execution_level.as_deref() {
+        push_line(
+            &mut output,
+            &format!("- Requested execution level: {level}"),
+        );
+    }
+    if !report.main_executable.sxs_dependencies.is_empty() {
+        push_line(
+            &mut output,
+            &format!(
+                "- Side-by-side dependencies: {}",
+                report.main_executable.sxs_dependencies.join(", ")
+            ),
+        );
+    }
     push_line(&mut output, "");
 
     push_line(&mut output, "## Architecture");
@@ -617,6 +654,10 @@ mod tests {
                 version_info: None,
                 digital_signature: SignatureStatus::NotChecked,
                 external_manifest: None,
+                is_dotnet: false,
+                embedded_manifest: false,
+                requested_execution_level: None,
+                sxs_dependencies: Vec::new(),
             },
             architecture: AppArchitecture::X64,
             install_location: None,
