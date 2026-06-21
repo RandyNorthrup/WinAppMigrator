@@ -15,9 +15,6 @@ pub const RADIUS_SM: u8 = 7;
 pub const RADIUS_MD: u8 = 11;
 pub const RADIUS_LG: u8 = 16;
 
-/// Width of the left navigation rail.
-pub const NAV_WIDTH: f32 = 232.0;
-
 /// The two presentation modes the application supports.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
@@ -42,7 +39,6 @@ pub struct Theme {
     pub accent_soft: Color32,
     pub on_accent: Color32,
     pub bg: Color32,
-    pub sidebar: Color32,
     pub surface: Color32,
     pub card: Color32,
     pub card_hover: Color32,
@@ -83,7 +79,6 @@ impl Theme {
             accent_soft: alpha(accent, 38),
             on_accent: rgb(255, 255, 255),
             bg: rgb(13, 15, 20),
-            sidebar: rgb(17, 19, 26),
             surface: rgb(20, 23, 31),
             card: rgb(25, 29, 39),
             card_hover: rgb(32, 37, 49),
@@ -108,7 +103,6 @@ impl Theme {
             accent_soft: alpha(accent, 28),
             on_accent: rgb(255, 255, 255),
             bg: rgb(244, 246, 250),
-            sidebar: rgb(255, 255, 255),
             surface: rgb(249, 250, 252),
             card: rgb(255, 255, 255),
             card_hover: rgb(243, 246, 250),

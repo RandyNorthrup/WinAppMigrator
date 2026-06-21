@@ -27,9 +27,12 @@ Use `/caveman` status updates in chat: short, direct, no filler. Keep code, docs
   orchestrated by `scan.rs`. Read authoritative installer records before
   guessing; keep heuristics conservative and guarded against cross-app false
   positives. See `docs/discovery.md`.
-- The GUI is an `eframe`/`egui` console split into `theme.rs` (design tokens +
-  style), `widgets.rs` (reusable components + painter-drawn icons), and
-  `views.rs` (routed pages). See `docs/gui.md`.
+- The GUI is the app (build a self-extracting installer; never restores). It is
+  a single `eframe`/`egui` screen split into `theme.rs` (design tokens + style),
+  `widgets.rs` (reusable components + painter-drawn icons), and `views.rs` (the
+  application screen + build-result renderer). The `winappmigrator-cli` crate is
+  the installer stub run on the target (reinstall + hash-verify); restore lives
+  only there. See `docs/gui.md`.
 - Verify GUI changes with `cargo` gates and a single launched-window screenshot;
   do **not** drive the live window with scripted mouse clicks or `SendKeys`.
 

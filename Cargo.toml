@@ -42,3 +42,19 @@ todo = "deny"
 unimplemented = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
+
+# The core does heavy compute (SHA-256, zip, PE parsing, large directory walks).
+# Build first-party code at opt-level 1 and dependencies at opt-level 2 in
+# dev/test so discovery, packaging, and the end-to-end installer test run in
+# seconds rather than minutes, while keeping debug info.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Lean, fast release binaries for the app and the installer it ships.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

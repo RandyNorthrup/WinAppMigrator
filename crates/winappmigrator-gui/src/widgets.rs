@@ -2,10 +2,7 @@
 
 use std::path::PathBuf;
 
-use eframe::egui::{
-    self, Align2, Color32, CursorIcon, FontId, Margin, Rect, Response, Sense, Shape, Stroke,
-    StrokeKind, Ui,
-};
+use eframe::egui::{self, Color32, Margin, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui};
 
 use crate::theme::{self, RADIUS_LG, RADIUS_MD, RADIUS_SM, Role, Theme};
 
@@ -14,18 +11,13 @@ use crate::theme::{self, RADIUS_LG, RADIUS_MD, RADIUS_SM, Role, Theme};
 pub enum ButtonKind {
     Primary,
     Secondary,
-    Danger,
     Ghost,
 }
 
-/// Glyphs drawn for navigation entries and empty states.
+/// Glyph drawn for the empty state.
 #[derive(Clone, Copy)]
 pub enum Icon {
-    Dashboard,
     Apps,
-    Analyze,
-    Package,
-    Restore,
 }
 
 /// A single value tile shown in a metrics row.
@@ -83,20 +75,11 @@ pub fn card_titled<R>(
 }
 
 /// Small uppercase tracking label used above sections.
-pub fn eyebrow(ui: &mut Ui, theme: &Theme, text: &str) {
-    ui.label(
-        egui::RichText::new(text.to_uppercase())
-            .size(11.0)
-            .strong()
-            .color(theme.text_subtle),
-    );
-}
-
 pub fn field_label(ui: &mut Ui, theme: &Theme, text: &str) {
     ui.label(egui::RichText::new(text).size(12.5).color(theme.text_muted));
 }
 
-/// A primary/secondary/danger/ghost action button.
+/// A primary/secondary/ghost action button.
 pub fn button(
     ui: &mut Ui,
     theme: &Theme,
@@ -108,13 +91,6 @@ pub fn button(
         ButtonKind::Primary => {
             egui::Button::new(egui::RichText::new(label).strong().color(theme.on_accent))
                 .fill(theme.accent)
-                .stroke(Stroke::NONE)
-                .corner_radius(RADIUS_SM)
-                .min_size(egui::vec2(120.0, 36.0))
-        }
-        ButtonKind::Danger => {
-            egui::Button::new(egui::RichText::new(label).strong().color(theme.on_accent))
-                .fill(theme.danger)
                 .stroke(Stroke::NONE)
                 .corner_radius(RADIUS_SM)
                 .min_size(egui::vec2(120.0, 36.0))
@@ -306,56 +282,6 @@ pub fn path_field(
     });
 }
 
-/// A full-width clickable navigation entry with a vector icon.
-pub fn nav_item(ui: &mut Ui, theme: &Theme, icon: Icon, label: &str, active: bool) -> bool {
-    let height = 40.0;
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
-    let response = response.on_hover_cursor(CursorIcon::PointingHand);
-    let dark = theme.mode == theme::ThemeMode::Dark;
-
-    let painter = ui.painter();
-    let bg = if active {
-        theme.accent_soft
-    } else if response.hovered() {
-        theme::alpha(theme.text, if dark { 16 } else { 12 })
-    } else {
-        Color32::TRANSPARENT
-    };
-    if bg.a() > 0 {
-        painter.rect_filled(rect, RADIUS_SM, bg);
-    }
-    if active {
-        let bar = Rect::from_min_size(
-            egui::pos2(rect.left() + 3.0, rect.top() + 9.0),
-            egui::vec2(3.0, height - 18.0),
-        );
-        painter.rect_filled(bar, 2, theme.accent);
-    }
-
-    let icon_color = if active {
-        theme.accent
-    } else {
-        theme.text_muted
-    };
-    let icon_rect = Rect::from_center_size(
-        egui::pos2(rect.left() + 28.0, rect.center().y),
-        egui::vec2(18.0, 18.0),
-    );
-    paint_icon(painter, icon, icon_rect, icon_color);
-
-    let text_color = if active { theme.text } else { theme.text_muted };
-    painter.text(
-        egui::pos2(rect.left() + 48.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        label,
-        FontId::proportional(14.0),
-        text_color,
-    );
-
-    response.clicked()
-}
-
 /// Paint the app brand mark inside `rect`.
 pub fn paint_logo(painter: &egui::Painter, rect: Rect, theme: &Theme) {
     painter.rect_filled(rect, RADIUS_SM, theme.accent);
@@ -385,17 +311,6 @@ pub fn paint_logo(painter: &egui::Painter, rect: Rect, theme: &Theme) {
 pub fn paint_icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32) {
     let stroke = Stroke::new(1.7, color);
     match icon {
-        Icon::Dashboard => {
-            let gap = 2.4;
-            let cell = (rect.width() - gap) / 2.0;
-            for (i, j) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
-                let min = egui::pos2(
-                    rect.left() + i * (cell + gap),
-                    rect.top() + j * (cell + gap),
-                );
-                painter.rect_filled(Rect::from_min_size(min, egui::vec2(cell, cell)), 2, color);
-            }
-        }
         Icon::Apps => {
             painter.rect_stroke(rect, 3, stroke, StrokeKind::Inside);
             let top = rect.top() + rect.height() * 0.34;
@@ -413,65 +328,6 @@ pub fn paint_icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color3
                     Stroke::new(1.4, color),
                 );
             }
-        }
-        Icon::Analyze => {
-            let center = egui::pos2(
-                rect.left() + rect.width() * 0.4,
-                rect.top() + rect.height() * 0.4,
-            );
-            let radius = rect.width() * 0.3;
-            painter.circle_stroke(center, radius, stroke);
-            let start = egui::pos2(center.x + radius * 0.7, center.y + radius * 0.7);
-            painter.line_segment(
-                [start, egui::pos2(rect.right(), rect.bottom())],
-                Stroke::new(2.0, color),
-            );
-        }
-        Icon::Package => {
-            painter.rect_stroke(rect, 2, stroke, StrokeKind::Inside);
-            painter.line_segment(
-                [
-                    egui::pos2(rect.left(), rect.center().y),
-                    egui::pos2(rect.right(), rect.center().y),
-                ],
-                Stroke::new(1.4, color),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(rect.center().x, rect.top()),
-                    egui::pos2(rect.center().x, rect.center().y),
-                ],
-                Stroke::new(1.4, color),
-            );
-        }
-        Icon::Restore => {
-            let center = rect.center();
-            let radius = rect.width() * 0.38;
-            let mut points = Vec::new();
-            let start = 0.55_f32;
-            let end = 2.4_f32 * std::f32::consts::PI;
-            let steps = 36;
-            for step in 0..=steps {
-                let t = start + (end - start) * step as f32 / steps as f32;
-                points.push(egui::pos2(
-                    center.x + radius * t.cos(),
-                    center.y + radius * t.sin(),
-                ));
-            }
-            painter.add(Shape::line(points, stroke));
-            // Arrowhead at the arc start.
-            let tip = egui::pos2(
-                center.x + radius * start.cos(),
-                center.y + radius * start.sin(),
-            );
-            painter.add(Shape::line(
-                vec![
-                    egui::pos2(tip.x - 4.5, tip.y - 1.0),
-                    tip,
-                    egui::pos2(tip.x + 1.0, tip.y - 5.0),
-                ],
-                stroke,
-            ));
         }
     }
 }

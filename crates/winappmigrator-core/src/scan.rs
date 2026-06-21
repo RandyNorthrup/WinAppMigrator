@@ -257,12 +257,16 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
 fn selected_executable_path(options: &ScanOptions) -> Result<PathBuf> {
     match &options.selection {
         AppSelection::ExecutablePath(path) => Ok(path.clone()),
-        AppSelection::InstalledApp(app) => app.main_executable.clone().ok_or_else(|| {
-            WinAppMigratorError::InvalidInput(format!(
-                "installed app has no main executable guess: {}",
-                app.display_name
-            ))
-        }),
+        AppSelection::InstalledApp(app) => app
+            .main_executable
+            .clone()
+            .or_else(|| crate::install_source::primary_executable(app))
+            .ok_or_else(|| {
+                WinAppMigratorError::InvalidInput(format!(
+                    "installed app has no main executable guess: {}",
+                    app.display_name
+                ))
+            }),
     }
 }
 

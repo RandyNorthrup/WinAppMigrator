@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 pub const SCAN_SCHEMA_VERSION: &str = "winappmigrator.scan.v1";
 pub const PACKAGE_SCHEMA_VERSION: &str = "winappmigrator.package.v1";
 pub const VERIFICATION_SCHEMA_VERSION: &str = "winappmigrator.verification.v1";
-pub const INVENTORY_SNAPSHOT_SCHEMA_VERSION: &str = "winappmigrator.inventory_snapshot.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -85,26 +84,6 @@ pub struct InstalledApp {
     pub registry_source_path: String,
     pub architecture: AppArchitecture,
     pub install_scope: InstallScope,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InventorySnapshotOptions {
-    pub output_dir: PathBuf,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InventorySnapshotReport {
-    pub schema_version: String,
-    pub generated_at_utc: String,
-    pub applications: Vec<InstalledApp>,
-    pub warnings: Vec<Warning>,
-    pub artifacts: InventorySnapshotArtifacts,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InventorySnapshotArtifacts {
-    pub json: PathBuf,
-    pub markdown: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -185,6 +185,125 @@ pub fn detect_install_source(app: &InstalledApp) -> InstallSource {
     }
 }
 
+/// Best-effort resolution of an application's main executable when the uninstall
+/// registry entry recorded none. Many MSI products omit both `InstallLocation`
+/// and a usable `DisplayIcon`, so the inventory-time heuristic finds nothing.
+/// Here we consult the authoritative install source — the Windows Installer
+/// component database for MSI products, otherwise the resolved install roots —
+/// and pick a representative non-auxiliary executable. Used as a fallback so a
+/// scan or package by application name still succeeds for such apps.
+pub fn primary_executable(app: &InstalledApp) -> Option<PathBuf> {
+    let source = detect_install_source(app);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if source.method == InstallMethod::WindowsInstaller
+        && let Some(code) = source.product_code.as_deref()
+        && let Some(paths) = msi_component_paths(code)
+    {
+        candidates.extend(
+            paths
+                .files
+                .into_iter()
+                .filter(|path| is_executable_path(path)),
+        );
+    }
+
+    if candidates.is_empty() {
+        for dir in &source.roots {
+            collect_dir_executables(dir, &mut candidates);
+        }
+    }
+
+    pick_primary_executable(candidates, &app.display_name)
+}
+
+fn is_executable_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("exe"))
+        .unwrap_or(false)
+        && path.is_file()
+}
+
+fn collect_dir_executables(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if is_executable_path(&path) {
+            out.push(path);
+        }
+    }
+}
+
+/// Pick the most representative main executable from a candidate set: drop
+/// uninstallers/helpers, prefer one whose file name matches the display name,
+/// and otherwise fall back to the largest remaining executable.
+fn pick_primary_executable(candidates: Vec<PathBuf>, display_name: &str) -> Option<PathBuf> {
+    let mut filtered: Vec<PathBuf> = candidates
+        .into_iter()
+        .filter(|path| !is_auxiliary_executable_name(path))
+        .collect();
+    filtered.sort();
+    filtered.dedup();
+    if filtered.is_empty() {
+        return None;
+    }
+
+    let normalized_display = normalize_for_match(display_name);
+    if !normalized_display.is_empty()
+        && let Some(matched) = filtered.iter().find(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(normalize_for_match)
+                .map(|stem| {
+                    !stem.is_empty()
+                        && (normalized_display.contains(&stem)
+                            || stem.contains(&normalized_display))
+                })
+                .unwrap_or(false)
+        })
+    {
+        return Some(matched.clone());
+    }
+
+    filtered
+        .into_iter()
+        .max_by_key(|path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0))
+}
+
+fn is_auxiliary_executable_name(path: &Path) -> bool {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    const AUXILIARY_MARKERS: &[&str] = &[
+        "unins",
+        "uninstall",
+        "setup",
+        "install",
+        "update",
+        "updater",
+        "crashpad",
+        "crashreporter",
+        "vcredist",
+        "vc_redist",
+        "dotnet",
+        "helper",
+    ];
+    AUXILIARY_MARKERS.iter().any(|marker| stem.contains(marker))
+}
+
+fn normalize_for_match(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 fn classify_method(app: &InstalledApp, product_code: Option<&str>) -> InstallMethod {
     let location = app
         .install_location

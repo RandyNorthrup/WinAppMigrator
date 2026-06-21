@@ -10,9 +10,9 @@ use crate::archive::{create_self_extracting_archive, create_zip_archive};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{package_destination_path, safe_relative_path};
 use crate::models::{
-    LicenseArtifact, PACKAGE_SCHEMA_VERSION, PackageArchiveFormat, PackageManifest, PackageOptions,
-    PackageResult, RegistryEntry, RegistryHive, RegistryValueKind, ScanOptions, ScheduledTaskEntry,
-    Warning, WarningSeverity,
+    FileEntry, LicenseArtifact, PACKAGE_SCHEMA_VERSION, PackageArchiveFormat, PackageManifest,
+    PackageOptions, PackageResult, RegistryEntry, RegistryHive, RegistryValueKind, ScanOptions,
+    ScheduledTaskEntry, Warning, WarningSeverity,
 };
 use crate::scan::scan_and_write_reports;
 
@@ -55,6 +55,7 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
     let report = scan_and_write_reports(&scan_options)?;
     let mut warnings = report.warnings.clone();
     let mut files_copied = 0_usize;
+    let mut failed_copies: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     for file in report
         .file_inventory
@@ -71,9 +72,35 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
             continue;
         };
         let destination = package_destination_path(&options.output_dir, relative)?;
-        copy_file_preserving_basic_metadata(&file.original_path, &destination)?;
-        files_copied += 1;
+        // A single locked or access-denied file (a running app's binary, an
+        // AppData installer cache entry, etc.) must not abort the whole package.
+        // Record it as a warning, mark it not-copied in the manifest so
+        // verification stays consistent, and continue.
+        match copy_file_preserving_basic_metadata(&file.original_path, &destination) {
+            Ok(()) => files_copied += 1,
+            Err(error) => {
+                warnings.push(Warning::new(
+                    "file_copy_failed",
+                    WarningSeverity::Warning,
+                    format!("Could not copy file into package: {error}"),
+                    Some(file.original_path.display().to_string()),
+                ));
+                failed_copies.insert(file.original_path.clone());
+            }
+        }
     }
+
+    let packaged_inventory: Vec<FileEntry> = report
+        .file_inventory
+        .iter()
+        .cloned()
+        .map(|mut entry| {
+            if failed_copies.contains(&entry.original_path) {
+                entry.should_copy = false;
+            }
+            entry
+        })
+        .collect();
 
     let license_artifacts_detected = package_license_artifacts(
         &options.output_dir,
@@ -88,7 +115,7 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         scan_timestamp_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,
         main_executable_path: report.main_executable.path.clone(),
         application_metadata: report.source_app.clone(),
-        file_inventory: report.file_inventory.clone(),
+        file_inventory: packaged_inventory,
         registry_keys_exported: report.registry_entries.clone(),
         com_registrations_detected: report.com_registrations.clone(),
         file_associations_detected: report.file_associations.clone(),

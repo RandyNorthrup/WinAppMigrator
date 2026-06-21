@@ -18,19 +18,15 @@ pub mod restore;
 pub mod scan;
 pub mod service_scan;
 pub mod shortcut_scan;
-pub mod snapshot;
 pub mod task_scan;
 pub mod verify;
 
 pub use app_inventory::list_installed_apps;
 pub use archive::{
-    create_self_extracting_archive, create_zip_archive, extract_embedded_self_archive,
-    extract_zip_archive, has_embedded_self_archive,
+    create_self_extracting_archive, extract_embedded_self_archive, has_embedded_self_archive,
 };
 pub use errors::{Result, WinAppMigratorError};
 pub use models::*;
 pub use package::create_package;
-pub use restore::{plan_restore, restore_package};
-pub use scan::scan_and_write_reports;
-pub use snapshot::write_inventory_snapshot;
+pub use restore::restore_package;
 pub use verify::verify_package;

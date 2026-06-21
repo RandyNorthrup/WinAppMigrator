@@ -1,7 +1,5 @@
 /target/
 /dist/
-/scan-output/
-/scan-output-*/
 /.env
 /.env.*
 !/.env.example

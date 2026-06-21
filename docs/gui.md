@@ -1,81 +1,76 @@
 # GUI Architecture
 
-The native GUI (`winappmigrator-gui`) is an `eframe`/`egui` 0.34 desktop app
-structured as an enterprise "console": a full-height navigation rail, a content
-header, and routed pages, with a cohesive light/dark design system.
+The native GUI (`winappmigrator-gui`) is an `eframe`/`egui` 0.34 desktop app.
+It is the **app**: it runs on the source machine, lists installed applications,
+and backs a chosen one up into a single self-extracting installer. It is a
+single screen — there are no routed pages, navigation rail, or restore controls.
+Reinstalling is the job of the installer it produces, on the target machine.
 
 ## Modules
 
 - `src/theme.rs` — the design system. `Theme` holds a fully resolved token
   palette for `ThemeMode::Dark` / `Light` (accent, surfaces, borders, text,
   status colors, shadows) and `Theme::apply(ctx)` maps those tokens onto the
-  global `egui` style (widget visuals, selection, panel/window fills, text
-  styles, spacing, corner radii). Radius/role constants live here too.
+  global `egui` style. Radius/role constants live here too.
 - `src/widgets.rs` — reusable, theme-aware components: `card` / `card_titled`,
-  `button` (`ButtonKind` Primary/Secondary/Danger/Ghost), `status_pill`,
-  `badge`, `metric_tiles`, `kv_row`, `mono_path`, `notice`, `empty_state`,
-  `path_field`, `nav_item`, and hand-drawn vector icons (`Icon`, `paint_icon`,
-  `paint_logo`) so no image assets are required.
-- `src/views.rs` — one method per page plus the result renderers (dependency
-  graph/table, Windows-integration collapsibles, **Data locations** footprint
-  card, verification, etc.). Implemented as `impl WinAppMigratorApp` so pages can
-  read/mutate app state directly.
-- `src/main.rs` — `WinAppMigratorApp` state, background worker orchestration
-  (scan/package/restore/snapshot/inventory over `mpsc` channels and threads),
-  the app-shell layout, routing, and small status helpers.
+  `button` (`ButtonKind` Primary/Secondary/Ghost), `status_pill`, `badge`,
+  `metric_tiles`, `kv_row`, `mono_path`, `notice`, `empty_state`, `path_field`,
+  and the painter-drawn brand mark/empty-state glyph (`paint_logo`,
+  `paint_icon`) so no image assets are required.
+- `src/views.rs` — the single application screen (`view_applications`): the
+  apps table, the per-app migrate panel (license/user-data toggles + build
+  button), and the build-result renderer. Implemented as
+  `impl WinAppMigratorApp` so it can read/mutate app state directly.
+- `src/main.rs` — `WinAppMigratorApp` state, the two background workers
+  (installed-app inventory, and the build pipeline) over `mpsc` channels and
+  threads, the app-shell layout, and small status helpers.
 
 ## Layout (eframe 0.34)
 
 eframe 0.34's `App` trait uses `logic()` (poll workers) + `ui()` (draw), where
-`ui()` receives a margin-less central `Ui`. The shell nests panels with
+`ui()` receives a margin-less central `Ui`. The shell nests two panels with
 `show_inside`:
 
 ```text
-Panel::left("nav")      → full-height navigation rail (brand, items, footer)
-Panel::top("topbar")    → page title, status pills, Reload apps, theme toggle
-CentralPanel            → ScrollArea → draw_active_view() (the routed page)
+Panel::top("header")  → brand, subtitle, inventory pill, Reload apps, theme toggle
+CentralPanel          → ScrollArea → view_applications()
 ```
 
 > Note: `egui::SidePanel`/`TopBottomPanel` are deprecated aliases in 0.34 — use
-> `egui::Panel::left`/`top` with `.exact_size`. The `App` trait's `update()` is
-> deprecated in favor of `ui()`.
+> `egui::Panel::top`. The `App` trait's `update()` is deprecated in favor of
+> `ui()`.
 
-## Pages (`View`)
+## The one flow
 
-- **Dashboard** — KPI tiles, a 4-stage migration workflow with status, quick
-  actions, environment info.
-- **Applications** — searchable/virtualized table of installed apps (name,
-  publisher, version, scope, arch) with scope filter and a "Save snapshot"
-  action; selecting a row fills the executable path and a default output dir and
-  shows a detail card ("Back up this app" / "Analyze").
-- **Analyze** — source + scan options (recursive DLLs, SHA-256, include user
-  data), and the results: summary metrics, **install method + evidence**, the
-  **Data locations** footprint card, dependency graph + table, Windows
-  integrations (registry/COM/services/drivers/tasks/shortcuts/env), runtime
-  prerequisites, and warnings.
-- **Package** — source, contents (include user data), archive options
-  (zip/SFX), and result artifacts.
-- **Restore** — package + target, dry-run/apply segmented control, force,
-  result metrics + verification + logged changes.
+1. **Pick an app** from the searchable, virtualized table (name, publisher,
+   version, scope, arch), with an All / Per-user / Per-machine filter.
+2. **Choose what to include** in the migrate panel: optionally back up the
+   app's license/activation data, and optionally its user data (settings,
+   Documents, Saved Games, ProgramData). Program files are always included.
+3. **Create the self-extracting installer.** One background pipeline
+   reverse-engineers the app (analysis is part of building, not a separate
+   step), copies its files, embeds everything in a self-extracting `.exe`, and
+   hash-verifies the package. The result card shows the installer path and a
+   "Hashes confirmed" status.
 
-## UX intent (middle ground)
-
-Keep the common path simple — pick an app, click "Back up this app", review the
-prefilled Package page — while leaving all advanced controls available (custom
-paths, scan toggles, dry-run vs apply, include/exclude user data). The heavy
-discovery work runs on background threads with progress text.
+The build requires the installer stub (`winappmigrator.exe`) beside the GUI; if
+it is missing the build button is disabled with a clear notice, because the
+product is always a self-extracting installer.
 
 ## Conventions
 
-- Theme is cloned per view method (`let theme = self.theme.clone();`) to keep
-  borrow handling simple; widgets take `&Theme`.
+- Theme is cloned per method (`let theme = self.theme.clone();`) to keep borrow
+  handling simple; widgets take `&Theme`.
 - Long-running work never blocks the UI thread; `request_repaint()` drives
   polling while a worker runs.
 - No external fonts/images; icons and the brand mark are painter-drawn.
+- No restore/verify-against-target code lives in the app. The app only builds
+  and confirms the package's own hashes.
 
 ## Validation
 
 Build/visual checks only — do **not** drive the live window with scripted mouse
 clicks or `SendKeys` (it is flaky and disrupts the desktop). Verify via
-`cargo fmt`/`clippy -D warnings`/tests, by launching the app and taking a single
-screenshot, or by exercising scan/package/restore logic through the CLI.
+`cargo fmt`/`clippy -D warnings`/tests, and by launching the app and taking a
+single screenshot. The build/reinstall/verify machinery itself is covered by the
+`winappmigrator-core` test suite.
