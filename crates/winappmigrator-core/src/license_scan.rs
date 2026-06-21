@@ -334,6 +334,7 @@ fn scan_vendor_key(
                 &sub_path,
                 None,
                 ctx.requires_admin,
+                ctx.requires_admin,
                 format!(
                     "Registry key suggests licensing data: {}\\{sub_path}",
                     ctx.hive_name
@@ -355,21 +356,24 @@ fn report_license_values(
         if !is_license_registry_name(&value_name) {
             continue;
         }
+        let value_kind = map_registry_type(value.vtype.clone());
+        // A DPAPI-encrypted binary blob is bound to the source user's master key,
+        // so it is reported (and restored best-effort) but flagged machine-bound:
+        // it will likely need reactivation rather than decrypting on the target.
+        let dpapi = matches!(value_kind, RegistryValueKind::Binary) && is_dpapi_blob(&value.bytes);
+        let machine_bound = ctx.requires_admin || dpapi;
         artifacts.push(registry_artifact(
             ctx.hive_name,
             key_path,
             Some(&value_name),
             ctx.requires_admin,
+            machine_bound,
             format!("Registry value suggests licensing data: {value_name}"),
         ));
-        // Capture only transferable, user-scoped values for automatic restore.
-        // Machine-scoped (HKLM) license data is left as metadata only, and
-        // binary blobs (commonly per-user DPAPI ciphertext that cannot decrypt on
-        // another machine/user) are never auto-restored.
-        let value_kind = map_registry_type(value.vtype.clone());
-        if ctx.include_license_data
-            && !ctx.requires_admin
-            && is_transferable_value_kind(&value_kind)
+        // Capture user-scoped (HKCU) license values — including plain binary
+        // serials/tokens and DPAPI blobs (best-effort, may need reactivation).
+        // Machine-scoped (HKLM) license data is left as metadata only.
+        if ctx.include_license_data && !ctx.requires_admin && is_restorable_value_kind(&value_kind)
         {
             entries.push(reg_value_to_entry(
                 ctx.hive.clone(),
@@ -380,6 +384,18 @@ fn report_license_values(
             ));
         }
     }
+}
+
+/// DPAPI provider GUID `{df9d8cd0-1501-11d1-8c7a-00c04fc297eb}` in the on-disk
+/// (mixed-endian) byte order it appears in a `CryptProtectData` blob header.
+const DPAPI_PROVIDER_GUID: [u8; 16] = [
+    0xD0, 0x8C, 0x9D, 0xDF, 0x01, 0x15, 0xD1, 0x11, 0x8C, 0x7A, 0x00, 0xC0, 0x4F, 0xC2, 0x97, 0xEB,
+];
+
+/// Heuristically detect a DPAPI blob: a 4-byte version, then the DPAPI provider
+/// GUID at offset 4.
+fn is_dpapi_blob(bytes: &[u8]) -> bool {
+    bytes.len() >= DPAPI_PROVIDER_GUID.len() + 4 && bytes[4..20] == DPAPI_PROVIDER_GUID
 }
 
 fn reg_value_to_entry(
@@ -408,10 +424,11 @@ fn reg_value_to_entry(
     }
 }
 
-/// Whether a registry value kind is plainly transferable to another machine.
-/// Text and numeric values transfer; binary blobs (often DPAPI-encrypted,
-/// user/machine-bound ciphertext) and other opaque kinds do not.
-fn is_transferable_value_kind(kind: &RegistryValueKind) -> bool {
+/// Whether a registry value kind holds restorable license data. Text, numeric,
+/// and binary values are captured (binary covers serials/tokens and DPAPI blobs,
+/// the latter restored best-effort and flagged machine-bound). Opaque kinds
+/// (None, links, resource lists) are not license data and are skipped.
+fn is_restorable_value_kind(kind: &RegistryValueKind) -> bool {
     matches!(
         kind,
         RegistryValueKind::String
@@ -419,6 +436,7 @@ fn is_transferable_value_kind(kind: &RegistryValueKind) -> bool {
             | RegistryValueKind::Dword
             | RegistryValueKind::Qword
             | RegistryValueKind::MultiString
+            | RegistryValueKind::Binary
     )
 }
 
@@ -452,6 +470,7 @@ fn registry_artifact(
     key_path: &str,
     value_name: Option<&str>,
     requires_admin: bool,
+    machine_bound: bool,
     detail: String,
 ) -> LicenseArtifact {
     let location = match value_name {
@@ -464,10 +483,13 @@ fn registry_artifact(
         path: None,
         registry_location: Some(location),
         detail,
-        // HKLM licensing data is machine-scoped; values may also be DPAPI-bound.
-        machine_bound: requires_admin,
+        machine_bound,
         requires_admin,
-        transferable: TransferableHint::Unknown,
+        transferable: if machine_bound {
+            TransferableHint::Unlikely
+        } else {
+            TransferableHint::Unknown
+        },
         should_copy: false,
         package_relative_path: None,
         size_bytes: None,
@@ -539,16 +561,28 @@ mod tests {
     }
 
     #[test]
-    fn binary_license_values_are_not_auto_restored() {
-        // Transferable text/numeric kinds are captured...
-        assert!(is_transferable_value_kind(&RegistryValueKind::String));
-        assert!(is_transferable_value_kind(&RegistryValueKind::ExpandString));
-        assert!(is_transferable_value_kind(&RegistryValueKind::Dword));
-        assert!(is_transferable_value_kind(&RegistryValueKind::Qword));
-        assert!(is_transferable_value_kind(&RegistryValueKind::MultiString));
-        // ...but binary (often DPAPI ciphertext) and opaque kinds are not.
-        assert!(!is_transferable_value_kind(&RegistryValueKind::Binary));
-        assert!(!is_transferable_value_kind(&RegistryValueKind::None));
+    fn restorable_value_kinds_cover_license_data() {
+        // Text, numeric, and binary license values are captured for restore...
+        assert!(is_restorable_value_kind(&RegistryValueKind::String));
+        assert!(is_restorable_value_kind(&RegistryValueKind::ExpandString));
+        assert!(is_restorable_value_kind(&RegistryValueKind::Dword));
+        assert!(is_restorable_value_kind(&RegistryValueKind::Qword));
+        assert!(is_restorable_value_kind(&RegistryValueKind::MultiString));
+        assert!(is_restorable_value_kind(&RegistryValueKind::Binary));
+        // ...but opaque, non-data kinds are skipped.
+        assert!(!is_restorable_value_kind(&RegistryValueKind::None));
+        assert!(!is_restorable_value_kind(&RegistryValueKind::Link));
+    }
+
+    #[test]
+    fn detects_dpapi_blob() {
+        let mut blob = vec![0x01, 0x00, 0x00, 0x00];
+        blob.extend_from_slice(&DPAPI_PROVIDER_GUID);
+        blob.extend_from_slice(&[0u8; 8]);
+        assert!(is_dpapi_blob(&blob));
+        // A plain serial/token is not flagged as DPAPI.
+        assert!(!is_dpapi_blob(b"ACME-1234-5678-PLAINKEY"));
+        assert!(!is_dpapi_blob(&[0u8; 10]));
     }
 
     #[test]
