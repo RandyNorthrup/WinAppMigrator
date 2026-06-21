@@ -196,7 +196,9 @@ cargo build --workspace --release
 .\scripts\gui-clickthrough-smoke.ps1   # launches the release GUI and exits
 ```
 
-See `docs\discovery.md`, `docs\gui.md`, `docs\installer-strategy.md`, `docs\sfx.md`, and `docs\tui-decision.md`.
+For a full reinstall on a clean, disposable OS (privileged registry/service/driver/prerequisite work included), run the produced installer through Windows Sandbox with `scripts\sandbox-install-e2e.ps1` — see `docs\sandbox-e2e.md`.
+
+See `docs\discovery.md`, `docs\gui.md`, `docs\installer-strategy.md`, `docs\sfx.md`, `docs\sandbox-e2e.md`, and `docs\tui-decision.md`.
 
 ## Release Notes
 

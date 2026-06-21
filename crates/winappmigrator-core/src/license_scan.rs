@@ -26,8 +26,10 @@ use crate::models::{
 /// File extensions that strongly indicate a license/activation file.
 const STRONG_LICENSE_EXTENSIONS: &[&str] = &["lic", "lservrc", "v2c", "rlm", "entitlement"];
 /// Ambiguous extensions only treated as license data when the file name itself
-/// signals licensing.
-const AMBIGUOUS_LICENSE_EXTENSIONS: &[&str] = &["dat", "key", "bin", "txt", "xml"];
+/// signals licensing. `.txt` is intentionally excluded: it is overwhelmingly a
+/// EULA / third-party license *text* (e.g. `7za_license.txt`), not the owner's
+/// activation data, and produced false positives.
+const AMBIGUOUS_LICENSE_EXTENSIONS: &[&str] = &["dat", "key", "bin", "xml"];
 const LICENSE_NAME_SIGNALS: &[&str] = &["license", "licence", "activation", "entitlement"];
 /// Registry value/sub-key names that indicate stored licensing data.
 const LICENSE_REGISTRY_SIGNALS: &[&str] = &[
@@ -261,6 +263,11 @@ fn detect_license_env_vars(artifacts: &mut Vec<LicenseArtifact>) {
 
 fn is_license_env_var(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
+    // Skip build-tool variables that merely end with the suffix (e.g. cargo sets
+    // CARGO_PKG_LICENSE_FILE) — they are not the application's license.
+    if upper.starts_with("CARGO_") || upper.starts_with("RUST") {
+        return false;
+    }
     upper == "LM_LICENSE_FILE" || upper.ends_with("_LICENSE_FILE")
 }
 
@@ -551,6 +558,10 @@ mod tests {
         assert!(license_file_match(Path::new(r"C:\App\data.dat")).is_none());
         assert!(license_file_match(Path::new(r"C:\App\license.dat")).is_some());
         assert!(license_file_match(Path::new(r"C:\App\readme.txt")).is_none());
+        // EULA / third-party license *text* must not be flagged as the owner's
+        // license (regression: 7za_license.txt false positive on Solar Fire).
+        assert!(license_file_match(Path::new(r"C:\App\7za_license.txt")).is_none());
+        assert!(license_file_match(Path::new(r"C:\App\license.txt")).is_none());
     }
 
     #[test]
@@ -558,6 +569,8 @@ mod tests {
         assert!(is_license_env_var("LM_LICENSE_FILE"));
         assert!(is_license_env_var("ACME_LICENSE_FILE"));
         assert!(!is_license_env_var("PATH"));
+        // Build-tool variables that merely end with the suffix are not licenses.
+        assert!(!is_license_env_var("CARGO_PKG_LICENSE_FILE"));
     }
 
     #[test]
