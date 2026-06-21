@@ -188,7 +188,10 @@ and install dir leaf/parent. Guards:
 - `MachineAppData` — **machine-wide** `ProgramData` application data shared by
   all users. This is deliberately distinct from per-user data and is copied
   under its own `include_program_data` toggle.
-- `ManualRuntimeInstall` — `.sys` drivers (never copied).
+- `ManualRuntimeInstall` — `.sys` driver files. Not copied as plain files; an
+  app-owned driver that backs a registered driver service is instead bundled and
+  re-registered via the driver-service path, while vendor/inbox drivers get
+  precise reinstall guidance.
 - `WindowsSystem` / others — reported, not copied.
 
 Per-user `Documents`/`Saved Games` are resolved through the `User Shell Folders`

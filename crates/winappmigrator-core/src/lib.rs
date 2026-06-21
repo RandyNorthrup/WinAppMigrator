@@ -11,6 +11,7 @@ pub mod models;
 pub mod package;
 pub mod path_utils;
 pub mod pe_scan;
+pub mod prerequisites;
 pub mod privilege;
 pub mod registry_scan;
 pub mod reporting;

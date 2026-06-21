@@ -166,9 +166,11 @@ tests/
 - DLL resolution reports system files but package creation copies only app-owned files.
 - Non-app-owned shared files outside the app directory are never copied; shared runtimes are reported as prerequisites.
 - Registry, environment variable, service, shortcut, and scheduled task restore paths are archived and apply-capable when privileges and overwrite policy allow.
-- Package and restore verification checks file hashes, rewritten registry values, environment variables, services, scheduled tasks, and shortcuts.
-- Driver and kernel components are reported as metadata-only manual reinstall items; WinAppMigrator does not copy or register drivers automatically.
-- Secrets and credentials are not collected. Licensing data is detected only to help an owner migrate their own license: it is opt-in (`--include-license-data`), reports transferability/machine-binding, copies license files only into the package `license/` directory, and is never restored automatically. WinAppMigrator never decrypts license data, bypasses or emulates activation, or emulates a hardware dongle.
+- Package and restore verification checks file hashes, rewritten registry values, environment variables, services, scheduled tasks, shortcuts, restored license files, bundled-prerequisite presence, and re-registered drivers.
+- Detected runtime prerequisites (Visual C++ runtime, …) are downloaded and embedded in the installer at build time, then installed silently and verified on the target (with a winget/URL fallback when a download is unavailable).
+- Application-owned drivers (a `.sys` inside the app's install footprint) are bundled and re-registered automatically (`sc create`, elevation required), then verified. Vendor/inbox drivers are not redistributed and are reported with precise, named reinstall guidance.
+- Secrets and credentials are not collected. Licensing data is detected only to help an owner migrate their own license: it is opt-in (`--include-license-data`), reports transferability/machine-binding, and is restored automatically by the installer — license files to their original/real locations, transferable (non-machine-bound, user-scoped) registry values, and non-machine-bound framework stores. Machine-bound licenses are skipped silently and may still need reactivation. WinAppMigrator never decrypts license data, bypasses or emulates activation, or emulates a hardware dongle.
+- The build output is a single self-extracting executable whose name encodes its contents (e.g. `App_userdata_license_installer.exe`); it carries the app, its data, license, prerequisites, and drivers, and reinstalls everything on the target.
 
 ## Troubleshooting
 

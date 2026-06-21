@@ -10,13 +10,17 @@
 
 use std::path::{Path, PathBuf};
 
-use winreg::RegKey;
-use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY};
+use winreg::enums::{
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN,
+    REG_EXPAND_SZ, REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD,
+    REG_RESOURCE_LIST, REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, RegType,
+};
+use winreg::{RegKey, RegValue};
 
 use crate::hashing::sha256_file;
 use crate::models::{
-    FileEntry, LicenseArtifact, LicenseArtifactKind, LicenseFramework, TransferableHint, Warning,
-    WarningSeverity,
+    FileEntry, LicenseArtifact, LicenseArtifactKind, LicenseFramework, MatchConfidence,
+    RegistryEntry, RegistryHive, RegistryValueKind, TransferableHint, Warning, WarningSeverity,
 };
 
 /// File extensions that strongly indicate a license/activation file.
@@ -57,41 +61,50 @@ struct LicenseFileClass {
 
 pub fn scan_license_artifacts(
     context: &LicenseScanContext<'_>,
-) -> (Vec<LicenseArtifact>, Vec<Warning>) {
+) -> (Vec<LicenseArtifact>, Vec<RegistryEntry>, Vec<Warning>) {
     let mut artifacts = Vec::new();
+    let mut registry_entries = Vec::new();
     let mut warnings = Vec::new();
 
     detect_license_files(context, &mut artifacts);
-    detect_framework_stores(&mut artifacts);
+    detect_framework_stores(context, &mut artifacts);
     detect_license_env_vars(&mut artifacts);
-    detect_registry_licenses(context, &mut artifacts);
+    detect_registry_licenses(context, &mut artifacts, &mut registry_entries);
+    dedupe_registry_entries(&mut registry_entries);
 
     if !artifacts.is_empty() {
+        // Informational only: the installer restores license data automatically.
+        // No manual action is required of the user.
         warnings.push(Warning::new(
             "license_data_detected",
-            WarningSeverity::Warning,
-            "Licensing data was detected. WinAppMigrator captures it to help migrate your own license; it never decrypts, bypasses activation, or emulates dongles. Review each item before relying on it.",
+            WarningSeverity::Info,
+            "Licensing/activation data was detected. The installer captures and restores it automatically; WinAppMigrator never decrypts, bypasses activation, or emulates dongles.",
             None,
         ));
         if artifacts.iter().any(|artifact| artifact.machine_bound) {
             warnings.push(Warning::new(
                 "license_machine_bound",
-                WarningSeverity::Warning,
-                "One or more licenses are machine-bound (hardware dongle, machine-locked activation, or encrypted) and will likely require reactivation on the target PC.",
-                None,
-            ));
-        }
-        if context.include_license_data {
-            warnings.push(Warning::new(
-                "license_data_included",
                 WarningSeverity::Info,
-                "License files are copied into the package `license/` directory. They are not restored automatically; place and reactivate them manually on the target.",
+                "Some licenses are machine-bound (hardware dongle, machine-locked activation, or encrypted). The installer restores what it can; these may still require reactivation on the new PC.",
                 None,
             ));
         }
     }
 
-    (artifacts, warnings)
+    (artifacts, registry_entries, warnings)
+}
+
+/// Drop duplicate captured registry values (the WOW64 32-bit view can surface
+/// the same value under two key paths).
+fn dedupe_registry_entries(entries: &mut Vec<RegistryEntry>) {
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|entry| {
+        seen.insert((
+            format!("{:?}", entry.hive),
+            entry.key_path.clone(),
+            entry.value_name.clone(),
+        ))
+    });
 }
 
 fn detect_license_files(context: &LicenseScanContext<'_>, artifacts: &mut Vec<LicenseArtifact>) {
@@ -178,7 +191,7 @@ fn license_file_match(path: &Path) -> Option<LicenseFileClass> {
     None
 }
 
-fn detect_framework_stores(artifacts: &mut Vec<LicenseArtifact>) {
+fn detect_framework_stores(context: &LicenseScanContext<'_>, artifacts: &mut Vec<LicenseArtifact>) {
     let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
     let Some(program_data) = program_data else {
         return;
@@ -192,22 +205,24 @@ fn detect_framework_stores(artifacts: &mut Vec<LicenseArtifact>) {
     for (relative, framework, machine_bound) in stores {
         let path = program_data.join(relative);
         if path.is_dir() {
+            let machine_bound = *machine_bound;
             artifacts.push(LicenseArtifact {
                 kind: LicenseArtifactKind::FrameworkStore,
                 framework: framework.clone(),
                 path: Some(path.clone()),
                 registry_location: None,
                 detail: format!("{} license store present", framework.label()),
-                machine_bound: *machine_bound,
+                machine_bound,
                 requires_admin: true,
-                transferable: if *machine_bound {
+                transferable: if machine_bound {
                     TransferableHint::Unlikely
                 } else {
                     TransferableHint::Unknown
                 },
-                // Framework stores are reported, not bulk-copied: they are
-                // machine-wide and typically hardware/activation bound.
-                should_copy: false,
+                // Machine-bound stores (CodeMeter/Sentinel) are hardware/activation
+                // bound and never copied. Non-machine-bound stores (FlexLM) are
+                // copied and restored when license backup is enabled.
+                should_copy: context.include_license_data && !machine_bound,
                 package_relative_path: None,
                 size_bytes: None,
                 hash_sha256: None,
@@ -249,9 +264,19 @@ fn is_license_env_var(name: &str) -> bool {
     upper == "LM_LICENSE_FILE" || upper.ends_with("_LICENSE_FILE")
 }
 
+/// Context for a single hive sweep, threaded through the vendor-key walk so the
+/// captured registry values carry the right hive and transferability.
+struct RegistryScanCtx {
+    hive: RegistryHive,
+    hive_name: &'static str,
+    requires_admin: bool,
+    include_license_data: bool,
+}
+
 fn detect_registry_licenses(
     context: &LicenseScanContext<'_>,
     artifacts: &mut Vec<LicenseArtifact>,
+    entries: &mut Vec<RegistryEntry>,
 ) {
     let Some(publisher) = context.publisher else {
         return;
@@ -260,72 +285,166 @@ fn detect_registry_licenses(
     if vendor.is_empty() {
         return;
     }
-    for (hive, hive_name, requires_admin) in [
-        (HKEY_LOCAL_MACHINE, "HKLM", true),
-        (HKEY_CURRENT_USER, "HKCU", false),
+    for (hive, hive_enum, hive_name, requires_admin) in [
+        (HKEY_LOCAL_MACHINE, RegistryHive::LocalMachine, "HKLM", true),
+        (HKEY_CURRENT_USER, RegistryHive::CurrentUser, "HKCU", false),
     ] {
+        let ctx = RegistryScanCtx {
+            hive: hive_enum,
+            hive_name,
+            requires_admin,
+            include_license_data: context.include_license_data,
+        };
+        // Read the native view for the plain `SOFTWARE` prefix and the 32-bit view
+        // via the explicit `WOW6432Node` prefix. Forcing KEY_WOW64_32KEY on both
+        // would miss native 64-bit keys and record a path that restores into the
+        // wrong view.
         for prefix in [r"SOFTWARE", r"SOFTWARE\WOW6432Node"] {
             let key_path = format!(r"{prefix}\{vendor}");
             let root = RegKey::predef(hive);
-            let Ok(vendor_key) = root.open_subkey_with_flags(&key_path, KEY_READ | KEY_WOW64_32KEY)
-            else {
+            let Ok(vendor_key) = root.open_subkey_with_flags(&key_path, KEY_READ) else {
                 continue;
             };
-            scan_vendor_key(&vendor_key, hive_name, &key_path, requires_admin, artifacts);
+            scan_vendor_key(&vendor_key, &ctx, &key_path, artifacts, entries);
         }
     }
 }
 
 /// Inspect a vendor key (and its immediate sub-keys) for value names that look
-/// like stored licensing data. Values are reported by location only — they are
-/// not copied, since they are often DPAPI-encrypted and machine-bound.
+/// like stored licensing data. Locations are always reported. Transferable
+/// (non-machine-bound, user-scoped) values are additionally captured so the
+/// installer can restore them; machine-bound (HKLM) values are reported only.
 fn scan_vendor_key(
     vendor_key: &RegKey,
-    hive_name: &str,
+    ctx: &RegistryScanCtx,
     key_path: &str,
-    requires_admin: bool,
     artifacts: &mut Vec<LicenseArtifact>,
+    entries: &mut Vec<RegistryEntry>,
 ) {
-    report_license_values(vendor_key, hive_name, key_path, requires_admin, artifacts);
+    report_license_values(vendor_key, ctx, key_path, artifacts, entries);
     for subkey_name in vendor_key.enum_keys().flatten().take(MAX_VENDOR_SUBKEYS) {
         let signals = is_license_registry_name(&subkey_name);
-        let Ok(subkey) =
-            vendor_key.open_subkey_with_flags(&subkey_name, KEY_READ | KEY_WOW64_32KEY)
-        else {
+        let Ok(subkey) = vendor_key.open_subkey_with_flags(&subkey_name, KEY_READ) else {
             continue;
         };
         let sub_path = format!(r"{key_path}\{subkey_name}");
         if signals {
             artifacts.push(registry_artifact(
-                hive_name,
+                ctx.hive_name,
                 &sub_path,
                 None,
-                requires_admin,
-                format!("Registry key suggests licensing data: {hive_name}\\{sub_path}"),
+                ctx.requires_admin,
+                format!(
+                    "Registry key suggests licensing data: {}\\{sub_path}",
+                    ctx.hive_name
+                ),
             ));
         }
-        report_license_values(&subkey, hive_name, &sub_path, requires_admin, artifacts);
+        report_license_values(&subkey, ctx, &sub_path, artifacts, entries);
     }
 }
 
 fn report_license_values(
     key: &RegKey,
-    hive_name: &str,
+    ctx: &RegistryScanCtx,
     key_path: &str,
-    requires_admin: bool,
     artifacts: &mut Vec<LicenseArtifact>,
+    entries: &mut Vec<RegistryEntry>,
 ) {
-    for (value_name, _) in key.enum_values().flatten() {
-        if is_license_registry_name(&value_name) {
-            artifacts.push(registry_artifact(
-                hive_name,
+    for (value_name, value) in key.enum_values().flatten() {
+        if !is_license_registry_name(&value_name) {
+            continue;
+        }
+        artifacts.push(registry_artifact(
+            ctx.hive_name,
+            key_path,
+            Some(&value_name),
+            ctx.requires_admin,
+            format!("Registry value suggests licensing data: {value_name}"),
+        ));
+        // Capture only transferable, user-scoped values for automatic restore.
+        // Machine-scoped (HKLM) license data is left as metadata only, and
+        // binary blobs (commonly per-user DPAPI ciphertext that cannot decrypt on
+        // another machine/user) are never auto-restored.
+        let value_kind = map_registry_type(value.vtype.clone());
+        if ctx.include_license_data
+            && !ctx.requires_admin
+            && is_transferable_value_kind(&value_kind)
+        {
+            entries.push(reg_value_to_entry(
+                ctx.hive.clone(),
                 key_path,
-                Some(&value_name),
-                requires_admin,
-                format!("Registry value suggests licensing data: {value_name}"),
+                &value_name,
+                &value,
+                ctx.requires_admin,
             ));
         }
     }
+}
+
+fn reg_value_to_entry(
+    hive: RegistryHive,
+    key_path: &str,
+    value_name: &str,
+    value: &RegValue,
+    requires_admin: bool,
+) -> RegistryEntry {
+    let value_kind = map_registry_type(value.vtype.clone());
+    let (value_data, value_bytes_hex) = match value_kind {
+        RegistryValueKind::String | RegistryValueKind::ExpandString => {
+            (Some(value.to_string()), None)
+        }
+        _ => (None, Some(hex_encode(&value.bytes))),
+    };
+    RegistryEntry {
+        hive,
+        key_path: key_path.to_owned(),
+        value_name: Some(value_name.to_owned()),
+        value_data,
+        value_kind: Some(value_kind),
+        value_bytes_hex,
+        confidence: MatchConfidence::Medium,
+        requires_admin,
+    }
+}
+
+/// Whether a registry value kind is plainly transferable to another machine.
+/// Text and numeric values transfer; binary blobs (often DPAPI-encrypted,
+/// user/machine-bound ciphertext) and other opaque kinds do not.
+fn is_transferable_value_kind(kind: &RegistryValueKind) -> bool {
+    matches!(
+        kind,
+        RegistryValueKind::String
+            | RegistryValueKind::ExpandString
+            | RegistryValueKind::Dword
+            | RegistryValueKind::Qword
+            | RegistryValueKind::MultiString
+    )
+}
+
+fn map_registry_type(vtype: RegType) -> RegistryValueKind {
+    match vtype {
+        REG_NONE => RegistryValueKind::None,
+        REG_SZ => RegistryValueKind::String,
+        REG_EXPAND_SZ => RegistryValueKind::ExpandString,
+        REG_BINARY => RegistryValueKind::Binary,
+        REG_DWORD => RegistryValueKind::Dword,
+        REG_DWORD_BIG_ENDIAN => RegistryValueKind::DwordBigEndian,
+        REG_LINK => RegistryValueKind::Link,
+        REG_MULTI_SZ => RegistryValueKind::MultiString,
+        REG_RESOURCE_LIST => RegistryValueKind::ResourceList,
+        REG_FULL_RESOURCE_DESCRIPTOR => RegistryValueKind::FullResourceDescriptor,
+        REG_RESOURCE_REQUIREMENTS_LIST => RegistryValueKind::ResourceRequirementsList,
+        REG_QWORD => RegistryValueKind::Qword,
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
 }
 
 fn registry_artifact(
@@ -417,6 +536,19 @@ mod tests {
         assert!(is_license_env_var("LM_LICENSE_FILE"));
         assert!(is_license_env_var("ACME_LICENSE_FILE"));
         assert!(!is_license_env_var("PATH"));
+    }
+
+    #[test]
+    fn binary_license_values_are_not_auto_restored() {
+        // Transferable text/numeric kinds are captured...
+        assert!(is_transferable_value_kind(&RegistryValueKind::String));
+        assert!(is_transferable_value_kind(&RegistryValueKind::ExpandString));
+        assert!(is_transferable_value_kind(&RegistryValueKind::Dword));
+        assert!(is_transferable_value_kind(&RegistryValueKind::Qword));
+        assert!(is_transferable_value_kind(&RegistryValueKind::MultiString));
+        // ...but binary (often DPAPI ciphertext) and opaque kinds are not.
+        assert!(!is_transferable_value_kind(&RegistryValueKind::Binary));
+        assert!(!is_transferable_value_kind(&RegistryValueKind::None));
     }
 
     #[test]

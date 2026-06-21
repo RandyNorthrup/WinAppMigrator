@@ -5,6 +5,7 @@ use std::process::Command;
 
 use filetime::{FileTime, set_file_times};
 use tempfile::TempDir;
+use walkdir::WalkDir;
 use winreg::enums::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN,
     REG_EXPAND_SZ, REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD,
@@ -15,14 +16,17 @@ use winreg::{RegKey, RegValue};
 use crate::archive::extract_zip_archive;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
-    package_destination_path, restore_destination_for_entry, split_user_data_relative,
+    ensure_within_root, package_destination_path, restore_destination_for_entry,
+    safe_relative_path, split_user_data_relative, user_data_real_destination,
 };
 use crate::models::{
-    EnvironmentScope, EnvironmentVariableEntry, PackageManifest, RegistryEntry, RegistryHive,
-    RegistryValueKind, RestoreOptions, RestorePlan, RestoreResult, ScheduledTaskEntry,
-    ServiceEntry, ShortcutEntry, VerificationOptions, Warning, WarningSeverity,
+    DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry, PackageManifest,
+    RegistryEntry, RegistryHive, RegistryValueKind, RestoreOptions, RestorePlan, RestoreResult,
+    RuntimePrerequisite, ScheduledTaskEntry, ServiceEntry, ShortcutEntry, VerificationOptions,
+    Warning, WarningSeverity,
 };
 use crate::package::read_manifest;
+use crate::prerequisites::{PrerequisiteInstallOutcome, install_bundle, is_present};
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
 use crate::verify::verify_package;
 
@@ -124,6 +128,15 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         ));
     }
 
+    // Install runtime prerequisites first so the app's own services/drivers and
+    // launch have their runtimes available.
+    restore_prerequisites(
+        &effective_options,
+        &manifest,
+        &mut changes_logged,
+        &mut warnings,
+        &mut errors,
+    );
     restore_files(
         &effective_options,
         &plan,
@@ -139,6 +152,14 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         &mut warnings,
         &mut errors,
     );
+    restore_license(
+        &effective_options,
+        &manifest,
+        &path_rewrites,
+        &mut changes_logged,
+        &mut warnings,
+        &mut errors,
+    );
     restore_services(
         &effective_options,
         &manifest,
@@ -148,9 +169,12 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         &mut errors,
     );
     restore_drivers(
+        &effective_options,
         &plan.planned_driver_actions,
+        &path_rewrites,
         &mut changes_logged,
         &mut warnings,
+        &mut errors,
     );
     restore_scheduled_tasks(
         &effective_options,
@@ -185,7 +209,7 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
             restore_user_data: options.restore_user_data,
         }) {
             Ok(report) => {
-                if report.restore_valid == Some(false) {
+                if !report.package_valid || report.restore_valid == Some(false) {
                     errors.extend(report.errors.clone());
                 }
                 warnings.extend(report.warnings.clone());
@@ -354,24 +378,453 @@ fn restore_services(
     }
 }
 
-fn restore_drivers(
-    drivers: &[crate::models::DriverEntry],
+/// Install runtime prerequisites recorded in the manifest. Each prerequisite is
+/// probed first and skipped if already present; otherwise the bundled installer
+/// (or winget fallback) runs, and the result is re-probed.
+fn restore_prerequisites(
+    options: &RestoreOptions,
+    manifest: &PackageManifest,
     changes_logged: &mut Vec<String>,
     warnings: &mut Vec<Warning>,
+    errors: &mut Vec<Warning>,
+) {
+    for prerequisite in &manifest.runtime_prerequisites {
+        let Some(bundle) = prerequisite.bundle.as_ref() else {
+            continue;
+        };
+        if prerequisite
+            .presence_probe
+            .as_ref()
+            .map(is_present)
+            .unwrap_or(false)
+        {
+            changes_logged.push(format!(
+                "prerequisite already present: {}",
+                prerequisite.name
+            ));
+            continue;
+        }
+        if !options.apply {
+            let via = if bundle.package_relative_path.is_some() {
+                "bundled installer"
+            } else {
+                "winget/URL"
+            };
+            changes_logged.push(format!(
+                "would install prerequisite {} ({via})",
+                prerequisite.name
+            ));
+            continue;
+        }
+        if bundle.requires_admin && !is_elevated() {
+            errors.push(Warning::new(
+                "prerequisite_requires_admin",
+                WarningSeverity::Error,
+                format!(
+                    "Installing {} requires elevation; re-run the installer as administrator.",
+                    prerequisite.name
+                ),
+                None,
+            ));
+            continue;
+        }
+        match install_bundle(bundle, &options.package_root) {
+            PrerequisiteInstallOutcome::Installed => {
+                changes_logged.push(format!("installed prerequisite {}", prerequisite.name));
+                confirm_prerequisite(prerequisite, false, warnings, errors);
+            }
+            PrerequisiteInstallOutcome::InstalledNeedsReboot => {
+                changes_logged.push(format!(
+                    "installed prerequisite {} (reboot required)",
+                    prerequisite.name
+                ));
+                warnings.push(Warning::new(
+                    "prerequisite_reboot_required",
+                    WarningSeverity::Warning,
+                    format!(
+                        "{} was installed but a reboot is required to complete it.",
+                        prerequisite.name
+                    ),
+                    None,
+                ));
+                confirm_prerequisite(prerequisite, true, warnings, errors);
+            }
+            PrerequisiteInstallOutcome::Skipped(reason) => {
+                warnings.push(Warning::new(
+                    "prerequisite_skipped",
+                    WarningSeverity::Info,
+                    format!("{}: {reason}", prerequisite.name),
+                    None,
+                ));
+            }
+            PrerequisiteInstallOutcome::Failed(reason) => {
+                errors.push(Warning::new(
+                    "prerequisite_install_failed",
+                    WarningSeverity::Error,
+                    format!(
+                        "Could not install {}: {reason}. Acquire it from {}.",
+                        prerequisite.name, bundle.download_url
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+}
+
+/// Re-probe a prerequisite after installing it. A failure to register is an
+/// error, unless a reboot is pending (then it is only a warning).
+fn confirm_prerequisite(
+    prerequisite: &RuntimePrerequisite,
+    reboot_pending: bool,
+    warnings: &mut Vec<Warning>,
+    errors: &mut Vec<Warning>,
+) {
+    let Some(probe) = prerequisite.presence_probe.as_ref() else {
+        return;
+    };
+    if is_present(probe) {
+        return;
+    }
+    if reboot_pending {
+        warnings.push(Warning::new(
+            "prerequisite_pending_reboot",
+            WarningSeverity::Warning,
+            format!(
+                "{} is not yet registered; it should be active after a reboot.",
+                prerequisite.name
+            ),
+            None,
+        ));
+    } else {
+        errors.push(Warning::new(
+            "prerequisite_not_verified",
+            WarningSeverity::Error,
+            format!(
+                "{} reported success but did not register; the install may have failed.",
+                prerequisite.name
+            ),
+            None,
+        ));
+    }
+}
+
+/// Restore captured license data: files and framework-store directories back to
+/// their original (or re-anchored) locations, plus transferable registry values.
+fn restore_license(
+    options: &RestoreOptions,
+    manifest: &PackageManifest,
+    path_rewrites: &[(String, String)],
+    changes_logged: &mut Vec<String>,
+    _warnings: &mut Vec<Warning>,
+    errors: &mut Vec<Warning>,
+) {
+    for artifact in &manifest.license_artifacts_detected {
+        if !artifact.should_copy {
+            continue;
+        }
+        let (Some(relative), Some(original)) = (
+            artifact.package_relative_path.as_ref(),
+            artifact.path.as_ref(),
+        ) else {
+            continue;
+        };
+        let source = match package_destination_path(&options.package_root, relative) {
+            Ok(path) => path,
+            Err(error) => {
+                errors.push(Warning::new(
+                    "license_source_invalid",
+                    WarningSeverity::Error,
+                    format!("Packaged license path is invalid: {error}"),
+                    Some(relative.display().to_string()),
+                ));
+                continue;
+            }
+        };
+        let destination =
+            match license_destination(original, path_rewrites, options.restore_user_data) {
+                Ok(path) => path,
+                Err(error) => {
+                    errors.push(Warning::new(
+                        "license_destination_invalid",
+                        WarningSeverity::Error,
+                        format!("Could not resolve license destination: {error}"),
+                        Some(original.display().to_string()),
+                    ));
+                    continue;
+                }
+            };
+
+        let is_dir = source.is_dir();
+        if !options.apply {
+            changes_logged.push(format!(
+                "would restore license {} -> {}",
+                source.display(),
+                destination.display()
+            ));
+            continue;
+        }
+        if destination_requires_admin(&destination) && !is_elevated() {
+            errors.push(Warning::new(
+                "license_requires_admin",
+                WarningSeverity::Error,
+                "Restoring license data to a protected location requires elevation.",
+                Some(destination.display().to_string()),
+            ));
+            continue;
+        }
+        // Honor --force for both files and framework-store directories: never
+        // overwrite an existing license/store on the target without it.
+        if destination.exists() && !options.force {
+            errors.push(Warning::new(
+                "license_destination_exists",
+                WarningSeverity::Warning,
+                "License destination exists; use --force to overwrite.",
+                Some(destination.display().to_string()),
+            ));
+            continue;
+        }
+        let result = if is_dir {
+            copy_license_dir(&source, &destination)
+        } else {
+            copy_restore_file(&source, &destination)
+        };
+        match result {
+            Ok(()) => changes_logged.push(format!(
+                "restored license {} -> {}",
+                source.display(),
+                destination.display()
+            )),
+            Err(error) => errors.push(Warning::new(
+                "license_restore_failed",
+                WarningSeverity::Error,
+                format!("Could not restore license data: {error}"),
+                Some(destination.display().to_string()),
+            )),
+        }
+    }
+
+    for entry in &manifest.license_registry_entries {
+        if !options.apply {
+            changes_logged.push(format!(
+                "would restore license registry {}\\{}",
+                registry_hive_name(&entry.hive),
+                entry.key_path
+            ));
+            continue;
+        }
+        match apply_registry_entry(entry, options.force, path_rewrites) {
+            Ok(message) => changes_logged.push(message),
+            Err(warning) => errors.push(warning),
+        }
+    }
+}
+
+/// Resolve where a license artifact should land on the target: re-anchored to
+/// the real user-data base when applicable, otherwise the original path with
+/// app-install paths rewritten to the target root.
+fn license_destination(
+    original: &Path,
+    path_rewrites: &[(String, String)],
+    restore_user_data: bool,
+) -> Result<PathBuf> {
+    if restore_user_data && let Some(destination) = user_data_real_destination(original)? {
+        return Ok(destination);
+    }
+    let rewritten = rewrite_known_paths(&original.to_string_lossy(), path_rewrites);
+    Ok(PathBuf::from(rewritten))
+}
+
+fn copy_license_dir(source: &Path, destination: &Path) -> Result<()> {
+    for entry in WalkDir::new(source).follow_links(false) {
+        let entry = entry.map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(source)
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+        copy_restore_file(entry.path(), &destination.join(relative))?;
+    }
+    Ok(())
+}
+
+/// Restore application-owned drivers by placing the bundled `.sys` and
+/// re-registering the driver service. Inbox/vendor drivers cannot be
+/// redistributed and are reported with precise reinstall guidance.
+fn restore_drivers(
+    options: &RestoreOptions,
+    drivers: &[DriverEntry],
+    path_rewrites: &[(String, String)],
+    changes_logged: &mut Vec<String>,
+    warnings: &mut Vec<Warning>,
+    errors: &mut Vec<Warning>,
 ) {
     for driver in drivers {
+        let Some(relative) = driver.package_relative_path.as_ref() else {
+            // Not bundled (inbox/vendor driver): precise, actionable guidance.
+            changes_logged.push(format!("driver not auto-restored: {}", driver.service_name));
+            warnings.push(Warning::new(
+                "driver_manual_reinstall",
+                WarningSeverity::Warning,
+                driver.restore_instructions.clone(),
+                Some(driver.service_name.clone()),
+            ));
+            continue;
+        };
+
+        // Place the bundled .sys under the target root. The driver image is never
+        // a copyable file-inventory entry, so we re-anchor its original path and
+        // constrain the result to the target root (path-traversal safe), falling
+        // back to <target_root>\drivers\<leaf> for atypical layouts.
+        let destination =
+            match driver_restore_destination(driver, &options.target_root, path_rewrites) {
+                Ok(path) => path,
+                Err(error) => {
+                    errors.push(Warning::new(
+                        "driver_destination_invalid",
+                        WarningSeverity::Error,
+                        format!("Could not resolve a safe driver destination: {error}"),
+                        Some(driver.service_name.clone()),
+                    ));
+                    continue;
+                }
+            };
+
+        if !options.apply {
+            changes_logged.push(format!(
+                "would install driver {} -> {}",
+                driver.service_name,
+                destination.display()
+            ));
+            continue;
+        }
+        if !is_elevated() {
+            errors.push(Warning::new(
+                "driver_requires_admin",
+                WarningSeverity::Error,
+                "Driver registration requires elevation; re-run the installer as administrator.",
+                Some(driver.service_name.clone()),
+            ));
+            continue;
+        }
+        let source = match package_destination_path(&options.package_root, relative) {
+            Ok(path) => path,
+            Err(error) => {
+                errors.push(Warning::new(
+                    "driver_source_invalid",
+                    WarningSeverity::Error,
+                    format!("Bundled driver path is invalid: {error}"),
+                    Some(relative.display().to_string()),
+                ));
+                continue;
+            }
+        };
+        if let Err(error) = copy_restore_file(&source, &destination) {
+            errors.push(Warning::new(
+                "driver_copy_failed",
+                WarningSeverity::Error,
+                format!("Could not place driver image: {error}"),
+                Some(destination.display().to_string()),
+            ));
+            continue;
+        }
         changes_logged.push(format!(
-            "driver metadata archived for manual restore {} -> {}",
-            driver.service_name,
-            driver.image_path.display()
+            "placed driver image {} -> {}",
+            source.display(),
+            destination.display()
         ));
-        warnings.push(Warning::new(
-            "driver_restore_manual",
+        match apply_driver(driver, &destination, options.force) {
+            Ok(messages) => changes_logged.extend(messages),
+            Err(warning) => errors.push(warning),
+        }
+    }
+}
+
+fn apply_driver(
+    driver: &DriverEntry,
+    image_path: &Path,
+    force: bool,
+) -> std::result::Result<Vec<String>, Warning> {
+    let mut query = Command::new(SC_EXE);
+    query.arg("query").arg(&driver.service_name);
+    let exists = command_success(&mut query);
+    if exists && !force {
+        return Err(Warning::new(
+            "driver_exists",
             WarningSeverity::Warning,
-            "Driver and kernel components are not copied or registered automatically; reinstall them with the vendor signed installer.",
+            "Driver service exists; use --force to reconfigure it.",
             Some(driver.service_name.clone()),
         ));
     }
+
+    let type_flag = driver_sc_type(&driver.driver_kind);
+    // Pass the raw path: std::process::Command applies the single layer of
+    // Windows argument quoting, and sc.exe stores it verbatim. Manually quoting
+    // here would embed literal quote characters in the registered ImagePath.
+    let mut messages = Vec::new();
+    if exists {
+        let mut command = Command::new(SC_EXE);
+        command
+            .arg("config")
+            .arg(&driver.service_name)
+            .arg("type=")
+            .arg(type_flag)
+            .arg("binPath=")
+            .arg(image_path);
+        run_checked(&mut command, "driver_config_failed", &driver.service_name)?;
+        messages.push(format!("configured driver {}", driver.service_name));
+    } else {
+        let mut command = Command::new(SC_EXE);
+        command
+            .arg("create")
+            .arg(&driver.service_name)
+            .arg("type=")
+            .arg(type_flag)
+            .arg("binPath=")
+            .arg(image_path);
+        if let Some(start_type) = driver.start_type.as_deref().and_then(sc_start_type) {
+            command.arg("start=").arg(start_type);
+        }
+        run_checked(&mut command, "driver_create_failed", &driver.service_name)?;
+        messages.push(format!("created driver {}", driver.service_name));
+    }
+    Ok(messages)
+}
+
+fn driver_sc_type(kind: &DriverKind) -> &'static str {
+    match kind {
+        DriverKind::Kernel | DriverKind::Unknown => "kernel",
+        DriverKind::FileSystem => "filesys",
+        DriverKind::Recognizer => "rec",
+    }
+}
+
+/// Resolve a path-traversal-safe destination for a bundled driver image, always
+/// inside `target_root`.
+fn driver_restore_destination(
+    driver: &DriverEntry,
+    target_root: &Path,
+    path_rewrites: &[(String, String)],
+) -> Result<PathBuf> {
+    let rewritten = PathBuf::from(rewrite_known_paths(
+        &driver.image_path.to_string_lossy(),
+        path_rewrites,
+    ));
+    if ensure_within_root(target_root, &rewritten).is_ok() {
+        return Ok(rewritten);
+    }
+    let leaf = driver
+        .image_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| format!("{}.sys", sanitize_filename(&driver.service_name)));
+    let destination = target_root
+        .join("drivers")
+        .join(safe_relative_path(Path::new(&leaf)));
+    ensure_within_root(target_root, &destination)?;
+    Ok(destination)
 }
 
 fn restore_scheduled_tasks(
@@ -662,14 +1115,15 @@ fn apply_service(
     }
 
     let mut messages = Vec::new();
-    let binary = quote_path(binary_path);
+    // Pass the raw path so Command applies exactly one layer of Windows argument
+    // quoting; sc.exe stores it verbatim. Pre-quoting would embed literal quotes.
     if exists {
         let mut command = Command::new(SC_EXE);
         command
             .arg("config")
             .arg(&service.service_name)
             .arg("binPath=")
-            .arg(&binary);
+            .arg(binary_path);
         run_checked(&mut command, "service_config_failed", &service.service_name)?;
         messages.push(format!("configured service {}", service.service_name));
     } else {
@@ -678,7 +1132,7 @@ fn apply_service(
             .arg("create")
             .arg(&service.service_name)
             .arg("binPath=")
-            .arg(&binary);
+            .arg(binary_path);
         if let Some(start_type) = service.start_type.as_deref().and_then(sc_start_type) {
             command.arg("start=").arg(start_type);
         }
@@ -1097,15 +1551,6 @@ fn sc_start_type(value: &str) -> Option<&'static str> {
     }
 }
 
-fn quote_path(path: &Path) -> String {
-    let text = path.display().to_string();
-    if text.contains(' ') {
-        format!("\"{}\"", text.replace('"', "\\\""))
-    } else {
-        text
-    }
-}
-
 fn run_checked(
     command: &mut Command,
     code: &'static str,
@@ -1259,5 +1704,64 @@ mod tests {
             rewrite_known_paths(r"run C:\APP\bin.exe", &rewrites),
             r"run D:\Restored\bin.exe"
         );
+    }
+
+    #[test]
+    fn license_destination_rewrites_app_paths() -> Result<()> {
+        let rewrites = vec![(r"C:\App".to_owned(), r"D:\Restored".to_owned())];
+        let destination = license_destination(Path::new(r"C:\App\license.lic"), &rewrites, false)?;
+        assert_eq!(destination, PathBuf::from(r"D:\Restored\license.lic"));
+        Ok(())
+    }
+
+    #[test]
+    fn driver_sc_type_maps_each_kind() {
+        assert_eq!(driver_sc_type(&DriverKind::Kernel), "kernel");
+        assert_eq!(driver_sc_type(&DriverKind::FileSystem), "filesys");
+        assert_eq!(driver_sc_type(&DriverKind::Recognizer), "rec");
+        assert_eq!(driver_sc_type(&DriverKind::Unknown), "kernel");
+    }
+
+    fn test_driver(image_path: &str) -> DriverEntry {
+        DriverEntry {
+            service_name: "AcmeFlt".to_owned(),
+            display_name: None,
+            image_path: PathBuf::from(image_path),
+            driver_kind: DriverKind::Kernel,
+            start_type: Some("manual".to_owned()),
+            account_name: None,
+            description: None,
+            requires_admin: true,
+            restore_instructions: String::new(),
+            app_owned: true,
+            signer: None,
+            hash_sha256: None,
+            package_relative_path: Some(PathBuf::from("drivers/AcmeFlt_flt.sys")),
+        }
+    }
+
+    #[test]
+    fn driver_destination_reanchors_under_target_root() -> Result<()> {
+        let target = PathBuf::from(r"D:\Restored");
+        let rewrites = vec![(r"C:\App".to_owned(), r"D:\Restored".to_owned())];
+        let driver = test_driver(r"C:\App\drivers\flt.sys");
+        let destination = driver_restore_destination(&driver, &target, &rewrites)?;
+        assert_eq!(destination, PathBuf::from(r"D:\Restored\drivers\flt.sys"));
+        assert!(destination.starts_with(&target));
+        Ok(())
+    }
+
+    #[test]
+    fn driver_destination_never_escapes_target_root() -> Result<()> {
+        let target = PathBuf::from(r"D:\Restored");
+        // No rewrite matches a machine path, so it must fall back under target.
+        let rewrites = vec![(r"C:\App".to_owned(), r"D:\Restored".to_owned())];
+        let driver = test_driver(r"C:\Windows\System32\drivers\flt.sys");
+        let destination = driver_restore_destination(&driver, &target, &rewrites)?;
+        assert!(
+            destination.starts_with(&target),
+            "driver destination {destination:?} escaped target root"
+        );
+        Ok(())
     }
 }

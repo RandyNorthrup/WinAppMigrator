@@ -61,9 +61,11 @@ fn build_installer_then_reinstall_and_verify_on_clean_target() -> TestResult {
         archive_format: Some(PackageArchiveFormat::Zip),
         create_self_extracting_archive: true,
         self_extracting_stub: Some(stub.clone()),
+        installer_dir: None,
         include_user_data: false,
         include_program_data: false,
         include_license_data: false,
+        bundle_prerequisites: false,
     };
     let result = create_package(&options)?;
     assert!(

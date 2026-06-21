@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 
 use crate::models::{DriverEntry, DriverKind, ServiceEntry, Warning, WarningSeverity};
 use crate::path_utils::split_command_executable_path;
+
+const POWERSHELL_EXE: &str = "powershell.exe";
 
 const SERVICES_KEY: &str = r"SYSTEM\CurrentControlSet\Services";
 const SERVICE_KERNEL_DRIVER: u32 = 0x0000_0001;
@@ -122,11 +125,17 @@ pub fn scan_drivers(context: &ServiceScanContext) -> (Vec<DriverEntry>, Vec<Warn
             continue;
         }
 
+        let kind = driver_kind(service_type);
+        let app_owned = is_app_owned_driver(context, &binary_path);
+        let signer = driver_signer(&binary_path);
+        let restore_instructions =
+            driver_restore_instructions(&service_name, &binary_path, &kind, app_owned, &signer);
+
         drivers.push(DriverEntry {
             service_name: service_name.clone(),
             display_name: service_key.get_value::<String, _>("DisplayName").ok(),
             image_path: binary_path,
-            driver_kind: driver_kind(service_type),
+            driver_kind: kind,
             start_type: service_key
                 .get_value::<u32, _>("Start")
                 .ok()
@@ -134,9 +143,11 @@ pub fn scan_drivers(context: &ServiceScanContext) -> (Vec<DriverEntry>, Vec<Warn
             account_name: service_key.get_value::<String, _>("ObjectName").ok(),
             description: service_key.get_value::<String, _>("Description").ok(),
             requires_admin: true,
-            restore_instructions:
-                "Kernel and driver components are reported only. Reinstall with the vendor driver package or signed installer; WinAppMigrator does not copy or register drivers automatically."
-                    .to_owned(),
+            restore_instructions,
+            app_owned,
+            signer,
+            hash_sha256: None,
+            package_relative_path: None,
         });
     }
 
@@ -150,6 +161,83 @@ fn path_matches(context: &ServiceScanContext, candidate: &Path) -> bool {
             .install_location
             .as_ref()
             .is_some_and(|root| path_starts_with_ignore_case(candidate, root))
+}
+
+/// A driver image is application-owned when it lives inside the app's install
+/// footprint, exists on disk, and is not a Windows inbox/System32 driver. Only
+/// these are bundled and re-registered automatically; inbox/vendor drivers are
+/// not redistributed.
+fn is_app_owned_driver(context: &ServiceScanContext, image_path: &Path) -> bool {
+    let lower = image_path.to_string_lossy().to_ascii_lowercase();
+    if lower.contains(r"\windows\") {
+        return false;
+    }
+    let under_install = context
+        .install_location
+        .as_ref()
+        .is_some_and(|root| path_starts_with_ignore_case(image_path, root));
+    under_install && image_path.is_file()
+}
+
+/// Best-effort Authenticode signer subject for a driver image. Spawns PowerShell
+/// only for drivers that matched the app (typically zero or one), so cost is
+/// bounded.
+fn driver_signer(image_path: &Path) -> Option<String> {
+    if !image_path.is_file() {
+        return None;
+    }
+    let script = format!(
+        "$s = Get-AuthenticodeSignature -LiteralPath '{}'; if ($s -and $s.SignerCertificate) {{ $s.SignerCertificate.Subject }}",
+        image_path.display().to_string().replace('\'', "''")
+    );
+    let output = Command::new(POWERSHELL_EXE)
+        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let subject = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!subject.is_empty()).then_some(subject)
+}
+
+fn driver_restore_instructions(
+    service_name: &str,
+    image_path: &Path,
+    kind: &DriverKind,
+    app_owned: bool,
+    signer: &Option<String>,
+) -> String {
+    let signed = signer
+        .as_deref()
+        .map(|subject| format!(", signed by {subject}"))
+        .unwrap_or_else(|| ", signature unknown".to_owned());
+    if app_owned {
+        format!(
+            "Application-owned {} driver '{}' ({}{}). The installer bundles its .sys and re-registers the driver service automatically (sc create, requires elevation), then verifies it loads.",
+            driver_kind_label(kind),
+            service_name,
+            image_path.display(),
+            signed
+        )
+    } else {
+        format!(
+            "Vendor/inbox {} driver '{}' ({}{}). WinAppMigrator does not redistribute third-party drivers; reinstall it with the vendor's signed driver package on the target before launching the app.",
+            driver_kind_label(kind),
+            service_name,
+            image_path.display(),
+            signed
+        )
+    }
+}
+
+fn driver_kind_label(kind: &DriverKind) -> &'static str {
+    match kind {
+        DriverKind::Kernel => "kernel",
+        DriverKind::FileSystem => "file-system",
+        DriverKind::Recognizer => "recognizer",
+        DriverKind::Unknown => "unknown-type",
+    }
 }
 
 fn path_eq(left: &Path, right: &Path) -> bool {

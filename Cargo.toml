@@ -25,6 +25,8 @@ tempfile = "3.27.0"
 thiserror = "2.0.18"
 time = { version = "0.3.49", features = ["formatting"] }
 tracing = "0.1.44"
+ureq = { version = "2.12.1", default-features = false, features = ["native-tls", "gzip"] }
+native-tls = "0.2.14"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 walkdir = "2.5.0"

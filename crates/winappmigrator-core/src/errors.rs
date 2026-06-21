@@ -25,6 +25,9 @@ pub enum WinAppMigratorError {
     #[error("archive operation failed: {0}")]
     Archive(String),
 
+    #[error("network operation failed: {0}")]
+    Network(String),
+
     #[error("time formatting failed: {0}")]
     TimeFormat(#[from] time::error::Format),
 }

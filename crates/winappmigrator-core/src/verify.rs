@@ -14,7 +14,9 @@ use winreg::{RegKey, RegValue};
 
 use crate::archive::extract_zip_archive;
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{package_destination_path, restore_destination_for_entry};
+use crate::file_discovery::{
+    package_destination_path, restore_destination_for_entry, user_data_real_destination,
+};
 use crate::hashing::sha256_file;
 use crate::models::{
     EnvironmentScope, EnvironmentVariableEntry, FileEntry, PackageManifest, RegistryEntry,
@@ -23,6 +25,7 @@ use crate::models::{
     VerificationReport, VerificationStatus, Warning, WarningSeverity,
 };
 use crate::package::read_manifest;
+use crate::prerequisites::is_present;
 
 const ZIP_EXTENSION: &str = "zip";
 const VERIFICATION_REPORT_JSON: &str = "verification_report.json";
@@ -39,6 +42,8 @@ pub fn verify_package(options: &VerificationOptions) -> Result<VerificationRepor
 
     verify_manifest(&manifest, &mut items, &mut errors);
     verify_package_files(&package_root, &manifest, &mut items, &mut errors);
+    verify_packaged_license(&package_root, &manifest, &mut items, &mut errors);
+    verify_packaged_prerequisites(&package_root, &manifest, &mut items, &mut errors);
 
     let restore_valid = if let Some(target_root) = options.target_root.as_ref() {
         verify_restored_target(
@@ -205,8 +210,16 @@ fn verify_restored_target(
 ) -> Result<()> {
     let path_rewrites = path_rewrites(manifest, target_root, restore_user_data)?;
     verify_restored_files(target_root, manifest, restore_user_data, items, errors)?;
+    verify_prerequisites(manifest, items);
+    verify_license_restored(manifest, &path_rewrites, restore_user_data, items, errors)?;
     verify_registry_entries(
         &manifest.registry_keys_exported,
+        &path_rewrites,
+        items,
+        errors,
+    );
+    verify_registry_entries(
+        &manifest.license_registry_entries,
         &path_rewrites,
         items,
         errors,
@@ -226,7 +239,7 @@ fn verify_restored_target(
         warnings,
         errors,
     );
-    verify_drivers(manifest, items, warnings);
+    verify_drivers(manifest, items, warnings, errors);
     verify_scheduled_tasks(
         &manifest.scheduled_tasks_detected,
         &path_rewrites,
@@ -295,8 +308,25 @@ fn verify_file_size_and_hash(
     path: &Path,
     file: &FileEntry,
 ) -> Result<VerificationItem> {
+    verify_hash(
+        category,
+        name,
+        path,
+        file.size_bytes,
+        file.hash_sha256.as_deref(),
+    )
+}
+
+/// Verify a file on disk against an expected size and SHA-256.
+fn verify_hash(
+    category: VerificationCategory,
+    name: String,
+    path: &Path,
+    expected_size: Option<u64>,
+    expected_hash: Option<&str>,
+) -> Result<VerificationItem> {
     let metadata = fs::metadata(path).map_err(|source| WinAppMigratorError::io(path, source))?;
-    if let Some(expected_size) = file.size_bytes
+    if let Some(expected_size) = expected_size
         && metadata.len() != expected_size
     {
         return Ok(failed_item(
@@ -309,7 +339,7 @@ fn verify_file_size_and_hash(
             Some(path.display().to_string()),
         ));
     }
-    if let Some(expected_hash) = file.hash_sha256.as_deref() {
+    if let Some(expected_hash) = expected_hash {
         let actual_hash = sha256_file(path)?;
         if !actual_hash.eq_ignore_ascii_case(expected_hash) {
             return Ok(failed_item(
@@ -326,6 +356,249 @@ fn verify_file_size_and_hash(
         "File size and hash match manifest.",
         Some(path.display().to_string()),
     ))
+}
+
+/// Verify the license payloads embedded in the package (hash of each copied
+/// license file). Counts toward `package_valid`.
+fn verify_packaged_license(
+    package_root: &Path,
+    manifest: &PackageManifest,
+    items: &mut Vec<VerificationItem>,
+    errors: &mut Vec<Warning>,
+) {
+    for artifact in &manifest.license_artifacts_detected {
+        if !artifact.should_copy {
+            continue;
+        }
+        let Some(relative) = artifact.package_relative_path.as_ref() else {
+            continue;
+        };
+        let Ok(packaged) = package_destination_path(package_root, relative) else {
+            continue;
+        };
+        let item = if artifact.hash_sha256.is_some() {
+            if packaged.is_file() {
+                verify_hash(
+                    VerificationCategory::PackageFile,
+                    relative.display().to_string(),
+                    &packaged,
+                    artifact.size_bytes,
+                    artifact.hash_sha256.as_deref(),
+                )
+                .unwrap_or_else(|error| {
+                    failed_item(
+                        VerificationCategory::PackageFile,
+                        relative.display().to_string(),
+                        format!("License payload verification failed: {error}"),
+                        Some(packaged.display().to_string()),
+                    )
+                })
+            } else {
+                failed_item(
+                    VerificationCategory::PackageFile,
+                    relative.display().to_string(),
+                    "Packaged license payload is missing.",
+                    Some(packaged.display().to_string()),
+                )
+            }
+        } else if packaged.is_dir() {
+            // Framework-store directory artifact: confirm the store was bundled.
+            passed_item(
+                VerificationCategory::PackageFile,
+                relative.display().to_string(),
+                "License store payload is present in the package.",
+                Some(packaged.display().to_string()),
+            )
+        } else {
+            failed_item(
+                VerificationCategory::PackageFile,
+                relative.display().to_string(),
+                "Packaged license store is missing.",
+                Some(packaged.display().to_string()),
+            )
+        };
+        if item.status == VerificationStatus::Failed {
+            errors.push(Warning::new(
+                "verification_license_payload_failed",
+                WarningSeverity::Error,
+                item.message.clone(),
+                item.source.clone(),
+            ));
+        }
+        items.push(item);
+    }
+}
+
+/// Verify the bundled prerequisite installer payloads (hash). Counts toward
+/// `package_valid`.
+fn verify_packaged_prerequisites(
+    package_root: &Path,
+    manifest: &PackageManifest,
+    items: &mut Vec<VerificationItem>,
+    errors: &mut Vec<Warning>,
+) {
+    for prerequisite in &manifest.runtime_prerequisites {
+        let Some(bundle) = prerequisite.bundle.as_ref() else {
+            continue;
+        };
+        let Some(relative) = bundle.package_relative_path.as_ref() else {
+            continue;
+        };
+        let Ok(packaged) = package_destination_path(package_root, relative) else {
+            continue;
+        };
+        let item = if packaged.is_file() {
+            verify_hash(
+                VerificationCategory::PackageFile,
+                relative.display().to_string(),
+                &packaged,
+                bundle.size_bytes,
+                bundle.hash_sha256.as_deref(),
+            )
+            .unwrap_or_else(|error| {
+                failed_item(
+                    VerificationCategory::PackageFile,
+                    relative.display().to_string(),
+                    format!("Prerequisite payload verification failed: {error}"),
+                    Some(packaged.display().to_string()),
+                )
+            })
+        } else {
+            failed_item(
+                VerificationCategory::PackageFile,
+                relative.display().to_string(),
+                "Bundled prerequisite payload is missing.",
+                Some(packaged.display().to_string()),
+            )
+        };
+        if item.status == VerificationStatus::Failed {
+            errors.push(Warning::new(
+                "verification_prerequisite_payload_failed",
+                WarningSeverity::Error,
+                item.message.clone(),
+                item.source.clone(),
+            ));
+        }
+        items.push(item);
+    }
+}
+
+/// Verify runtime prerequisites are present on the target after restore.
+///
+/// A present prerequisite passes; an absent one is reported as Skipped (not
+/// Failed) because absence can mean a reboot is pending after a reboot-required
+/// install. The authoritative failure signal is `restore`'s own errors
+/// (`restore_prerequisites`/`confirm_prerequisite`), which mark a genuine,
+/// non-reboot install failure as an error.
+fn verify_prerequisites(manifest: &PackageManifest, items: &mut Vec<VerificationItem>) {
+    for prerequisite in &manifest.runtime_prerequisites {
+        if prerequisite.bundle.is_none() {
+            continue;
+        }
+        let item = match prerequisite.presence_probe.as_ref() {
+            Some(probe) if is_present(probe) => passed_item(
+                VerificationCategory::Prerequisite,
+                prerequisite.name.clone(),
+                "Runtime prerequisite is present on the target.",
+                None,
+            ),
+            Some(_) => VerificationItem {
+                category: VerificationCategory::Prerequisite,
+                name: prerequisite.name.clone(),
+                status: VerificationStatus::Skipped,
+                message:
+                    "Runtime prerequisite not detected; it may require a reboot or manual completion (see the restore log for the authoritative outcome)."
+                        .to_owned(),
+                source: None,
+            },
+            None => VerificationItem {
+                category: VerificationCategory::Prerequisite,
+                name: prerequisite.name.clone(),
+                status: VerificationStatus::Skipped,
+                message: "Prerequisite presence is not registry-probable; install was best-effort."
+                    .to_owned(),
+                source: None,
+            },
+        };
+        items.push(item);
+    }
+}
+
+/// Verify restored license files match their packaged hashes at their target
+/// locations.
+fn verify_license_restored(
+    manifest: &PackageManifest,
+    path_rewrites: &[(String, String)],
+    restore_user_data: bool,
+    items: &mut Vec<VerificationItem>,
+    errors: &mut Vec<Warning>,
+) -> Result<()> {
+    for artifact in &manifest.license_artifacts_detected {
+        if !artifact.should_copy {
+            continue;
+        }
+        let Some(original) = artifact.path.as_ref() else {
+            continue;
+        };
+        let destination = license_destination(original, path_rewrites, restore_user_data)?;
+        let name = original.display().to_string();
+        let item = if artifact.hash_sha256.is_some() {
+            if destination.is_file() {
+                verify_hash(
+                    VerificationCategory::License,
+                    name,
+                    &destination,
+                    artifact.size_bytes,
+                    artifact.hash_sha256.as_deref(),
+                )?
+            } else {
+                failed_item(
+                    VerificationCategory::License,
+                    name,
+                    "Restored license file is missing.",
+                    Some(destination.display().to_string()),
+                )
+            }
+        } else if destination.is_dir() {
+            passed_item(
+                VerificationCategory::License,
+                name,
+                "Restored license store directory is present.",
+                Some(destination.display().to_string()),
+            )
+        } else {
+            failed_item(
+                VerificationCategory::License,
+                name,
+                "Restored license store is missing.",
+                Some(destination.display().to_string()),
+            )
+        };
+        if item.status == VerificationStatus::Failed {
+            errors.push(Warning::new(
+                "verification_license_failed",
+                WarningSeverity::Error,
+                item.message.clone(),
+                item.source.clone(),
+            ));
+        }
+        items.push(item);
+    }
+    Ok(())
+}
+
+fn license_destination(
+    original: &Path,
+    path_rewrites: &[(String, String)],
+    restore_user_data: bool,
+) -> Result<PathBuf> {
+    if restore_user_data && let Some(destination) = user_data_real_destination(original)? {
+        return Ok(destination);
+    }
+    Ok(PathBuf::from(rewrite_known_paths(
+        &original.to_string_lossy(),
+        path_rewrites,
+    )))
 }
 
 fn verify_registry_entries(
@@ -521,25 +794,61 @@ fn verify_drivers(
     manifest: &PackageManifest,
     items: &mut Vec<VerificationItem>,
     warnings: &mut Vec<Warning>,
+    errors: &mut Vec<Warning>,
 ) {
+    let mut manual_pending = false;
     for driver in &manifest.drivers_detected {
-        items.push(VerificationItem {
-            category: VerificationCategory::Driver,
-            name: driver.service_name.clone(),
-            status: VerificationStatus::Skipped,
-            message: "Driver metadata is archived for manual vendor installer verification; automatic driver restore verification is intentionally skipped."
-                .to_owned(),
-            source: Some(driver.image_path.display().to_string()),
-        });
+        if driver.package_relative_path.is_some() {
+            // Bundled, application-owned driver: confirm the service is registered.
+            let item = if driver_service_registered(&driver.service_name) {
+                passed_item(
+                    VerificationCategory::Driver,
+                    driver.service_name.clone(),
+                    "Driver service is registered on the target.",
+                    Some(driver.image_path.display().to_string()),
+                )
+            } else {
+                failed_item(
+                    VerificationCategory::Driver,
+                    driver.service_name.clone(),
+                    "Bundled driver service is not registered after restore.",
+                    Some(driver.image_path.display().to_string()),
+                )
+            };
+            if item.status == VerificationStatus::Failed {
+                errors.push(Warning::new(
+                    "verification_driver_failed",
+                    WarningSeverity::Error,
+                    item.message.clone(),
+                    item.source.clone(),
+                ));
+            }
+            items.push(item);
+        } else {
+            manual_pending = true;
+            items.push(VerificationItem {
+                category: VerificationCategory::Driver,
+                name: driver.service_name.clone(),
+                status: VerificationStatus::Skipped,
+                message: driver.restore_instructions.clone(),
+                source: Some(driver.image_path.display().to_string()),
+            });
+        }
     }
-    if !manifest.drivers_detected.is_empty() {
+    if manual_pending {
         warnings.push(Warning::new(
             "verification_driver_manual",
             WarningSeverity::Warning,
-            "Driver and kernel components require manual validation with the signed vendor driver installer.",
+            "One or more vendor/inbox drivers are not redistributed by WinAppMigrator; reinstall them with the vendor's signed driver package on the target.",
             None,
         ));
     }
+}
+
+fn driver_service_registered(service_name: &str) -> bool {
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(format!(r"SYSTEM\CurrentControlSet\Services\{service_name}"))
+        .is_ok()
 }
 
 fn verify_scheduled_tasks(

@@ -9,10 +9,12 @@ use time::format_description::well_known::Rfc3339;
 use crate::archive::{create_self_extracting_archive, create_zip_archive};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{package_destination_path, safe_relative_path};
+use crate::hashing::sha256_file;
 use crate::models::{
-    FileEntry, LicenseArtifact, PACKAGE_SCHEMA_VERSION, PackageArchiveFormat, PackageManifest,
-    PackageOptions, PackageResult, RegistryEntry, RegistryHive, RegistryValueKind, ScanOptions,
-    ScheduledTaskEntry, Warning, WarningSeverity,
+    AppArchitecture, DriverEntry, FileEntry, LicenseArtifact, PACKAGE_SCHEMA_VERSION,
+    PackageArchiveFormat, PackageManifest, PackageOptions, PackageResult, RegistryEntry,
+    RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions, ScheduledTaskEntry, Warning,
+    WarningSeverity,
 };
 use crate::scan::scan_and_write_reports;
 
@@ -24,6 +26,7 @@ const DRIVERS_DIR: &str = "drivers";
 const SCHEDULED_TASKS_DIR: &str = "scheduled_tasks";
 const ENVIRONMENT_DIR: &str = "environment";
 const LICENSE_DIR: &str = "license";
+const PREREQUISITES_DIR: &str = "prerequisites";
 const MANIFESTS_DIR: &str = "manifests";
 const REPORTS_DIR: &str = "reports";
 const MANIFEST_FILE: &str = "manifest.json";
@@ -108,6 +111,18 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         &mut warnings,
     )?;
 
+    // Make runtime prerequisites installable on the target: download and embed
+    // the redistributables when requested, recording a winget/URL fallback when a
+    // download fails. Bundle application-owned driver images for automatic
+    // re-registration.
+    let runtime_prerequisites = bundle_prerequisites(
+        options,
+        &report.architecture,
+        &report.runtime_prerequisites,
+        &mut warnings,
+    );
+    let drivers_detected = package_drivers(&options.output_dir, &report.drivers, &mut warnings);
+
     let manifest = PackageManifest {
         schema_version: PACKAGE_SCHEMA_VERSION.to_owned(),
         source_computer_name: std::env::var("COMPUTERNAME").ok(),
@@ -120,12 +135,13 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         com_registrations_detected: report.com_registrations.clone(),
         file_associations_detected: report.file_associations.clone(),
         services_detected: report.services.clone(),
-        drivers_detected: report.drivers.clone(),
+        drivers_detected,
         scheduled_tasks_detected: report.scheduled_tasks.clone(),
         shortcuts_detected: report.shortcuts.clone(),
         environment_variables_detected: report.environment_variables.clone(),
-        runtime_prerequisites: report.runtime_prerequisites.clone(),
+        runtime_prerequisites,
         license_artifacts_detected,
+        license_registry_entries: report.license_registry_entries.clone(),
         warnings: warnings.clone(),
         items_intentionally_excluded: report.items_excluded.clone(),
     };
@@ -135,30 +151,36 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
     write_integration_artifacts(&options.output_dir, &manifest)?;
     write_restore_plan(&options.output_dir.join(RESTORE_PLAN_FILE), &manifest)?;
 
+    let zip_path = options.output_dir.with_extension("zip");
     let mut archive_path = None;
     if matches!(options.archive_format, Some(PackageArchiveFormat::Zip))
         || options.create_self_extracting_archive
     {
-        let path = options.output_dir.with_extension("zip");
-        create_zip_archive(&options.output_dir, &path)?;
-        archive_path = Some(path);
+        create_zip_archive(&options.output_dir, &zip_path)?;
+        archive_path = Some(zip_path.clone());
     }
 
     let mut self_extracting_archive_path = None;
     if options.create_self_extracting_archive {
-        let archive = archive_path.as_ref().ok_or_else(|| {
-            WinAppMigratorError::Archive(
-                "self-extracting archive requested without zip archive output".to_owned(),
-            )
-        })?;
         let stub = options.self_extracting_stub.as_ref().ok_or_else(|| {
             WinAppMigratorError::InvalidInput(
                 "self-extracting archive requires a CLI stub executable".to_owned(),
             )
         })?;
-        let path = options.output_dir.with_extension("sfx.exe");
-        create_self_extracting_archive(stub, archive, &path)?;
-        self_extracting_archive_path = Some(path);
+        let installer_path = installer_output_path(options);
+        if let Some(parent) = installer_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| WinAppMigratorError::io(parent, source))?;
+        }
+        create_self_extracting_archive(stub, &zip_path, &installer_path)?;
+        self_extracting_archive_path = Some(installer_path);
+
+        // The standalone zip is only an intermediate for the installer. Unless a
+        // zip artifact was explicitly requested, drop it so the deliverable is a
+        // single self-contained executable.
+        if !matches!(options.archive_format, Some(PackageArchiveFormat::Zip)) {
+            let _ = fs::remove_file(&zip_path);
+            archive_path = None;
+        }
     }
 
     Ok(PackageResult {
@@ -172,10 +194,194 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
     })
 }
 
+/// Compute the installer's output path. The file name encodes the chosen
+/// contents so the deliverable is self-describing, e.g.
+/// `Example_userdata_license_installer.exe`. That one executable carries the
+/// app, its data, license, prerequisites, and drivers.
+fn installer_output_path(options: &PackageOptions) -> PathBuf {
+    let base = options
+        .output_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "app".to_owned());
+    let mut name = sanitize_artifact_name(&base);
+    if name.is_empty() {
+        name = "app".to_owned();
+    }
+    if options.include_user_data {
+        name.push_str("_userdata");
+    }
+    if options.include_license_data {
+        name.push_str("_license");
+    }
+    name.push_str("_installer.exe");
+    let directory = options
+        .installer_dir
+        .clone()
+        .or_else(|| options.output_dir.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| options.output_dir.clone());
+    directory.join(name)
+}
+
+/// Resolve a concrete install plan for each runtime prerequisite that must be
+/// present on the target. When `bundle_prerequisites` is set, the official
+/// redistributable is downloaded and embedded; if the download fails (or the
+/// runtime is winget-only), a winget/URL fallback is recorded so the installer
+/// can still acquire it. Prerequisites that already ship app-local get no plan.
+fn bundle_prerequisites(
+    options: &PackageOptions,
+    architecture: &AppArchitecture,
+    prerequisites: &[RuntimePrerequisite],
+    warnings: &mut Vec<Warning>,
+) -> Vec<RuntimePrerequisite> {
+    let mut planned = Vec::with_capacity(prerequisites.len());
+    for prerequisite in prerequisites {
+        let mut prerequisite = prerequisite.clone();
+        if options.bundle_prerequisites
+            && prerequisite.install_manually
+            && let Some(spec) = crate::prerequisites::spec(&prerequisite.kind, architecture)
+        {
+            prerequisite.bundle = Some(plan_one_prerequisite(
+                options,
+                &prerequisite,
+                &spec,
+                warnings,
+            ));
+        }
+        planned.push(prerequisite);
+    }
+    planned
+}
+
+fn plan_one_prerequisite(
+    options: &PackageOptions,
+    prerequisite: &RuntimePrerequisite,
+    spec: &crate::prerequisites::PrerequisiteSpec,
+    warnings: &mut Vec<Warning>,
+) -> crate::models::PrerequisiteBundle {
+    if !spec.bundleable {
+        // winget/URL acquisition on the target (e.g. .NET runtime).
+        return crate::prerequisites::bundle_from_spec(spec, None, None, None);
+    }
+    let relative = PathBuf::from(PREREQUISITES_DIR).join(spec.file_name);
+    let destination = match package_destination_path(&options.output_dir, &relative) {
+        Ok(path) => path,
+        Err(error) => {
+            warnings.push(Warning::new(
+                "prerequisite_path_invalid",
+                WarningSeverity::Warning,
+                format!(
+                    "Could not place bundled prerequisite {}: {error}",
+                    spec.file_name
+                ),
+                None,
+            ));
+            return crate::prerequisites::bundle_from_spec(spec, None, None, None);
+        }
+    };
+    match crate::prerequisites::download(&spec.download_url, &destination) {
+        Ok(()) => match sha256_file(&destination) {
+            // A bundled payload must carry an integrity hash, otherwise
+            // verification would trivially pass on a corrupt/missing payload.
+            Ok(hash) => {
+                let size = fs::metadata(&destination).ok().map(|meta| meta.len());
+                crate::prerequisites::bundle_from_spec(spec, Some(relative), Some(hash), size)
+            }
+            Err(error) => {
+                warnings.push(Warning::new(
+                    "prerequisite_hash_failed",
+                    WarningSeverity::Warning,
+                    format!(
+                        "Downloaded {} but could not hash it ({error}); the installer will acquire it on the target via winget/URL instead.",
+                        prerequisite.name
+                    ),
+                    Some(destination.display().to_string()),
+                ));
+                let _ = fs::remove_file(&destination);
+                crate::prerequisites::bundle_from_spec(spec, None, None, None)
+            }
+        },
+        Err(error) => {
+            warnings.push(Warning::new(
+                "prerequisite_download_failed",
+                WarningSeverity::Warning,
+                format!(
+                    "Could not download {} ({error}); the installer will acquire it on the target via winget/URL.",
+                    prerequisite.name
+                ),
+                Some(spec.download_url.clone()),
+            ));
+            crate::prerequisites::bundle_from_spec(spec, None, None, None)
+        }
+    }
+}
+
+/// Copy application-owned driver images into the package `drivers/` directory so
+/// the installer can re-register them. Inbox/vendor drivers are left as metadata.
+fn package_drivers(
+    output_dir: &Path,
+    drivers: &[DriverEntry],
+    warnings: &mut Vec<Warning>,
+) -> Vec<DriverEntry> {
+    let mut packaged = Vec::with_capacity(drivers.len());
+    for driver in drivers {
+        let mut driver = driver.clone();
+        if driver.app_owned && driver.image_path.is_file() {
+            let leaf = driver
+                .image_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "driver.sys".to_owned());
+            // Prefix with the service name so two app-owned drivers sharing a .sys
+            // leaf name (e.g. x64\flt.sys and x86\flt.sys) cannot collide.
+            let unique = format!("{}_{}", sanitize_artifact_name(&driver.service_name), leaf);
+            let relative = PathBuf::from(DRIVERS_DIR).join(safe_relative_path(Path::new(&unique)));
+            match package_destination_path(output_dir, &relative).and_then(|destination| {
+                copy_file_preserving_basic_metadata(&driver.image_path, &destination)
+                    .map(|()| destination)
+            }) {
+                Ok(destination) => match sha256_file(&destination) {
+                    // Only mark as bundled when we have an integrity hash, so
+                    // verification cannot trivially pass on a bad image.
+                    Ok(hash) => {
+                        driver.hash_sha256 = Some(hash);
+                        driver.package_relative_path = Some(relative);
+                    }
+                    Err(error) => {
+                        let _ = fs::remove_file(&destination);
+                        warnings.push(Warning::new(
+                            "driver_hash_failed",
+                            WarningSeverity::Warning,
+                            format!(
+                                "Bundled driver image for '{}' but could not hash it ({error}); reporting it for manual reinstall instead.",
+                                driver.service_name
+                            ),
+                            Some(driver.image_path.display().to_string()),
+                        ));
+                    }
+                },
+                Err(error) => {
+                    warnings.push(Warning::new(
+                        "driver_copy_failed",
+                        WarningSeverity::Warning,
+                        format!(
+                            "Could not bundle driver image for '{}': {error}",
+                            driver.service_name
+                        ),
+                        Some(driver.image_path.display().to_string()),
+                    ));
+                }
+            }
+        }
+        packaged.push(driver);
+    }
+    packaged
+}
+
 /// Copy copyable license file artifacts into the package `license/` directory
 /// and return the (possibly updated) artifact list for the manifest. Non-file
-/// artifacts (framework stores, registry, environment, dongles) are recorded as
-/// metadata only and never copied.
+/// artifacts (registry values, environment, dongles) are recorded as metadata
+/// only; framework-store directories are copied recursively when transferable.
 fn package_license_artifacts(
     output_dir: &Path,
     artifacts: &[LicenseArtifact],
@@ -190,13 +396,31 @@ fn package_license_artifacts(
                     let relative = PathBuf::from(LICENSE_DIR).join(safe_relative_path(source));
                     let destination = package_destination_path(output_dir, &relative)?;
                     copy_file_preserving_basic_metadata(source, &destination)?;
+                    artifact.hash_sha256 = sha256_file(&destination).ok();
+                    artifact.size_bytes = fs::metadata(&destination).ok().map(|meta| meta.len());
                     artifact.package_relative_path = Some(relative);
+                }
+                Some(source) if source.is_dir() => {
+                    let relative = PathBuf::from(LICENSE_DIR).join(safe_relative_path(source));
+                    let destination = package_destination_path(output_dir, &relative)?;
+                    let copied = copy_dir_recursive(source, &destination, warnings)?;
+                    if copied > 0 {
+                        artifact.package_relative_path = Some(relative);
+                    } else {
+                        warnings.push(Warning::new(
+                            "license_store_empty",
+                            WarningSeverity::Info,
+                            "License store had no readable files to copy; recorded as metadata only.",
+                            Some(source.display().to_string()),
+                        ));
+                        artifact.should_copy = false;
+                    }
                 }
                 _ => {
                     warnings.push(Warning::new(
                         "license_file_not_copied",
                         WarningSeverity::Warning,
-                        "License file could not be copied (missing or unreadable); recorded as metadata only.",
+                        "License data could not be copied (missing or unreadable); recorded as metadata only.",
                         artifact.path.as_ref().map(|path| path.display().to_string()),
                     ));
                     artifact.should_copy = false;
@@ -206,6 +430,48 @@ fn package_license_artifacts(
         packaged.push(artifact);
     }
     Ok(packaged)
+}
+
+/// Recursively copy a directory tree into the package, best-effort. Files that
+/// cannot be read (locked/access-denied) are warned about and skipped rather
+/// than aborting the whole package. Returns the number of files copied.
+fn copy_dir_recursive(
+    source: &Path,
+    destination: &Path,
+    warnings: &mut Vec<Warning>,
+) -> Result<usize> {
+    let mut copied = 0_usize;
+    for entry in walkdir::WalkDir::new(source).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warnings.push(Warning::new(
+                    "license_store_walk_failed",
+                    WarningSeverity::Info,
+                    format!("Could not enumerate part of a license store: {error}"),
+                    Some(source.display().to_string()),
+                ));
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(source) else {
+            continue;
+        };
+        let target = destination.join(relative);
+        match copy_file_preserving_basic_metadata(entry.path(), &target) {
+            Ok(()) => copied += 1,
+            Err(error) => warnings.push(Warning::new(
+                "license_store_file_skipped",
+                WarningSeverity::Info,
+                format!("Skipped a license store file: {error}"),
+                Some(entry.path().display().to_string()),
+            )),
+        }
+    }
+    Ok(copied)
 }
 
 fn create_package_dirs(root: &Path) -> Result<()> {
@@ -219,6 +485,7 @@ fn create_package_dirs(root: &Path) -> Result<()> {
         root.join(SCHEDULED_TASKS_DIR),
         root.join(ENVIRONMENT_DIR),
         root.join(LICENSE_DIR),
+        root.join(PREREQUISITES_DIR),
         root.join(MANIFESTS_DIR),
         root.join(REPORTS_DIR),
     ] {
@@ -502,5 +769,52 @@ mod tests {
             OffsetDateTime::now_utc().unix_timestamp_nanos()
         ));
         Ok(dir)
+    }
+
+    #[test]
+    fn installer_name_encodes_chosen_contents() {
+        let file_name = |options: &PackageOptions| {
+            installer_output_path(options)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        };
+        let mut options = PackageOptions::for_executable(r"C:\App\App.exe", r"C:\work\Example");
+        options.include_user_data = false;
+        options.include_license_data = false;
+        assert_eq!(
+            file_name(&options).as_deref(),
+            Some("Example_installer.exe")
+        );
+
+        options.include_user_data = true;
+        assert_eq!(
+            file_name(&options).as_deref(),
+            Some("Example_userdata_installer.exe")
+        );
+
+        options.include_license_data = true;
+        assert_eq!(
+            file_name(&options).as_deref(),
+            Some("Example_userdata_license_installer.exe")
+        );
+
+        options.include_user_data = false;
+        assert_eq!(
+            file_name(&options).as_deref(),
+            Some("Example_license_installer.exe")
+        );
+
+        // Default installer directory is the parent of the staging dir.
+        assert_eq!(
+            installer_output_path(&options).parent(),
+            Some(Path::new(r"C:\work"))
+        );
+
+        // An explicit installer directory overrides the default.
+        options.installer_dir = Some(PathBuf::from(r"D:\out"));
+        assert_eq!(
+            installer_output_path(&options).parent(),
+            Some(Path::new(r"D:\out"))
+        );
     }
 }

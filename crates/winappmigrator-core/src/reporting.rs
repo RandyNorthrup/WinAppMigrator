@@ -493,7 +493,7 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
     }
     push_line(&mut output, "");
 
-    push_line(&mut output, "## Manual Steps Likely Required");
+    push_line(&mut output, "## Prerequisites & Manual Steps");
     if report.runtime_prerequisites.is_empty()
         && report.dependencies.iter().all(|entry| !entry.missing)
     {
@@ -501,11 +501,11 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
     } else {
         push_line(
             &mut output,
-            "- Install detected runtime prerequisites manually.",
+            "- Detected runtime prerequisites are bundled into the installer (or installed via winget) and verified automatically on the target.",
         );
         push_line(
             &mut output,
-            "- Investigate missing dependencies before migration.",
+            "- Investigate any unresolved dependencies before migration.",
         );
     }
     push_line(&mut output, "");
@@ -727,6 +727,7 @@ mod tests {
             environment_variables: Vec::new(),
             runtime_prerequisites: Vec::<RuntimePrerequisite>::new(),
             license_artifacts: Vec::new(),
+            license_registry_entries: Vec::new(),
             warnings: Vec::new(),
             items_excluded: Vec::new(),
             confidence_score: 92,

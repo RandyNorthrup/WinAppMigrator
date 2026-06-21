@@ -12,8 +12,8 @@ use std::thread;
 use eframe::egui::{self, Align, Layout, Margin, RichText, Stroke};
 
 use winappmigrator_core::{
-    AppSelection, InstalledApp, PackageArchiveFormat, PackageOptions, PackageResult,
-    VerificationOptions, VerificationReport, create_package, list_installed_apps, verify_package,
+    AppSelection, InstalledApp, PackageOptions, PackageResult, VerificationOptions,
+    VerificationReport, create_package, list_installed_apps, verify_package,
 };
 
 use theme::{Role, Theme, ThemeMode};
@@ -134,7 +134,13 @@ impl WinAppMigratorApp {
         if self.output_dir.trim().is_empty() {
             self.output_dir = default_output_for(&app.display_name);
         }
-        let output_dir = PathBuf::from(self.output_dir.trim());
+        // The chosen folder receives only the single self-extracting installer.
+        let installer_dir = PathBuf::from(self.output_dir.trim());
+        let base_name = installer_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "App".to_owned());
         let app_name = app.display_name.clone();
         let include_user_data = self.backup_user_data;
         let include_license_data = self.backup_license;
@@ -149,18 +155,29 @@ impl WinAppMigratorApp {
         self.last_outcome = None;
 
         thread::spawn(move || {
+            // Build the package in a throwaway staging directory so the chosen
+            // output folder ends up holding only the single installer executable.
+            let staging_parent =
+                std::env::temp_dir().join(format!("winappmigrator-build-{}", std::process::id()));
+            let staging = staging_parent.join(&base_name);
+
             let options = PackageOptions {
                 selection: AppSelection::InstalledApp(Box::new(app)),
-                output_dir: output_dir.clone(),
+                output_dir: staging.clone(),
                 current_directory: std::env::current_dir().ok(),
-                archive_format: Some(PackageArchiveFormat::Zip),
+                // The deliverable is a single self-contained .exe; no loose zip.
+                archive_format: None,
                 create_self_extracting_archive: true,
                 self_extracting_stub: Some(stub),
+                installer_dir: Some(installer_dir),
                 include_user_data,
                 // ProgramData is machine-wide application data; back it up
                 // together with per-user data under the one "user data" choice.
                 include_program_data: include_user_data,
                 include_license_data,
+                // Download and embed runtime prerequisites so the one installer
+                // installs everything on the target, even offline.
+                bundle_prerequisites: true,
             };
 
             let message = match create_package(&options) {
@@ -168,7 +185,9 @@ impl WinAppMigratorApp {
                     let verify_options = VerificationOptions {
                         package_root: package.package_root.clone(),
                         target_root: None,
-                        output_dir: Some(package.package_root.clone()),
+                        // Keep the verification report in staging (discarded) so
+                        // only the installer remains in the chosen folder.
+                        output_dir: Some(staging.clone()),
                         restore_user_data: false,
                     };
                     match verify_package(&verify_options) {
@@ -184,6 +203,7 @@ impl WinAppMigratorApp {
                 }
                 Err(error) => MigrateMessage::Failed(error.to_string()),
             };
+            let _ = std::fs::remove_dir_all(&staging_parent);
             let _send_result = sender.send(message);
         });
     }

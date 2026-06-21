@@ -170,6 +170,10 @@ pub struct ScanReport {
     pub runtime_prerequisites: Vec<RuntimePrerequisite>,
     #[serde(default)]
     pub license_artifacts: Vec<LicenseArtifact>,
+    /// Transferable license values captured from the registry (non-machine-bound
+    /// only) so the installer can restore them automatically.
+    #[serde(default)]
+    pub license_registry_entries: Vec<RegistryEntry>,
     pub warnings: Vec<Warning>,
     pub items_excluded: Vec<String>,
     pub confidence_score: u8,
@@ -254,6 +258,9 @@ pub struct PackageManifest {
     pub runtime_prerequisites: Vec<RuntimePrerequisite>,
     #[serde(default)]
     pub license_artifacts_detected: Vec<LicenseArtifact>,
+    /// Transferable license values to restore into the registry on the target.
+    #[serde(default)]
+    pub license_registry_entries: Vec<RegistryEntry>,
     pub warnings: Vec<Warning>,
     pub items_intentionally_excluded: Vec<String>,
 }
@@ -266,12 +273,23 @@ pub struct PackageOptions {
     pub archive_format: Option<PackageArchiveFormat>,
     pub create_self_extracting_archive: bool,
     pub self_extracting_stub: Option<PathBuf>,
+    /// Directory the single self-extracting installer executable is written to.
+    /// Defaults to the parent of `output_dir` when `None`. The installer's file
+    /// name encodes the chosen contents (e.g. `App_userdata_license_installer.exe`).
+    #[serde(default)]
+    pub installer_dir: Option<PathBuf>,
     #[serde(default = "default_true")]
     pub include_user_data: bool,
     #[serde(default = "default_true")]
     pub include_program_data: bool,
     #[serde(default)]
     pub include_license_data: bool,
+    /// Download detected runtime prerequisites (VC++ redistributable, etc.) and
+    /// embed them in the package so the installer can install them offline on the
+    /// target. Requires network access at package time; failures degrade to a
+    /// documented winget/URL fallback recorded in the manifest.
+    #[serde(default)]
+    pub bundle_prerequisites: bool,
 }
 
 impl PackageOptions {
@@ -286,9 +304,11 @@ impl PackageOptions {
             archive_format: None,
             create_self_extracting_archive: false,
             self_extracting_stub: None,
+            installer_dir: None,
             include_user_data: true,
             include_program_data: true,
             include_license_data: false,
+            bundle_prerequisites: false,
         }
     }
 }
@@ -522,6 +542,20 @@ pub struct DriverEntry {
     pub description: Option<String>,
     pub requires_admin: bool,
     pub restore_instructions: String,
+    /// True when the driver image is an application-owned `.sys` (under the app's
+    /// install footprint, not a Windows inbox/System32 driver). Only app-owned
+    /// drivers are bundled and re-registered automatically.
+    #[serde(default)]
+    pub app_owned: bool,
+    /// Authenticode signer subject of the driver image, when determinable.
+    #[serde(default)]
+    pub signer: Option<String>,
+    #[serde(default)]
+    pub hash_sha256: Option<String>,
+    /// Path inside the package (e.g. `drivers/acmeflt.sys`) when the driver image
+    /// was bundled for automatic re-registration.
+    #[serde(default)]
+    pub package_relative_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -652,7 +686,24 @@ pub struct RuntimePrerequisite {
     pub name: String,
     pub kind: RuntimePrerequisiteKind,
     pub evidence: String,
+    /// True when the runtime must be installed on the target system (it does not
+    /// ship app-local with the application). Kept for back-compat; the installer
+    /// now acts on `bundle` instead of leaving this to the user.
     pub install_manually: bool,
+    /// Whether the runtime was already present on the source machine at scan
+    /// time. Informational; `None` when not probed.
+    #[serde(default)]
+    pub present_on_source: Option<bool>,
+    /// Concrete plan for making the runtime available on the target: a bundled
+    /// installer payload, or a documented winget/URL fallback. `None` when
+    /// WinAppMigrator has no installer for this runtime (e.g. an app-local
+    /// runtime that needs no separate install).
+    #[serde(default)]
+    pub bundle: Option<PrerequisiteBundle>,
+    /// Registry probe the installer uses to confirm the runtime is present,
+    /// before and after installing it. `None` when no reliable probe is known.
+    #[serde(default)]
+    pub presence_probe: Option<PrerequisiteRegistryProbe>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -664,6 +715,42 @@ pub enum RuntimePrerequisiteKind {
     PythonRuntime,
     ElectronNodeRuntime,
     Unknown,
+}
+
+/// How the installer can make a runtime prerequisite available on the target.
+/// Resolved at package time so the installer needs no network when a payload was
+/// bundled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrerequisiteBundle {
+    /// Path inside the package (e.g. `prerequisites/vc_redist.x64.exe`) when the
+    /// installer payload was downloaded and embedded. `None` means the payload
+    /// could not be bundled and the target must acquire it via `winget_id`/
+    /// `download_url`.
+    pub package_relative_path: Option<PathBuf>,
+    pub download_url: String,
+    pub hash_sha256: Option<String>,
+    pub size_bytes: Option<u64>,
+    /// Arguments for a silent, unattended install of the bundled payload.
+    pub silent_install_args: Vec<String>,
+    /// Process exit codes that indicate the install succeeded.
+    pub success_exit_codes: Vec<i32>,
+    /// Exit codes that indicate success but require a reboot to complete.
+    pub reboot_exit_codes: Vec<i32>,
+    /// winget package id used as the on-target acquisition fallback.
+    pub winget_id: Option<String>,
+    /// True when installing this runtime modifies a machine-wide location and
+    /// therefore needs elevation.
+    pub requires_admin: bool,
+}
+
+/// A registry presence check for a runtime prerequisite. The runtime is
+/// considered present when any candidate key holds `value_name` as a DWORD that
+/// is `>= min_value`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrerequisiteRegistryProbe {
+    pub key_paths: Vec<String>,
+    pub value_name: String,
+    pub min_value: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -789,6 +876,8 @@ pub enum VerificationCategory {
     Driver,
     ScheduledTask,
     Shortcut,
+    Prerequisite,
+    License,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

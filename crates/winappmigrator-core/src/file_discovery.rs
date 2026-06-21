@@ -324,7 +324,7 @@ fn is_external_package_path(package_relative_path: &Path) -> bool {
 /// machine, e.g. `C:\Users\alice\AppData\Roaming\App\x` →
 /// `%APPDATA%\App\x`. Returns `Ok(None)` when the path is not under a known
 /// user-data anchor or the target base cannot be resolved.
-fn user_data_real_destination(original_path: &Path) -> Result<Option<PathBuf>> {
+pub fn user_data_real_destination(original_path: &Path) -> Result<Option<PathBuf>> {
     let Some((anchor, tail)) = split_user_data_relative(original_path) else {
         return Ok(None);
     };
@@ -804,13 +804,19 @@ fn add_file(
     } else {
         match classification {
             FileClassification::ManualRuntimeInstall => {
+                let file_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 warnings.push(Warning::new(
                     "driver_file_not_copied",
-                    WarningSeverity::Warning,
-                    "Kernel driver files require a vendor driver installer and are not copied by package creation.",
+                    WarningSeverity::Info,
+                    format!(
+                        "Driver/kernel file '{file_name}' is not copied as a plain file. If it backs a registered driver service for this app, the installer bundles it and re-registers the driver automatically; otherwise reinstall it with the vendor's signed driver package."
+                    ),
                     Some(path.display().to_string()),
                 ));
-                "Driver or kernel component requires manual vendor installation"
+                "Driver/kernel file: bundled and re-registered when app-owned, otherwise vendor reinstall"
             }
             FileClassification::UserData if !include_user_data => {
                 "User data found but excluded by current scan options"

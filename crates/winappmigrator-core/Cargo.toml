@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 filetime.workspace = true
+native-tls.workspace = true
 pelite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -15,6 +16,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tracing.workspace = true
+ureq.workspace = true
 walkdir.workspace = true
 winreg.workspace = true
 zip.workspace = true

@@ -162,13 +162,15 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         &app_local_dlls,
         &file_inventory,
         pe_scan.metadata.is_dotnet,
+        &pe_scan.architecture,
     );
-    let (license_artifacts, license_warnings) = scan_license_artifacts(&LicenseScanContext {
-        publisher: source_app.as_ref().and_then(|app| app.publisher.as_deref()),
-        discovered_files: &file_inventory,
-        include_license_data: options.include_license_data,
-        include_hashes: options.include_hashes,
-    });
+    let (license_artifacts, license_registry_entries, license_warnings) =
+        scan_license_artifacts(&LicenseScanContext {
+            publisher: source_app.as_ref().and_then(|app| app.publisher.as_deref()),
+            discovered_files: &file_inventory,
+            include_license_data: options.include_license_data,
+            include_hashes: options.include_hashes,
+        });
     let mut warnings = pe_scan.warnings;
     warnings.extend(resolver_warnings);
     warnings.extend(file_warnings);
@@ -235,6 +237,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         environment_variables,
         runtime_prerequisites,
         license_artifacts,
+        license_registry_entries,
         warnings,
         items_excluded: vec![
             "Windows directory, System32, and SysWOW64 files are reported but not copied."
@@ -243,7 +246,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
                 .to_owned(),
             "Registry, services, scheduled tasks, and shortcuts are archived for restore; apply mode remains explicit and privilege-gated."
                 .to_owned(),
-            "Driver and kernel components are reported but not copied or registered automatically; reinstall them with a signed vendor installer."
+            "Application-owned drivers are bundled and re-registered automatically; vendor/inbox drivers are reported with precise reinstall guidance and are not redistributed."
                 .to_owned(),
         ],
         confidence_score,
@@ -326,13 +329,26 @@ fn runtime_prerequisites(
     app_local_dlls: &[FileEntry],
     file_inventory: &[FileEntry],
     is_dotnet: bool,
+    architecture: &crate::models::AppArchitecture,
 ) -> Vec<RuntimePrerequisite> {
     let signals = collect_runtime_signal_names(dependencies, app_local_dlls, file_inventory);
     let vc_dependency = dependencies
         .iter()
         .find(|dependency| is_runtime_prerequisite_dll(&dependency.name))
         .map(|dependency| dependency.name.clone());
-    runtime_prerequisites_from_signals(&signals, vc_dependency.as_deref(), is_dotnet)
+    let mut prerequisites =
+        runtime_prerequisites_from_signals(&signals, vc_dependency.as_deref(), is_dotnet);
+    // Attach a presence probe and a source-presence reading where one is known,
+    // so packaging and the installer can confirm the runtime before and after
+    // installing it.
+    for prerequisite in &mut prerequisites {
+        if let Some(probe) = crate::prerequisites::presence_probe(&prerequisite.kind, architecture)
+        {
+            prerequisite.present_on_source = Some(crate::prerequisites::is_present(&probe));
+            prerequisite.presence_probe = Some(probe);
+        }
+    }
+    prerequisites
 }
 
 /// Lowercased leaf file names that signal a bundled or required runtime:
@@ -377,6 +393,9 @@ fn runtime_prerequisites_from_signals(
             kind: RuntimePrerequisiteKind::VisualCppRedistributable,
             evidence: format!("Imported runtime DLL: {name}"),
             install_manually: true,
+            present_on_source: None,
+            bundle: None,
+            presence_probe: None,
         });
     }
 
@@ -407,6 +426,9 @@ fn runtime_prerequisites_from_signals(
             kind: RuntimePrerequisiteKind::DotNetDesktopRuntime,
             evidence: evidence.to_owned(),
             install_manually,
+            present_on_source: None,
+            bundle: None,
+            presence_probe: None,
         });
     }
 
@@ -416,6 +438,9 @@ fn runtime_prerequisites_from_signals(
             kind: RuntimePrerequisiteKind::JavaRuntime,
             evidence: "Java runtime artifacts present (jvm/java)".to_owned(),
             install_manually: !has("jvm.dll"),
+            present_on_source: None,
+            bundle: None,
+            presence_probe: None,
         });
     }
 
@@ -429,6 +454,9 @@ fn runtime_prerequisites_from_signals(
             kind: RuntimePrerequisiteKind::PythonRuntime,
             evidence: "Python runtime artifacts present (python*.dll)".to_owned(),
             install_manually: false,
+            present_on_source: None,
+            bundle: None,
+            presence_probe: None,
         });
     }
 
@@ -441,6 +469,9 @@ fn runtime_prerequisites_from_signals(
             kind: RuntimePrerequisiteKind::ElectronNodeRuntime,
             evidence: "Electron/Node artifacts present (node/ffmpeg/asar)".to_owned(),
             install_manually: false,
+            present_on_source: None,
+            bundle: None,
+            presence_probe: None,
         });
     }
 

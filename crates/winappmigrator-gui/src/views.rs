@@ -369,10 +369,15 @@ impl WinAppMigratorApp {
                     );
 
                     ui.add_space(12.0);
-                    if button(ui, theme, ButtonKind::Secondary, "Open folder", true).clicked()
-                        && let Err(error) = crate::open_folder(&package.package_root)
-                    {
-                        folder_error = Some(error.to_string());
+                    if button(ui, theme, ButtonKind::Secondary, "Open folder", true).clicked() {
+                        let target = package
+                            .self_extracting_archive_path
+                            .as_deref()
+                            .and_then(|path| path.parent())
+                            .unwrap_or(package.package_root.as_path());
+                        if let Err(error) = crate::open_folder(target) {
+                            folder_error = Some(error.to_string());
+                        }
                     }
                 },
             );
