@@ -842,8 +842,14 @@ fn is_registry_key_path(value: &str) -> bool {
 }
 
 /// Markers that identify a well-known base directory; the application's install
-/// root is the first path segment that follows one of these.
+/// root is the first path segment that follows one of these. Ordered
+/// most-specific first: the shared `Common Files` directories must be matched
+/// before the plain `Program Files` markers so a vendor's files under
+/// `Common Files\<Vendor>` resolve to that vendor sub-directory instead of
+/// collapsing the entire (multi-vendor) `Common Files` tree into one root.
 const ROOT_MARKERS: &[&str] = &[
+    r"\program files (x86)\common files\",
+    r"\program files\common files\",
     r"\program files (x86)\",
     r"\program files\",
     r"\programdata\",
@@ -973,6 +979,25 @@ mod tests {
             vec![
                 PathBuf::from(r"C:\Program Files\Inkscape"),
                 PathBuf::from(r"C:\ProgramData\Inkscape"),
+            ]
+        );
+    }
+
+    #[test]
+    fn common_files_root_is_vendor_scoped_not_the_whole_shared_dir() {
+        // A vendor file under the shared Common Files tree must resolve to the
+        // vendor sub-directory, never the multi-vendor Common Files root.
+        let files = vec![
+            PathBuf::from(r"C:\Program Files (x86)\Common Files\Esoteric Technologies\shared.dll"),
+            PathBuf::from(r"C:\Program Files (x86)\SolarFire9\SolarFire.exe"),
+        ];
+        let mut roots = minimal_install_roots(&files);
+        roots.sort();
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from(r"C:\Program Files (x86)\Common Files\Esoteric Technologies"),
+                PathBuf::from(r"C:\Program Files (x86)\SolarFire9"),
             ]
         );
     }
