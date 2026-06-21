@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Deserialize;
 
 use crate::models::{ShortcutEntry, Warning, WarningSeverity};
+use crate::path_utils::hidden_command;
 
 #[derive(Debug, Clone)]
 pub struct ShortcutScanContext {
@@ -103,7 +103,7 @@ fn shortcut_entry(
 }
 
 fn run_powershell(script: &str) -> std::io::Result<String> {
-    let output = Command::new("powershell.exe")
+    let output = hidden_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()?;
     if output.status.success() {

@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use tempfile::TempDir;
 use time::OffsetDateTime;
@@ -25,6 +24,7 @@ use crate::models::{
     VerificationReport, VerificationStatus, Warning, WarningSeverity,
 };
 use crate::package::read_manifest;
+use crate::path_utils::hidden_command;
 use crate::prerequisites::is_present;
 
 const ZIP_EXTENSION: &str = "zip";
@@ -1099,7 +1099,7 @@ fn scheduled_task_xml(task: &ScheduledTaskEntry) -> std::io::Result<Option<Strin
         escape_ps_single(&task.task_name),
         escape_ps_single(&task.task_path)
     );
-    let output = Command::new(POWERSHELL_EXE)
+    let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
         .output()?;
     if output.status.code() == Some(2) {
@@ -1122,7 +1122,7 @@ fn shortcut_target(path: &Path) -> std::io::Result<Option<String>> {
         "$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath",
         escape_ps_single(path.display().to_string().as_str())
     );
-    let output = Command::new(POWERSHELL_EXE)
+    let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
         .output()?;
     if output.status.success() {

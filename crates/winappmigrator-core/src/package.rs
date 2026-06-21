@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use filetime::{FileTime, set_file_times};
 use time::OffsetDateTime;
@@ -16,6 +15,7 @@ use crate::models::{
     RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions, ScheduledTaskEntry, Warning,
     WarningSeverity,
 };
+use crate::path_utils::hidden_command;
 use crate::scan::scan_and_write_reports;
 
 const FILES_DIR: &str = "files";
@@ -516,7 +516,7 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 fn source_windows_version() -> Option<String> {
-    Command::new("cmd")
+    hidden_command("cmd")
         .args(["/C", "ver"])
         .output()
         .ok()

@@ -1,11 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 
 use crate::models::{DriverEntry, DriverKind, ServiceEntry, Warning, WarningSeverity};
-use crate::path_utils::split_command_executable_path;
+use crate::path_utils::{hidden_command, split_command_executable_path};
 
 const POWERSHELL_EXE: &str = "powershell.exe";
 
@@ -190,7 +189,7 @@ fn driver_signer(image_path: &Path) -> Option<String> {
         "$s = Get-AuthenticodeSignature -LiteralPath '{}'; if ($s -and $s.SignerCertificate) {{ $s.SignerCertificate.Subject }}",
         image_path.display().to_string().replace('\'', "''")
     );
-    let output = Command::new(POWERSHELL_EXE)
+    let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
         .output()
         .ok()?;

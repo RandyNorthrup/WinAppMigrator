@@ -1,6 +1,24 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const EXE_EXTENSION: &str = "exe";
+
+/// Build a `Command` that does not pop up a console window for the child
+/// process. Every external tool WinAppMigrator runs (sc.exe, PowerShell, winget,
+/// bundled installers, cmd) must use this so building or installing never flashes
+/// terminal windows over the GUI/app.
+pub fn hidden_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: run the child without allocating a console.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
 
 pub fn file_name_string(path: &Path) -> String {
     path.file_name()

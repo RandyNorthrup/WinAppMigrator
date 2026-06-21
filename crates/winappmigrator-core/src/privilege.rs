@@ -1,9 +1,10 @@
 use std::path::Path;
-use std::process::Command;
+
+use crate::path_utils::hidden_command;
 
 pub fn is_elevated() -> bool {
     let script = "[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent() | ForEach-Object { $_.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }";
-    Command::new("powershell.exe")
+    hidden_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
         .ok()

@@ -26,6 +26,7 @@ use crate::models::{
     Warning, WarningSeverity,
 };
 use crate::package::read_manifest;
+use crate::path_utils::hidden_command;
 use crate::prerequisites::{PrerequisiteInstallOutcome, install_bundle, is_present};
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
 use crate::verify::verify_package;
@@ -747,7 +748,7 @@ fn apply_driver(
     image_path: &Path,
     force: bool,
 ) -> std::result::Result<Vec<String>, Warning> {
-    let mut query = Command::new(SC_EXE);
+    let mut query = hidden_command(SC_EXE);
     query.arg("query").arg(&driver.service_name);
     let exists = command_success(&mut query);
     if exists && !force {
@@ -765,7 +766,7 @@ fn apply_driver(
     // here would embed literal quote characters in the registered ImagePath.
     let mut messages = Vec::new();
     if exists {
-        let mut command = Command::new(SC_EXE);
+        let mut command = hidden_command(SC_EXE);
         command
             .arg("config")
             .arg(&driver.service_name)
@@ -776,7 +777,7 @@ fn apply_driver(
         run_checked(&mut command, "driver_config_failed", &driver.service_name)?;
         messages.push(format!("configured driver {}", driver.service_name));
     } else {
-        let mut command = Command::new(SC_EXE);
+        let mut command = hidden_command(SC_EXE);
         command
             .arg("create")
             .arg(&driver.service_name)
@@ -1102,7 +1103,7 @@ fn apply_service(
     binary_path: &Path,
     force: bool,
 ) -> std::result::Result<Vec<String>, Warning> {
-    let mut query = Command::new(SC_EXE);
+    let mut query = hidden_command(SC_EXE);
     query.arg("query").arg(&service.service_name);
     let exists = command_success(&mut query);
     if exists && !force {
@@ -1118,7 +1119,7 @@ fn apply_service(
     // Pass the raw path so Command applies exactly one layer of Windows argument
     // quoting; sc.exe stores it verbatim. Pre-quoting would embed literal quotes.
     if exists {
-        let mut command = Command::new(SC_EXE);
+        let mut command = hidden_command(SC_EXE);
         command
             .arg("config")
             .arg(&service.service_name)
@@ -1127,7 +1128,7 @@ fn apply_service(
         run_checked(&mut command, "service_config_failed", &service.service_name)?;
         messages.push(format!("configured service {}", service.service_name));
     } else {
-        let mut command = Command::new(SC_EXE);
+        let mut command = hidden_command(SC_EXE);
         command
             .arg("create")
             .arg(&service.service_name)
@@ -1141,7 +1142,7 @@ fn apply_service(
     }
 
     if let Some(description) = service.description.as_deref() {
-        let mut command = Command::new(SC_EXE);
+        let mut command = hidden_command(SC_EXE);
         command
             .arg("description")
             .arg(&service.service_name)
@@ -1154,7 +1155,7 @@ fn apply_service(
     }
     if !service.dependencies.is_empty() {
         let dependencies = service.dependencies.join("/");
-        let mut command = Command::new(SC_EXE);
+        let mut command = hidden_command(SC_EXE);
         command
             .arg("config")
             .arg(&service.service_name)
@@ -1587,7 +1588,7 @@ fn scheduled_task_exists(task: &ScheduledTaskEntry) -> std::result::Result<bool,
         escape_ps_single(&task.task_name),
         escape_ps_single(&task.task_path)
     );
-    let output = Command::new(POWERSHELL_EXE)
+    let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
         .output()
         .map_err(|error| {
@@ -1602,7 +1603,7 @@ fn scheduled_task_exists(task: &ScheduledTaskEntry) -> std::result::Result<bool,
 }
 
 fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
-    let output = Command::new(POWERSHELL_EXE)
+    let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
         .map_err(|error| {

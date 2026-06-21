@@ -22,6 +22,7 @@ use crate::file_discovery::package_destination_path;
 use crate::models::{
     AppArchitecture, PrerequisiteBundle, PrerequisiteRegistryProbe, RuntimePrerequisiteKind,
 };
+use crate::path_utils::hidden_command;
 
 const WINGET_EXE: &str = "winget";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
@@ -183,7 +184,7 @@ pub fn install_bundle(
 }
 
 fn run_payload(payload: &Path, bundle: &PrerequisiteBundle) -> PrerequisiteInstallOutcome {
-    let mut command = Command::new(payload);
+    let mut command = hidden_command(payload);
     command.args(&bundle.silent_install_args);
     match wait_with_timeout(command, INSTALL_TIMEOUT) {
         WaitOutcome::Exited(code) => classify_exit_code(code, bundle),
@@ -197,7 +198,7 @@ fn run_payload(payload: &Path, bundle: &PrerequisiteBundle) -> PrerequisiteInsta
 }
 
 fn run_winget(winget_id: &str) -> PrerequisiteInstallOutcome {
-    let mut command = Command::new(WINGET_EXE);
+    let mut command = hidden_command(WINGET_EXE);
     command.args([
         "install",
         "--id",
