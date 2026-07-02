@@ -54,6 +54,7 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         include_user_data: options.include_user_data,
         include_program_data: options.include_program_data,
         include_license_data: options.include_license_data,
+        source: options.source.clone(),
     };
     let report = scan_and_write_reports(&scan_options)?;
     let mut warnings = report.warnings.clone();
@@ -502,14 +503,78 @@ fn copy_file_preserving_basic_metadata(source: &Path, destination: &Path) -> Res
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|source| WinAppMigratorError::io(parent, source))?;
     }
-    fs::copy(source, destination).map_err(|error| WinAppMigratorError::io(destination, error))?;
-    let metadata = fs::metadata(source).map_err(|error| WinAppMigratorError::io(source, error))?;
-    fs::set_permissions(destination, metadata.permissions())
-        .map_err(|error| WinAppMigratorError::io(destination, error))?;
+    // A plain in-process copy fails on files whose NTFS ACL denies this process —
+    // common for a foreign disk owned by another PC's SIDs. Fall back to a
+    // backup-semantics copy (robocopy /B) that reads through SeBackupPrivilege
+    // without modifying the source, then apply metadata. `fs::copy` is tried
+    // first so the common (accessible) case stays fast and dependency-free.
+    match fs::copy(source, destination) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            copy_file_backup_mode(source, destination)?;
+        }
+        Err(error) => return Err(WinAppMigratorError::io(destination, error)),
+    }
+    let Ok(metadata) = fs::metadata(source) else {
+        // Source metadata may be unreadable even when a backup-mode copy
+        // succeeded; the bytes are what matter, so keep the copied file as-is.
+        return Ok(());
+    };
+    let _ = fs::set_permissions(destination, metadata.permissions());
     let accessed = FileTime::from_last_access_time(&metadata);
     let modified = FileTime::from_last_modification_time(&metadata);
-    set_file_times(destination, accessed, modified)
-        .map_err(|error| WinAppMigratorError::io(destination, error))?;
+    let _ = set_file_times(destination, accessed, modified);
+    Ok(())
+}
+
+/// Copy a single file using `robocopy /B` (backup mode), which reads through the
+/// process's `SeBackupPrivilege` so restrictive NTFS ACLs on a foreign disk do
+/// not block the copy. It is strictly read-only on the source (never changes its
+/// ACLs or attributes). robocopy copies by directory + file name, so the source
+/// and destination file names must match; the caller passes a destination whose
+/// name equals the source's.
+fn copy_file_backup_mode(source: &Path, destination: &Path) -> Result<()> {
+    let (Some(source_dir), Some(file_name)) = (source.parent(), source.file_name()) else {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "cannot backup-copy a file without a parent directory: {}",
+            source.display()
+        )));
+    };
+    let Some(destination_dir) = destination.parent() else {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "backup-copy destination has no parent directory: {}",
+            destination.display()
+        )));
+    };
+    let status = hidden_command("robocopy")
+        .arg(source_dir)
+        .arg(destination_dir)
+        .arg(file_name)
+        .args(["/B", "/NJH", "/NJS", "/NP", "/NDL", "/NC", "/NS", "/R:1", "/W:1"])
+        .status()
+        .map_err(|error| WinAppMigratorError::io(source, error))?;
+    // robocopy encodes success in exit codes 0-7 (bit 3+ are failures).
+    let copied_ok = status.code().is_some_and(|code| code < 8);
+    if !copied_ok {
+        return Err(WinAppMigratorError::io(
+            destination,
+            std::io::Error::other(format!(
+                "robocopy backup-mode copy failed (exit {:?})",
+                status.code()
+            )),
+        ));
+    }
+    // Robocopy may rename destination when names differ; ours match, but if the
+    // destination file name differs from the source, move it into place.
+    if let Some(dest_name) = destination.file_name()
+        && dest_name != file_name
+    {
+        let robocopied = destination_dir.join(file_name);
+        if robocopied.exists() {
+            fs::rename(&robocopied, destination)
+                .map_err(|error| WinAppMigratorError::io(destination, error))?;
+        }
+    }
     Ok(())
 }
 

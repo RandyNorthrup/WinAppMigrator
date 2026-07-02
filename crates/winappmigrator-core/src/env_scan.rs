@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
 
-use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_MULTI_SZ};
+use winreg::enums::{KEY_READ, REG_EXPAND_SZ, REG_MULTI_SZ};
 use winreg::{RegKey, RegValue};
 
 use crate::models::{
     EnvironmentScope, EnvironmentVariableEntry, MatchConfidence, RegistryValueKind, Warning,
     WarningSeverity,
 };
+use crate::system_context::SystemContext;
 
 const HKCU_ENVIRONMENT: &str = r"Environment";
 const HKLM_ENVIRONMENT: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
@@ -19,23 +20,28 @@ pub struct EnvironmentScanContext {
 
 pub fn scan_environment(
     context: &EnvironmentScanContext,
+    system: &SystemContext,
 ) -> (Vec<EnvironmentVariableEntry>, Vec<Warning>) {
     let mut entries = Vec::new();
     let mut warnings = Vec::new();
-    scan_registry_environment(
-        context,
-        EnvironmentScope::User,
-        HKCU_ENVIRONMENT,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_registry_environment(
-        context,
-        EnvironmentScope::Machine,
-        HKLM_ENVIRONMENT,
-        &mut entries,
-        &mut warnings,
-    );
+
+    match system.open_hklm(HKLM_ENVIRONMENT, KEY_READ) {
+        Ok(key) => collect_env_values(context, EnvironmentScope::Machine, &key, &mut entries),
+        Err(error) => warnings.push(Warning::new(
+            "environment_registry_unreadable",
+            WarningSeverity::Info,
+            format!("Could not read machine environment registry key: {error}"),
+            Some(HKLM_ENVIRONMENT.to_owned()),
+        )),
+    }
+
+    // Per-user environment: live yields the current user; offline every profile.
+    for user in system.user_hives() {
+        if let Ok(key) = user.open(HKCU_ENVIRONMENT, KEY_READ) {
+            collect_env_values(context, EnvironmentScope::User, &key, &mut entries);
+        }
+    }
+
     entries.sort_by(|left, right| {
         format!("{:?}:{}", left.scope, left.name.to_ascii_lowercase()).cmp(&format!(
             "{:?}:{}",
@@ -47,30 +53,12 @@ pub fn scan_environment(
     (entries, warnings)
 }
 
-fn scan_registry_environment(
+fn collect_env_values(
     context: &EnvironmentScanContext,
     scope: EnvironmentScope,
-    key_path: &str,
+    key: &RegKey,
     entries: &mut Vec<EnvironmentVariableEntry>,
-    warnings: &mut Vec<Warning>,
 ) {
-    let root = match scope {
-        EnvironmentScope::User => RegKey::predef(HKEY_CURRENT_USER),
-        EnvironmentScope::Machine => RegKey::predef(HKEY_LOCAL_MACHINE),
-    };
-    let key = match root.open_subkey_with_flags(key_path, KEY_READ) {
-        Ok(key) => key,
-        Err(error) => {
-            warnings.push(Warning::new(
-                "environment_registry_unreadable",
-                WarningSeverity::Info,
-                format!("Could not read environment registry key: {error}"),
-                Some(key_path.to_owned()),
-            ));
-            return;
-        }
-    };
-
     for value in key.enum_values().flatten() {
         let name = value.0;
         let raw = value.1;

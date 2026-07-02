@@ -3,15 +3,14 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 use winreg::RegKey;
-use winreg::enums::{
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
-};
+use winreg::enums::{KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
 use crate::errors::{Result, WinAppMigratorError};
-use crate::models::{AppArchitecture, InstallScope, InstalledApp, RegistryHive};
+use crate::models::{AppArchitecture, InstallScope, InstalledApp};
 use crate::path_utils::{
     looks_like_executable, normalize_name_for_match, split_command_executable_path,
 };
+use crate::system_context::{SystemContext, UserHive};
 
 const HKLM_UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const HKLM_WOW6432_UNINSTALL: &str =
@@ -25,12 +24,9 @@ const UNINSTALL_STRING_VALUE: &str = "UninstallString";
 const DISPLAY_ICON_VALUE: &str = "DisplayIcon";
 
 #[derive(Debug, Clone)]
-struct RegistryLocation {
-    hive: RegistryHive,
-    hive_label: &'static str,
+struct HklmUninstallLocation {
     subkey: &'static str,
     architecture: AppArchitecture,
-    install_scope: InstallScope,
     flags: u32,
 }
 
@@ -44,37 +40,34 @@ pub struct RawUninstallEntry {
     pub display_icon: Option<String>,
 }
 
+/// List apps installed on the live machine.
 pub fn list_installed_apps() -> Result<Vec<InstalledApp>> {
-    let locations = [
-        RegistryLocation {
-            hive: RegistryHive::LocalMachine,
-            hive_label: "HKLM",
+    list_installed_apps_from(&SystemContext::live())
+}
+
+/// List apps installed on the system `system` points at (live OS or a connected
+/// offline volume). Paths in each entry are re-rooted onto the source system.
+pub fn list_installed_apps_from(system: &SystemContext) -> Result<Vec<InstalledApp>> {
+    let hklm_locations = [
+        HklmUninstallLocation {
             subkey: HKLM_UNINSTALL,
             architecture: AppArchitecture::X64,
-            install_scope: InstallScope::PerMachine,
             flags: KEY_READ | KEY_WOW64_64KEY,
         },
-        RegistryLocation {
-            hive: RegistryHive::LocalMachine,
-            hive_label: "HKLM",
+        HklmUninstallLocation {
             subkey: HKLM_WOW6432_UNINSTALL,
             architecture: AppArchitecture::X86,
-            install_scope: InstallScope::PerMachine,
             flags: KEY_READ | KEY_WOW64_32KEY,
-        },
-        RegistryLocation {
-            hive: RegistryHive::CurrentUser,
-            hive_label: "HKCU",
-            subkey: HKCU_UNINSTALL,
-            architecture: AppArchitecture::Unknown,
-            install_scope: InstallScope::PerUser,
-            flags: KEY_READ,
         },
     ];
 
     let mut apps = Vec::new();
-    for location in locations {
-        apps.extend(read_uninstall_location(&location)?);
+    for location in hklm_locations {
+        apps.extend(read_hklm_uninstall(system, &location)?);
+    }
+    // Per-user apps: live yields the current user; offline yields every profile.
+    for user in system.user_hives() {
+        apps.extend(read_hkcu_uninstall(system, &user));
     }
 
     apps.sort_by(|left, right| {
@@ -85,23 +78,57 @@ pub fn list_installed_apps() -> Result<Vec<InstalledApp>> {
     Ok(apps)
 }
 
-fn read_uninstall_location(location: &RegistryLocation) -> Result<Vec<InstalledApp>> {
-    let root = match location.hive {
-        RegistryHive::LocalMachine => RegKey::predef(HKEY_LOCAL_MACHINE),
-        RegistryHive::CurrentUser => RegKey::predef(HKEY_CURRENT_USER),
-    };
-
-    let uninstall_key = match root.open_subkey_with_flags(location.subkey, location.flags) {
+fn read_hklm_uninstall(
+    system: &SystemContext,
+    location: &HklmUninstallLocation,
+) -> Result<Vec<InstalledApp>> {
+    let uninstall_key = match system.open_hklm(location.subkey, location.flags) {
         Ok(key) => key,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
             return Err(WinAppMigratorError::Registry(format!(
-                "{}\\{}: {}",
-                location.hive_label, location.subkey, error
+                "HKLM\\{}: {}",
+                location.subkey, error
             )));
         }
     };
+    Ok(collect_uninstall_entries(
+        system,
+        &uninstall_key,
+        location.flags,
+        "HKLM",
+        location.subkey,
+        location.architecture.clone(),
+        InstallScope::PerMachine,
+    ))
+}
 
+fn read_hkcu_uninstall(system: &SystemContext, user: &UserHive) -> Vec<InstalledApp> {
+    let uninstall_key = match user.open(HKCU_UNINSTALL, KEY_READ) {
+        Ok(key) => key,
+        Err(_) => return Vec::new(),
+    };
+    collect_uninstall_entries(
+        system,
+        &uninstall_key,
+        KEY_READ,
+        "HKCU",
+        HKCU_UNINSTALL,
+        AppArchitecture::Unknown,
+        InstallScope::PerUser,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_uninstall_entries(
+    system: &SystemContext,
+    uninstall_key: &RegKey,
+    flags: u32,
+    hive_label: &str,
+    subkey: &str,
+    architecture: AppArchitecture,
+    install_scope: InstallScope,
+) -> Vec<InstalledApp> {
     let mut apps = Vec::new();
     for key_name in uninstall_key.enum_keys() {
         let key_name = match key_name {
@@ -111,7 +138,7 @@ fn read_uninstall_location(location: &RegistryLocation) -> Result<Vec<InstalledA
                 continue;
             }
         };
-        let child = match uninstall_key.open_subkey_with_flags(&key_name, location.flags) {
+        let child = match uninstall_key.open_subkey_with_flags(&key_name, flags) {
             Ok(child) => child,
             Err(error) => {
                 warn!(%error, key_name, "failed to open uninstall subkey");
@@ -119,18 +146,18 @@ fn read_uninstall_location(location: &RegistryLocation) -> Result<Vec<InstalledA
             }
         };
         let raw = read_raw_entry(&child);
-        let source_path = format!(r"{}\{}\{}", location.hive_label, location.subkey, key_name);
+        let source_path = format!(r"{hive_label}\{subkey}\{key_name}");
         if let Some(app) = parse_uninstall_entry(
+            system,
             &raw,
             source_path,
-            location.architecture.clone(),
-            location.install_scope.clone(),
+            architecture.clone(),
+            install_scope.clone(),
         ) {
             apps.push(app);
         }
     }
-
-    Ok(apps)
+    apps
 }
 
 fn read_raw_entry(key: &RegKey) -> RawUninstallEntry {
@@ -152,6 +179,7 @@ fn read_optional_string(key: &RegKey, value_name: &str) -> Option<String> {
 }
 
 pub fn parse_uninstall_entry(
+    system: &SystemContext,
     raw: &RawUninstallEntry,
     registry_source_path: String,
     architecture: AppArchitecture,
@@ -162,9 +190,15 @@ pub fn parse_uninstall_entry(
         return None;
     }
 
-    let install_location = raw.install_location.as_ref().map(PathBuf::from);
+    // Registry records paths as they were on the source system (e.g. C:\...);
+    // re-root them onto the scanned volume before any existence checks.
+    let install_location = raw
+        .install_location
+        .as_ref()
+        .map(PathBuf::from)
+        .map(|path| system.resolve_source_path(&path));
     let main_executable =
-        guess_main_executable(raw, install_location.as_deref(), display_name.as_str());
+        guess_main_executable(system, raw, install_location.as_deref(), display_name.as_str());
 
     Some(InstalledApp {
         display_name,
@@ -180,6 +214,7 @@ pub fn parse_uninstall_entry(
 }
 
 fn guess_main_executable(
+    system: &SystemContext,
     raw: &RawUninstallEntry,
     install_location: Option<&Path>,
     display_name: &str,
@@ -188,11 +223,11 @@ fn guess_main_executable(
         .into_iter()
         .flatten()
     {
-        if let Some(path) = split_command_executable_path(value)
-            && looks_like_executable(&path)
-            && path.exists()
-        {
-            return Some(path);
+        if let Some(path) = split_command_executable_path(value) {
+            let path = system.resolve_source_path(&path);
+            if looks_like_executable(&path) && path.exists() {
+                return Some(path);
+            }
         }
     }
 
@@ -297,6 +332,7 @@ mod tests {
         };
 
         let app = parse_uninstall_entry(
+            &SystemContext::live(),
             &raw,
             r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\Example".to_owned(),
             AppArchitecture::X64,
@@ -317,6 +353,7 @@ mod tests {
         let raw = RawUninstallEntry::default();
 
         let app = parse_uninstall_entry(
+            &SystemContext::live(),
             &raw,
             "HKCU\\Example".to_owned(),
             AppArchitecture::Unknown,

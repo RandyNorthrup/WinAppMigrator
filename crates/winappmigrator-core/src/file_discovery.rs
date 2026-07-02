@@ -14,6 +14,7 @@ use crate::models::{
     WarningSeverity,
 };
 use crate::path_utils::{file_name_string, normalize_name_for_match, path_has_extension};
+use crate::system_context::SystemContext;
 
 const MAX_WALK_DEPTH: usize = 24;
 /// `User Shell Folders` holds the (possibly redirected) per-user known-folder
@@ -74,7 +75,6 @@ const GENERIC_TOKENS: &[&str] = &[
 const APPDATA_ROAMING_SEGMENT: &str = r"AppData\Roaming";
 const APPDATA_LOCAL_SEGMENT: &str = r"AppData\Local";
 const APPDATA_LOCAL_LOW_SEGMENT: &str = r"AppData\LocalLow";
-const USER_PROFILE_NAMES_TO_SKIP: &[&str] = &["All Users", "Default", "Default User", "Public"];
 /// Directory names whose contents are disposable (caches, crash dumps, logs)
 /// and are pruned from copy candidates to keep packages lean.
 const VOLATILE_DIR_NAMES: &[&str] = &[
@@ -120,6 +120,7 @@ struct Tokens {
 
 pub fn discover_files(
     context: &FileDiscoveryContext,
+    system: &SystemContext,
 ) -> (Vec<FileEntry>, Vec<FootprintLocation>, Vec<Warning>) {
     let mut warnings = Vec::new();
     let mut files = Vec::new();
@@ -144,7 +145,7 @@ pub fn discover_files(
     );
 
     let tokens = Tokens::from_context(context);
-    for root in collect_roots(context, &tokens) {
+    for root in collect_roots(context, &tokens, system) {
         let start = files.len();
         discover_tree(
             &root,
@@ -379,7 +380,11 @@ fn user_data_base(anchor: UserDataAnchor) -> Option<PathBuf> {
     }
 }
 
-fn collect_roots(context: &FileDiscoveryContext, tokens: &Tokens) -> Vec<DiscoveryRoot> {
+fn collect_roots(
+    context: &FileDiscoveryContext,
+    tokens: &Tokens,
+    system: &SystemContext,
+) -> Vec<DiscoveryRoot> {
     let mut raw: Vec<DiscoveryRoot> = Vec::new();
 
     if let Some(install_location) = context.install_location.as_ref() {
@@ -401,18 +406,19 @@ fn collect_roots(context: &FileDiscoveryContext, tokens: &Tokens) -> Vec<Discove
         push_root(&mut raw, extra.clone(), kind);
     }
 
-    collect_program_files_roots(tokens, &mut raw);
-    collect_program_data_roots(tokens, &mut raw);
-    collect_appdata_roots(tokens, &mut raw);
-    collect_known_user_folder_roots(tokens, &mut raw);
+    collect_program_files_roots(tokens, &mut raw, system);
+    collect_program_data_roots(tokens, &mut raw, system);
+    collect_appdata_roots(tokens, &mut raw, system);
+    collect_known_user_folder_roots(tokens, &mut raw, system);
 
+    let known_base_dirs = known_base_dirs(system);
     // Deduplicate while preserving order so the most authoritative root (the
     // install location) owns each shared file, and drop any root nested inside a
     // root already kept so subtrees are not walked twice.
     let mut seen_paths = BTreeSet::new();
     let mut roots: Vec<DiscoveryRoot> = Vec::new();
     for root in raw {
-        if !is_walkable_app_dir(&root.path) {
+        if !is_walkable_app_dir(&root.path, &known_base_dirs) {
             continue;
         }
         let key = root.path.to_string_lossy().to_ascii_lowercase();
@@ -435,22 +441,28 @@ fn push_root(roots: &mut Vec<DiscoveryRoot>, path: PathBuf, kind: FootprintKind)
     roots.push(DiscoveryRoot { path, kind, scope });
 }
 
-fn collect_program_files_roots(tokens: &Tokens, roots: &mut Vec<DiscoveryRoot>) {
-    for env_var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
-        if let Some(base) = std::env::var_os(env_var).map(PathBuf::from) {
-            collect_matching_dirs(&base, FootprintKind::InstallDirectory, tokens, roots);
-        }
+fn collect_program_files_roots(
+    tokens: &Tokens,
+    roots: &mut Vec<DiscoveryRoot>,
+    system: &SystemContext,
+) {
+    for base in system.program_files_dirs() {
+        collect_matching_dirs(&base, FootprintKind::InstallDirectory, tokens, roots);
     }
 }
 
-fn collect_program_data_roots(tokens: &Tokens, roots: &mut Vec<DiscoveryRoot>) {
-    if let Some(base) = std::env::var_os("ProgramData").map(PathBuf::from) {
+fn collect_program_data_roots(
+    tokens: &Tokens,
+    roots: &mut Vec<DiscoveryRoot>,
+    system: &SystemContext,
+) {
+    if let Some(base) = system.program_data() {
         collect_matching_dirs(&base, FootprintKind::ProgramData, tokens, roots);
     }
 }
 
-fn collect_appdata_roots(tokens: &Tokens, roots: &mut Vec<DiscoveryRoot>) {
-    for (base, kind) in appdata_bases() {
+fn collect_appdata_roots(tokens: &Tokens, roots: &mut Vec<DiscoveryRoot>, system: &SystemContext) {
+    for (base, kind) in appdata_bases(system) {
         collect_matching_dirs(&base, kind, tokens, roots);
     }
 }
@@ -459,17 +471,40 @@ fn collect_appdata_roots(tokens: &Tokens, roots: &mut Vec<DiscoveryRoot>) {
 /// `Documents` (including nested `My Games\<App>`) and `Saved Games`, resolving
 /// any folder redirection (OneDrive, roaming profiles) recorded in the
 /// `User Shell Folders` registry key before falling back to the profile path.
-fn collect_known_user_folder_roots(tokens: &Tokens, roots: &mut Vec<DiscoveryRoot>) {
-    if let Some(documents) = documents_dir() {
-        collect_matching_dirs(&documents, FootprintKind::Documents, tokens, roots);
-    }
-    if let Some(saved_games) = saved_games_dir() {
-        collect_matching_dirs(&saved_games, FootprintKind::SavedGames, tokens, roots);
+fn collect_known_user_folder_roots(
+    tokens: &Tokens,
+    roots: &mut Vec<DiscoveryRoot>,
+    system: &SystemContext,
+) {
+    if system.is_offline() {
+        // Redirection lives in each user's NTUSER hive; the common case is
+        // unredirected, so use the profile-relative folders for every user.
+        for profile in system.user_profiles() {
+            collect_matching_dirs(
+                &profile.join(DOCUMENTS_FALLBACK),
+                FootprintKind::Documents,
+                tokens,
+                roots,
+            );
+            collect_matching_dirs(
+                &profile.join(SAVED_GAMES_FALLBACK),
+                FootprintKind::SavedGames,
+                tokens,
+                roots,
+            );
+        }
+    } else {
+        if let Some(documents) = documents_dir() {
+            collect_matching_dirs(&documents, FootprintKind::Documents, tokens, roots);
+        }
+        if let Some(saved_games) = saved_games_dir() {
+            collect_matching_dirs(&saved_games, FootprintKind::SavedGames, tokens, roots);
+        }
     }
     // Shared Public Documents: some apps keep machine-wide data here rather than
     // in ProgramData (e.g. YDIS's diagnostic database at
     // C:\Users\Public\Documents\YDIS_Data).
-    if let Some(public_documents) = public_documents_dir() {
+    if let Some(public_documents) = public_documents_dir(system) {
         collect_matching_dirs(&public_documents, FootprintKind::PublicDocuments, tokens, roots);
     }
 }
@@ -484,10 +519,9 @@ fn saved_games_dir() -> Option<PathBuf> {
 
 /// The shared Public Documents directory (`%PUBLIC%\Documents`, i.e.
 /// `C:\Users\Public\Documents`), where some apps store machine-wide data.
-fn public_documents_dir() -> Option<PathBuf> {
-    std::env::var_os("PUBLIC")
-        .map(PathBuf::from)
-        .or_else(|| Some(PathBuf::from(r"C:\Users\Public")))
+fn public_documents_dir(system: &SystemContext) -> Option<PathBuf> {
+    system
+        .public_dir()
         .map(|base| base.join(DOCUMENTS_FALLBACK))
         .filter(|path| path.is_dir())
 }
@@ -576,26 +610,9 @@ fn collect_matching_dirs(
     }
 }
 
-fn appdata_bases() -> Vec<(PathBuf, FootprintKind)> {
+fn appdata_bases(system: &SystemContext) -> Vec<(PathBuf, FootprintKind)> {
     let mut bases = Vec::new();
-    let mut profiles = BTreeSet::new();
-
-    if let Some(user_profile) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
-        profiles.insert(user_profile);
-    }
-    if let Some(user_profile) = std::env::var_os("USERPROFILE").map(PathBuf::from)
-        && let Some(users_root) = user_profile.parent()
-        && let Ok(entries) = fs::read_dir(users_root)
-    {
-        for entry in entries.flatten() {
-            let profile_path = entry.path();
-            if profile_path.is_dir() && !is_skipped_user_profile(&profile_path) {
-                profiles.insert(profile_path);
-            }
-        }
-    }
-
-    for profile in profiles {
+    for profile in system.user_profiles() {
         bases.push((
             profile.join(APPDATA_ROAMING_SEGMENT),
             FootprintKind::RoamingAppData,
@@ -610,16 +627,6 @@ fn appdata_bases() -> Vec<(PathBuf, FootprintKind)> {
         ));
     }
     bases
-}
-
-fn is_skipped_user_profile(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    USER_PROFILE_NAMES_TO_SKIP
-        .iter()
-        .any(|skipped| name.eq_ignore_ascii_case(skipped))
 }
 
 impl Tokens {
@@ -984,7 +991,7 @@ fn is_windows_system_path(path: &Path) -> bool {
 /// True when `path` is a directory we can safely walk: it exists, is not a
 /// Windows system tree, and is a subdirectory of (not equal to) a known base
 /// such as `Program Files` or a user profile.
-fn is_walkable_app_dir(path: &Path) -> bool {
+fn is_walkable_app_dir(path: &Path, known_base_dirs: &[PathBuf]) -> bool {
     if !path.is_dir() {
         return false;
     }
@@ -999,13 +1006,13 @@ fn is_walkable_app_dir(path: &Path) -> bool {
     if component_count < 2 {
         return false;
     }
-    !is_known_base_dir(path)
+    !is_known_base_dir(path, known_base_dirs)
 }
 
-fn is_known_base_dir(path: &Path) -> bool {
+fn is_known_base_dir(path: &Path, known_base_dirs: &[PathBuf]) -> bool {
     let normalized = path.to_string_lossy().to_ascii_lowercase();
     let normalized = normalized.trim_end_matches('\\');
-    known_base_dirs().iter().any(|base| {
+    known_base_dirs.iter().any(|base| {
         base.to_string_lossy()
             .to_ascii_lowercase()
             .trim_end_matches('\\')
@@ -1013,26 +1020,20 @@ fn is_known_base_dir(path: &Path) -> bool {
     })
 }
 
-fn known_base_dirs() -> Vec<PathBuf> {
-    let mut bases = Vec::new();
-    for env_var in [
-        "ProgramFiles",
-        "ProgramFiles(x86)",
-        "ProgramW6432",
-        "ProgramData",
-    ] {
-        if let Some(path) = std::env::var_os(env_var).map(PathBuf::from) {
-            bases.push(path);
-        }
+fn known_base_dirs(system: &SystemContext) -> Vec<PathBuf> {
+    let mut bases = system.program_files_dirs();
+    if let Some(program_data) = system.program_data() {
+        bases.push(program_data);
     }
-    for (base, _) in appdata_bases() {
+    for (base, _) in appdata_bases(system) {
         bases.push(base);
     }
-    if let Some(user_profile) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
-        bases.push(user_profile.clone());
-        if let Some(users_root) = user_profile.parent() {
-            bases.push(users_root.to_path_buf());
-        }
+    let profiles = system.user_profiles();
+    if let Some(users_root) = profiles.first().and_then(|profile| profile.parent()) {
+        bases.push(users_root.to_path_buf());
+    }
+    for profile in profiles {
+        bases.push(profile);
     }
     bases
 }

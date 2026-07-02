@@ -19,10 +19,11 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use winreg::RegKey;
-use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
+use winreg::enums::{KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
 use crate::models::{InstallMethod, InstalledApp};
 use crate::path_utils::split_command_executable_path;
+use crate::system_context::SystemContext;
 
 const USERDATA_PATH: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
 const APP_PATHS_PREFIX: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
@@ -50,7 +51,7 @@ struct MsiComponentPaths {
     registry_count: usize,
 }
 
-pub fn detect_install_source(app: &InstalledApp) -> InstallSource {
+pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> InstallSource {
     let product_code = extract_product_code(app);
     let method = classify_method(app, product_code.as_deref());
 
@@ -62,7 +63,7 @@ pub fn detect_install_source(app: &InstalledApp) -> InstallSource {
     match method {
         InstallMethod::WindowsInstaller => {
             if let Some(code) = product_code.as_deref()
-                && let Some(paths) = msi_component_paths(code)
+                && let Some(paths) = msi_component_paths(code, system)
             {
                 authoritative_file_count = paths.files.len();
                 authoritative_registry_count = paths.registry_count;
@@ -77,7 +78,7 @@ pub fn detect_install_source(app: &InstalledApp) -> InstallSource {
             if let Some(dir) = primary_install_dir(app)
                 && let Some(log) = find_inno_log(&dir)
             {
-                let files = inno_manifest_files(&log);
+                let files = inno_manifest_files(&log, system);
                 if files.is_empty() {
                     evidence.push("Inno Setup uninstall log (unins000.dat)".to_owned());
                 } else {
@@ -100,7 +101,7 @@ pub fn detect_install_source(app: &InstalledApp) -> InstallSource {
             if let Some(dir) = primary_install_dir(app)
                 && let Some(log) = find_nsis_log(&dir)
             {
-                let files = nsis_manifest_files(&log);
+                let files = nsis_manifest_files(&log, system);
                 if !files.is_empty() {
                     authoritative_file_count = files.len();
                     let footprint: Vec<PathBuf> = files
@@ -141,7 +142,7 @@ pub fn detect_install_source(app: &InstalledApp) -> InstallSource {
                 && let Some(identity) = appx_identity_name(&dir)
             {
                 evidence.push(format!("AppxManifest identity: {identity}"));
-                let package_roots = msix_package_data_roots(&identity);
+                let package_roots = msix_package_data_roots(&identity, system);
                 if !package_roots.is_empty() {
                     evidence.push(format!(
                         "MSIX per-user package data: {} location(s)",
@@ -159,7 +160,7 @@ pub fn detect_install_source(app: &InstalledApp) -> InstallSource {
     if let Some(executable) = app.main_executable.as_ref()
         && let Some(name) = executable.file_name().and_then(|value| value.to_str())
     {
-        let app_paths = app_paths_roots(name);
+        let app_paths = app_paths_roots(name, system);
         if !app_paths.is_empty() {
             evidence.push("App Paths registration".to_owned());
             roots.extend(app_paths);
@@ -172,7 +173,7 @@ pub fn detect_install_source(app: &InstalledApp) -> InstallSource {
         && let Some(executable) = split_command_executable_path(uninstall)
         && let Some(parent) = executable.parent()
     {
-        roots.push(parent.to_path_buf());
+        roots.push(system.resolve_source_path(parent));
     }
 
     InstallSource {
@@ -192,13 +193,13 @@ pub fn detect_install_source(app: &InstalledApp) -> InstallSource {
 /// component database for MSI products, otherwise the resolved install roots —
 /// and pick a representative non-auxiliary executable. Used as a fallback so a
 /// scan or package by application name still succeeds for such apps.
-pub fn primary_executable(app: &InstalledApp) -> Option<PathBuf> {
-    let source = detect_install_source(app);
+pub fn primary_executable(app: &InstalledApp, system: &SystemContext) -> Option<PathBuf> {
+    let source = detect_install_source(app, system);
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if source.method == InstallMethod::WindowsInstaller
         && let Some(code) = source.product_code.as_deref()
-        && let Some(paths) = msi_component_paths(code)
+        && let Some(paths) = msi_component_paths(code, system)
     {
         candidates.extend(
             paths
@@ -385,7 +386,7 @@ fn is_inno_log_name(name: &str) -> bool {
 /// uninstall log. The log stores each installed path as a resolved absolute
 /// string (UTF-16 in modern logs, ANSI in older ones); scanning those strings
 /// is version-independent and avoids decoding Inno's record framing.
-fn inno_manifest_files(log_path: &Path) -> Vec<PathBuf> {
+fn inno_manifest_files(log_path: &Path, system: &SystemContext) -> Vec<PathBuf> {
     let Ok(data) = std::fs::read(log_path) else {
         return Vec::new();
     };
@@ -398,7 +399,7 @@ fn inno_manifest_files(log_path: &Path) -> Vec<PathBuf> {
         .into_iter()
         .chain(extract_ansi_paths(&data))
     {
-        let path = PathBuf::from(&candidate);
+        let path = system.resolve_source_path(&PathBuf::from(&candidate));
         if path.is_file() && seen.insert(candidate.to_ascii_lowercase()) {
             files.push(path);
         }
@@ -432,7 +433,7 @@ fn is_nsis_log_name(name: &str) -> bool {
 /// The log has no documented stable framing, so (like the Inno reader) this
 /// scans for resolved absolute path strings and keeps the ones that exist,
 /// which is robust across AdvUninstLog versions and UTF-16/ANSI encodings.
-fn nsis_manifest_files(log_path: &Path) -> Vec<PathBuf> {
+fn nsis_manifest_files(log_path: &Path, system: &SystemContext) -> Vec<PathBuf> {
     let Ok(data) = std::fs::read(log_path) else {
         return Vec::new();
     };
@@ -442,7 +443,7 @@ fn nsis_manifest_files(log_path: &Path) -> Vec<PathBuf> {
         .into_iter()
         .chain(extract_ansi_paths(&data))
     {
-        let path = PathBuf::from(&candidate);
+        let path = system.resolve_source_path(&PathBuf::from(&candidate));
         if path.is_file() && seen.insert(candidate.to_ascii_lowercase()) {
             files.push(path);
         }
@@ -573,24 +574,23 @@ fn file_contains_signature(path: &Path, signature: &[u8]) -> bool {
         .any(|window| window == signature)
 }
 
-fn app_paths_roots(executable_name: &str) -> Vec<PathBuf> {
+fn app_paths_roots(executable_name: &str, system: &SystemContext) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let subkey = format!("{APP_PATHS_PREFIX}\\{executable_name}");
     for flags in [KEY_READ | KEY_WOW64_64KEY, KEY_READ | KEY_WOW64_32KEY] {
-        let Ok(key) = hklm.open_subkey_with_flags(&subkey, flags) else {
+        let Ok(key) = system.open_hklm(&subkey, flags) else {
             continue;
         };
         if let Ok(default) = key.get_value::<String, _>("")
             && let Some(parent) = PathBuf::from(default.trim_matches('"')).parent()
         {
-            roots.push(parent.to_path_buf());
+            roots.push(system.resolve_source_path(parent));
         }
         if let Ok(path_value) = key.get_value::<String, _>("Path") {
             for segment in path_value.split(';') {
                 let trimmed = segment.trim().trim_matches('"');
                 if !trimmed.is_empty() {
-                    roots.push(PathBuf::from(trimmed));
+                    roots.push(system.resolve_source_path(&PathBuf::from(trimmed)));
                 }
             }
         }
@@ -673,25 +673,39 @@ fn appx_identity_name(install_dir: &Path) -> Option<String> {
 /// Per-user MSIX package-data directories for an identity name. The folder is
 /// named `<IdentityName>_<publisherHash>`, so a prefix match avoids computing
 /// the publisher hash. Scoped to the current user's `%LOCALAPPDATA%\Packages`.
-fn msix_package_data_roots(identity_name: &str) -> Vec<PathBuf> {
-    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
-        return Vec::new();
-    };
+fn msix_package_data_roots(identity_name: &str, system: &SystemContext) -> Vec<PathBuf> {
     let prefix = format!("{}_", identity_name.to_ascii_lowercase());
-    let Ok(entries) = std::fs::read_dir(local_app_data.join(MSIX_PACKAGES_DIR)) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
+    let mut roots = Vec::new();
+    for local_app_data in local_app_data_dirs(system) {
+        let Ok(entries) = std::fs::read_dir(local_app_data.join(MSIX_PACKAGES_DIR)) else {
+            continue;
+        };
+        roots.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
             path.is_dir()
                 && path
                     .file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name.to_ascii_lowercase().starts_with(&prefix))
-        })
-        .collect()
+        }));
+    }
+    roots
+}
+
+/// `%LOCALAPPDATA%` bases to search. Live: the current user; offline: each
+/// profile's `AppData\Local` under the scanned volume.
+fn local_app_data_dirs(system: &SystemContext) -> Vec<PathBuf> {
+    if system.is_offline() {
+        system
+            .user_profiles()
+            .into_iter()
+            .map(|profile| profile.join(r"AppData\Local"))
+            .collect()
+    } else {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .into_iter()
+            .collect()
+    }
 }
 
 fn extract_product_code(app: &InstalledApp) -> Option<String> {
@@ -747,11 +761,10 @@ pub fn squish_guid(guid: &str) -> Option<String> {
     Some(squished.to_ascii_uppercase())
 }
 
-fn msi_component_paths(product_code: &str) -> Option<MsiComponentPaths> {
+fn msi_component_paths(product_code: &str, system: &SystemContext) -> Option<MsiComponentPaths> {
     let squished_product = squish_guid(product_code)?;
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let user_data = hklm
-        .open_subkey_with_flags(USERDATA_PATH, KEY_READ | KEY_WOW64_64KEY)
+    let user_data = system
+        .open_hklm(USERDATA_PATH, KEY_READ | KEY_WOW64_64KEY)
         .ok()?;
 
     let mut files = Vec::new();
@@ -782,7 +795,9 @@ fn msi_component_paths(product_code: &str) -> Option<MsiComponentPaths> {
             if is_registry_key_path(&key_path) {
                 registry_count += 1;
             } else if seen.insert(key_path.to_ascii_lowercase()) {
-                files.push(PathBuf::from(key_path));
+                // MSI records absolute source-machine paths; re-root onto the
+                // scanned volume so downstream reads hit the right disk.
+                files.push(system.resolve_source_path(&PathBuf::from(key_path)));
             }
         }
     }
@@ -1030,7 +1045,7 @@ mod tests {
         std::fs::write(&log, content.as_bytes())?;
 
         let found = find_nsis_log(&base);
-        let files = nsis_manifest_files(&log);
+        let files = nsis_manifest_files(&log, &SystemContext::live());
         let _ = std::fs::remove_dir_all(&base);
 
         assert_eq!(found.as_deref(), Some(log.as_path()));

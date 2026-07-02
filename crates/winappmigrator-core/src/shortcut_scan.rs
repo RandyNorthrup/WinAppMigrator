@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::models::{ShortcutEntry, Warning, WarningSeverity};
 use crate::path_utils::hidden_command;
+use crate::system_context::SystemContext;
 
 #[derive(Debug, Clone)]
 pub struct ShortcutScanContext {
@@ -21,7 +22,28 @@ struct PowerShellShortcut {
     icon_location: Option<String>,
 }
 
-pub fn scan_shortcuts(context: &ShortcutScanContext) -> (Vec<ShortcutEntry>, Vec<Warning>) {
+pub fn scan_shortcuts(
+    context: &ShortcutScanContext,
+    system: &SystemContext,
+) -> (Vec<ShortcutEntry>, Vec<Warning>) {
+    if system.is_offline() {
+        // The live shell folders and WScript.Shell COM only see this PC. Reading
+        // a foreign disk's .lnk files is not required for a correct migration —
+        // the installer recreates shortcuts from the captured install location on
+        // restore — so we skip source-shortcut enumeration and note it.
+        let warning = Warning::new(
+            "shortcuts_offline_skipped",
+            WarningSeverity::Info,
+            "Source Start Menu/Desktop shortcuts are not read from a connected drive; the \
+             installer recreates shortcuts from the app's install location on restore.",
+            None,
+        );
+        return (Vec::new(), vec![warning]);
+    }
+    scan_live_shortcuts(context)
+}
+
+fn scan_live_shortcuts(context: &ShortcutScanContext) -> (Vec<ShortcutEntry>, Vec<Warning>) {
     let mut warnings = Vec::new();
     let script = r#"
 $roots = @(

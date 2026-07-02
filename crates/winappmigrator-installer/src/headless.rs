@@ -90,8 +90,13 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
         return Ok(EXIT_SUCCESS);
     };
 
-    let temp_dir = tempfile::tempdir()
-        .map_err(|source| WinAppMigratorError::io("temporary extraction directory", source))?;
+    // Remove extraction directories from previous or crashed runs first.
+    crate::cleanup::sweep_stale_extractions(executable);
+    // Stage the extracted package on the install destination's drive (falling
+    // back to the installer's own drive, then the system temp drive) so a large
+    // package never fails to extract for lack of space on the system drive.
+    let temp_dir = extraction_staging(&target_root, executable)
+        .map_err(|source| WinAppMigratorError::io("staging extraction directory", source))?;
     let extracted = extract_embedded_self_archive(executable, temp_dir.path())?;
     if !extracted {
         return Err(WinAppMigratorError::InvalidInput(
@@ -141,6 +146,36 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     } else {
         Ok(EXIT_FAILURE)
     }
+}
+
+/// Choose a directory to extract the embedded package into, preferring the
+/// install destination's drive, then the installer's own drive, then the system
+/// temp drive — so a large package never fails to extract for lack of space on
+/// the system drive. The returned [`tempfile::TempDir`] is removed on drop.
+fn extraction_staging(target_root: &Path, executable: &Path) -> std::io::Result<tempfile::TempDir> {
+    // The nearest existing ancestor of the install location sits on the
+    // destination drive.
+    let mut ancestor = Some(target_root);
+    while let Some(dir) = ancestor {
+        if dir.is_dir()
+            && let Ok(temp) = tempfile::Builder::new()
+                .prefix("winappmigrator-install-")
+                .tempdir_in(dir)
+        {
+            return Ok(temp);
+        }
+        ancestor = dir.parent();
+    }
+    if let Some(parent) = executable.parent()
+        && let Ok(temp) = tempfile::Builder::new()
+            .prefix("winappmigrator-install-")
+            .tempdir_in(parent)
+    {
+        return Ok(temp);
+    }
+    tempfile::Builder::new()
+        .prefix("winappmigrator-install-")
+        .tempdir()
 }
 
 #[cfg(test)]

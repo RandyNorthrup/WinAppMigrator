@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use winreg::RegKey;
-use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+use winreg::enums::KEY_READ;
 
 use crate::models::{DriverEntry, DriverKind, ServiceEntry, Warning, WarningSeverity};
 use crate::path_utils::{hidden_command, split_command_executable_path};
+use crate::system_context::SystemContext;
 
 const POWERSHELL_EXE: &str = "powershell.exe";
 
@@ -19,11 +19,14 @@ pub struct ServiceScanContext {
     pub install_location: Option<PathBuf>,
 }
 
-pub fn scan_services(context: &ServiceScanContext) -> (Vec<ServiceEntry>, Vec<Warning>) {
+pub fn scan_services(
+    context: &ServiceScanContext,
+    system: &SystemContext,
+) -> (Vec<ServiceEntry>, Vec<Warning>) {
     let mut services = Vec::new();
     let mut warnings = Vec::new();
-    let root = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let services_key = match root.open_subkey_with_flags(SERVICES_KEY, KEY_READ) {
+    let windows_dir = system.windows_dir();
+    let services_key = match system.open_hklm(SERVICES_KEY, KEY_READ) {
         Ok(key) => key,
         Err(error) => {
             warnings.push(Warning::new(
@@ -49,9 +52,10 @@ pub fn scan_services(context: &ServiceScanContext) -> (Vec<ServiceEntry>, Vec<Wa
         let Ok(image_path) = service_key.get_value::<String, _>("ImagePath") else {
             continue;
         };
-        let image_path = expand_image_path(&image_path);
+        let image_path = expand_image_path(&image_path, &windows_dir);
         let binary_path = split_command_executable_path(&image_path)
             .unwrap_or_else(|| PathBuf::from(image_path.trim()));
+        let binary_path = system.resolve_source_path(&binary_path);
         if !path_matches(context, &binary_path) {
             continue;
         }
@@ -88,11 +92,14 @@ pub fn scan_services(context: &ServiceScanContext) -> (Vec<ServiceEntry>, Vec<Wa
     (services, warnings)
 }
 
-pub fn scan_drivers(context: &ServiceScanContext) -> (Vec<DriverEntry>, Vec<Warning>) {
+pub fn scan_drivers(
+    context: &ServiceScanContext,
+    system: &SystemContext,
+) -> (Vec<DriverEntry>, Vec<Warning>) {
     let mut drivers = Vec::new();
     let mut warnings = Vec::new();
-    let root = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let services_key = match root.open_subkey_with_flags(SERVICES_KEY, KEY_READ) {
+    let windows_dir = system.windows_dir();
+    let services_key = match system.open_hklm(SERVICES_KEY, KEY_READ) {
         Ok(key) => key,
         Err(error) => {
             warnings.push(Warning::new(
@@ -117,9 +124,10 @@ pub fn scan_drivers(context: &ServiceScanContext) -> (Vec<DriverEntry>, Vec<Warn
         let Ok(image_path) = service_key.get_value::<String, _>("ImagePath") else {
             continue;
         };
-        let image_path = expand_image_path(&image_path);
+        let image_path = expand_image_path(&image_path, &windows_dir);
         let binary_path = split_command_executable_path(&image_path)
             .unwrap_or_else(|| PathBuf::from(image_path.trim()));
+        let binary_path = system.resolve_source_path(&binary_path);
         if !path_matches(context, &binary_path) {
             continue;
         }
@@ -278,19 +286,30 @@ fn path_starts_with_ignore_case(path: &Path, root: &Path) -> bool {
         .starts_with(&root.to_string_lossy().to_ascii_lowercase())
 }
 
-fn expand_image_path(value: &str) -> String {
-    let mut expanded = value.to_owned();
-    for (key, val) in std::env::vars() {
-        let marker = format!("%{key}%");
-        expanded = expanded.replace(&marker, &val);
+/// Expand a service/driver `ImagePath` to a filesystem path. The `\SystemRoot\`,
+/// `%SystemRoot%\`, and `%windir%\` prefixes resolve against `windows_dir` (the
+/// scanned system's Windows directory — the mounted volume's offline). Any other
+/// `%VAR%` markers are expanded from the live environment (a no-op offline,
+/// where those variables are absent).
+fn expand_image_path(value: &str, windows_dir: &Path) -> String {
+    let trimmed = value.trim();
+    for marker in [r"\SystemRoot\", r"%SystemRoot%\", r"%windir%\"] {
+        if let Some(rest) = strip_prefix_ci(trimmed, marker) {
+            return windows_dir.join(rest).display().to_string();
+        }
     }
-    if let Some(stripped) = expanded.strip_prefix(r"\SystemRoot\")
-        && let Some(system_root) = std::env::var_os("SystemRoot")
-    {
-        return PathBuf::from(system_root)
-            .join(stripped)
-            .display()
-            .to_string();
+    let mut expanded = trimmed.to_owned();
+    for (key, val) in std::env::vars() {
+        expanded = expanded.replace(&format!("%{key}%"), &val);
     }
     expanded
+}
+
+/// Strip a leading prefix case-insensitively, returning the remainder.
+fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    if value.len() >= prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&value[prefix.len()..])
+    } else {
+        None
+    }
 }

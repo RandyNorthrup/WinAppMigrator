@@ -4,6 +4,40 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- Added **scanning an app from a connected drive** — a disk pulled from another
+  (often failing) PC and mounted on the working machine (e.g. `E:\`) — instead of
+  only the live OS. A new `SystemContext` abstraction (`system_context.rs`,
+  `ScanSource::{Live, OfflineVolume}`) is the single seam every scanner reads
+  through, replacing the two live-only seams (`RegKey::predef` and
+  `std::env::var_os(known folder)`). For an offline volume it mounts the disk's
+  registry hives read-only via `reg load` (using the process's backup privilege,
+  so ACL-locked `config` hives read non-destructively), resolving the disk's
+  active control set from `SYSTEM\Select\Current`, and unmounts them on drop;
+  derives every known-folder base (`Program Files`, `ProgramData`, all user
+  profiles, `Public`, `Windows`) from the volume root; and re-roots absolute
+  source paths (`C:\…` → `<volume>\…`). All scanners were threaded through it —
+  app inventory, registry, environment, license, install-source, and services/
+  drivers (from the offline `SYSTEM` hive), with **scheduled tasks read from the
+  disk's `Windows\System32\Tasks` XML** (new `roxmltree` dependency) since the
+  live Task Scheduler cannot see another disk. Offline scanning **requires
+  administrator rights**; the app offers a "Restart as administrator" gate. Per
+  the requirement, it is **non-destructive**: the source disk is only ever read
+  (backup-mode reads; never `takeown`/`icacls`). Source-shortcut enumeration is
+  skipped for offline sources (the installer recreates shortcuts on restore). The
+  GUI gained a **scan-source selector** ("This PC" / "Connected drive…") with a
+  Windows-volume check and elevation notice.
+- Added **non-destructive backup-mode file copying**: when packaging can't copy a
+  file because its NTFS ACL denies this process (common on a foreign disk owned by
+  another PC's SIDs), it falls back to `robocopy /B` (backup semantics via
+  `SeBackupPrivilege`), which reads through the ACL without modifying the source.
+  The fast in-process `fs::copy` is still tried first.
+- The produced installer is now **named after the application**, not the chosen
+  output folder (e.g. `YAMAHA DIAGNOSTIC SYSTEM2_installer.exe`).
+- The app now **stages files on the destination drive**, so a large migration
+  never fails for lack of space on the system/temp drive: the builder stages the
+  package on the same drive as the chosen output folder, and each produced
+  installer extracts its embedded package onto the install destination's drive
+  (falling back to the installer's own drive, then the system temp drive).
 - Extended footprint discovery to the **shared Public Documents** folder
   (`%PUBLIC%\Documents`, i.e. `C:\Users\Public\Documents`), which some apps use
   for machine-wide data instead of `ProgramData`. New `FootprintKind::PublicDocuments`

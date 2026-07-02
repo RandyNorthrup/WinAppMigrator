@@ -153,10 +153,19 @@ impl InstallerApp {
                 return;
             }
         }
-        let temp = match tempfile::tempdir() {
+        // Remove extraction directories from previous or crashed runs first, so
+        // nothing accumulates even if a prior window was killed before its own
+        // cleanup could run.
+        crate::cleanup::sweep_stale_extractions(&exe);
+        // Stage the extracted package on the same drive as the installer itself
+        // (where the user placed it to run on the target), not the system temp
+        // drive, so a large package never fails to extract for lack of space on
+        // C:. Falls back to the system temp directory if that is not writable.
+        let temp = match staging_dir(&exe) {
             Ok(temp) => temp,
             Err(error) => {
-                self.screen = Screen::Failed(format!("Could not create a temp directory: {error}"));
+                self.screen =
+                    Screen::Failed(format!("Could not create a staging directory: {error}"));
                 return;
             }
         };
@@ -287,48 +296,59 @@ impl eframe::App for InstallerApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
-                    widgets::paint_logo(ui.painter(), rect, &theme);
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(WINDOW_TITLE)
-                            .size(18.0)
-                            .strong()
-                            .color(theme.text),
-                    );
-                });
-                ui.add_space(12.0);
+                // Inset the content so cards never sit flush against the window
+                // edge (the scrollbar stays at the edge, the content is guttered).
+                egui::Frame::new()
+                    .inner_margin(egui::Margin {
+                        left: 22,
+                        right: 22,
+                        top: 16,
+                        bottom: 18,
+                    })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
+                            widgets::paint_logo(ui.painter(), rect, &theme);
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new(WINDOW_TITLE)
+                                    .size(18.0)
+                                    .strong()
+                                    .color(theme.text),
+                            );
+                        });
+                        ui.add_space(12.0);
 
-                // Read the screen into an owned value so the immutable borrow of
-                // `self.screen` is released before `ready_ui` borrows `self` mutably.
-                enum Kind {
-                    NoPackage,
-                    Failed,
-                    Ready,
-                }
-                let (kind, failed) = match &self.screen {
-                    Screen::NoPackage => (Kind::NoPackage, String::new()),
-                    Screen::Failed(reason) => (Kind::Failed, reason.clone()),
-                    Screen::Ready => (Kind::Ready, String::new()),
-                };
-                match kind {
-                    Kind::NoPackage => widgets::notice(
-                        ui,
-                        &theme,
-                        Role::Accent,
-                        "This is a WinAppMigrator installer stub — it carries no application \
-                         package. Build an installer with WinAppMigrator, then run the produced \
-                         .exe here.",
-                    ),
-                    Kind::Failed => widgets::notice(ui, &theme, Role::Danger, &failed),
-                    Kind::Ready => {
-                        self.ready_ui(ui, &theme, &mut do_preview, &mut do_install);
-                    }
-                }
-                ui.add_space(8.0);
+                        // Read the screen into an owned value so the immutable borrow
+                        // of `self.screen` is released before `ready_ui` borrows
+                        // `self` mutably.
+                        enum Kind {
+                            NoPackage,
+                            Failed,
+                            Ready,
+                        }
+                        let (kind, failed) = match &self.screen {
+                            Screen::NoPackage => (Kind::NoPackage, String::new()),
+                            Screen::Failed(reason) => (Kind::Failed, reason.clone()),
+                            Screen::Ready => (Kind::Ready, String::new()),
+                        };
+                        match kind {
+                            Kind::NoPackage => widgets::notice(
+                                ui,
+                                &theme,
+                                Role::Accent,
+                                "This is a WinAppMigrator installer stub — it carries no \
+                                 application package. Build an installer with WinAppMigrator, \
+                                 then run the produced .exe here.",
+                            ),
+                            Kind::Failed => widgets::notice(ui, &theme, Role::Danger, &failed),
+                            Kind::Ready => {
+                                self.ready_ui(ui, &theme, &mut do_preview, &mut do_install);
+                            }
+                        }
+                        ui.add_space(8.0);
+                    });
             });
 
         if do_preview {
@@ -539,6 +559,22 @@ impl InstallerApp {
             }
         });
     }
+}
+
+/// A staging directory for extracting the embedded package, preferring the drive
+/// the installer sits on (the target device) over the system temp drive so a
+/// large package never runs out of space on C:. Auto-removed when dropped.
+fn staging_dir(exe: &std::path::Path) -> std::io::Result<TempDir> {
+    if let Some(parent) = exe.parent()
+        && let Ok(temp) = tempfile::Builder::new()
+            .prefix("winappmigrator-install-")
+            .tempdir_in(parent)
+    {
+        return Ok(temp);
+    }
+    tempfile::Builder::new()
+        .prefix("winappmigrator-install-")
+        .tempdir()
 }
 
 fn prereq_row(prereq: &RuntimePrerequisite) -> PrereqRow {

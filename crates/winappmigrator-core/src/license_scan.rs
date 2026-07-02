@@ -8,12 +8,12 @@
 //! dongle. Many licenses are machine-bound and will require reactivation on the
 //! target; every discovered artifact is reported with that caveat.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use winreg::enums::{
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN,
-    REG_EXPAND_SZ, REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD,
-    REG_RESOURCE_LIST, REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, RegType,
+    KEY_READ, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN, REG_EXPAND_SZ,
+    REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD, REG_RESOURCE_LIST,
+    REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, RegType,
 };
 use winreg::{RegKey, RegValue};
 
@@ -22,6 +22,7 @@ use crate::models::{
     FileEntry, LicenseArtifact, LicenseArtifactKind, LicenseFramework, MatchConfidence,
     RegistryEntry, RegistryHive, RegistryValueKind, TransferableHint, Warning, WarningSeverity,
 };
+use crate::system_context::SystemContext;
 
 /// File extensions that strongly indicate a license/activation file.
 const STRONG_LICENSE_EXTENSIONS: &[&str] = &["lic", "lservrc", "v2c", "rlm", "entitlement"];
@@ -63,15 +64,20 @@ struct LicenseFileClass {
 
 pub fn scan_license_artifacts(
     context: &LicenseScanContext<'_>,
+    system: &SystemContext,
 ) -> (Vec<LicenseArtifact>, Vec<RegistryEntry>, Vec<Warning>) {
     let mut artifacts = Vec::new();
     let mut registry_entries = Vec::new();
     let mut warnings = Vec::new();
 
     detect_license_files(context, &mut artifacts);
-    detect_framework_stores(context, &mut artifacts);
-    detect_license_env_vars(&mut artifacts);
-    detect_registry_licenses(context, &mut artifacts, &mut registry_entries);
+    detect_framework_stores(context, system, &mut artifacts);
+    // License environment variables can only be read from the live session; an
+    // offline disk's are captured (path-matched) by the environment scan instead.
+    if !system.is_offline() {
+        detect_license_env_vars(&mut artifacts);
+    }
+    detect_registry_licenses(context, system, &mut artifacts, &mut registry_entries);
     dedupe_registry_entries(&mut registry_entries);
 
     if !artifacts.is_empty() {
@@ -193,9 +199,12 @@ fn license_file_match(path: &Path) -> Option<LicenseFileClass> {
     None
 }
 
-fn detect_framework_stores(context: &LicenseScanContext<'_>, artifacts: &mut Vec<LicenseArtifact>) {
-    let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
-    let Some(program_data) = program_data else {
+fn detect_framework_stores(
+    context: &LicenseScanContext<'_>,
+    system: &SystemContext,
+    artifacts: &mut Vec<LicenseArtifact>,
+) {
+    let Some(program_data) = system.program_data() else {
         return;
     };
     let stores: &[(&str, LicenseFramework, bool)] = &[
@@ -282,6 +291,7 @@ struct RegistryScanCtx {
 
 fn detect_registry_licenses(
     context: &LicenseScanContext<'_>,
+    system: &SystemContext,
     artifacts: &mut Vec<LicenseArtifact>,
     entries: &mut Vec<RegistryEntry>,
 ) {
@@ -292,27 +302,33 @@ fn detect_registry_licenses(
     if vendor.is_empty() {
         return;
     }
-    for (hive, hive_enum, hive_name, requires_admin) in [
-        (HKEY_LOCAL_MACHINE, RegistryHive::LocalMachine, "HKLM", true),
-        (HKEY_CURRENT_USER, RegistryHive::CurrentUser, "HKCU", false),
-    ] {
-        let ctx = RegistryScanCtx {
-            hive: hive_enum,
-            hive_name,
-            requires_admin,
+    // Read the native view for the plain `SOFTWARE` prefix and the 32-bit view
+    // via the explicit `WOW6432Node` prefix, for both the machine hive and each
+    // user hive (live: current user; offline: every profile).
+    let hklm_ctx = RegistryScanCtx {
+        hive: RegistryHive::LocalMachine,
+        hive_name: "HKLM",
+        requires_admin: true,
+        include_license_data: context.include_license_data,
+    };
+    for prefix in [r"SOFTWARE", r"SOFTWARE\WOW6432Node"] {
+        let key_path = format!(r"{prefix}\{vendor}");
+        if let Ok(vendor_key) = system.open_hklm(&key_path, KEY_READ) {
+            scan_vendor_key(&vendor_key, &hklm_ctx, &key_path, artifacts, entries);
+        }
+    }
+    for user in system.user_hives() {
+        let user_ctx = RegistryScanCtx {
+            hive: RegistryHive::CurrentUser,
+            hive_name: "HKCU",
+            requires_admin: false,
             include_license_data: context.include_license_data,
         };
-        // Read the native view for the plain `SOFTWARE` prefix and the 32-bit view
-        // via the explicit `WOW6432Node` prefix. Forcing KEY_WOW64_32KEY on both
-        // would miss native 64-bit keys and record a path that restores into the
-        // wrong view.
         for prefix in [r"SOFTWARE", r"SOFTWARE\WOW6432Node"] {
             let key_path = format!(r"{prefix}\{vendor}");
-            let root = RegKey::predef(hive);
-            let Ok(vendor_key) = root.open_subkey_with_flags(&key_path, KEY_READ) else {
-                continue;
-            };
-            scan_vendor_key(&vendor_key, &ctx, &key_path, artifacts, entries);
+            if let Ok(vendor_key) = user.open(&key_path, KEY_READ) {
+                scan_vendor_key(&vendor_key, &user_ctx, &key_path, artifacts, entries);
+            }
         }
     }
 }

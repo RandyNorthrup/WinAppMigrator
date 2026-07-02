@@ -63,6 +63,36 @@ The installer stub is **embedded inside WinAppMigrator** at build time (see
 if the app was compiled without an embedded stub (a bootstrap build) it falls
 back to a sibling `winappmigrator-installer.exe`.
 
+## Scan source: this PC or a connected drive
+
+A **scan-source selector** at the top of the app list chooses where installed
+apps are read from:
+
+- **This PC** (default) — the live running OS.
+- **Connected drive…** — a disk from another (often failing) PC, mounted here
+  (e.g. `E:\`). Picking a folder validates it is a Windows volume
+  (`\Windows\System32\config\SOFTWARE` exists) before use.
+
+Scanning a connected drive **requires administrator rights** (to mount the
+drive's registry hives and read protected files); when the app is not elevated it
+shows a notice and a **Restart as administrator** button that relaunches elevated
+(`Start-Process -Verb RunAs`). The source (`ScanSource`) is cloned into the
+inventory and packaging worker threads, which build the `SystemContext` there so
+offline hive mounts are short-lived. See `docs/discovery.md` for the offline
+model. Reading a foreign disk is strictly non-destructive.
+
+## Where files are staged (destination-drive staging)
+
+So a large migration never fails for lack of space on the system/temp drive, the
+builder stages the (potentially large) package on the **same drive as the chosen
+output folder** (`build_staging_parent`), not `%TEMP%`, and cleans it up after —
+the chosen folder still receives only the single installer. The installer is
+**named after the application** (`safe_file_stem`), e.g.
+`YAMAHA DIAGNOSTIC SYSTEM2_installer.exe`, not after the output folder. Each
+produced installer likewise extracts its embedded package onto the **install
+destination's drive** (falling back to the installer's own drive, then the system
+temp drive).
+
 ## The produced installer (`winappmigrator-installer`)
 
 Each installer is a standalone GUI self-extractor (its own crate, embedding a

@@ -11,6 +11,7 @@ use crate::models::{
 };
 use crate::path_utils::path_has_extension;
 use crate::pe_scan::{ImportedDll, read_pe_architecture, scan_pe};
+use crate::system_context::SystemContext;
 
 const DLL_EXTENSION: &str = "dll";
 const WINDOWS_ENV_VAR: &str = "SystemRoot";
@@ -80,9 +81,10 @@ struct ResolvedImport {
 pub fn resolve_imports(
     imports: &[ImportedDll],
     context: &DllResolutionContext,
+    system: &SystemContext,
 ) -> (Vec<DependencyEntry>, Vec<Warning>) {
     let mut warnings = Vec::new();
-    let search_dirs = build_search_directories(context, &mut warnings);
+    let search_dirs = build_search_directories(context, system, &mut warnings);
     let mut dependencies = Vec::new();
     let mut pending: VecDeque<ImportedDll> = imports.iter().cloned().collect();
     let mut seen_names = BTreeSet::new();
@@ -311,6 +313,7 @@ fn hash_dependency(
 
 fn build_search_directories(
     context: &DllResolutionContext,
+    system: &SystemContext,
     warnings: &mut Vec<Warning>,
 ) -> Vec<SearchDirectory> {
     let mut directories = Vec::new();
@@ -325,7 +328,7 @@ fn build_search_directories(
         );
     }
 
-    if let Some(windows_dir) = windows_dir() {
+    if let Some(windows_dir) = windows_dir(system) {
         match context.app_architecture {
             AppArchitecture::X86 => {
                 push_unique(
@@ -374,7 +377,11 @@ fn build_search_directories(
         );
     }
 
-    if let Some(path_value) = env::var_os("PATH") {
+    // The live PATH belongs to this machine, not the scanned disk, so it is only
+    // a meaningful DLL search location for a live scan.
+    if !system.is_offline()
+        && let Some(path_value) = env::var_os("PATH")
+    {
         for path in env::split_paths(&path_value) {
             push_unique(
                 &mut directories,
@@ -403,7 +410,10 @@ fn push_unique(
     }
 }
 
-fn windows_dir() -> Option<PathBuf> {
+fn windows_dir(system: &SystemContext) -> Option<PathBuf> {
+    if system.is_offline() {
+        return Some(system.windows_dir());
+    }
     env::var_os(WINDOWS_ENV_VAR)
         .or_else(|| env::var_os(LEGACY_WINDOWS_ENV_VAR))
         .map(PathBuf::from)
@@ -460,7 +470,8 @@ mod tests {
             delay_loaded: false,
         }];
 
-        let (dependencies, warnings) = resolve_imports(&imports, &context);
+        let (dependencies, warnings) =
+            resolve_imports(&imports, &context, &SystemContext::live());
 
         assert!(warnings.is_empty());
         assert_eq!(dependencies.len(), 1);
@@ -497,7 +508,8 @@ mod tests {
             delay_loaded: false,
         }];
 
-        let (dependencies, _warnings) = resolve_imports(&imports, &context);
+        let (dependencies, _warnings) =
+            resolve_imports(&imports, &context, &SystemContext::live());
         fs::remove_dir_all(&root)?;
 
         assert_eq!(dependencies.len(), 1);

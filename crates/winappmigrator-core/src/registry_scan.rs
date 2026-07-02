@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 use winreg::enums::{
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN,
-    REG_EXPAND_SZ, REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD,
-    REG_RESOURCE_LIST, REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, RegType,
+    KEY_READ, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN, REG_EXPAND_SZ,
+    REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD, REG_RESOURCE_LIST,
+    REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, RegType,
 };
 use winreg::{RegKey, RegValue};
 
@@ -15,6 +15,31 @@ use crate::models::{
 use crate::path_utils::{
     looks_like_executable, normalize_name_for_match, split_command_executable_path,
 };
+use crate::system_context::{SystemContext, UserHive};
+
+/// A registry root to open logical key paths against. Live opens `predef`
+/// hives; offline maps each logical path onto the mounted hive while callers
+/// keep the logical path for capture/restore.
+enum RegRoot<'a> {
+    Hklm(&'a SystemContext),
+    User(&'a UserHive),
+}
+
+impl RegRoot<'_> {
+    fn open(&self, logical: &str, flags: u32) -> std::io::Result<RegKey> {
+        match self {
+            RegRoot::Hklm(system) => system.open_hklm(logical, flags),
+            RegRoot::User(user) => user.open(logical, flags),
+        }
+    }
+
+    fn hive(&self) -> RegistryHive {
+        match self {
+            RegRoot::Hklm(_) => RegistryHive::LocalMachine,
+            RegRoot::User(_) => RegistryHive::CurrentUser,
+        }
+    }
+}
 
 const APP_PATHS: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths";
 const HKLM_UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
@@ -56,124 +81,82 @@ pub struct RegistryScanArtifacts {
     pub warnings: Vec<Warning>,
 }
 
-pub fn scan_registry(context: &RegistryScanContext) -> (Vec<RegistryEntry>, Vec<Warning>) {
-    let artifacts = scan_registry_artifacts(context);
+pub fn scan_registry(
+    context: &RegistryScanContext,
+    system: &SystemContext,
+) -> (Vec<RegistryEntry>, Vec<Warning>) {
+    let artifacts = scan_registry_artifacts(context, system);
     (artifacts.entries, artifacts.warnings)
 }
 
-pub fn scan_registry_artifacts(context: &RegistryScanContext) -> RegistryScanArtifacts {
+pub fn scan_registry_artifacts(
+    context: &RegistryScanContext,
+    system: &SystemContext,
+) -> RegistryScanArtifacts {
     let mut entries = Vec::new();
     let mut warnings = Vec::new();
     let mut file_associations = Vec::new();
 
-    scan_app_paths(
-        context,
-        RegistryHive::LocalMachine,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_app_paths(
-        context,
-        RegistryHive::CurrentUser,
-        &mut entries,
-        &mut warnings,
-    );
+    let hklm = RegRoot::Hklm(system);
+    scan_app_paths(context, &hklm, &mut entries, &mut warnings);
+    scan_uninstall_entries(context, &hklm, HKLM_UNINSTALL, &mut entries, &mut warnings);
     scan_uninstall_entries(
         context,
-        RegistryHive::LocalMachine,
-        HKLM_UNINSTALL,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_uninstall_entries(
-        context,
-        RegistryHive::LocalMachine,
+        &hklm,
         HKLM_WOW6432_UNINSTALL,
         &mut entries,
         &mut warnings,
     );
-    scan_uninstall_entries(
-        context,
-        RegistryHive::CurrentUser,
-        HKCU_UNINSTALL,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_run_keys(
-        context,
-        RegistryHive::LocalMachine,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_run_keys(
-        context,
-        RegistryHive::CurrentUser,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_software_children(
-        context,
-        RegistryHive::CurrentUser,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_software_children(
-        context,
-        RegistryHive::LocalMachine,
-        &mut entries,
-        &mut warnings,
-    );
+    scan_run_keys(context, &hklm, &mut entries, &mut warnings);
+    scan_software_children(context, &hklm, &mut entries, &mut warnings);
     scan_class_registrations(
         context,
-        RegistryHive::CurrentUser,
-        HKCU_CLASSES_APPLICATIONS,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_class_registrations(
-        context,
-        RegistryHive::CurrentUser,
-        HKCU_CLASSES_CLSID,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_class_registrations(
-        context,
-        RegistryHive::LocalMachine,
+        &hklm,
         HKLM_CLASSES_APPLICATIONS,
         &mut entries,
         &mut warnings,
     );
+    scan_class_registrations(context, &hklm, HKLM_CLASSES_CLSID, &mut entries, &mut warnings);
     scan_class_registrations(
         context,
-        RegistryHive::LocalMachine,
-        HKLM_CLASSES_CLSID,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_class_registrations(
-        context,
-        RegistryHive::LocalMachine,
+        &hklm,
         HKLM_WOW6432_CLASSES_CLSID,
         &mut entries,
         &mut warnings,
     );
     scan_file_extension_associations(
         context,
-        RegistryHive::CurrentUser,
-        HKCU_CLASSES,
-        &mut entries,
-        &mut warnings,
-        &mut file_associations,
-    );
-    scan_file_extension_associations(
-        context,
-        RegistryHive::LocalMachine,
+        &hklm,
         HKLM_CLASSES,
         &mut entries,
         &mut warnings,
         &mut file_associations,
     );
+
+    // Per-user hives: live yields the current user; offline yields every profile.
+    for user in system.user_hives() {
+        let hkcu = RegRoot::User(&user);
+        scan_app_paths(context, &hkcu, &mut entries, &mut warnings);
+        scan_uninstall_entries(context, &hkcu, HKCU_UNINSTALL, &mut entries, &mut warnings);
+        scan_run_keys(context, &hkcu, &mut entries, &mut warnings);
+        scan_software_children(context, &hkcu, &mut entries, &mut warnings);
+        scan_class_registrations(
+            context,
+            &hkcu,
+            HKCU_CLASSES_APPLICATIONS,
+            &mut entries,
+            &mut warnings,
+        );
+        scan_class_registrations(context, &hkcu, HKCU_CLASSES_CLSID, &mut entries, &mut warnings);
+        scan_file_extension_associations(
+            context,
+            &hkcu,
+            HKCU_CLASSES,
+            &mut entries,
+            &mut warnings,
+            &mut file_associations,
+        );
+    }
 
     entries.sort_by(|left, right| {
         left.key_path
@@ -217,7 +200,7 @@ pub fn scan_registry_artifacts(context: &RegistryScanContext) -> RegistryScanArt
 }
 
 struct RegistryCaptureContext<'a> {
-    root: &'a RegKey,
+    root: &'a RegRoot<'a>,
     hive: RegistryHive,
     confidence: MatchConfidence,
     entries: &'a mut Vec<RegistryEntry>,
@@ -227,44 +210,31 @@ struct RegistryCaptureContext<'a> {
 
 fn scan_class_registrations(
     context: &RegistryScanContext,
-    hive: RegistryHive,
+    root: &RegRoot,
     base_path: &str,
     entries: &mut Vec<RegistryEntry>,
     warnings: &mut Vec<Warning>,
 ) {
-    let Some(root) = open_root(hive.clone()) else {
-        return;
-    };
-    let Ok(base_key) = root.open_subkey_with_flags(base_path, KEY_READ) else {
+    let Ok(base_key) = root.open(base_path, KEY_READ) else {
         return;
     };
     for child_name in base_key.enum_keys().flatten() {
         let key_path = format!(r"{base_path}\{child_name}");
-        if registry_tree_matches_context(&root, &key_path, context, 0) {
-            capture_registry_subtree(
-                &root,
-                hive.clone(),
-                &key_path,
-                MatchConfidence::High,
-                entries,
-                warnings,
-            );
+        if registry_tree_matches_context(root, &key_path, context, 0) {
+            capture_registry_subtree(root, &key_path, MatchConfidence::High, entries, warnings);
         }
     }
 }
 
 fn scan_file_extension_associations(
     context: &RegistryScanContext,
-    hive: RegistryHive,
+    root: &RegRoot,
     classes_path: &str,
     entries: &mut Vec<RegistryEntry>,
     warnings: &mut Vec<Warning>,
     file_associations: &mut Vec<FileAssociationEntry>,
 ) {
-    let Some(root) = open_root(hive.clone()) else {
-        return;
-    };
-    let Ok(classes_key) = root.open_subkey_with_flags(classes_path, KEY_READ) else {
+    let Ok(classes_key) = root.open(classes_path, KEY_READ) else {
         return;
     };
 
@@ -274,7 +244,7 @@ fn scan_file_extension_associations(
         .filter(|name| name.starts_with('.'))
     {
         let extension_path = format!(r"{classes_path}\{extension_name}");
-        let Ok(extension_key) = root.open_subkey_with_flags(&extension_path, KEY_READ) else {
+        let Ok(extension_key) = root.open(&extension_path, KEY_READ) else {
             continue;
         };
         let Ok(default_value) = extension_key.get_raw_value("") else {
@@ -285,29 +255,14 @@ fn scan_file_extension_associations(
             continue;
         }
         let prog_id_path = format!(r"{classes_path}\{prog_id}");
-        if !registry_tree_matches_context(&root, &prog_id_path, context, 0) {
+        if !registry_tree_matches_context(root, &prog_id_path, context, 0) {
             continue;
         }
 
-        capture_registry_subtree(
-            &root,
-            hive.clone(),
-            &extension_path,
-            MatchConfidence::High,
-            entries,
-            warnings,
-        );
-        capture_registry_subtree(
-            &root,
-            hive.clone(),
-            &prog_id_path,
-            MatchConfidence::High,
-            entries,
-            warnings,
-        );
+        capture_registry_subtree(root, &extension_path, MatchConfidence::High, entries, warnings);
+        capture_registry_subtree(root, &prog_id_path, MatchConfidence::High, entries, warnings);
         file_associations.extend(file_associations_from_prog_id(
-            &root,
-            hive.clone(),
+            root,
             classes_path,
             &extension_name,
             &prog_id,
@@ -316,14 +271,14 @@ fn scan_file_extension_associations(
 }
 
 fn file_associations_from_prog_id(
-    root: &RegKey,
-    hive: RegistryHive,
+    root: &RegRoot,
     classes_path: &str,
     extension: &str,
     prog_id: &str,
 ) -> Vec<FileAssociationEntry> {
+    let hive = root.hive();
     let shell_path = format!(r"{classes_path}\{prog_id}\shell");
-    let Ok(shell_key) = root.open_subkey_with_flags(&shell_path, KEY_READ) else {
+    let Ok(shell_key) = root.open(&shell_path, KEY_READ) else {
         return vec![FileAssociationEntry {
             hive: hive.clone(),
             extension: Some(extension.to_owned()),
@@ -339,7 +294,7 @@ fn file_associations_from_prog_id(
     let mut associations = Vec::new();
     for verb in shell_key.enum_keys().flatten() {
         let command_path = format!(r"{shell_path}\{verb}\command");
-        let Ok(command_key) = root.open_subkey_with_flags(&command_path, KEY_READ) else {
+        let Ok(command_key) = root.open(&command_path, KEY_READ) else {
             continue;
         };
         let command = command_key
@@ -374,59 +329,40 @@ fn file_associations_from_prog_id(
 
 fn scan_uninstall_entries(
     context: &RegistryScanContext,
-    hive: RegistryHive,
+    root: &RegRoot,
     uninstall_path: &str,
     entries: &mut Vec<RegistryEntry>,
     warnings: &mut Vec<Warning>,
 ) {
-    let Some(root) = open_root(hive.clone()) else {
-        return;
-    };
-    let key = match root.open_subkey_with_flags(uninstall_path, KEY_READ) {
+    let key = match root.open(uninstall_path, KEY_READ) {
         Ok(key) => key,
         Err(_) => return,
     };
+    let hive = root.hive();
 
     for child_name in key.enum_keys().flatten() {
         let key_path = format!(r"{uninstall_path}\{child_name}");
         if source_registry_path_matches(context, &hive, &key_path) {
-            capture_registry_subtree(
-                &root,
-                hive.clone(),
-                &key_path,
-                MatchConfidence::High,
-                entries,
-                warnings,
-            );
+            capture_registry_subtree(root, &key_path, MatchConfidence::High, entries, warnings);
             continue;
         }
 
-        let Ok(child) = root.open_subkey_with_flags(&key_path, KEY_READ) else {
+        let Ok(child) = root.open(&key_path, KEY_READ) else {
             continue;
         };
         if uninstall_key_matches_context(context, &child) {
-            capture_registry_subtree(
-                &root,
-                hive.clone(),
-                &key_path,
-                MatchConfidence::High,
-                entries,
-                warnings,
-            );
+            capture_registry_subtree(root, &key_path, MatchConfidence::High, entries, warnings);
         }
     }
 }
 
 fn scan_app_paths(
     context: &RegistryScanContext,
-    hive: RegistryHive,
+    root: &RegRoot,
     entries: &mut Vec<RegistryEntry>,
     warnings: &mut Vec<Warning>,
 ) {
-    let Some(root) = open_root(hive.clone()) else {
-        return;
-    };
-    let key = match root.open_subkey_with_flags(APP_PATHS, KEY_READ) {
+    let key = match root.open(APP_PATHS, KEY_READ) {
         Ok(key) => key,
         Err(error) => {
             warn!(%error, "App Paths registry key unavailable");
@@ -458,8 +394,7 @@ fn scan_app_paths(
         }
         if matched {
             capture_registry_subtree(
-                &root,
-                hive.clone(),
+                root,
                 &format!(r"{APP_PATHS}\{child_name}"),
                 MatchConfidence::High,
                 entries,
@@ -471,15 +406,13 @@ fn scan_app_paths(
 
 fn scan_run_keys(
     context: &RegistryScanContext,
-    hive: RegistryHive,
+    root: &RegRoot,
     entries: &mut Vec<RegistryEntry>,
     _warnings: &mut Vec<Warning>,
 ) {
-    let Some(root) = open_root(hive.clone()) else {
-        return;
-    };
+    let hive = root.hive();
     for key_path in RUN_KEYS {
-        let Ok(key) = root.open_subkey_with_flags(key_path, KEY_READ) else {
+        let Ok(key) = root.open(key_path, KEY_READ) else {
             continue;
         };
         for value in key.enum_values().flatten() {
@@ -502,18 +435,15 @@ fn scan_run_keys(
 
 fn scan_software_children(
     context: &RegistryScanContext,
-    hive: RegistryHive,
+    root: &RegRoot,
     entries: &mut Vec<RegistryEntry>,
     _warnings: &mut Vec<Warning>,
 ) {
-    let Some(root) = open_root(hive.clone()) else {
-        return;
-    };
-    let software_path = match hive {
+    let software_path = match root.hive() {
         RegistryHive::LocalMachine => HKLM_SOFTWARE,
         RegistryHive::CurrentUser => HKCU_SOFTWARE,
     };
-    let Ok(software) = root.open_subkey_with_flags(software_path, KEY_READ) else {
+    let Ok(software) = root.open(software_path, KEY_READ) else {
         return;
     };
     let tokens = related_tokens(context);
@@ -525,8 +455,7 @@ fn scan_software_children(
         let normalized = normalize_name_for_match(&child_name);
         if tokens.iter().any(|token| normalized.contains(token)) {
             capture_registry_subtree(
-                &root,
-                hive.clone(),
+                root,
                 &format!(r"{software_path}\{child_name}"),
                 MatchConfidence::Medium,
                 entries,
@@ -537,13 +466,13 @@ fn scan_software_children(
 }
 
 fn capture_registry_subtree(
-    root: &RegKey,
-    hive: RegistryHive,
+    root: &RegRoot,
     key_path: &str,
     confidence: MatchConfidence,
     entries: &mut Vec<RegistryEntry>,
     warnings: &mut Vec<Warning>,
 ) {
+    let hive = root.hive();
     let mut context = RegistryCaptureContext {
         root,
         hive,
@@ -571,7 +500,7 @@ fn capture_registry_subtree_inner(
     }
     context.keys_seen += 1;
 
-    let key = match context.root.open_subkey_with_flags(key_path, KEY_READ) {
+    let key = match context.root.open(key_path, KEY_READ) {
         Ok(key) => key,
         Err(error) => {
             context.warnings.push(Warning::new(
@@ -696,7 +625,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn registry_tree_matches_context(
-    root: &RegKey,
+    root: &RegRoot,
     key_path: &str,
     context: &RegistryScanContext,
     depth: usize,
@@ -704,7 +633,7 @@ fn registry_tree_matches_context(
     if depth > MAX_REGISTRY_MATCH_SCAN_DEPTH {
         return false;
     }
-    let Ok(key) = root.open_subkey_with_flags(key_path, KEY_READ) else {
+    let Ok(key) = root.open(key_path, KEY_READ) else {
         return false;
     };
     for value in key.enum_values().flatten() {
@@ -950,13 +879,6 @@ fn registry_server_path(value: &str) -> Option<PathBuf> {
     split_command_executable_path(value).or_else(|| {
         let trimmed = value.trim().trim_matches('"');
         (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
-    })
-}
-
-fn open_root(hive: RegistryHive) -> Option<RegKey> {
-    Some(match hive {
-        RegistryHive::LocalMachine => RegKey::predef(HKEY_LOCAL_MACHINE),
-        RegistryHive::CurrentUser => RegKey::predef(HKEY_CURRENT_USER),
     })
 }
 

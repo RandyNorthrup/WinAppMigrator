@@ -14,6 +14,10 @@ impl WinAppMigratorApp {
     pub(crate) fn view_applications(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
 
+        // Scan source: this PC or a connected drive from another PC.
+        self.source_selector(ui, &theme);
+        ui.add_space(12.0);
+
         // Search + scope filter.
         widgets::card(ui, &theme, |ui| {
             ui.horizontal(|ui| {
@@ -137,6 +141,107 @@ impl WinAppMigratorApp {
             ui.add_space(12.0);
             self.migrate_panel(ui, &theme, index);
         }
+    }
+
+    /// The scan-source selector: read installed apps from this PC, or from a
+    /// drive connected from another (often failing) PC.
+    fn source_selector(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        let offline = self.scan_source.is_offline();
+        let offline_root = match &self.scan_source {
+            winappmigrator_core::ScanSource::OfflineVolume { volume_root } => {
+                Some(volume_root.display().to_string())
+            }
+            winappmigrator_core::ScanSource::Live => None,
+        };
+        let needs_elevation = offline && !self.elevated;
+
+        widgets::card(ui, theme, |ui| {
+            ui.horizontal(|ui| {
+                widgets::field_label(ui, theme, "Scan source");
+                ui.add_space(6.0);
+                if button(
+                    ui,
+                    theme,
+                    if offline {
+                        ButtonKind::Ghost
+                    } else {
+                        ButtonKind::Primary
+                    },
+                    "This PC",
+                    true,
+                )
+                .clicked()
+                {
+                    self.select_live_source();
+                }
+                if button(
+                    ui,
+                    theme,
+                    if offline {
+                        ButtonKind::Primary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    "Connected drive…",
+                    true,
+                )
+                .clicked()
+                {
+                    self.pick_offline_drive();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (label, role) = if offline {
+                        ("Offline drive", Role::Warning)
+                    } else {
+                        ("This PC", Role::Success)
+                    };
+                    widgets::status_pill(ui, theme, label, role);
+                });
+            });
+
+            if let Some(root) = offline_root.as_ref() {
+                ui.add_space(8.0);
+                widgets::mono_path(ui, theme, "Drive root", root);
+            }
+
+            if let Some(error) = self.source_error.clone() {
+                ui.add_space(8.0);
+                widgets::notice(ui, theme, Role::Danger, &error);
+            }
+
+            if needs_elevation {
+                ui.add_space(8.0);
+                widgets::notice(
+                    ui,
+                    theme,
+                    Role::Warning,
+                    "Scanning a connected drive needs administrator rights to read the drive's \
+                     registry and protected files.",
+                );
+                ui.add_space(8.0);
+                if button(
+                    ui,
+                    theme,
+                    ButtonKind::Primary,
+                    "Restart as administrator",
+                    true,
+                )
+                .clicked()
+                {
+                    self.restart_as_admin();
+                }
+            } else if offline {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "Reads apps, files, registry, services, and scheduled tasks straight from \
+                         the drive; the built installer works exactly like a live scan.",
+                    )
+                    .size(12.0)
+                    .color(theme.text_muted),
+                );
+            }
+        });
     }
 
     /// Select an app and prefill the default output directory for it.

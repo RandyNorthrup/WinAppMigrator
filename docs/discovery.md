@@ -241,10 +241,53 @@ version** (`pe_scan::dotnet_metadata_version`, the `BSJB` root's version string)
 This avoids the earlier error of mapping every `mscoree` reference to the modern
 ".NET Desktop Runtime 8", which is a different runtime from .NET Framework.
 
+## Scanning an offline volume (a disk from another PC)
+
+Discovery normally reads the live OS through two seams: the live registry
+(`RegKey::predef(HKLM/HKCU)`) and known folders (`std::env::var_os(…)` +
+`path.exists()`). `system_context.rs` funnels both through one `SystemContext`
+so the same scanners work against a **mounted disk from another machine** (a
+failing PC). `ScanSource` is `Live` or `OfflineVolume { volume_root }` (e.g.
+`E:\`), threaded via `ScanOptions`/`PackageOptions`.
+
+For an offline volume, `SystemContext::open`:
+
+- **Mounts the disk's hives read-only** with `reg load HKLM\WAM_<pid>_… <hive>`
+  for `SOFTWARE`, `SYSTEM`, and each `Users\<name>\NTUSER.DAT`. `reg load` uses
+  the process's backup/restore privileges (present when elevated), so the ACL on
+  a foreign `config` hive doesn't block it — **without modifying the disk**. A
+  drop guard `reg unload`s every mount; logical `HKLM\…` paths are mapped onto the
+  mounts, resolving `SYSTEM\CurrentControlSet` to the disk's active set from
+  `SYSTEM\Select\Current` (there is no live `CurrentControlSet` symlink offline).
+- **Derives known-folder bases** (`Program Files`, `ProgramData`, `Public`,
+  `Windows`, and every `Users\*` profile) from `volume_root` instead of the live
+  environment, and enumerates **all** user hives (not just the current user).
+- **Re-roots** absolute source paths — a registry-recorded `C:\Program Files\App`
+  becomes `<volume_root>\Program Files\App` (`resolve_source_path`).
+
+Scanner coverage offline: app inventory, registry, environment, license, and
+install-source read the mounted hives; services/drivers read the offline `SYSTEM`
+hive; **scheduled tasks are parsed from the disk's `Windows\System32\Tasks` XML**
+(the same schema `Export-ScheduledTask` emits) because the live Task Scheduler
+can't see another disk. Prerequisite *presence* on the source is left unknown
+offline (the `is_present` probe reads the live registry). Source **shortcuts** are
+not enumerated offline (the installer recreates them on restore).
+
+**Requirements and safety:** offline scanning requires **elevation** (for
+`reg load` and backup reads). It is **read-only / non-destructive** — the disk is
+never written (no `takeown`/`icacls`); files whose live ACL denies a plain read
+are copied at package time via `robocopy /B` (backup semantics), still without
+touching the source. Restore re-anchoring is unaffected: user-data paths still
+split on their `\appdata\roaming\`-style markers, so data re-homes to the
+*target's* `%APPDATA%`/`%PUBLIC%` regardless of the source drive letter.
+
 ## Known limitations / next steps
 
 - Scope the MSI component sweep to the product (Features/Base85) to cut latency.
 - Deeper MSIX (`AppxManifest`, package data) and Squirrel (`app-*`) enumeration.
+- Offline per-user known-folder *redirection* (OneDrive Documents, etc.) uses the
+  default profile-relative folders rather than reading each `NTUSER.DAT`'s
+  `User Shell Folders`.
 
 ## Restoring user data to real locations
 

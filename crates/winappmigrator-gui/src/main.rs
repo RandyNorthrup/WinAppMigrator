@@ -1,4 +1,5 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Always a windowed GUI app — never allocate a console window, in any build.
+#![windows_subsystem = "windows"]
 
 mod views;
 
@@ -10,9 +11,12 @@ use std::thread;
 use eframe::egui::{self, Align, Layout, Margin, RichText, Stroke};
 
 use winappmigrator_core::{
-    AppSelection, InstalledApp, PackageOptions, PackageResult, VerificationOptions,
-    VerificationReport, create_package, list_installed_apps, verify_package,
+    AppSelection, InstalledApp, PackageOptions, PackageResult, ScanSource, SystemContext,
+    VerificationOptions, VerificationReport, create_package, list_installed_apps_from,
+    verify_package,
 };
+use winappmigrator_core::path_utils::hidden_command;
+use winappmigrator_core::privilege::is_elevated;
 use winappmigrator_ui::{theme, widgets};
 
 use theme::{Role, Theme, ThemeMode};
@@ -63,6 +67,12 @@ pub struct WinAppMigratorApp {
     output_dir: String,
     backup_user_data: bool,
     backup_license: bool,
+    /// Where apps are read from: the live OS, or a connected offline drive.
+    scan_source: ScanSource,
+    /// Whether this process is elevated (offline drive scanning requires it).
+    elevated: bool,
+    /// A problem selecting the offline drive (not a Windows volume, etc.).
+    source_error: Option<String>,
     migrate_state: OperationState,
     migrate_receiver: Option<Receiver<MigrateMessage>>,
     migrate_detail: String,
@@ -83,27 +93,89 @@ impl WinAppMigratorApp {
             output_dir: String::new(),
             backup_user_data: false,
             backup_license: false,
+            scan_source: ScanSource::Live,
+            elevated: is_elevated(),
+            source_error: None,
             migrate_state: OperationState::Idle,
             migrate_receiver: None,
             migrate_detail: String::new(),
             last_outcome: None,
             last_error: None,
         };
+        // Remove any stub temp directories left by previous or crashed runs.
+        sweep_stale_stub_temp_dirs();
         app.start_inventory_load();
         app
     }
 
     fn start_inventory_load(&mut self) {
         self.inventory_state = InventoryState::Loading;
+        self.selected_app_index = None;
         let (sender, receiver) = mpsc::channel();
         self.inventory_receiver = Some(receiver);
+        // Build the source context (mounting offline hives if needed) on the
+        // worker thread so mounts are short-lived and never block the UI.
+        let source = self.scan_source.clone();
         thread::spawn(move || {
-            let message = match list_installed_apps() {
+            let message = match SystemContext::open(&source)
+                .and_then(|system| list_installed_apps_from(&system))
+            {
                 Ok(apps) => InventoryMessage::Loaded(apps),
                 Err(error) => InventoryMessage::Failed(error.to_string()),
             };
             let _send_result = sender.send(message);
         });
+    }
+
+    /// Scan the live machine.
+    fn select_live_source(&mut self) {
+        self.source_error = None;
+        if self.scan_source.is_offline() {
+            self.scan_source = ScanSource::Live;
+            self.start_inventory_load();
+        }
+    }
+
+    /// Pick a connected drive (a disk from another PC) as the scan source.
+    fn pick_offline_drive(&mut self) {
+        let Some(root) = rfd::FileDialog::new()
+            .set_title("Select the connected drive's root (e.g. E:\\)")
+            .pick_folder()
+        else {
+            return;
+        };
+        // A Windows system volume has \Windows and \Users. Check those (which are
+        // listable) rather than the registry hive file, whose ACL denies even an
+        // existence check until we are elevated and reading it via backup mode.
+        if !(root.join("Windows").is_dir() && root.join("Users").is_dir()) {
+            self.source_error = Some(format!(
+                "{} does not look like a Windows system drive (no \\Windows and \\Users). \
+                 Pick the root of the drive from the other PC.",
+                root.display()
+            ));
+            return;
+        }
+        self.source_error = None;
+        self.scan_source = ScanSource::offline(root);
+        // Only attempt the scan when elevated; otherwise the source selector
+        // shows the "Restart as administrator" gate instead.
+        if self.elevated {
+            self.start_inventory_load();
+        }
+    }
+
+    /// Relaunch the app elevated so it can mount the offline drive's hives.
+    fn restart_as_admin(&self) {
+        if let Ok(exe) = std::env::current_exe() {
+            let script = format!(
+                "Start-Process -FilePath '{}' -Verb RunAs",
+                exe.display().to_string().replace('\'', "''")
+            );
+            let _ = hidden_command("powershell")
+                .args(["-NoProfile", "-Command", &script])
+                .spawn();
+            std::process::exit(0);
+        }
     }
 
     /// Reverse-engineer the selected application and build a self-extracting
@@ -135,14 +207,13 @@ impl WinAppMigratorApp {
         }
         // The chosen folder receives only the single self-extracting installer.
         let installer_dir = PathBuf::from(self.output_dir.trim());
-        let base_name = installer_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "App".to_owned());
+        // Name the installer after the application, not the chosen folder, so the
+        // deliverable is self-describing (e.g. `YAMAHA DIAGNOSTIC SYSTEM2_installer.exe`).
+        let base_name = safe_file_stem(&app.display_name);
         let app_name = app.display_name.clone();
         let include_user_data = self.backup_user_data;
         let include_license_data = self.backup_license;
+        let source = self.scan_source.clone();
 
         let (sender, receiver) = mpsc::channel();
         self.migrate_receiver = Some(receiver);
@@ -154,10 +225,11 @@ impl WinAppMigratorApp {
         self.last_outcome = None;
 
         thread::spawn(move || {
-            // Build the package in a throwaway staging directory so the chosen
-            // output folder ends up holding only the single installer executable.
-            let staging_parent =
-                std::env::temp_dir().join(format!("winappmigrator-build-{}", std::process::id()));
+            // Stage the (potentially large) package on the SAME drive as the
+            // chosen output folder, not the system temp drive, so a full-footprint
+            // build never fails for lack of space on C:. The chosen folder still
+            // ends up holding only the single self-extracting installer.
+            let staging_parent = build_staging_parent(&installer_dir);
             let staging = staging_parent.join(&base_name);
 
             let options = PackageOptions {
@@ -177,6 +249,8 @@ impl WinAppMigratorApp {
                 // Download and embed runtime prerequisites so the one installer
                 // installs everything on the target, even offline.
                 bundle_prerequisites: true,
+                // Read the app from the live OS or the connected offline drive.
+                source,
             };
 
             let message = match create_package(&options) {
@@ -373,6 +447,37 @@ pub(crate) fn default_output_for(app_name: &str) -> String {
         .to_string()
 }
 
+/// Sanitize an application's display name into a safe file stem, used to name the
+/// produced installer after the app (e.g. `YAMAHA DIAGNOSTIC SYSTEM2`).
+pub(crate) fn safe_file_stem(app_name: &str) -> String {
+    let safe: String = app_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = safe.trim();
+    if trimmed.is_empty() {
+        "App".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// A staging directory on the SAME drive as the chosen output folder, so the
+/// temporary full-footprint package never has to fit on the system temp drive.
+pub(crate) fn build_staging_parent(installer_dir: &Path) -> PathBuf {
+    let base = installer_dir
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(installer_dir);
+    base.join(format!(".winappmigrator-build-{}", std::process::id()))
+}
+
 /// The GUI installer stub, embedded into the app at build time (see `build.rs`).
 /// Empty only on a first-pass build where the stub was not yet available; the
 /// runtime then falls back to a sibling stub file.
@@ -393,10 +498,19 @@ pub(crate) fn installer_stub_path() -> Option<PathBuf> {
     sibling.is_file().then_some(sibling)
 }
 
+/// Prefix for this app's per-process temp directory (holds the extracted stub).
+const STUB_TEMP_PREFIX: &str = "winappmigrator-stub-";
+
+/// This process's temp directory for the extracted installer stub. Removed on
+/// exit by `Drop for WinAppMigratorApp`.
+fn stub_temp_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("{STUB_TEMP_PREFIX}{}", std::process::id()))
+}
+
 /// Write the embedded installer stub to a per-process temp file (once) and
 /// return its path, so it can be used as the self-extracting archive stub.
 fn write_embedded_stub() -> std::io::Result<PathBuf> {
-    let dir = std::env::temp_dir().join(format!("winappmigrator-stub-{}", std::process::id()));
+    let dir = stub_temp_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("winappmigrator-installer.exe");
     let already_written = std::fs::metadata(&path)
@@ -406,6 +520,34 @@ fn write_embedded_stub() -> std::io::Result<PathBuf> {
         std::fs::write(&path, EMBEDDED_INSTALLER_STUB)?;
     }
     Ok(path)
+}
+
+/// Remove leftover stub temp directories from previous (or crashed) runs, so a
+/// crash never leaves the ~18 MB stub behind. The current process's own
+/// directory is kept and cleaned on exit (`Drop`).
+fn sweep_stale_stub_temp_dirs() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let own = stub_temp_dir();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_ours = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(STUB_TEMP_PREFIX));
+        if is_ours && path != own && path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+impl Drop for WinAppMigratorApp {
+    fn drop(&mut self) {
+        // eframe drops the app when the window closes; remove this process's
+        // extracted installer stub so nothing is left in %TEMP%.
+        let _ = std::fs::remove_dir_all(stub_temp_dir());
+    }
 }
 
 /// The combined result of a migration build: the package, its self-extracting

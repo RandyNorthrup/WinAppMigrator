@@ -96,14 +96,17 @@ pub fn button(
                 .min_size(egui::vec2(120.0, 36.0))
         }
         ButtonKind::Secondary => egui::Button::new(egui::RichText::new(label).color(theme.text))
-            .fill(theme.card)
+            .fill(theme.card_hover)
             .stroke(Stroke::new(1.0, theme.border_strong))
             .corner_radius(RADIUS_SM)
             .min_size(egui::vec2(92.0, 34.0)),
-        ButtonKind::Ghost => egui::Button::new(egui::RichText::new(label).color(theme.text_muted))
+        // A ghost (tertiary) button is still unmistakably a button: an outlined
+        // capsule with a legible label — never bare text that reads as a caption.
+        ButtonKind::Ghost => egui::Button::new(egui::RichText::new(label).color(theme.text))
             .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE)
-            .frame(false),
+            .stroke(Stroke::new(1.0, theme.border_strong))
+            .corner_radius(RADIUS_SM)
+            .min_size(egui::vec2(92.0, 34.0)),
     };
     ui.add_enabled(enabled, widget)
 }

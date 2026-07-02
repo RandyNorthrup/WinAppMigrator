@@ -66,6 +66,7 @@ fn build_installer_then_reinstall_and_verify_on_clean_target() -> TestResult {
         include_program_data: false,
         include_license_data: false,
         bundle_prerequisites: false,
+        source: winappmigrator_core::ScanSource::Live,
     };
     let result = create_package(&options)?;
     assert!(

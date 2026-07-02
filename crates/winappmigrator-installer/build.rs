@@ -5,23 +5,31 @@
 //! prompt once via UAC on launch, so the whole installer runs elevated and every
 //! write succeeds — the standard behavior users expect from an installer.
 //!
-//! Only release builds get the manifest: debug builds stay `asInvoker` so the
-//! GUI can be run and screenshotted during development without a UAC prompt.
+//! Release builds request `requireAdministrator`; debug builds request an
+//! explicit `asInvoker`. Both always embed a manifest: a debug installer must
+//! still declare a `requestedExecutionLevel`, otherwise Windows' installer-
+//! detection heuristic (any exe named `*installer*`/`*setup*`) auto-elevates it
+//! through a broker as a separate process — which broke run/screenshot/close
+//! during development. An explicit `asInvoker` manifest suppresses that.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let is_windows = std::env::var_os("CARGO_CFG_WINDOWS").is_some();
-    let is_release = std::env::var("PROFILE").as_deref() == Ok("release");
-    if !(is_windows && is_release) {
+    if !is_windows {
         return;
     }
+    let is_release = std::env::var("PROFILE").as_deref() == Ok("release");
 
     use embed_manifest::manifest::ExecutionLevel;
     use embed_manifest::{embed_manifest, new_manifest};
 
-    let manifest = new_manifest("WinAppMigrator.Installer")
-        .requested_execution_level(ExecutionLevel::RequireAdministrator);
+    let level = if is_release {
+        ExecutionLevel::RequireAdministrator
+    } else {
+        ExecutionLevel::AsInvoker
+    };
+    let manifest = new_manifest("WinAppMigrator.Installer").requested_execution_level(level);
     if let Err(error) = embed_manifest(manifest) {
         // Don't fail the build over manifest embedding; the installer still works
         // (the user can right-click "Run as administrator"), just without the

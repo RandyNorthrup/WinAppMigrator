@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::system_context::ScanSource;
+
 pub const SCAN_SCHEMA_VERSION: &str = "winappmigrator.scan.v1";
 pub const PACKAGE_SCHEMA_VERSION: &str = "winappmigrator.package.v1";
 pub const VERIFICATION_SCHEMA_VERSION: &str = "winappmigrator.verification.v1";
@@ -113,6 +115,10 @@ pub struct ScanOptions {
     /// so it is opt-in.
     #[serde(default)]
     pub include_license_data: bool,
+    /// Where to read the application from: the live OS (default) or a connected
+    /// offline volume (a disk from another PC).
+    #[serde(default)]
+    pub source: ScanSource,
 }
 
 fn default_true() -> bool {
@@ -133,6 +139,7 @@ impl ScanOptions {
             include_user_data: true,
             include_program_data: true,
             include_license_data: false,
+            source: ScanSource::Live,
         }
     }
 }
@@ -308,6 +315,10 @@ pub struct PackageOptions {
     /// documented winget/URL fallback recorded in the manifest.
     #[serde(default)]
     pub bundle_prerequisites: bool,
+    /// Where to read the application from: the live OS (default) or a connected
+    /// offline volume (a disk from another PC).
+    #[serde(default)]
+    pub source: ScanSource,
 }
 
 impl PackageOptions {
@@ -327,6 +338,7 @@ impl PackageOptions {
             include_program_data: true,
             include_license_data: false,
             bundle_prerequisites: false,
+            source: ScanSource::Live,
         }
     }
 }

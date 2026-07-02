@@ -24,6 +24,7 @@ use crate::registry_scan::{RegistryScanContext, scan_registry_artifacts};
 use crate::reporting::{artifact_paths, write_scan_reports};
 use crate::service_scan::{ServiceScanContext, scan_drivers, scan_services};
 use crate::shortcut_scan::{ShortcutScanContext, scan_shortcuts};
+use crate::system_context::SystemContext;
 use crate::task_scan::{TaskScanContext, scan_scheduled_tasks};
 
 const BASE_CONFIDENCE_SCORE: i32 = 100;
@@ -57,7 +58,11 @@ struct ConfidenceInputs<'a> {
 }
 
 pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
-    let executable_path = selected_executable_path(options)?;
+    // The single seam every scanner reads through: the live OS, or a mounted
+    // offline volume from another PC. Held for the whole scan so offline hive
+    // mounts stay live until every scanner has run.
+    let system = SystemContext::open(&options.source)?;
+    let executable_path = selected_executable_path(options, &system)?;
     validate_scan_input(&executable_path)?;
 
     let mut pe_scan = scan_pe(&executable_path)?;
@@ -89,7 +94,8 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         recursive: options.recursive_dependencies,
         include_hashes: options.include_hashes,
     };
-    let (dependencies, resolver_warnings) = resolve_imports(&pe_scan.direct_imports, &context);
+    let (dependencies, resolver_warnings) =
+        resolve_imports(&pe_scan.direct_imports, &context, &system);
     let app_local_dlls = find_app_local_dlls(&executable_path)?;
     let source_app = match &options.selection {
         AppSelection::InstalledApp(app) => Some((**app).clone()),
@@ -107,35 +113,55 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
 
     // Reverse-engineer how the app was installed; for MSI products this reads
     // the authoritative Windows Installer component database.
-    let install_source = source_app.as_ref().map(detect_install_source);
+    let install_source = source_app
+        .as_ref()
+        .map(|app| detect_install_source(app, &system));
 
-    let registry_artifacts = scan_registry_artifacts(&RegistryScanContext {
-        executable_path: executable_path.clone(),
-        install_location: install_location.clone(),
-        display_name: app_name.clone(),
-        publisher: publisher.clone(),
-        source_registry_path,
-    });
-    let (services, service_warnings) = scan_services(&ServiceScanContext {
-        executable_path: executable_path.clone(),
-        install_location: install_location.clone(),
-    });
-    let (drivers, driver_warnings) = scan_drivers(&ServiceScanContext {
-        executable_path: executable_path.clone(),
-        install_location: install_location.clone(),
-    });
-    let (scheduled_tasks, task_warnings) = scan_scheduled_tasks(&TaskScanContext {
-        executable_path: executable_path.clone(),
-        install_location: install_location.clone(),
-    });
-    let (shortcuts, shortcut_warnings) = scan_shortcuts(&ShortcutScanContext {
-        executable_path: executable_path.clone(),
-        install_location: install_location.clone(),
-    });
-    let (environment_variables, environment_warnings) = scan_environment(&EnvironmentScanContext {
-        executable_path: executable_path.clone(),
-        install_location: install_location.clone(),
-    });
+    let registry_artifacts = scan_registry_artifacts(
+        &RegistryScanContext {
+            executable_path: executable_path.clone(),
+            install_location: install_location.clone(),
+            display_name: app_name.clone(),
+            publisher: publisher.clone(),
+            source_registry_path,
+        },
+        &system,
+    );
+    let (services, service_warnings) = scan_services(
+        &ServiceScanContext {
+            executable_path: executable_path.clone(),
+            install_location: install_location.clone(),
+        },
+        &system,
+    );
+    let (drivers, driver_warnings) = scan_drivers(
+        &ServiceScanContext {
+            executable_path: executable_path.clone(),
+            install_location: install_location.clone(),
+        },
+        &system,
+    );
+    let (scheduled_tasks, task_warnings) = scan_scheduled_tasks(
+        &TaskScanContext {
+            executable_path: executable_path.clone(),
+            install_location: install_location.clone(),
+        },
+        &system,
+    );
+    let (shortcuts, shortcut_warnings) = scan_shortcuts(
+        &ShortcutScanContext {
+            executable_path: executable_path.clone(),
+            install_location: install_location.clone(),
+        },
+        &system,
+    );
+    let (environment_variables, environment_warnings) = scan_environment(
+        &EnvironmentScanContext {
+            executable_path: executable_path.clone(),
+            install_location: install_location.clone(),
+        },
+        &system,
+    );
 
     // Fold concrete locations referenced by Windows integrations into the
     // footprint discovery so split installs (Program Files plus a service
@@ -145,8 +171,8 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     if let Some(source) = install_source.as_ref() {
         extra_roots.extend(source.roots.iter().cloned());
     }
-    let (file_inventory, footprint_locations, file_warnings) =
-        discover_files(&FileDiscoveryContext {
+    let (file_inventory, footprint_locations, file_warnings) = discover_files(
+        &FileDiscoveryContext {
             executable_path: executable_path.clone(),
             install_location: install_location.clone(),
             app_name,
@@ -155,7 +181,9 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             include_user_data: options.include_user_data,
             include_program_data: options.include_program_data,
             extra_roots,
-        });
+        },
+        &system,
+    );
 
     let runtime_prerequisites = runtime_prerequisites(
         &dependencies,
@@ -164,14 +192,17 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         pe_scan.metadata.is_dotnet,
         pe_scan.metadata.dotnet_runtime_version.as_deref(),
         &pe_scan.architecture,
+        system.is_offline(),
     );
-    let (license_artifacts, license_registry_entries, license_warnings) =
-        scan_license_artifacts(&LicenseScanContext {
+    let (license_artifacts, license_registry_entries, license_warnings) = scan_license_artifacts(
+        &LicenseScanContext {
             publisher: source_app.as_ref().and_then(|app| app.publisher.as_deref()),
             discovered_files: &file_inventory,
             include_license_data: options.include_license_data,
             include_hashes: options.include_hashes,
-        });
+        },
+        &system,
+    );
     let mut warnings = pe_scan.warnings;
     warnings.extend(resolver_warnings);
     warnings.extend(file_warnings);
@@ -258,13 +289,13 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     Ok(report)
 }
 
-fn selected_executable_path(options: &ScanOptions) -> Result<PathBuf> {
+fn selected_executable_path(options: &ScanOptions, system: &SystemContext) -> Result<PathBuf> {
     match &options.selection {
         AppSelection::ExecutablePath(path) => Ok(path.clone()),
         AppSelection::InstalledApp(app) => app
             .main_executable
             .clone()
-            .or_else(|| crate::install_source::primary_executable(app))
+            .or_else(|| crate::install_source::primary_executable(app, system))
             .ok_or_else(|| {
                 WinAppMigratorError::InvalidInput(format!(
                     "installed app has no main executable guess: {}",
@@ -332,6 +363,7 @@ fn runtime_prerequisites(
     is_dotnet: bool,
     dotnet_runtime_version: Option<&str>,
     architecture: &crate::models::AppArchitecture,
+    offline: bool,
 ) -> Vec<RuntimePrerequisite> {
     let signals = collect_runtime_signal_names(dependencies, app_local_dlls, file_inventory);
     let vc_dependency = dependencies
@@ -346,11 +378,15 @@ fn runtime_prerequisites(
     );
     // Attach a presence probe and a source-presence reading where one is known,
     // so packaging and the installer can confirm the runtime before and after
-    // installing it.
+    // installing it. `is_present` reads the *live* registry, so it only reflects
+    // the source when scanning the live machine; for an offline disk we leave
+    // the source presence unknown rather than reporting this PC's runtimes.
     for prerequisite in &mut prerequisites {
         if let Some(probe) = crate::prerequisites::presence_probe(&prerequisite.kind, architecture)
         {
-            prerequisite.present_on_source = Some(crate::prerequisites::is_present(&probe));
+            if !offline {
+                prerequisite.present_on_source = Some(crate::prerequisites::is_present(&probe));
+            }
             prerequisite.presence_probe = Some(probe);
         }
     }

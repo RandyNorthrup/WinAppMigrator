@@ -19,6 +19,7 @@ eframe = { version = "0.34.3", default-features = false, features = ["default_fo
 filetime = "0.2.29"
 pelite = { version = "0.10.0", default-features = false, features = ["std"] }
 rfd = { version = "0.17.2", default-features = false }
+roxmltree = "0.20.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.11.0"

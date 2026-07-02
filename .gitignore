@@ -10,3 +10,6 @@
 Thumbs.db
 Desktop.ini
 temp/
+
+# Scan report output directories (dev artifacts)
+/scan-output*/

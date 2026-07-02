@@ -12,8 +12,12 @@
 //! - **Headless** (any arguments): the classic `--target-root … --apply` flow,
 //!   for automation, CI, and the end-to-end test.
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Always a windowed app — never flash a console window when double-clicked, in
+// any build. Headless mode still writes to a redirected stdout handle (as the
+// e2e test and automation use), which a windowed subsystem does not affect.
+#![windows_subsystem = "windows"]
 
+mod cleanup;
 mod gui;
 mod headless;
 
