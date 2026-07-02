@@ -55,6 +55,15 @@ jobs:
           WINAPPMIGRATOR_INSTALLER_STUB: ${{ github.workspace }}\target\release\winappmigrator-installer.exe
         run: cargo build --release -p winappmigrator-gui
 
+      # Regenerate the open-source attribution bundle so it always matches the
+      # dependencies actually compiled into this release.
+      - name: Generate third-party license attribution
+        shell: pwsh
+        run: |
+          cargo install cargo-about --locked --features cli
+          cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md
+          if (-not (Test-Path THIRD-PARTY-LICENSES.md)) { throw 'THIRD-PARTY-LICENSES.md was not generated' }
+
       - name: Stage release artifacts
         id: stage
         shell: pwsh
@@ -63,7 +72,7 @@ jobs:
           $name = "WinAppMigrator-$tag-windows-x64"
           New-Item -ItemType Directory -Force -Path dist, "dist/$name" | Out-Null
           Copy-Item target/release/winappmigrator.exe "dist/$name/winappmigrator.exe"
-          Copy-Item README.md, CHANGELOG.md "dist/$name/"
+          Copy-Item README.md, CHANGELOG.md, LICENSE, THIRD-PARTY-LICENSES.md "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip" -Force
           Copy-Item target/release/winappmigrator.exe "dist/WinAppMigrator-$tag.exe"
           foreach ($f in @("dist/$name.zip", "dist/WinAppMigrator-$tag.exe")) {

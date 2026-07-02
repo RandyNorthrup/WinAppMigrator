@@ -191,6 +191,8 @@ impl WinAppMigratorApp {
         let include_user_data = self.backup_user_data;
         let include_license_data = self.backup_license;
         let source = self.scan_source.clone();
+        // Record the active theme so the produced installer presents to match.
+        let ui_theme = self.theme.mode.as_tag().to_owned();
 
         let (sender, receiver) = mpsc::channel();
         self.migrate_receiver = Some(receiver);
@@ -228,6 +230,7 @@ impl WinAppMigratorApp {
                 bundle_prerequisites: true,
                 // Read the app from the live OS or the connected offline drive.
                 source,
+                ui_theme: Some(ui_theme),
             };
 
             let message = match create_package(&options) {

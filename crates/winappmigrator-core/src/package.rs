@@ -148,6 +148,7 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         included_user_data: options.include_user_data,
         included_program_data: options.include_program_data,
         included_license_data: options.include_license_data,
+        ui_theme: options.ui_theme.clone(),
     };
 
     let manifest_path = options.output_dir.join(MANIFEST_FILE);

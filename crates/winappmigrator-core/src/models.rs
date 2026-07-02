@@ -288,6 +288,11 @@ pub struct PackageManifest {
     /// installer's "Restore license" checkbox: it is only shown when true.
     #[serde(default)]
     pub included_license_data: bool,
+    /// The UI theme tag ("light"/"dark") active in the app when the installer was
+    /// built, so the produced installer can present in the same theme. `None` on
+    /// older packages, which the installer treats as the default (dark).
+    #[serde(default)]
+    pub ui_theme: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,6 +324,10 @@ pub struct PackageOptions {
     /// offline volume (a disk from another PC).
     #[serde(default)]
     pub source: ScanSource,
+    /// UI theme tag ("light"/"dark") to record in the package so the produced
+    /// installer presents in the theme the app used when building it.
+    #[serde(default)]
+    pub ui_theme: Option<String>,
 }
 
 impl PackageOptions {
@@ -339,6 +348,7 @@ impl PackageOptions {
             include_license_data: false,
             bundle_prerequisites: false,
             source: ScanSource::Live,
+            ui_theme: None,
         }
     }
 }

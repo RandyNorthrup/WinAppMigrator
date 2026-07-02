@@ -29,6 +29,23 @@ impl ThemeMode {
             ThemeMode::Light => ThemeMode::Dark,
         }
     }
+
+    /// A stable string tag for persisting the mode (e.g. in a package manifest),
+    /// so a produced installer can render in the theme active when it was built.
+    pub fn as_tag(self) -> &'static str {
+        match self {
+            ThemeMode::Dark => "dark",
+            ThemeMode::Light => "light",
+        }
+    }
+
+    /// Parse a tag written by [`ThemeMode::as_tag`]; anything else is `Dark`.
+    pub fn from_tag(tag: &str) -> Self {
+        match tag {
+            "light" => ThemeMode::Light,
+            _ => ThemeMode::Dark,
+        }
+    }
 }
 
 /// A fully resolved set of colors for the active presentation mode.
@@ -250,4 +267,22 @@ pub enum Role {
     Warning,
     Danger,
     Neutral,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ThemeMode;
+
+    #[test]
+    fn theme_mode_tag_round_trips() {
+        for mode in [ThemeMode::Dark, ThemeMode::Light] {
+            assert!(ThemeMode::from_tag(mode.as_tag()) == mode);
+        }
+    }
+
+    #[test]
+    fn unknown_theme_tag_defaults_to_dark() {
+        assert!(ThemeMode::from_tag("nonsense") == ThemeMode::Dark);
+        assert!(ThemeMode::from_tag("") == ThemeMode::Dark);
+    }
 }

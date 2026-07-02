@@ -10,6 +10,25 @@ bundled license/user data), then hash-verifies every file.
 
 Author: **Randy Northrup**.
 
+## Screenshots
+
+Turn an installed app into one self-extracting installer in three steps —
+**pick → build → install**. _(Shown with a sample “DemoApp”.)_
+
+**1. Pick an installed app** — on this PC or a drive from another PC.
+
+![WinAppMigrator listing installed applications](docs/images/winappmigrator-start.png)
+
+**2. Choose what to back up and build the installer** — optionally include the
+app's license and user data, then produce a single `.exe`.
+
+![WinAppMigrator building a self-extracting installer for a selected app](docs/images/winappmigrator-app.png)
+
+**3. Run the installer on the target PC** — it reinstalls the app (in the same
+theme it was built with), restores the captured data, and hash-verifies every file.
+
+![The produced WinAppMigrator installer](docs/images/winappmigrator-installer.png)
+
 ## Two binaries, one job each
 
 - **`winappmigrator-gui` — the app** (binary `winappmigrator.exe`). Runs on the
@@ -248,3 +267,10 @@ docs/
   reverse-engineering, and the offline-volume model.
 - [docs/gui.md](docs/gui.md) — GUI architecture.
 - [docs/PLAN.md](docs/PLAN.md) — product scope and status.
+
+## License
+
+Licensed under the [MIT License](LICENSE) © 2026 Randy Northrup.
+
+All dependencies are permissively licensed (MIT / Apache-2.0 / BSD / Zlib / ISC
+and similar).

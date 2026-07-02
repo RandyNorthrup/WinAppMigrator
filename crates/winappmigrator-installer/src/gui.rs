@@ -216,6 +216,11 @@ impl InstallerApp {
         self.show_license = manifest.included_license_data;
         self.restore_user_data = self.show_user_data;
         self.restore_license = self.show_license;
+        // Present in the theme the app used when this installer was built (older
+        // packages carry no tag and keep the default dark theme).
+        if let Some(tag) = manifest.ui_theme.as_deref() {
+            self.theme = Theme::new(ThemeMode::from_tag(tag));
+        }
         self.prereqs = manifest
             .runtime_prerequisites
             .iter()
@@ -283,6 +288,13 @@ impl InstallerApp {
 }
 
 impl eframe::App for InstallerApp {
+    /// Clear the framebuffer to the theme background so the window matches the
+    /// active theme (the installer draws directly, without a filled panel, so the
+    /// default near-black clear color would otherwise show through in light mode).
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        self.theme.bg.to_normalized_gamma_f32()
+    }
+
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
     }

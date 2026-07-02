@@ -1,0 +1,32 @@
+# Configuration for `cargo about generate` — produces THIRD-PARTY-LICENSES.md,
+# the attribution bundle for the open-source crates compiled into the shipped
+# binaries. WinAppMigrator is MIT (see LICENSE); this file lists the permissive
+# licenses we accept so cargo-about picks a permissive option for every crate.
+
+# Only build for the platform we ship (Windows x64); this prunes deps that only
+# exist for other targets (e.g. UEFI/Unix-only crates) from the attribution.
+targets = ["x86_64-pc-windows-msvc"]
+
+# Ignore first-party workspace crates and dev-only build tooling.
+workarounds = []
+
+# Every license we are willing to redistribute under. All are permissive; none
+# are copyleft. For dual/multi-licensed crates cargo-about elects the first of
+# these it finds, so GPL/LGPL "OR" alternatives are never chosen.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "CC0-1.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "MPL-2.0",
+]

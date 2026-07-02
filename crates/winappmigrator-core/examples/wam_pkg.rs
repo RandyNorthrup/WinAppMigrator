@@ -52,6 +52,7 @@ fn main() {
         include_license_data: false,
         bundle_prerequisites: false,
         source: ScanSource::Live,
+        ui_theme: None,
     };
 
     let result = create_package(&options);
