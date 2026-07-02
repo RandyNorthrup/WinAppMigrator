@@ -202,7 +202,7 @@ level.
   stub then the app (so the app embeds the fresh stub) and publish a GitHub
   Release with `winappmigrator.exe`, a portable `.zip`, and `SHA256SUMS.txt`.
 
-The current version is `0.4.2` (released as `v0.4.2.0`). Builds are **unsigned**
+The current version is `0.4.2` (latest release `v0.4.2.1`). Builds are **unsigned**
 — the app and its installers are not Authenticode-signed.
 
 ## Project structure
