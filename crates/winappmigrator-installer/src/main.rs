@@ -8,7 +8,7 @@
 //! - **GUI** (double-click, no arguments): a window that shows the app, lets the
 //!   user pick the install location and — when they were captured at build time
 //!   — whether to restore user data and license data, then installs with live
-//!   progress. Release builds request administrator elevation on launch.
+//!   progress. It always requests administrator elevation on launch.
 //! - **Headless** (any arguments): the classic `--target-root … --apply` flow,
 //!   for automation, CI, and the end-to-end test.
 

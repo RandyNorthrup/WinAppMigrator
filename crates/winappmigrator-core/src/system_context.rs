@@ -16,8 +16,9 @@
 //! * re-roots absolute paths recorded on the source system (`C:\Program
 //!   Files\App`) onto the mounted volume (`E:\Program Files\App`).
 //!
-//! Offline scanning requires elevation (for `reg load` and backup-mode reads);
-//! [`SystemContext::open`] fails clearly otherwise.
+//! Offline scanning needs administrator rights (for `reg load` and backup-mode
+//! reads). WinAppMigrator always runs elevated, so the mount succeeds; `reg load`
+//! surfaces any failure (missing hive, access denied) directly.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -30,7 +31,6 @@ use winreg::enums::{
 
 use crate::errors::{Result, WinAppMigratorError};
 use crate::path_utils::hidden_command;
-use crate::privilege::is_elevated;
 
 /// Profile directory names under `Users\` that are not real user profiles.
 pub const NON_USER_PROFILE_NAMES: &[&str] = &["All Users", "Default", "Default User", "Public"];
@@ -152,8 +152,9 @@ impl SystemContext {
     }
 
     /// Build the context for `source`. For an offline volume this mounts the
-    /// disk's registry hives (requiring elevation) and returns an error if the
-    /// volume is not a Windows system disk or the process is not elevated.
+    /// disk's registry hives (which needs administrator rights — the app runs
+    /// elevated) and returns an error if the volume is not a Windows system disk
+    /// or the hives cannot be mounted.
     pub fn open(source: &ScanSource) -> Result<Self> {
         match source {
             ScanSource::Live => Ok(Self::live()),
@@ -321,14 +322,6 @@ impl SystemContext {
 // ---- Offline mounting -------------------------------------------------------
 
 fn mount_offline(volume_root: &Path) -> Result<OfflineHives> {
-    if !is_elevated() {
-        return Err(WinAppMigratorError::InvalidInput(
-            "Scanning a connected drive requires administrator rights (to read the drive's \
-             registry hives and protected files). Restart WinAppMigrator as administrator."
-                .to_owned(),
-        ));
-    }
-
     // Detect a Windows volume by its listable \Windows directory; the hive files
     // under \Windows\System32\config are ACL-protected and may not even stat
     // until reg load reads them through backup privilege, so don't precheck them.

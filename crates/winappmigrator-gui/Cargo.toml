@@ -16,5 +16,8 @@ rfd.workspace = true
 winappmigrator-core.workspace = true
 winappmigrator-ui.workspace = true
 
+[build-dependencies]
+embed-manifest.workspace = true
+
 [lints]
 workspace = true

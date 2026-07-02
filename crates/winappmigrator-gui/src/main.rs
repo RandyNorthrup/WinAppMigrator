@@ -10,8 +10,6 @@ use std::thread;
 
 use eframe::egui::{self, Align, Layout, Margin, RichText, Stroke};
 
-use winappmigrator_core::path_utils::hidden_command;
-use winappmigrator_core::privilege::is_elevated;
 use winappmigrator_core::{
     AppSelection, InstalledApp, PackageOptions, PackageResult, ScanSource, SystemContext,
     VerificationOptions, VerificationReport, create_package, list_installed_apps_from,
@@ -69,8 +67,6 @@ pub struct WinAppMigratorApp {
     backup_license: bool,
     /// Where apps are read from: the live OS, or a connected offline drive.
     scan_source: ScanSource,
-    /// Whether this process is elevated (offline drive scanning requires it).
-    elevated: bool,
     /// A problem selecting the offline drive (not a Windows volume, etc.).
     source_error: Option<String>,
     migrate_state: OperationState,
@@ -94,7 +90,6 @@ impl WinAppMigratorApp {
             backup_user_data: false,
             backup_license: false,
             scan_source: ScanSource::Live,
-            elevated: is_elevated(),
             source_error: None,
             migrate_state: OperationState::Idle,
             migrate_receiver: None,
@@ -157,37 +152,7 @@ impl WinAppMigratorApp {
         }
         self.source_error = None;
         self.scan_source = ScanSource::offline(root);
-        // Only attempt the scan when elevated; otherwise the source selector
-        // shows the "Restart as administrator" gate instead.
-        if self.elevated {
-            self.start_inventory_load();
-        }
-    }
-
-    /// Relaunch the app elevated so it can mount the offline drive's hives. On
-    /// success this process exits so only the elevated instance runs; if the
-    /// relaunch cannot even be started, surface why instead of exiting silently.
-    fn restart_as_admin(&mut self) {
-        let Ok(exe) = std::env::current_exe() else {
-            self.source_error =
-                Some("Could not locate the application to relaunch as administrator.".to_owned());
-            return;
-        };
-        let script = format!(
-            "Start-Process -FilePath '{}' -Verb RunAs",
-            exe.display().to_string().replace('\'', "''")
-        );
-        match hidden_command("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .spawn()
-        {
-            Ok(_child) => std::process::exit(0),
-            Err(error) => {
-                self.source_error = Some(format!(
-                    "Could not relaunch as administrator ({error}). Right-click the app and choose 'Run as administrator' instead."
-                ));
-            }
-        }
+        self.start_inventory_load();
     }
 
     /// Reverse-engineer the selected application and build a self-extracting

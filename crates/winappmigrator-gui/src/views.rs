@@ -153,8 +153,6 @@ impl WinAppMigratorApp {
             }
             winappmigrator_core::ScanSource::Live => None,
         };
-        let needs_elevation = offline && !self.elevated;
-
         widgets::card(ui, theme, |ui| {
             ui.horizontal(|ui| {
                 widgets::field_label(ui, theme, "Scan source");
@@ -209,28 +207,7 @@ impl WinAppMigratorApp {
                 widgets::notice(ui, theme, Role::Danger, &error);
             }
 
-            if needs_elevation {
-                ui.add_space(8.0);
-                widgets::notice(
-                    ui,
-                    theme,
-                    Role::Warning,
-                    "Scanning a connected drive needs administrator rights to read the drive's \
-                     registry and protected files.",
-                );
-                ui.add_space(8.0);
-                if button(
-                    ui,
-                    theme,
-                    ButtonKind::Primary,
-                    "Restart as administrator",
-                    true,
-                )
-                .clicked()
-                {
-                    self.restart_as_admin();
-                }
-            } else if offline {
+            if offline {
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new(

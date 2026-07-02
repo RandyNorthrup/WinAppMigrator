@@ -4,6 +4,30 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+## 0.4.2.0 — 2026-07-02
+
+- **First tagged release + release automation.** Set the workspace version to
+  `0.4.2` (released as `v0.4.2.0`) and added a GitHub Actions release workflow
+  (`.github/workflows/release.yml`) that, on a `v*` tag, builds the installer stub
+  then the app and publishes a GitHub Release with `winappmigrator.exe`, a
+  portable `.zip`, and `SHA256SUMS.txt`. CI (`ci.yml`) was slimmed to quality
+  gates only.
+- **The app and its installers always run elevated.** Both embed a
+  `requireAdministrator` manifest in every build, so Windows prompts once via UAC
+  at launch and the whole session is elevated — there is no mid-task elevation
+  prompt. The old "Restart as administrator" gate (and the app's
+  `elevated`/`restart_as_admin` code and the offline-mount elevation guard) was
+  removed as dead. The end-to-end test skips its reinstall step when it cannot
+  spawn the elevated installer on a non-elevated host; CI runs elevated and
+  exercises it fully.
+- **Removed code signing.** The app and installers are distributed unsigned; the
+  Authenticode signing hook, `docs/signing.md`, and `scripts/sign-release.ps1`
+  were removed.
+- **Docs/repo cleanup for accuracy.** Rewrote the README to current reality; fixed
+  stale docs (references to a removed `winappmigrator-cli` crate, non-existent CLI
+  flags, the removed elevation gate, an outdated `FootprintKind` list); moved
+  `PLAN.md` into `docs/`; and removed decision docs (installer-strategy, sfx,
+  tui-decision), the manual QA scripts, and `AGENTS.md`.
 - **Production hardening pass** (cleanup, shared helpers, no silenced errors):
   - **Removed dead/legacy code** left after the offline-scan refactor: the
     live-only `list_installed_apps()` wrapper, `SystemContext::{source,describe}()`

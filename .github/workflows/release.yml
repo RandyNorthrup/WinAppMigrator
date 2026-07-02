@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and publish (e.g. v0.4.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Windows x64 release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve release tag
+        id: meta
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tag = $env:GITHUB_REF_NAME
+          } else {
+            $tag = '${{ inputs.tag }}'
+          }
+          if ([string]::IsNullOrWhiteSpace($tag)) { throw 'No release tag resolved.' }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Release tag: $tag"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Build the installer stub first so the app can embed the freshly built
+      # stub (the app is a single portable exe that carries the stub inside it).
+      - name: Build installer stub (release)
+        shell: pwsh
+        run: cargo build --release -p winappmigrator-installer
+
+      - name: Build app with embedded stub (release)
+        shell: pwsh
+        env:
+          WINAPPMIGRATOR_INSTALLER_STUB: ${{ github.workspace }}\target\release\winappmigrator-installer.exe
+        run: cargo build --release -p winappmigrator-gui
+
+      - name: Stage release artifacts
+        id: stage
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.meta.outputs.tag }}'
+          $name = "WinAppMigrator-$tag-windows-x64"
+          New-Item -ItemType Directory -Force -Path dist, "dist/$name" | Out-Null
+          Copy-Item target/release/winappmigrator.exe "dist/$name/winappmigrator.exe"
+          Copy-Item README.md, CHANGELOG.md "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip" -Force
+          Copy-Item target/release/winappmigrator.exe "dist/WinAppMigrator-$tag.exe"
+          foreach ($f in @("dist/$name.zip", "dist/WinAppMigrator-$tag.exe")) {
+            $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+            "$h  $(Split-Path $f -Leaf)" | Out-File dist/SHA256SUMS.txt -Append -Encoding ascii
+          }
+          Write-Host '--- SHA256SUMS.txt ---'
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.meta.outputs.tag }}'
+          $notes = "WinAppMigrator $tag - portable Windows x64 build. A single elevated app (winappmigrator.exe) that carries the self-extracting installer stub inside it. See CHANGELOG.md for details. Unsigned build."
+          gh release create $tag `
+            "dist/WinAppMigrator-$tag-windows-x64.zip" `
+            "dist/WinAppMigrator-$tag.exe" `
+            "dist/SHA256SUMS.txt" `
+            --title "WinAppMigrator $tag" `
+            --notes $notes

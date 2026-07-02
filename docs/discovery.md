@@ -204,17 +204,18 @@ or fail on files whose data is not present locally.
 `FootprintLocation { path, kind, scope, file_count, total_bytes,
 copyable_bytes, included }` groups the inventory by root for display.
 `FootprintKind` ∈ `InstallDirectory`, `ProgramData`, `RoamingAppData`,
-`LocalAppData`, `LocalLowAppData`, `RegistryReference`, `Other`.
+`LocalAppData`, `LocalLowAppData`, `Documents`, `SavedGames`, `PublicDocuments`,
+`RegistryReference`, `Other`.
 
 ## Options
 
 - `ScanOptions.include_user_data` / `PackageOptions.include_user_data`
   (default `true`) — when false, genuine per-user data (Roaming/Local/LocalLow
   AppData, Documents, Saved Games) is discovered and reported but not copied.
-  CLI: `--skip-user-data` on `scan` and `package`.
+  Set from the app's "User data" toggle.
 - `ScanOptions.include_program_data` / `PackageOptions.include_program_data`
   (default `true`) — controls machine-wide `ProgramData` separately from
-  per-user data. CLI: `--skip-program-data` on `scan` and `package`.
+  per-user data. The app drives it from the same "User data" toggle.
 - `ScanOptions.include_hashes` — SHA-256 of copyable files. This dominates scan
   time for large apps; a GUI toggle exists ("Compute SHA-256 hashes").
 
@@ -295,8 +296,8 @@ By default restore is conservative: every archived file (including the
 `files\_external\…` user-data staged from outside the install directory) lands
 under one `target_root`, so a restore never touches the live profile unless asked.
 
-Opting in with `--restore-user-data` (CLI `restore`/SFX, or the "Restore user
-data to real AppData/ProgramData" checkbox in the GUI) re-anchors each
+Opting in with the installer's `--restore-user-data` flag (or the installer
+window's "Restore user data" checkbox) re-anchors each
 user-data file to the **target machine's** equivalent base, derived from its
 archived source path:
 
@@ -316,5 +317,6 @@ destinations. Files that cannot be re-anchored fall back to the sandbox path.
 Safety: ProgramData (and other machine-wide protected roots) require an elevated
 shell on apply — `privilege::destination_requires_admin` gates this; each
 re-anchored destination is still bounded to its base by `ensure_within_root`;
-existing files are only overwritten with `--force`; and `verify` must be passed
-the same `--restore-user-data` value so it checks the real locations.
+existing files are only overwritten with `--force`; and the installer's built-in
+verification runs with the same `--restore-user-data` value so it checks the real
+locations.

@@ -5,15 +5,16 @@
 WinAppMigrator backs up an installed Windows application into a single
 **self-extracting installer**. There are two binaries with a strict split:
 
-- **`winappmigrator-gui` — the app.** Runs on the source machine. Lists
-  installed apps; the user picks one and optionally includes its license and/or
-  its user data. The app reverse-engineers the application's full footprint and
-  builds one self-extracting `.exe`, hash-verifying the package. It never
-  restores anything.
-- **`winappmigrator` (cli crate) — the installer stub.** Embedded into the
-  produced `.exe`. Runs on the target machine: extracts its package, reinstalls
-  the app and bundled data, and hash-verifies the result. Restore lives only
-  here.
+- **`winappmigrator-gui` — the app** (binary `winappmigrator.exe`). Runs on the
+  source machine. Lists installed apps — from **this PC or a connected drive** (a
+  disk pulled from another, often failing, PC) — the user picks one and optionally
+  includes its license and/or its user data. The app reverse-engineers the
+  application's full footprint and builds one self-extracting `.exe`,
+  hash-verifying the package. It never restores anything, and always runs elevated
+  (release builds embed a `requireAdministrator` manifest).
+- **`winappmigrator-installer` — the installer stub.** Embedded into the produced
+  `.exe`. Runs on the target machine: extracts its package, reinstalls the app and
+  bundled data, and hash-verifies the result. Restore lives only here.
 
 `winappmigrator-core` holds all shared logic (inventory, install-source
 reverse-engineering, footprint discovery, packaging, restore, verification).
@@ -23,6 +24,11 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
 - Single-screen GUI: app list → pick → optional license / user-data toggles →
   build self-extracting installer → "Hashes confirmed". Self-extracting output
   is mandatory.
+- Scan source selector: **this PC or a connected offline drive** (a disk from
+  another PC). Offline reads mount the disk's registry hives read-only, read
+  scheduled tasks from the on-disk Task XML, and re-root recorded paths onto the
+  volume — strictly non-destructive. The app runs elevated, so there is no
+  mid-task UAC prompt.
 - Installer stub: extract embedded package → reinstall → hash-verify package and
   reinstalled files; non-zero exit on any mismatch.
 - Layered footprint discovery (MSI component DB, Inno `unins*.dat`, NSIS
@@ -31,7 +37,7 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   detection, and authoritative file counts.
 - Optional per-user/ProgramData data backup and optional license detection/
   backup (opt-in; never decrypts, bypasses activation, or emulates dongles).
-- End-to-end test (`crates/winappmigrator-cli/tests/installer_e2e.rs`) runs the
+- End-to-end test (`crates/winappmigrator-installer/tests/installer_e2e.rs`) runs the
   real stub binary: reverse-engineer → build SFX → reinstall on a clean target →
   verify. Core unit suite covers discovery/packaging/SFX/restore/verification.
 - Dev/release build profiles tuned (deps + first-party optimized in dev for fast
@@ -53,4 +59,5 @@ gates plus a single launched-window screenshot — never scripted clicks.
 ## Not in scope for this release line
 
 - MSI/MSIX/setup installer output (the self-extracting `.exe` is the product).
-- A TUI. Authenticode signing is wired for manual CI but disabled by default.
+- A TUI.
+- Code signing — the app and its installers are distributed unsigned.

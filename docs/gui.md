@@ -74,12 +74,14 @@ apps are read from:
   (`\Windows\System32\config\SOFTWARE` exists) before use.
 
 Scanning a connected drive **requires administrator rights** (to mount the
-drive's registry hives and read protected files); when the app is not elevated it
-shows a notice and a **Restart as administrator** button that relaunches elevated
-(`Start-Process -Verb RunAs`). The source (`ScanSource`) is cloned into the
-inventory and packaging worker threads, which build the `SystemContext` there so
-offline hive mounts are short-lived. See `docs/discovery.md` for the offline
-model. Reading a foreign disk is strictly non-destructive.
+drive's registry hives and read protected files). The app already runs elevated:
+release builds embed a `requireAdministrator` manifest (see
+`winappmigrator-gui/build.rs`), so Windows prompts once via UAC at launch and the
+whole session is elevated — there is no mid-task elevation prompt or gate. The
+source (`ScanSource`) is cloned into the inventory and packaging worker threads,
+which build the `SystemContext` there so offline hive mounts are short-lived. See
+`docs/discovery.md` for the offline model. Reading a foreign disk is strictly
+non-destructive.
 
 ## Where files are staged (destination-drive staging)
 
