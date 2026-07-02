@@ -149,22 +149,48 @@ fn scan_offline_tasks(
     system: &SystemContext,
 ) -> (Vec<ScheduledTaskEntry>, Vec<Warning>) {
     let mut tasks = Vec::new();
-    let warnings = Vec::new();
+    let mut warnings = Vec::new();
     let windows_dir = system.windows_dir();
     let tasks_root = windows_dir.join(OFFLINE_TASKS_SUBDIR);
 
-    for entry in WalkDir::new(&tasks_root)
-        .follow_links(false)
-        .into_iter()
-        .flatten()
-    {
+    for entry in WalkDir::new(&tasks_root).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warnings.push(Warning::new(
+                    "offline_task_walk_error",
+                    WarningSeverity::Info,
+                    format!("Could not read a scheduled-task entry: {error}"),
+                    Some(tasks_root.display().to_string()),
+                ));
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }
         let Some(xml) = read_text_file(entry.path()) else {
+            warnings.push(Warning::new(
+                "offline_task_unreadable",
+                WarningSeverity::Info,
+                format!(
+                    "Could not read scheduled-task definition {}; if it launches the app it was not captured.",
+                    entry.path().display()
+                ),
+                Some(entry.path().display().to_string()),
+            ));
             continue;
         };
         let Some(parsed) = parse_task_xml(&xml) else {
+            warnings.push(Warning::new(
+                "offline_task_parse_failed",
+                WarningSeverity::Info,
+                format!(
+                    "Could not parse scheduled-task definition {}; if it launches the app it was not captured.",
+                    entry.path().display()
+                ),
+                Some(entry.path().display().to_string()),
+            ));
             continue;
         };
         let Some(execute) = parsed.execute.as_deref() else {
@@ -396,7 +422,10 @@ mod tests {
         let Some(parsed) = parse_task_xml(SAMPLE_TASK_XML) else {
             panic!("task XML should parse");
         };
-        assert_eq!(parsed.execute.as_deref(), Some(r"C:\Program Files\Demo\demo.exe"));
+        assert_eq!(
+            parsed.execute.as_deref(),
+            Some(r"C:\Program Files\Demo\demo.exe")
+        );
         assert_eq!(parsed.arguments.as_deref(), Some("/run"));
         assert_eq!(
             parsed.working_directory.as_deref(),

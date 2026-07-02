@@ -470,8 +470,7 @@ mod tests {
             delay_loaded: false,
         }];
 
-        let (dependencies, warnings) =
-            resolve_imports(&imports, &context, &SystemContext::live());
+        let (dependencies, warnings) = resolve_imports(&imports, &context, &SystemContext::live());
 
         assert!(warnings.is_empty());
         assert_eq!(dependencies.len(), 1);
@@ -508,8 +507,7 @@ mod tests {
             delay_loaded: false,
         }];
 
-        let (dependencies, _warnings) =
-            resolve_imports(&imports, &context, &SystemContext::live());
+        let (dependencies, _warnings) = resolve_imports(&imports, &context, &SystemContext::live());
         fs::remove_dir_all(&root)?;
 
         assert_eq!(dependencies.len(), 1);

@@ -27,7 +27,9 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex_lower(&hasher.finalize()))
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
+/// Encode bytes as a lowercase hex string (e.g. a SHA-256 digest or a raw
+/// registry value). Allocation-free per byte, unlike a `format!("{:02x}")` loop.
+pub fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

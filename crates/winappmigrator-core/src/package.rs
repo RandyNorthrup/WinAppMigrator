@@ -15,7 +15,7 @@ use crate::models::{
     RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions, ScheduledTaskEntry, Warning,
     WarningSeverity,
 };
-use crate::path_utils::hidden_command;
+use crate::path_utils::{hidden_command, sanitize_filename};
 use crate::scan::scan_and_write_reports;
 
 const FILES_DIR: &str = "files";
@@ -550,7 +550,9 @@ fn copy_file_backup_mode(source: &Path, destination: &Path) -> Result<()> {
         .arg(source_dir)
         .arg(destination_dir)
         .arg(file_name)
-        .args(["/B", "/NJH", "/NJS", "/NP", "/NDL", "/NC", "/NS", "/R:1", "/W:1"])
+        .args([
+            "/B", "/NJH", "/NJS", "/NP", "/NDL", "/NC", "/NS", "/R:1", "/W:1",
+        ])
         .status()
         .map_err(|error| WinAppMigratorError::io(source, error))?;
     // robocopy encodes success in exit codes 0-7 (bit 3+ are failures).
@@ -740,17 +742,7 @@ fn hex_decode(value: &str) -> Vec<u8> {
 }
 
 fn sanitize_artifact_name(value: &str) -> String {
-    let sanitized = value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    sanitized.trim_matches('_').to_owned()
+    sanitize_filename(value).trim_matches('_').to_owned()
 }
 
 fn write_restore_plan(path: &Path, manifest: &PackageManifest) -> Result<()> {
@@ -789,10 +781,6 @@ pub fn read_manifest(package_root: &Path) -> Result<PackageManifest> {
     let path = package_root.join(MANIFEST_FILE);
     let bytes = fs::read(&path).map_err(|source| WinAppMigratorError::io(&path, source))?;
     serde_json::from_slice(&bytes).map_err(WinAppMigratorError::from)
-}
-
-pub fn files_dir(package_root: &Path) -> PathBuf {
-    package_root.join(FILES_DIR)
 }
 
 #[cfg(test)]

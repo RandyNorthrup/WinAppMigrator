@@ -4,6 +4,33 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **Production hardening pass** (cleanup, shared helpers, no silenced errors):
+  - **Removed dead/legacy code** left after the offline-scan refactor: the
+    live-only `list_installed_apps()` wrapper, `SystemContext::{source,describe}()`
+    and the now-unused `SystemContext.source` field, `package::files_dir()`,
+    `path_utils::path_eq_case_insensitive()`, and the write-only
+    `InstallSource.authoritative_registry_count` field.
+  - **Consolidated duplicated helpers.** The registry↔`winreg` mappings shared by
+    restore and verify (`registry_root`, `environment_registry_target`,
+    `registry_hive_name`, `registry_value_name`, `registry_raw_type` — including
+    the load-bearing `…\Session Manager\Environment` path) now live once in a new
+    `registry_target` module, so the write and verify sides can never drift.
+    Three copies of a bytes→hex encoder collapsed onto `hashing::hex_lower`; the
+    filesystem-name sanitizer shared by packaging and restore moved to
+    `path_utils::sanitize_filename`; the GUI's two name sanitizers share one
+    helper; and the installer's two staging-directory functions merged into
+    `cleanup::create_staging_dir`, which (with every call site) now uses the
+    `EXTRACTION_PREFIX` constant the stale-dir sweeper matches on — closing a
+    latent gap where changing the prefix would silently break cleanup.
+  - **Stopped silently dropping data on error.** Footprint discovery now records a
+    warning when a base folder (`Program Files`, `ProgramData`, per-user
+    `AppData`, …) can't be enumerated — previously an access-denied read on an
+    offline/foreign disk dropped that whole category with no notice. Offline
+    scheduled-task scanning warns on unreadable/malformed task XML instead of
+    skipping silently; license scanning warns when a vendor sub-key can't be
+    opened and still reports a license-named key's *location* even when its values
+    can't be read; and the app's "Restart as administrator" action now surfaces a
+    message if the elevated relaunch can't be started instead of exiting silently.
 - Added **scanning an app from a connected drive** — a disk pulled from another
   (often failing) PC and mounted on the working machine (e.g. `E:\`) — instead of
   only the live OS. A new `SystemContext` abstraction (`system_context.rs`,

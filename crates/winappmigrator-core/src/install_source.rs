@@ -38,7 +38,6 @@ pub struct InstallSource {
     pub method: InstallMethod,
     pub product_code: Option<String>,
     pub authoritative_file_count: usize,
-    pub authoritative_registry_count: usize,
     /// Install directories derived from authoritative or registered sources.
     pub roots: Vec<PathBuf>,
     /// Human-readable signals used to reverse-engineer the install.
@@ -58,7 +57,6 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
     let mut roots = Vec::new();
     let mut evidence = Vec::new();
     let mut authoritative_file_count = 0;
-    let mut authoritative_registry_count = 0;
 
     match method {
         InstallMethod::WindowsInstaller => {
@@ -66,11 +64,10 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
                 && let Some(paths) = msi_component_paths(code, system)
             {
                 authoritative_file_count = paths.files.len();
-                authoritative_registry_count = paths.registry_count;
                 roots.extend(minimal_install_roots(&paths.files));
                 evidence.push(format!(
                     "Windows Installer database: {} component key paths",
-                    authoritative_file_count + authoritative_registry_count
+                    authoritative_file_count + paths.registry_count
                 ));
             }
         }
@@ -180,7 +177,6 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
         method,
         product_code,
         authoritative_file_count,
-        authoritative_registry_count,
         roots: dedup_existing_dirs(roots),
         evidence,
     }

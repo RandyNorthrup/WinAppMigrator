@@ -8,6 +8,7 @@ use winreg::enums::{
 };
 use winreg::{RegKey, RegValue};
 
+use crate::hashing::hex_lower;
 use crate::models::{
     ComRegistrationEntry, ComServerKind, FileAssociationEntry, MatchConfidence, RegistryEntry,
     RegistryHive, RegistryValueKind, Warning, WarningSeverity,
@@ -116,7 +117,13 @@ pub fn scan_registry_artifacts(
         &mut entries,
         &mut warnings,
     );
-    scan_class_registrations(context, &hklm, HKLM_CLASSES_CLSID, &mut entries, &mut warnings);
+    scan_class_registrations(
+        context,
+        &hklm,
+        HKLM_CLASSES_CLSID,
+        &mut entries,
+        &mut warnings,
+    );
     scan_class_registrations(
         context,
         &hklm,
@@ -147,7 +154,13 @@ pub fn scan_registry_artifacts(
             &mut entries,
             &mut warnings,
         );
-        scan_class_registrations(context, &hkcu, HKCU_CLASSES_CLSID, &mut entries, &mut warnings);
+        scan_class_registrations(
+            context,
+            &hkcu,
+            HKCU_CLASSES_CLSID,
+            &mut entries,
+            &mut warnings,
+        );
         scan_file_extension_associations(
             context,
             &hkcu,
@@ -259,8 +272,20 @@ fn scan_file_extension_associations(
             continue;
         }
 
-        capture_registry_subtree(root, &extension_path, MatchConfidence::High, entries, warnings);
-        capture_registry_subtree(root, &prog_id_path, MatchConfidence::High, entries, warnings);
+        capture_registry_subtree(
+            root,
+            &extension_path,
+            MatchConfidence::High,
+            entries,
+            warnings,
+        );
+        capture_registry_subtree(
+            root,
+            &prog_id_path,
+            MatchConfidence::High,
+            entries,
+            warnings,
+        );
         file_associations.extend(file_associations_from_prog_id(
             root,
             classes_path,
@@ -568,7 +593,7 @@ fn entry_from_raw_value(
         value_name: Some(display_value_name(&value_name)),
         value_data: Some(raw_value_to_display(&raw_value)),
         value_kind: Some(registry_value_kind(&raw_value.vtype)),
-        value_bytes_hex: Some(hex_encode(raw_value.bytes.as_ref())),
+        value_bytes_hex: Some(hex_lower(raw_value.bytes.as_ref())),
         confidence,
         requires_admin,
     }
@@ -614,14 +639,6 @@ fn registry_value_kind(value_type: &RegType) -> RegistryValueKind {
     } else {
         RegistryValueKind::Binary
     }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push_str(&format!("{byte:02x}"));
-    }
-    encoded
 }
 
 fn registry_tree_matches_context(

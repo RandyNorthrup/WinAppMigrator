@@ -14,6 +14,7 @@ pub mod pe_scan;
 pub mod prerequisites;
 pub mod privilege;
 pub mod registry_scan;
+mod registry_target;
 pub mod reporting;
 pub mod restore;
 pub mod scan;
@@ -23,7 +24,7 @@ pub mod system_context;
 pub mod task_scan;
 pub mod verify;
 
-pub use app_inventory::{list_installed_apps, list_installed_apps_from};
+pub use app_inventory::list_installed_apps_from;
 pub use archive::{
     create_self_extracting_archive, extract_embedded_self_archive, has_embedded_self_archive,
 };

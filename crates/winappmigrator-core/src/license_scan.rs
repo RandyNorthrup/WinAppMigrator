@@ -17,7 +17,7 @@ use winreg::enums::{
 };
 use winreg::{RegKey, RegValue};
 
-use crate::hashing::sha256_file;
+use crate::hashing::{hex_lower, sha256_file};
 use crate::models::{
     FileEntry, LicenseArtifact, LicenseArtifactKind, LicenseFramework, MatchConfidence,
     RegistryEntry, RegistryHive, RegistryValueKind, TransferableHint, Warning, WarningSeverity,
@@ -77,7 +77,13 @@ pub fn scan_license_artifacts(
     if !system.is_offline() {
         detect_license_env_vars(&mut artifacts);
     }
-    detect_registry_licenses(context, system, &mut artifacts, &mut registry_entries);
+    detect_registry_licenses(
+        context,
+        system,
+        &mut artifacts,
+        &mut registry_entries,
+        &mut warnings,
+    );
     dedupe_registry_entries(&mut registry_entries);
 
     if !artifacts.is_empty() {
@@ -294,6 +300,7 @@ fn detect_registry_licenses(
     system: &SystemContext,
     artifacts: &mut Vec<LicenseArtifact>,
     entries: &mut Vec<RegistryEntry>,
+    warnings: &mut Vec<Warning>,
 ) {
     let Some(publisher) = context.publisher else {
         return;
@@ -314,7 +321,14 @@ fn detect_registry_licenses(
     for prefix in [r"SOFTWARE", r"SOFTWARE\WOW6432Node"] {
         let key_path = format!(r"{prefix}\{vendor}");
         if let Ok(vendor_key) = system.open_hklm(&key_path, KEY_READ) {
-            scan_vendor_key(&vendor_key, &hklm_ctx, &key_path, artifacts, entries);
+            scan_vendor_key(
+                &vendor_key,
+                &hklm_ctx,
+                &key_path,
+                artifacts,
+                entries,
+                warnings,
+            );
         }
     }
     for user in system.user_hives() {
@@ -327,7 +341,14 @@ fn detect_registry_licenses(
         for prefix in [r"SOFTWARE", r"SOFTWARE\WOW6432Node"] {
             let key_path = format!(r"{prefix}\{vendor}");
             if let Ok(vendor_key) = user.open(&key_path, KEY_READ) {
-                scan_vendor_key(&vendor_key, &user_ctx, &key_path, artifacts, entries);
+                scan_vendor_key(
+                    &vendor_key,
+                    &user_ctx,
+                    &key_path,
+                    artifacts,
+                    entries,
+                    warnings,
+                );
             }
         }
     }
@@ -343,15 +364,15 @@ fn scan_vendor_key(
     key_path: &str,
     artifacts: &mut Vec<LicenseArtifact>,
     entries: &mut Vec<RegistryEntry>,
+    warnings: &mut Vec<Warning>,
 ) {
     report_license_values(vendor_key, ctx, key_path, artifacts, entries);
     for subkey_name in vendor_key.enum_keys().flatten().take(MAX_VENDOR_SUBKEYS) {
-        let signals = is_license_registry_name(&subkey_name);
-        let Ok(subkey) = vendor_key.open_subkey_with_flags(&subkey_name, KEY_READ) else {
-            continue;
-        };
         let sub_path = format!(r"{key_path}\{subkey_name}");
-        if signals {
+        // The key name alone can signal licensing data, so report the location
+        // even when the key's values cannot be read below — a locked license key
+        // must never be dropped without a trace.
+        if is_license_registry_name(&subkey_name) {
             artifacts.push(registry_artifact(
                 ctx.hive_name,
                 &sub_path,
@@ -364,7 +385,18 @@ fn scan_vendor_key(
                 ),
             ));
         }
-        report_license_values(&subkey, ctx, &sub_path, artifacts, entries);
+        match vendor_key.open_subkey_with_flags(&subkey_name, KEY_READ) {
+            Ok(subkey) => report_license_values(&subkey, ctx, &sub_path, artifacts, entries),
+            Err(error) => warnings.push(Warning::new(
+                "license_subkey_unreadable",
+                WarningSeverity::Info,
+                format!(
+                    "Could not read license registry key {}\\{sub_path} ({error}); any values it holds were not captured.",
+                    ctx.hive_name
+                ),
+                Some(format!("{}\\{sub_path}", ctx.hive_name)),
+            )),
+        }
     }
 }
 
@@ -433,7 +465,7 @@ fn reg_value_to_entry(
         RegistryValueKind::String | RegistryValueKind::ExpandString => {
             (Some(value.to_string()), None)
         }
-        _ => (None, Some(hex_encode(&value.bytes))),
+        _ => (None, Some(hex_lower(&value.bytes))),
     };
     RegistryEntry {
         hive,
@@ -478,14 +510,6 @@ fn map_registry_type(vtype: RegType) -> RegistryValueKind {
         REG_RESOURCE_REQUIREMENTS_LIST => RegistryValueKind::ResourceRequirementsList,
         REG_QWORD => RegistryValueKind::Qword,
     }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push_str(&format!("{byte:02x}"));
-    }
-    output
 }
 
 fn registry_artifact(

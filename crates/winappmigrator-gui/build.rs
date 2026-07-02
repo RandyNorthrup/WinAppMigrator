@@ -33,7 +33,9 @@ fn main() {
     match source.as_ref() {
         Some(path) => {
             if let Err(error) = std::fs::copy(path, &staged) {
-                println!("cargo:warning=could not stage installer stub ({error}); the app will fall back to a sibling stub");
+                println!(
+                    "cargo:warning=could not stage installer stub ({error}); the app will fall back to a sibling stub"
+                );
                 let _ = std::fs::write(&staged, []);
             } else {
                 println!("cargo:rerun-if-changed={}", path.display());

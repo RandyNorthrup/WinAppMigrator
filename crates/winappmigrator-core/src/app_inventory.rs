@@ -40,11 +40,6 @@ pub struct RawUninstallEntry {
     pub display_icon: Option<String>,
 }
 
-/// List apps installed on the live machine.
-pub fn list_installed_apps() -> Result<Vec<InstalledApp>> {
-    list_installed_apps_from(&SystemContext::live())
-}
-
 /// List apps installed on the system `system` points at (live OS or a connected
 /// offline volume). Paths in each entry are re-rooted onto the source system.
 pub fn list_installed_apps_from(system: &SystemContext) -> Result<Vec<InstalledApp>> {
@@ -197,8 +192,12 @@ pub fn parse_uninstall_entry(
         .as_ref()
         .map(PathBuf::from)
         .map(|path| system.resolve_source_path(&path));
-    let main_executable =
-        guess_main_executable(system, raw, install_location.as_deref(), display_name.as_str());
+    let main_executable = guess_main_executable(
+        system,
+        raw,
+        install_location.as_deref(),
+        display_name.as_str(),
+    );
 
     Some(InstalledApp {
         display_name,

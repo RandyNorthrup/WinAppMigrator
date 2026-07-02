@@ -142,17 +142,13 @@ impl Drop for MountGuard {
 /// The single seam every scanner reads state through. Construct once per scan
 /// with [`SystemContext::open`] and pass `&SystemContext` to each scanner.
 pub struct SystemContext {
-    source: ScanSource,
     offline: Option<OfflineHives>,
 }
 
 impl SystemContext {
     /// A context bound to the live, running OS.
     pub fn live() -> Self {
-        Self {
-            source: ScanSource::Live,
-            offline: None,
-        }
+        Self { offline: None }
     }
 
     /// Build the context for `source`. For an offline volume this mounts the
@@ -164,27 +160,14 @@ impl SystemContext {
             ScanSource::OfflineVolume { volume_root } => {
                 let offline = mount_offline(volume_root)?;
                 Ok(Self {
-                    source: source.clone(),
                     offline: Some(offline),
                 })
             }
         }
     }
 
-    pub fn source(&self) -> &ScanSource {
-        &self.source
-    }
-
     pub fn is_offline(&self) -> bool {
         self.offline.is_some()
-    }
-
-    /// A short human description for UI and warnings.
-    pub fn describe(&self) -> String {
-        match &self.offline {
-            None => "this PC".to_owned(),
-            Some(hives) => format!("connected drive {}", hives.volume_root.display()),
-        }
     }
 
     // ---- Registry -----------------------------------------------------------
@@ -432,7 +415,10 @@ impl OfflineHives {
             let rest = rest.trim_start_matches('\\');
             // CurrentControlSet is a live-only symlink; resolve to the active set.
             if let Some(after) = strip_prefix_ci(rest, "CurrentControlSet") {
-                return Some(join_mount(mount, &format!(r"{}{}", self.control_set, after)));
+                return Some(join_mount(
+                    mount,
+                    &format!(r"{}{}", self.control_set, after),
+                ));
             }
             return Some(join_mount(mount, rest));
         }
@@ -657,7 +643,10 @@ mod tests {
 
     #[test]
     fn strip_prefix_requires_whole_segment() {
-        assert_eq!(strip_prefix_ci("Software\\X", "Software"), Some("\\X".to_owned()));
+        assert_eq!(
+            strip_prefix_ci("Software\\X", "Software"),
+            Some("\\X".to_owned())
+        );
         assert_eq!(strip_prefix_ci("Software", "Software"), Some(String::new()));
         // Must not match a partial segment like "Soft".
         assert_eq!(strip_prefix_ci("SoftwareX\\Y", "Software"), None);

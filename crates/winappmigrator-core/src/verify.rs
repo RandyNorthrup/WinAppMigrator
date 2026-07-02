@@ -4,11 +4,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use winreg::enums::{
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN,
-    REG_EXPAND_SZ, REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD,
-    REG_RESOURCE_LIST, REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, RegType,
-};
+use winreg::enums::HKEY_LOCAL_MACHINE;
 use winreg::{RegKey, RegValue};
 
 use crate::archive::extract_zip_archive;
@@ -18,14 +14,18 @@ use crate::file_discovery::{
 };
 use crate::hashing::sha256_file;
 use crate::models::{
-    EnvironmentScope, EnvironmentVariableEntry, FileEntry, PackageManifest, RegistryEntry,
-    RegistryHive, RegistryValueKind, ScheduledTaskEntry, ServiceEntry, ShortcutEntry,
-    VERIFICATION_SCHEMA_VERSION, VerificationCategory, VerificationItem, VerificationOptions,
-    VerificationReport, VerificationStatus, Warning, WarningSeverity,
+    EnvironmentVariableEntry, FileEntry, PackageManifest, RegistryEntry, RegistryValueKind,
+    ScheduledTaskEntry, ServiceEntry, ShortcutEntry, VERIFICATION_SCHEMA_VERSION,
+    VerificationCategory, VerificationItem, VerificationOptions, VerificationReport,
+    VerificationStatus, Warning, WarningSeverity,
 };
 use crate::package::read_manifest;
 use crate::path_utils::hidden_command;
 use crate::prerequisites::is_present;
+use crate::registry_target::{
+    environment_registry_target, registry_hive_name, registry_raw_type, registry_root,
+    registry_value_name,
+};
 
 const ZIP_EXTENSION: &str = "zip";
 const VERIFICATION_REPORT_JSON: &str = "verification_report.json";
@@ -1147,23 +1147,6 @@ fn command_path_matches(actual_command: &str, expected_path: &Path) -> bool {
     actual_command.to_ascii_lowercase().contains(&expected)
 }
 
-fn registry_root(hive: &RegistryHive) -> RegKey {
-    match hive {
-        RegistryHive::LocalMachine => RegKey::predef(HKEY_LOCAL_MACHINE),
-        RegistryHive::CurrentUser => RegKey::predef(HKEY_CURRENT_USER),
-    }
-}
-
-fn environment_registry_target(scope: &EnvironmentScope) -> (RegKey, &'static str) {
-    match scope {
-        EnvironmentScope::User => (RegKey::predef(HKEY_CURRENT_USER), "Environment"),
-        EnvironmentScope::Machine => (
-            RegKey::predef(HKEY_LOCAL_MACHINE),
-            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-        ),
-    }
-}
-
 fn registry_entry_name(entry: &RegistryEntry) -> String {
     format!(
         "{}\\{}\\{}",
@@ -1171,37 +1154,6 @@ fn registry_entry_name(entry: &RegistryEntry) -> String {
         entry.key_path,
         entry.value_name.as_deref().unwrap_or("(Default)")
     )
-}
-
-fn registry_hive_name(hive: &RegistryHive) -> &'static str {
-    match hive {
-        RegistryHive::LocalMachine => "HKLM",
-        RegistryHive::CurrentUser => "HKCU",
-    }
-}
-
-fn registry_value_name(value_name: Option<&str>) -> &str {
-    match value_name {
-        None | Some("(Default)") => "",
-        Some(value) => value,
-    }
-}
-
-fn registry_raw_type(kind: &RegistryValueKind) -> RegType {
-    match kind {
-        RegistryValueKind::None => REG_NONE,
-        RegistryValueKind::String => REG_SZ,
-        RegistryValueKind::ExpandString => REG_EXPAND_SZ,
-        RegistryValueKind::Binary => REG_BINARY,
-        RegistryValueKind::Dword => REG_DWORD,
-        RegistryValueKind::DwordBigEndian => REG_DWORD_BIG_ENDIAN,
-        RegistryValueKind::Link => REG_LINK,
-        RegistryValueKind::MultiString => REG_MULTI_SZ,
-        RegistryValueKind::ResourceList => REG_RESOURCE_LIST,
-        RegistryValueKind::FullResourceDescriptor => REG_FULL_RESOURCE_DESCRIPTOR,
-        RegistryValueKind::ResourceRequirementsList => REG_RESOURCE_REQUIREMENTS_LIST,
-        RegistryValueKind::Qword => REG_QWORD,
-    }
 }
 
 fn hex_decode(value: &str) -> std::result::Result<Vec<u8>, &'static str> {

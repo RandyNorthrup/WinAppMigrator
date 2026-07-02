@@ -36,9 +36,21 @@ pub fn looks_like_executable(path: &Path) -> bool {
     path_has_extension(path, EXE_EXTENSION)
 }
 
-pub fn path_eq_case_insensitive(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy()
-        .eq_ignore_ascii_case(&right.to_string_lossy())
+/// Replace every character that is not ASCII-alphanumeric or one of `-_.` with
+/// `_`, producing a string safe to use as a file or directory name on Windows.
+/// Does not trim; callers that want no leading/trailing `_` should
+/// `trim_matches('_')` the result.
+pub fn sanitize_filename(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 pub fn split_command_executable_path(command: &str) -> Option<PathBuf> {

@@ -145,7 +145,7 @@ pub fn discover_files(
     );
 
     let tokens = Tokens::from_context(context);
-    for root in collect_roots(context, &tokens, system) {
+    for root in collect_roots(context, &tokens, system, &mut warnings) {
         let start = files.len();
         discover_tree(
             &root,
@@ -384,6 +384,7 @@ fn collect_roots(
     context: &FileDiscoveryContext,
     tokens: &Tokens,
     system: &SystemContext,
+    warnings: &mut Vec<Warning>,
 ) -> Vec<DiscoveryRoot> {
     let mut raw: Vec<DiscoveryRoot> = Vec::new();
 
@@ -406,10 +407,10 @@ fn collect_roots(
         push_root(&mut raw, extra.clone(), kind);
     }
 
-    collect_program_files_roots(tokens, &mut raw, system);
-    collect_program_data_roots(tokens, &mut raw, system);
-    collect_appdata_roots(tokens, &mut raw, system);
-    collect_known_user_folder_roots(tokens, &mut raw, system);
+    collect_program_files_roots(tokens, &mut raw, system, warnings);
+    collect_program_data_roots(tokens, &mut raw, system, warnings);
+    collect_appdata_roots(tokens, &mut raw, system, warnings);
+    collect_known_user_folder_roots(tokens, &mut raw, system, warnings);
 
     let known_base_dirs = known_base_dirs(system);
     // Deduplicate while preserving order so the most authoritative root (the
@@ -445,9 +446,16 @@ fn collect_program_files_roots(
     tokens: &Tokens,
     roots: &mut Vec<DiscoveryRoot>,
     system: &SystemContext,
+    warnings: &mut Vec<Warning>,
 ) {
     for base in system.program_files_dirs() {
-        collect_matching_dirs(&base, FootprintKind::InstallDirectory, tokens, roots);
+        collect_matching_dirs(
+            &base,
+            FootprintKind::InstallDirectory,
+            tokens,
+            roots,
+            warnings,
+        );
     }
 }
 
@@ -455,15 +463,21 @@ fn collect_program_data_roots(
     tokens: &Tokens,
     roots: &mut Vec<DiscoveryRoot>,
     system: &SystemContext,
+    warnings: &mut Vec<Warning>,
 ) {
     if let Some(base) = system.program_data() {
-        collect_matching_dirs(&base, FootprintKind::ProgramData, tokens, roots);
+        collect_matching_dirs(&base, FootprintKind::ProgramData, tokens, roots, warnings);
     }
 }
 
-fn collect_appdata_roots(tokens: &Tokens, roots: &mut Vec<DiscoveryRoot>, system: &SystemContext) {
+fn collect_appdata_roots(
+    tokens: &Tokens,
+    roots: &mut Vec<DiscoveryRoot>,
+    system: &SystemContext,
+    warnings: &mut Vec<Warning>,
+) {
     for (base, kind) in appdata_bases(system) {
-        collect_matching_dirs(&base, kind, tokens, roots);
+        collect_matching_dirs(&base, kind, tokens, roots, warnings);
     }
 }
 
@@ -475,6 +489,7 @@ fn collect_known_user_folder_roots(
     tokens: &Tokens,
     roots: &mut Vec<DiscoveryRoot>,
     system: &SystemContext,
+    warnings: &mut Vec<Warning>,
 ) {
     if system.is_offline() {
         // Redirection lives in each user's NTUSER hive; the common case is
@@ -485,27 +500,47 @@ fn collect_known_user_folder_roots(
                 FootprintKind::Documents,
                 tokens,
                 roots,
+                warnings,
             );
             collect_matching_dirs(
                 &profile.join(SAVED_GAMES_FALLBACK),
                 FootprintKind::SavedGames,
                 tokens,
                 roots,
+                warnings,
             );
         }
     } else {
         if let Some(documents) = documents_dir() {
-            collect_matching_dirs(&documents, FootprintKind::Documents, tokens, roots);
+            collect_matching_dirs(
+                &documents,
+                FootprintKind::Documents,
+                tokens,
+                roots,
+                warnings,
+            );
         }
         if let Some(saved_games) = saved_games_dir() {
-            collect_matching_dirs(&saved_games, FootprintKind::SavedGames, tokens, roots);
+            collect_matching_dirs(
+                &saved_games,
+                FootprintKind::SavedGames,
+                tokens,
+                roots,
+                warnings,
+            );
         }
     }
     // Shared Public Documents: some apps keep machine-wide data here rather than
     // in ProgramData (e.g. YDIS's diagnostic database at
     // C:\Users\Public\Documents\YDIS_Data).
     if let Some(public_documents) = public_documents_dir(system) {
-        collect_matching_dirs(&public_documents, FootprintKind::PublicDocuments, tokens, roots);
+        collect_matching_dirs(
+            &public_documents,
+            FootprintKind::PublicDocuments,
+            tokens,
+            roots,
+            warnings,
+        );
     }
 }
 
@@ -580,9 +615,29 @@ fn collect_matching_dirs(
     kind: FootprintKind,
     tokens: &Tokens,
     roots: &mut Vec<DiscoveryRoot>,
+    warnings: &mut Vec<Warning>,
 ) {
-    let Ok(entries) = fs::read_dir(base) else {
-        return;
+    let entries = match fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(error) => {
+            // `NotFound` just means the app keeps nothing under this base — normal
+            // and silent. Any other error (notably `PermissionDenied` on an
+            // offline/foreign disk owned by another PC's SIDs) means we could not
+            // look, so real application data here would be silently missed. Record
+            // it rather than dropping the whole footprint category.
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warnings.push(Warning::new(
+                    "file_discovery_base_unreadable",
+                    WarningSeverity::Warning,
+                    format!(
+                        "Could not read {} ({error}); application data stored there was not included.",
+                        base.display()
+                    ),
+                    Some(base.display().to_string()),
+                ));
+            }
+            return;
+        }
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -595,8 +650,22 @@ fn collect_matching_dirs(
             push_root(roots, path, kind.clone());
             continue;
         }
-        let Ok(children) = fs::read_dir(&path) else {
-            continue;
+        let children = match fs::read_dir(&path) {
+            Ok(children) => children,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    warnings.push(Warning::new(
+                        "file_discovery_dir_unreadable",
+                        WarningSeverity::Info,
+                        format!(
+                            "Could not read {} ({error}); nested application data there may be missing.",
+                            path.display()
+                        ),
+                        Some(path.display().to_string()),
+                    ));
+                }
+                continue;
+            }
         };
         for child in children.flatten() {
             let child_path = child.path();
@@ -1253,7 +1322,14 @@ mod tests {
         };
         let tokens = Tokens::from_context(&context);
         let mut roots = Vec::new();
-        collect_matching_dirs(&base, FootprintKind::ProgramData, &tokens, &mut roots);
+        let mut warnings = Vec::new();
+        collect_matching_dirs(
+            &base,
+            FootprintKind::ProgramData,
+            &tokens,
+            &mut roots,
+            &mut warnings,
+        );
 
         let _ = fs::remove_dir_all(&base);
         assert!(

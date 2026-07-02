@@ -37,6 +37,41 @@ pub fn sweep_stale_extractions(executable: &Path) {
     }
 }
 
+/// Create a fresh extraction staging directory, preferring a drive with room for
+/// a large package: the install destination's drive first (when `target_root` is
+/// given), then the installer executable's own drive, then the system temp drive
+/// — so a large package never fails to extract for lack of space on `C:`. Using
+/// [`EXTRACTION_PREFIX`] keeps every staging directory matchable by
+/// [`sweep_stale_extractions`]. Auto-removed when the returned `TempDir` drops.
+pub fn create_staging_dir(
+    target_root: Option<&Path>,
+    executable: &Path,
+) -> std::io::Result<tempfile::TempDir> {
+    // The nearest existing ancestor of the install location sits on the
+    // destination drive.
+    let mut ancestor = target_root;
+    while let Some(dir) = ancestor {
+        if dir.is_dir()
+            && let Ok(temp) = staging_in(dir)
+        {
+            return Ok(temp);
+        }
+        ancestor = dir.parent();
+    }
+    if let Some(parent) = executable.parent()
+        && let Ok(temp) = staging_in(parent)
+    {
+        return Ok(temp);
+    }
+    tempfile::Builder::new().prefix(EXTRACTION_PREFIX).tempdir()
+}
+
+fn staging_in(dir: &Path) -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(EXTRACTION_PREFIX)
+        .tempdir_in(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

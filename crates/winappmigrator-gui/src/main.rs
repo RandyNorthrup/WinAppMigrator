@@ -10,13 +10,13 @@ use std::thread;
 
 use eframe::egui::{self, Align, Layout, Margin, RichText, Stroke};
 
+use winappmigrator_core::path_utils::hidden_command;
+use winappmigrator_core::privilege::is_elevated;
 use winappmigrator_core::{
     AppSelection, InstalledApp, PackageOptions, PackageResult, ScanSource, SystemContext,
     VerificationOptions, VerificationReport, create_package, list_installed_apps_from,
     verify_package,
 };
-use winappmigrator_core::path_utils::hidden_command;
-use winappmigrator_core::privilege::is_elevated;
 use winappmigrator_ui::{theme, widgets};
 
 use theme::{Role, Theme, ThemeMode};
@@ -164,17 +164,29 @@ impl WinAppMigratorApp {
         }
     }
 
-    /// Relaunch the app elevated so it can mount the offline drive's hives.
-    fn restart_as_admin(&self) {
-        if let Ok(exe) = std::env::current_exe() {
-            let script = format!(
-                "Start-Process -FilePath '{}' -Verb RunAs",
-                exe.display().to_string().replace('\'', "''")
-            );
-            let _ = hidden_command("powershell")
-                .args(["-NoProfile", "-Command", &script])
-                .spawn();
-            std::process::exit(0);
+    /// Relaunch the app elevated so it can mount the offline drive's hives. On
+    /// success this process exits so only the elevated instance runs; if the
+    /// relaunch cannot even be started, surface why instead of exiting silently.
+    fn restart_as_admin(&mut self) {
+        let Ok(exe) = std::env::current_exe() else {
+            self.source_error =
+                Some("Could not locate the application to relaunch as administrator.".to_owned());
+            return;
+        };
+        let script = format!(
+            "Start-Process -FilePath '{}' -Verb RunAs",
+            exe.display().to_string().replace('\'', "''")
+        );
+        match hidden_command("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .spawn()
+        {
+            Ok(_child) => std::process::exit(0),
+            Err(error) => {
+                self.source_error = Some(format!(
+                    "Could not relaunch as administrator ({error}). Right-click the app and choose 'Run as administrator' instead."
+                ));
+            }
         }
     }
 
@@ -424,10 +436,13 @@ pub(crate) fn open_folder(path: &Path) -> std::io::Result<()> {
     Command::new("explorer").arg(path).spawn().map(|_child| ())
 }
 
-/// A sensible default installer output directory for an application, so the
-/// common path does not require the user to choose a folder manually.
-pub(crate) fn default_output_for(app_name: &str) -> String {
-    let safe: String = app_name
+/// Sanitize an application's display name into a safe, human-readable label:
+/// keep letters, digits, spaces, hyphens, and underscores; replace anything else
+/// with `_`; trim surrounding whitespace. Unlike the core's filesystem sanitizer,
+/// spaces are preserved so installer names read naturally (e.g.
+/// `YAMAHA DIAGNOSTIC SYSTEM2`).
+fn sanitized_app_label(app_name: &str) -> String {
+    app_name
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
@@ -436,13 +451,24 @@ pub(crate) fn default_output_for(app_name: &str) -> String {
                 '_'
             }
         })
-        .collect();
-    let safe = safe.trim();
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// A sensible default installer output directory for an application, so the
+/// common path does not require the user to choose a folder manually.
+pub(crate) fn default_output_for(app_name: &str) -> String {
+    let safe = sanitized_app_label(app_name);
     let base = std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("WinAppMigrator")
-        .join(if safe.is_empty() { "Package" } else { safe })
+        .join(if safe.is_empty() {
+            "Package"
+        } else {
+            safe.as_str()
+        })
         .display()
         .to_string()
 }
@@ -450,21 +476,11 @@ pub(crate) fn default_output_for(app_name: &str) -> String {
 /// Sanitize an application's display name into a safe file stem, used to name the
 /// produced installer after the app (e.g. `YAMAHA DIAGNOSTIC SYSTEM2`).
 pub(crate) fn safe_file_stem(app_name: &str) -> String {
-    let safe: String = app_name
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let trimmed = safe.trim();
-    if trimmed.is_empty() {
+    let safe = sanitized_app_label(app_name);
+    if safe.is_empty() {
         "App".to_owned()
     } else {
-        trimmed.to_owned()
+        safe
     }
 }
 

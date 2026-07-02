@@ -364,8 +364,8 @@ fn dotnet_framework35_spec() -> PrerequisiteSpec {
     PrerequisiteSpec {
         bundleable: false,
         file_name: "netfx3-windows-feature",
-        download_url:
-            "https://learn.microsoft.com/dotnet/framework/install/dotnet-35-windows".to_owned(),
+        download_url: "https://learn.microsoft.com/dotnet/framework/install/dotnet-35-windows"
+            .to_owned(),
         silent_install_args: Vec::new(),
         success_exit_codes: vec![0],
         reboot_exit_codes: vec![3010],
@@ -387,8 +387,7 @@ fn dotnet_framework4x_spec() -> PrerequisiteSpec {
     PrerequisiteSpec {
         bundleable: false,
         file_name: "dotnet-framework-4x-inbox",
-        download_url:
-            "https://dotnet.microsoft.com/download/dotnet-framework".to_owned(),
+        download_url: "https://dotnet.microsoft.com/download/dotnet-framework".to_owned(),
         silent_install_args: Vec::new(),
         success_exit_codes: vec![0],
         reboot_exit_codes: vec![3010],
@@ -500,7 +499,10 @@ mod tests {
         assert!(spec.windows_feature.is_none());
         assert!(spec.winget_id.is_none());
         assert!(!spec.requires_admin);
-        assert!(spec.probe.is_some(), "4.x is confirmed via a presence probe");
+        assert!(
+            spec.probe.is_some(),
+            "4.x is confirmed via a presence probe"
+        );
     }
 
     #[test]

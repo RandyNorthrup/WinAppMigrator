@@ -6,12 +6,8 @@ use std::process::Command;
 use filetime::{FileTime, set_file_times};
 use tempfile::TempDir;
 use walkdir::WalkDir;
-use winreg::enums::{
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN,
-    REG_EXPAND_SZ, REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD,
-    REG_RESOURCE_LIST, REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, RegType,
-};
-use winreg::{RegKey, RegValue};
+use winreg::RegValue;
+use winreg::enums::REG_NONE;
 
 use crate::archive::extract_zip_archive;
 use crate::errors::{Result, WinAppMigratorError};
@@ -20,15 +16,18 @@ use crate::file_discovery::{
     safe_relative_path, split_user_data_relative, user_data_real_destination,
 };
 use crate::models::{
-    DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry, PackageManifest,
-    RegistryEntry, RegistryHive, RegistryValueKind, RestoreOptions, RestorePlan, RestoreResult,
-    RuntimePrerequisite, ScheduledTaskEntry, ServiceEntry, ShortcutEntry, VerificationOptions,
-    Warning, WarningSeverity,
+    DriverEntry, DriverKind, EnvironmentVariableEntry, PackageManifest, RegistryEntry,
+    RegistryValueKind, RestoreOptions, RestorePlan, RestoreResult, RuntimePrerequisite,
+    ScheduledTaskEntry, ServiceEntry, ShortcutEntry, VerificationOptions, Warning, WarningSeverity,
 };
 use crate::package::read_manifest;
-use crate::path_utils::hidden_command;
+use crate::path_utils::{hidden_command, sanitize_filename};
 use crate::prerequisites::{PrerequisiteInstallOutcome, install_bundle, is_present};
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
+use crate::registry_target::{
+    environment_registry_target, registry_hive_name, registry_raw_type, registry_root,
+    registry_value_name,
+};
 use crate::verify::verify_package;
 
 const RESTORE_LOG_JSON: &str = "restore_log.json";
@@ -1451,54 +1450,6 @@ fn replace_ignore_ascii_case(haystack: &str, needle: &str, replacement: &str) ->
     result
 }
 
-fn registry_root(hive: &RegistryHive) -> RegKey {
-    match hive {
-        RegistryHive::LocalMachine => RegKey::predef(HKEY_LOCAL_MACHINE),
-        RegistryHive::CurrentUser => RegKey::predef(HKEY_CURRENT_USER),
-    }
-}
-
-fn environment_registry_target(scope: &EnvironmentScope) -> (RegKey, &'static str) {
-    match scope {
-        EnvironmentScope::User => (RegKey::predef(HKEY_CURRENT_USER), "Environment"),
-        EnvironmentScope::Machine => (
-            RegKey::predef(HKEY_LOCAL_MACHINE),
-            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-        ),
-    }
-}
-
-fn registry_hive_name(hive: &RegistryHive) -> &'static str {
-    match hive {
-        RegistryHive::LocalMachine => "HKLM",
-        RegistryHive::CurrentUser => "HKCU",
-    }
-}
-
-fn registry_value_name(value_name: Option<&str>) -> &str {
-    match value_name {
-        None | Some("(Default)") => "",
-        Some(value) => value,
-    }
-}
-
-fn registry_raw_type(kind: &RegistryValueKind) -> RegType {
-    match kind {
-        RegistryValueKind::None => REG_NONE,
-        RegistryValueKind::String => REG_SZ,
-        RegistryValueKind::ExpandString => REG_EXPAND_SZ,
-        RegistryValueKind::Binary => REG_BINARY,
-        RegistryValueKind::Dword => REG_DWORD,
-        RegistryValueKind::DwordBigEndian => REG_DWORD_BIG_ENDIAN,
-        RegistryValueKind::Link => REG_LINK,
-        RegistryValueKind::MultiString => REG_MULTI_SZ,
-        RegistryValueKind::ResourceList => REG_RESOURCE_LIST,
-        RegistryValueKind::FullResourceDescriptor => REG_FULL_RESOURCE_DESCRIPTOR,
-        RegistryValueKind::ResourceRequirementsList => REG_RESOURCE_REQUIREMENTS_LIST,
-        RegistryValueKind::Qword => REG_QWORD,
-    }
-}
-
 fn encode_utf16_nul(value: &str) -> Vec<u8> {
     value
         .encode_utf16()
@@ -1637,19 +1588,6 @@ fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
 
 fn escape_ps_single(value: &str) -> String {
     value.replace('\'', "''")
-}
-
-fn sanitize_filename(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 struct PreparedPackage {

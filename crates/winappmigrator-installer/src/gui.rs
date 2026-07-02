@@ -161,7 +161,7 @@ impl InstallerApp {
         // (where the user placed it to run on the target), not the system temp
         // drive, so a large package never fails to extract for lack of space on
         // C:. Falls back to the system temp directory if that is not writable.
-        let temp = match staging_dir(&exe) {
+        let temp = match crate::cleanup::create_staging_dir(None, &exe) {
             Ok(temp) => temp,
             Err(error) => {
                 self.screen =
@@ -197,7 +197,9 @@ impl InstallerApp {
                     .map(|name| name.to_string_lossy().into_owned())
             })
             .unwrap_or_else(|| "Application".to_owned());
-        self.publisher = meta.and_then(|app| app.publisher.clone()).unwrap_or_default();
+        self.publisher = meta
+            .and_then(|app| app.publisher.clone())
+            .unwrap_or_default();
         self.version = meta.and_then(|app| app.version.clone()).unwrap_or_default();
         self.source_computer = manifest.source_computer_name.clone().unwrap_or_default();
         self.target_root = meta
@@ -428,13 +430,14 @@ impl InstallerApp {
                 }
                 for prereq in &self.prereqs {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&prereq.name).size(13.5).color(theme.text));
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                widgets::status_pill(ui, theme, &prereq.handling, prereq.role);
-                            },
+                        ui.label(
+                            egui::RichText::new(&prereq.name)
+                                .size(13.5)
+                                .color(theme.text),
                         );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            widgets::status_pill(ui, theme, &prereq.handling, prereq.role);
+                        });
                     });
                     ui.add_space(4.0);
                 }
@@ -444,21 +447,21 @@ impl InstallerApp {
 
         let running = self.phase == Phase::Running;
         ui.horizontal(|ui| {
-            if widgets::button(ui, theme, ButtonKind::Primary, "Install", !running)
-                .clicked()
-            {
+            if widgets::button(ui, theme, ButtonKind::Primary, "Install", !running).clicked() {
                 *do_install = true;
             }
             ui.add_space(8.0);
-            if widgets::button(ui, theme, ButtonKind::Secondary, "Preview", !running)
-                .clicked()
-            {
+            if widgets::button(ui, theme, ButtonKind::Secondary, "Preview", !running).clicked() {
                 *do_preview = true;
             }
             if running {
                 ui.add_space(10.0);
                 ui.add(egui::Spinner::new());
-                ui.label(egui::RichText::new(&self.detail).size(12.5).color(theme.text_muted));
+                ui.label(
+                    egui::RichText::new(&self.detail)
+                        .size(12.5)
+                        .color(theme.text_muted),
+                );
             }
         });
 
@@ -559,22 +562,6 @@ impl InstallerApp {
             }
         });
     }
-}
-
-/// A staging directory for extracting the embedded package, preferring the drive
-/// the installer sits on (the target device) over the system temp drive so a
-/// large package never runs out of space on C:. Auto-removed when dropped.
-fn staging_dir(exe: &std::path::Path) -> std::io::Result<TempDir> {
-    if let Some(parent) = exe.parent()
-        && let Ok(temp) = tempfile::Builder::new()
-            .prefix("winappmigrator-install-")
-            .tempdir_in(parent)
-    {
-        return Ok(temp);
-    }
-    tempfile::Builder::new()
-        .prefix("winappmigrator-install-")
-        .tempdir()
 }
 
 fn prereq_row(prereq: &RuntimePrerequisite) -> PrereqRow {
