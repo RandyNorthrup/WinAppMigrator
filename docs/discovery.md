@@ -218,6 +218,29 @@ copyable_bytes, included }` groups the inventory by root for display.
 - `ScanOptions.include_hashes` — SHA-256 of copyable files. This dominates scan
   time for large apps; a GUI toggle exists ("Compute SHA-256 hashes").
 
+## Runtime prerequisites
+
+`scan::runtime_prerequisites_from_signals` infers the runtimes an app needs from
+its imports, app-local DLLs, and footprint, and `prerequisites.rs` resolves each
+to a concrete on-target plan (bundled installer, winget, or a Windows optional
+feature), verified by a registry probe.
+
+.NET is detected precisely by reading the managed image's **CLR metadata-root
+version** (`pe_scan::dotnet_metadata_version`, the `BSJB` root's version string):
+
+- `mscoree`/`clr` host + CLR `v1.x`/`v2.0` → **.NET Framework 3.5**
+  (`DotNetFramework35`), installed by enabling the **`NetFx3` Windows optional
+  feature via DISM** (`/online /enable-feature /featurename:NetFx3 /all`). The
+  payload comes from Windows Update or install media; on failure the installer
+  gives an actionable fallback message.
+- `mscoree` host + CLR `v4.0` → **.NET Framework 4.x** (`DotNetFramework4x`),
+  in-box on Windows 10/11 — listed and probed, never installed.
+- `hostfxr`/`coreclr` → self-contained modern .NET (ships app-local).
+- Otherwise a managed image → modern **.NET Desktop Runtime** (winget/download).
+
+This avoids the earlier error of mapping every `mscoree` reference to the modern
+".NET Desktop Runtime 8", which is a different runtime from .NET Framework.
+
 ## Known limitations / next steps
 
 - Scope the MSI component sweep to the product (Features/Base85) to cut latency.

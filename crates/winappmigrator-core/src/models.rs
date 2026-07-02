@@ -202,6 +202,12 @@ pub struct ExecutableMetadata {
     /// rather than the PE import table, so this flags additional manual review.
     #[serde(default)]
     pub is_dotnet: bool,
+    /// The CLR metadata-root version string of a managed image (for example
+    /// `v2.0.50727` for .NET Framework 2.0/3.5, `v4.0.30319` for 4.x and modern
+    /// .NET). Used to pick the correct .NET prerequisite. `None` when not managed
+    /// or the metadata root could not be read.
+    #[serde(default)]
+    pub dotnet_runtime_version: Option<String>,
     /// True when an application manifest is embedded as an `RT_MANIFEST`
     /// resource (distinct from an external `<exe>.manifest` file).
     #[serde(default)]
@@ -263,6 +269,18 @@ pub struct PackageManifest {
     pub license_registry_entries: Vec<RegistryEntry>,
     pub warnings: Vec<Warning>,
     pub items_intentionally_excluded: Vec<String>,
+    /// Whether per-user application data was captured at build time. Drives the
+    /// installer's "Restore user data" checkbox: it is only shown when true.
+    #[serde(default)]
+    pub included_user_data: bool,
+    /// Whether machine-wide ProgramData was captured at build time. Also gates
+    /// the installer's "Restore user data" checkbox.
+    #[serde(default)]
+    pub included_program_data: bool,
+    /// Whether license artifacts were captured at build time. Drives the
+    /// installer's "Restore license" checkbox: it is only shown when true.
+    #[serde(default)]
+    pub included_license_data: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -384,6 +402,9 @@ pub enum FootprintKind {
     LocalLowAppData,
     Documents,
     SavedGames,
+    /// Shared `C:\Users\Public\Documents` — machine-wide data some apps keep in
+    /// the Public profile rather than ProgramData (e.g. YDIS's database).
+    PublicDocuments,
     RegistryReference,
     Other,
 }
@@ -398,6 +419,7 @@ impl FootprintKind {
             FootprintKind::LocalLowAppData => "LocalLow AppData",
             FootprintKind::Documents => "Documents",
             FootprintKind::SavedGames => "Saved Games",
+            FootprintKind::PublicDocuments => "Public Documents",
             FootprintKind::RegistryReference => "Referenced location",
             FootprintKind::Other => "Other location",
         }
@@ -710,7 +732,14 @@ pub struct RuntimePrerequisite {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimePrerequisiteKind {
     VisualCppRedistributable,
+    /// Modern .NET (Core) desktop runtime, acquired via winget/download.
     DotNetDesktopRuntime,
+    /// Classic .NET Framework 2.0/3.0/3.5 (CLR v2.0.50727). Installed on the
+    /// target by enabling the `NetFx3` Windows optional feature.
+    DotNetFramework35,
+    /// Classic .NET Framework 4.x (CLR v4.0.30319). Ships with Windows 10/11, so
+    /// it is listed for transparency but needs no install on modern targets.
+    DotNetFramework4x,
     JavaRuntime,
     PythonRuntime,
     ElectronNodeRuntime,
@@ -738,6 +767,11 @@ pub struct PrerequisiteBundle {
     pub reboot_exit_codes: Vec<i32>,
     /// winget package id used as the on-target acquisition fallback.
     pub winget_id: Option<String>,
+    /// Windows optional feature to enable on the target (e.g. `NetFx3` for .NET
+    /// Framework 3.5) via DISM. When set, the installer enables this feature
+    /// instead of running a payload or winget. `None` for ordinary runtimes.
+    #[serde(default)]
+    pub windows_feature: Option<String>,
     /// True when installing this runtime modifies a machine-wide location and
     /// therefore needs elevation.
     pub requires_admin: bool,
@@ -827,6 +861,12 @@ pub struct RestoreOptions {
     /// `target_root` regardless of this flag.
     #[serde(default)]
     pub restore_user_data: bool,
+    /// When true, captured license artifacts and transferable license registry
+    /// values are restored to the target. Gated because a license is only
+    /// meaningful when it was captured at build time and the user opted in.
+    /// Defaults to true so existing callers keep restoring license data.
+    #[serde(default = "default_true")]
+    pub restore_license: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -838,6 +878,10 @@ pub struct VerificationOptions {
     /// verifier checks the same destinations the restore wrote to.
     #[serde(default)]
     pub restore_user_data: bool,
+    /// Must match the `restore_license` value used during restore so the
+    /// verifier does not expect license files that were intentionally skipped.
+    #[serde(default = "default_true")]
+    pub restore_license: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

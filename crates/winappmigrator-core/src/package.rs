@@ -144,6 +144,9 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         license_registry_entries: report.license_registry_entries.clone(),
         warnings: warnings.clone(),
         items_intentionally_excluded: report.items_excluded.clone(),
+        included_user_data: options.include_user_data,
+        included_program_data: options.include_program_data,
+        included_license_data: options.include_license_data,
     };
 
     let manifest_path = options.output_dir.join(MANIFEST_FILE);
@@ -753,6 +756,7 @@ mod tests {
             apply: false,
             force: false,
             restore_user_data: false,
+            restore_license: true,
         })?;
 
         assert!(result.manifest_path.is_file());

@@ -162,6 +162,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         &app_local_dlls,
         &file_inventory,
         pe_scan.metadata.is_dotnet,
+        pe_scan.metadata.dotnet_runtime_version.as_deref(),
         &pe_scan.architecture,
     );
     let (license_artifacts, license_registry_entries, license_warnings) =
@@ -329,6 +330,7 @@ fn runtime_prerequisites(
     app_local_dlls: &[FileEntry],
     file_inventory: &[FileEntry],
     is_dotnet: bool,
+    dotnet_runtime_version: Option<&str>,
     architecture: &crate::models::AppArchitecture,
 ) -> Vec<RuntimePrerequisite> {
     let signals = collect_runtime_signal_names(dependencies, app_local_dlls, file_inventory);
@@ -336,8 +338,12 @@ fn runtime_prerequisites(
         .iter()
         .find(|dependency| is_runtime_prerequisite_dll(&dependency.name))
         .map(|dependency| dependency.name.clone());
-    let mut prerequisites =
-        runtime_prerequisites_from_signals(&signals, vc_dependency.as_deref(), is_dotnet);
+    let mut prerequisites = runtime_prerequisites_from_signals(
+        &signals,
+        vc_dependency.as_deref(),
+        is_dotnet,
+        dotnet_runtime_version,
+    );
     // Attach a presence probe and a source-presence reading where one is known,
     // so packaging and the installer can confirm the runtime before and after
     // installing it.
@@ -382,6 +388,7 @@ fn runtime_prerequisites_from_signals(
     names: &BTreeSet<String>,
     vc_dependency: Option<&str>,
     is_dotnet: bool,
+    dotnet_runtime_version: Option<&str>,
 ) -> Vec<RuntimePrerequisite> {
     let mut prerequisites = Vec::new();
     let has = |needle: &str| names.contains(needle);
@@ -400,36 +407,15 @@ fn runtime_prerequisites_from_signals(
     }
 
     let dotnet_core = any(&["coreclr.dll", "hostfxr.dll", "hostpolicy.dll", "clrjit.dll"]);
+    // `mscoree`/`clr` is the .NET *Framework* shim; modern .NET (Core) apps host
+    // through `hostfxr`/`coreclr` instead.
     let dotnet_framework = any(&["mscoree.dll", "mscoreei.dll", "clr.dll"]);
     if is_dotnet || dotnet_core || dotnet_framework {
-        let (name, evidence, install_manually) = if dotnet_core {
-            (
-                ".NET runtime (bundled)",
-                "Self-contained .NET host present (coreclr/hostfxr)",
-                false,
-            )
-        } else if dotnet_framework {
-            (
-                "Microsoft .NET Framework",
-                ".NET Framework CLR host referenced (mscoree)",
-                true,
-            )
-        } else {
-            (
-                "Microsoft .NET Desktop Runtime",
-                "Managed (.NET) image: CLR/COR20 header present",
-                true,
-            )
-        };
-        prerequisites.push(RuntimePrerequisite {
-            name: name.to_owned(),
-            kind: RuntimePrerequisiteKind::DotNetDesktopRuntime,
-            evidence: evidence.to_owned(),
-            install_manually,
-            present_on_source: None,
-            bundle: None,
-            presence_probe: None,
-        });
+        prerequisites.push(dotnet_prerequisite(
+            dotnet_core,
+            dotnet_framework,
+            dotnet_runtime_version,
+        ));
     }
 
     if any(&["jvm.dll", "java.dll", "jli.dll", "javaw.exe", "java.exe"]) {
@@ -476,6 +462,74 @@ fn runtime_prerequisites_from_signals(
     }
 
     prerequisites
+}
+
+/// Pick the correct .NET prerequisite for a managed image. The distinguishing
+/// signals are the host shim (`mscoree` = .NET Framework, `hostfxr`/`coreclr` =
+/// modern self-contained .NET) and the CLR metadata version: `v1.x`/`v2.0`
+/// requires the .NET Framework 3.5 Windows feature (NetFx3), while `v4.0` is the
+/// in-box .NET Framework 4.x on Windows 10/11.
+fn dotnet_prerequisite(
+    dotnet_core: bool,
+    dotnet_framework: bool,
+    dotnet_runtime_version: Option<&str>,
+) -> RuntimePrerequisite {
+    let version = dotnet_runtime_version.unwrap_or_default();
+    let needs_netfx3 = version.starts_with("v1.") || version.starts_with("v2.");
+    let (name, kind, evidence, install_manually) = if dotnet_core {
+        (
+            ".NET runtime (bundled)",
+            RuntimePrerequisiteKind::DotNetDesktopRuntime,
+            "Self-contained .NET host present (coreclr/hostfxr)".to_owned(),
+            false,
+        )
+    } else if dotnet_framework && needs_netfx3 {
+        (
+            "Microsoft .NET Framework 3.5",
+            RuntimePrerequisiteKind::DotNetFramework35,
+            format!(".NET Framework CLR host (mscoree) with CLR {version}; needs NetFx3"),
+            true,
+        )
+    } else if dotnet_framework {
+        (
+            "Microsoft .NET Framework 4.x",
+            RuntimePrerequisiteKind::DotNetFramework4x,
+            format!(
+                ".NET Framework CLR host (mscoree){}; ships with Windows 10/11",
+                if version.is_empty() {
+                    String::new()
+                } else {
+                    format!(" with CLR {version}")
+                }
+            ),
+            false,
+        )
+    } else if needs_netfx3 {
+        // Managed image (COR20) with no host-shim import but an old CLR metadata
+        // version: still the legacy Framework, so NetFx3 is the right runtime.
+        (
+            "Microsoft .NET Framework 3.5",
+            RuntimePrerequisiteKind::DotNetFramework35,
+            format!("Managed (.NET) image with CLR {version}; needs NetFx3"),
+            true,
+        )
+    } else {
+        (
+            "Microsoft .NET Desktop Runtime",
+            RuntimePrerequisiteKind::DotNetDesktopRuntime,
+            "Managed (.NET) image: CLR/COR20 header present".to_owned(),
+            true,
+        )
+    };
+    RuntimePrerequisite {
+        name: name.to_owned(),
+        kind,
+        evidence,
+        install_manually,
+        present_on_source: None,
+        bundle: None,
+        presence_probe: None,
+    }
 }
 
 fn missing_dependency_warnings(dependencies: &[DependencyEntry]) -> Vec<Warning> {
@@ -604,7 +658,8 @@ mod tests {
     #[test]
     fn detects_bundled_dotnet_and_electron_runtimes() {
         let names = name_set(&["coreclr.dll", "hostfxr.dll", "ffmpeg.dll", "app.asar"]);
-        let prerequisites = runtime_prerequisites_from_signals(&names, None, true);
+        let prerequisites =
+            runtime_prerequisites_from_signals(&names, None, true, Some("v4.0.30319"));
 
         assert!(
             prerequisites.iter().any(|prerequisite| {
@@ -623,24 +678,54 @@ mod tests {
     }
 
     #[test]
-    fn dotnet_framework_requires_manual_install() {
+    fn dotnet_framework_2_0_maps_to_netfx3() {
+        // mscoree + CLR v2.0.50727 is the YDIS case: it needs the .NET Framework
+        // 3.5 Windows feature, not the modern .NET desktop runtime.
         let names = name_set(&["mscoree.dll"]);
-        let prerequisites = runtime_prerequisites_from_signals(&names, None, false);
+        let prerequisites =
+            runtime_prerequisites_from_signals(&names, None, true, Some("v2.0.50727"));
 
-        assert!(prerequisites.iter().any(|prerequisite| {
-            prerequisite.kind == RuntimePrerequisiteKind::DotNetDesktopRuntime
-                && prerequisite.install_manually
-        }));
+        assert!(
+            prerequisites.iter().any(|prerequisite| {
+                prerequisite.kind == RuntimePrerequisiteKind::DotNetFramework35
+                    && prerequisite.install_manually
+            }),
+            "CLR v2.0 must map to .NET Framework 3.5, got {:?}",
+            prerequisites.iter().map(|p| &p.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dotnet_framework_4_x_is_inbox_not_dotnet_8() {
+        let names = name_set(&["mscoree.dll"]);
+        let prerequisites =
+            runtime_prerequisites_from_signals(&names, None, true, Some("v4.0.30319"));
+
+        assert!(
+            prerequisites.iter().any(|prerequisite| {
+                prerequisite.kind == RuntimePrerequisiteKind::DotNetFramework4x
+                    && !prerequisite.install_manually
+            }),
+            "CLR v4.0 with mscoree must be listed as in-box 4.x, not a runtime install"
+        );
+        assert!(
+            !prerequisites
+                .iter()
+                .any(|prerequisite| prerequisite.kind
+                    == RuntimePrerequisiteKind::DotNetDesktopRuntime),
+            ".NET Framework must never be reported as the modern .NET desktop runtime"
+        );
     }
 
     #[test]
     fn detects_java_and_python_runtimes() {
-        let java = runtime_prerequisites_from_signals(&name_set(&["jvm.dll"]), None, false);
+        let java = runtime_prerequisites_from_signals(&name_set(&["jvm.dll"]), None, false, None);
         assert!(
             java.iter()
                 .any(|prerequisite| prerequisite.kind == RuntimePrerequisiteKind::JavaRuntime)
         );
-        let python = runtime_prerequisites_from_signals(&name_set(&["python311.dll"]), None, false);
+        let python =
+            runtime_prerequisites_from_signals(&name_set(&["python311.dll"]), None, false, None);
         assert!(
             python
                 .iter()

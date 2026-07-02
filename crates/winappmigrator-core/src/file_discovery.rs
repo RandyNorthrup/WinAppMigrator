@@ -253,15 +253,20 @@ pub enum UserDataAnchor {
     LocalAppData,
     LocalLowAppData,
     ProgramData,
+    /// The shared Public profile (`C:\Users\Public`). Machine-wide and fixed
+    /// across machines, so it re-anchors to the same absolute location.
+    PublicProfile,
 }
 
 /// Anchor markers, longest/most-specific first so `AppData\LocalLow` is matched
-/// before `AppData\Local`.
+/// before `AppData\Local` (and `\users\public\` before it could be confused with
+/// a per-user profile path).
 const USER_DATA_ANCHORS: &[(UserDataAnchor, &str)] = &[
     (UserDataAnchor::RoamingAppData, r"\appdata\roaming\"),
     (UserDataAnchor::LocalLowAppData, r"\appdata\locallow\"),
     (UserDataAnchor::LocalAppData, r"\appdata\local\"),
     (UserDataAnchor::ProgramData, r"\programdata\"),
+    (UserDataAnchor::PublicProfile, r"\users\public\"),
 ];
 
 /// Sandbox restore destination: strip the package `files` root and join the
@@ -366,6 +371,11 @@ fn user_data_base(anchor: UserDataAnchor) -> Option<PathBuf> {
         UserDataAnchor::LocalLowAppData => std::env::var_os("USERPROFILE")
             .map(|profile| PathBuf::from(profile).join(APPDATA_LOCAL_LOW_SEGMENT)),
         UserDataAnchor::ProgramData => std::env::var_os("ProgramData").map(PathBuf::from),
+        // %PUBLIC% is C:\Users\Public on every Windows install; the marker
+        // includes the trailing "public\", so the tail already excludes it.
+        UserDataAnchor::PublicProfile => std::env::var_os("PUBLIC")
+            .map(PathBuf::from)
+            .or_else(|| Some(PathBuf::from(r"C:\Users\Public"))),
     }
 }
 
@@ -456,6 +466,12 @@ fn collect_known_user_folder_roots(tokens: &Tokens, roots: &mut Vec<DiscoveryRoo
     if let Some(saved_games) = saved_games_dir() {
         collect_matching_dirs(&saved_games, FootprintKind::SavedGames, tokens, roots);
     }
+    // Shared Public Documents: some apps keep machine-wide data here rather than
+    // in ProgramData (e.g. YDIS's diagnostic database at
+    // C:\Users\Public\Documents\YDIS_Data).
+    if let Some(public_documents) = public_documents_dir() {
+        collect_matching_dirs(&public_documents, FootprintKind::PublicDocuments, tokens, roots);
+    }
 }
 
 fn documents_dir() -> Option<PathBuf> {
@@ -464,6 +480,16 @@ fn documents_dir() -> Option<PathBuf> {
 
 fn saved_games_dir() -> Option<PathBuf> {
     user_shell_folder(SAVED_GAMES_VALUE).or_else(|| user_profile_join(SAVED_GAMES_FALLBACK))
+}
+
+/// The shared Public Documents directory (`%PUBLIC%\Documents`, i.e.
+/// `C:\Users\Public\Documents`), where some apps store machine-wide data.
+fn public_documents_dir() -> Option<PathBuf> {
+    std::env::var_os("PUBLIC")
+        .map(PathBuf::from)
+        .or_else(|| Some(PathBuf::from(r"C:\Users\Public")))
+        .map(|base| base.join(DOCUMENTS_FALLBACK))
+        .filter(|path| path.is_dir())
 }
 
 fn user_profile_join(leaf: &str) -> Option<PathBuf> {
@@ -724,6 +750,7 @@ fn discovery_reason(kind: &FootprintKind) -> &'static str {
         FootprintKind::LocalLowAppData => "LocalLow user application data",
         FootprintKind::Documents => "User document data",
         FootprintKind::SavedGames => "Saved game data",
+        FootprintKind::PublicDocuments => "Shared public document data",
         FootprintKind::RegistryReference => "Referenced application location",
         FootprintKind::Other => "Related application file",
     }
@@ -870,9 +897,11 @@ fn classify_file(
                 FileClassification::UserData
             }
         }
-        // ProgramData is machine-wide application data shared by all users, not
-        // per-user data.
-        FootprintKind::ProgramData => FileClassification::MachineAppData,
+        // ProgramData and shared Public Documents are machine-wide application
+        // data shared by all users, not per-user data.
+        FootprintKind::ProgramData | FootprintKind::PublicDocuments => {
+            FileClassification::MachineAppData
+        }
         FootprintKind::RoamingAppData
         | FootprintKind::LocalAppData
         | FootprintKind::LocalLowAppData
@@ -1114,6 +1143,44 @@ mod tests {
         );
         assert_eq!(documents, FileClassification::UserData);
         assert_eq!(saved, FileClassification::UserData);
+    }
+
+    #[test]
+    fn public_documents_are_machine_app_data() {
+        let classification = classify_file(
+            Path::new(r"C:\Users\Public\Documents\YDIS_Data\Config.xml"),
+            None,
+            &FootprintKind::PublicDocuments,
+        );
+        assert_eq!(classification, FileClassification::MachineAppData);
+    }
+
+    #[test]
+    fn public_profile_reanchors_to_public_base() {
+        // A shared Public path splits on the "\users\public\" marker so the tail
+        // starts after it, and re-anchors to %PUBLIC% (fixed at C:\Users\Public),
+        // i.e. back to the same absolute location on the target.
+        let path = Path::new(r"C:\Users\Public\Documents\YDIS_Data\Config.xml");
+        let Some((anchor, tail)) = split_user_data_relative(path) else {
+            panic!("public path should split on the marker");
+        };
+        assert_eq!(anchor, UserDataAnchor::PublicProfile);
+        assert_eq!(tail, PathBuf::from(r"Documents\YDIS_Data\Config.xml"));
+
+        let Ok(Some(destination)) = user_data_real_destination(path) else {
+            panic!("public base should resolve to a destination");
+        };
+        assert!(
+            destination.ends_with(r"Documents\YDIS_Data\Config.xml"),
+            "unexpected destination: {}",
+            destination.display()
+        );
+        assert!(
+            destination
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains(r"\public\")
+        );
     }
 
     #[test]

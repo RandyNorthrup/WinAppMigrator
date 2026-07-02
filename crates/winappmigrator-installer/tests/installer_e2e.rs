@@ -1,11 +1,10 @@
 //! End-to-end test of the whole product pipeline against the real binary.
 //!
 //! It reverse-engineers a genuine PE executable, builds a self-extracting
-//! installer using the actual `winappmigrator` stub binary, runs that installer
-//! against a clean target directory, and asserts the reinstall plus hash
-//! verification pass. The installer exits non-zero on any hash mismatch, so a
-//! successful exit is a strong end-to-end assertion. A dry-run pass first
-//! confirms the package validates without writing to the target.
+//! installer using the actual `winappmigrator-installer` stub binary, runs that
+//! installer headlessly against a clean target directory, and asserts the
+//! reinstall plus hash verification pass. The installer exits non-zero on any
+//! hash mismatch, so a successful exit is a strong end-to-end assertion.
 
 use std::error::Error;
 use std::fs;
@@ -16,9 +15,10 @@ use winappmigrator_core::{AppSelection, PackageArchiveFormat, PackageOptions, cr
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-/// Path to the built `winappmigrator` stub binary (the installer template).
+/// Path to the built installer stub binary (the installer template that both
+/// carries the package and, given `--target-root … --apply`, reinstalls it).
 fn stub_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_winappmigrator"))
+    PathBuf::from(env!("CARGO_BIN_EXE_winappmigrator-installer"))
 }
 
 fn count_files(root: &Path) -> usize {
@@ -77,9 +77,9 @@ fn build_installer_then_reinstall_and_verify_on_clean_target() -> TestResult {
         .ok_or("no self-extracting installer was produced")?;
     assert!(installer.is_file(), "installer not written");
 
-    // 2. Reinstall on a clean target. The installer reinstalls, hash-verifies
-    //    both its package and the reinstalled files, and exits non-zero on any
-    //    mismatch — so a successful exit asserts the whole pipeline.
+    // 2. Reinstall on a clean target, headlessly. The installer reinstalls,
+    //    hash-verifies both its package and the reinstalled files, and exits
+    //    non-zero on any mismatch — so a successful exit asserts the pipeline.
     let target = work.path().join("target");
     let apply = Command::new(&installer)
         .arg("--target-root")

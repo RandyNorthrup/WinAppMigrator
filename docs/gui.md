@@ -8,15 +8,18 @@ Reinstalling is the job of the installer it produces, on the target machine.
 
 ## Modules
 
-- `src/theme.rs` — the design system. `Theme` holds a fully resolved token
-  palette for `ThemeMode::Dark` / `Light` (accent, surfaces, borders, text,
-  status colors, shadows) and `Theme::apply(ctx)` maps those tokens onto the
-  global `egui` style. Radius/role constants live here too.
-- `src/widgets.rs` — reusable, theme-aware components: `card` / `card_titled`,
-  `button` (`ButtonKind` Primary/Secondary/Ghost), `status_pill`, `badge`,
-  `metric_tiles`, `kv_row`, `mono_path`, `notice`, `empty_state`, `path_field`,
-  and the painter-drawn brand mark/empty-state glyph (`paint_logo`,
-  `paint_icon`) so no image assets are required.
+The design system and widgets live in a **shared `winappmigrator-ui` crate** so
+the app and the produced installer render identically:
+
+- `winappmigrator-ui/src/theme.rs` — the design system. `Theme` holds a fully
+  resolved token palette for `ThemeMode::Dark` / `Light` (accent, surfaces,
+  borders, text, status colors, shadows) and `Theme::apply(ctx)` maps those
+  tokens onto the global `egui` style. Radius/role constants live here too.
+- `winappmigrator-ui/src/widgets.rs` — reusable, theme-aware components: `card` /
+  `card_titled`, `button` (`ButtonKind` Primary/Secondary/Ghost), `status_pill`,
+  `badge`, `metric_tiles`, `kv_row`, `mono_path`, `notice`, `empty_state`,
+  `path_field`, and the painter-drawn brand mark/empty-state glyph
+  (`paint_logo`, `paint_icon`) so no image assets are required.
 - `src/views.rs` — the single application screen (`view_applications`): the
   apps table, the per-app migrate panel (license/user-data toggles + build
   button), and the build-result renderer. Implemented as
@@ -53,9 +56,25 @@ CentralPanel          → ScrollArea → view_applications()
    hash-verifies the package. The result card shows the installer path and a
    "Hashes confirmed" status.
 
-The build requires the installer stub (`winappmigrator.exe`) beside the GUI; if
-it is missing the build button is disabled with a clear notice, because the
-product is always a self-extracting installer.
+The installer stub is **embedded inside WinAppMigrator** at build time (see
+`winappmigrator-gui/build.rs`, which stages `winappmigrator-installer(.exe)` for
+`include_bytes!`), so the app is a single portable executable. At build time
+`installer_stub_path()` writes the embedded stub to a temp file and uses it;
+if the app was compiled without an embedded stub (a bootstrap build) it falls
+back to a sibling `winappmigrator-installer.exe`.
+
+## The produced installer (`winappmigrator-installer`)
+
+Each installer is a standalone GUI self-extractor (its own crate, embedding a
+`requireAdministrator` manifest in release so it auto-elevates; debug stays
+`asInvoker` for testing). On launch it extracts its embedded package, reads the
+manifest, and shows the app, an editable **install location** (defaulted to the
+original path), **Restore user data** / **Restore license** checkboxes — shown
+only when `PackageManifest.included_user_data`/`included_license_data` are set —
+and a **Dependencies** list. **Install** runs `restore_package` +
+`verify_package` on a worker thread with live progress. Given command-line args
+it instead runs headlessly (`--target-root … --apply`) for automation and the
+end-to-end test. The stub reuses `winappmigrator-ui` for its look.
 
 ## Conventions
 

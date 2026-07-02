@@ -1,8 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod theme;
 mod views;
-mod widgets;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,6 +13,7 @@ use winappmigrator_core::{
     AppSelection, InstalledApp, PackageOptions, PackageResult, VerificationOptions,
     VerificationReport, create_package, list_installed_apps, verify_package,
 };
+use winappmigrator_ui::{theme, widgets};
 
 use theme::{Role, Theme, ThemeMode};
 use widgets::ButtonKind;
@@ -122,9 +121,9 @@ impl WinAppMigratorApp {
 
         // The product is a self-extracting installer, so the stub that becomes
         // that installer must be present. Without it we cannot build anything.
-        let Some(stub) = cli_stub_path() else {
+        let Some(stub) = installer_stub_path() else {
             self.last_error = Some(
-                "Installer stub (winappmigrator.exe) was not found beside this app, so a \
+                "Installer stub (winappmigrator-installer.exe) was not found beside this app, so a \
                  self-extracting installer cannot be built."
                     .to_owned(),
             );
@@ -189,6 +188,7 @@ impl WinAppMigratorApp {
                         // only the installer remains in the chosen folder.
                         output_dir: Some(staging.clone()),
                         restore_user_data: false,
+                        restore_license: include_license_data,
                     };
                     match verify_package(&verify_options) {
                         Ok(verification) => MigrateMessage::Completed(Box::new(MigrationOutcome {
@@ -373,12 +373,39 @@ pub(crate) fn default_output_for(app_name: &str) -> String {
         .to_string()
 }
 
-/// Path to the bundled CLI, used as the self-extracting installer stub. It is
-/// shipped beside the GUI executable.
-pub(crate) fn cli_stub_path() -> Option<PathBuf> {
+/// The GUI installer stub, embedded into the app at build time (see `build.rs`).
+/// Empty only on a first-pass build where the stub was not yet available; the
+/// runtime then falls back to a sibling stub file.
+const EMBEDDED_INSTALLER_STUB: &[u8] = include_bytes!(env!("WAM_INSTALLER_STUB"));
+
+/// Resolve the installer stub used to build a self-extracting installer.
+///
+/// WinAppMigrator is one portable executable, so the stub normally lives inside
+/// it: we write the embedded bytes to a temp file and hand that back. When the
+/// stub was not embedded (a bootstrap build), fall back to a sibling
+/// `winappmigrator-installer.exe`.
+pub(crate) fn installer_stub_path() -> Option<PathBuf> {
+    if !EMBEDDED_INSTALLER_STUB.is_empty() {
+        return write_embedded_stub().ok();
+    }
     let current = std::env::current_exe().ok()?;
-    let sibling = current.parent()?.join("winappmigrator.exe");
+    let sibling = current.parent()?.join("winappmigrator-installer.exe");
     sibling.is_file().then_some(sibling)
+}
+
+/// Write the embedded installer stub to a per-process temp file (once) and
+/// return its path, so it can be used as the self-extracting archive stub.
+fn write_embedded_stub() -> std::io::Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("winappmigrator-stub-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("winappmigrator-installer.exe");
+    let already_written = std::fs::metadata(&path)
+        .map(|meta| meta.len() == EMBEDDED_INSTALLER_STUB.len() as u64)
+        .unwrap_or(false);
+    if !already_written {
+        std::fs::write(&path, EMBEDDED_INSTALLER_STUB)?;
+    }
+    Ok(path)
 }
 
 /// The combined result of a migration build: the package, its self-extracting

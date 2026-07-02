@@ -231,15 +231,15 @@ impl WinAppMigratorApp {
             summary.push_str(" on another device, then hash-verifies fidelity.");
             widgets::notice(ui, theme, Role::Accent, &summary);
 
-            let stub_present = crate::cli_stub_path().is_some();
+            let stub_present = crate::installer_stub_path().is_some();
             if !stub_present {
                 ui.add_space(8.0);
                 widgets::notice(
                     ui,
                     theme,
                     Role::Danger,
-                    "Installer stub (winappmigrator.exe) was not found beside this app, so a \
-                     self-extracting installer cannot be built.",
+                    "Installer stub (winappmigrator-installer.exe) was not found beside this app, \
+                     so a self-extracting installer cannot be built.",
                 );
             }
 

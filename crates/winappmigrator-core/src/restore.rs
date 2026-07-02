@@ -208,6 +208,7 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
             target_root: Some(options.target_root.clone()),
             output_dir: Some(output_dir.clone()),
             restore_user_data: options.restore_user_data,
+            restore_license: options.restore_license,
         }) {
             Ok(report) => {
                 if !report.package_valid || report.restore_valid == Some(false) {
@@ -520,6 +521,11 @@ fn restore_license(
     _warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
+    // The user (or automation) can opt out of restoring license data even when
+    // it was captured; skip both files and transferable registry values.
+    if !options.restore_license {
+        return;
+    }
     for artifact in &manifest.license_artifacts_detected {
         if !artifact.should_copy {
             continue;
@@ -1692,6 +1698,7 @@ mod tests {
             apply: true,
             force: false,
             restore_user_data: false,
+            restore_license: true,
         };
 
         assert!(restore_package(&options).is_err());

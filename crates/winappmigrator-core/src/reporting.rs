@@ -691,6 +691,7 @@ mod tests {
                 digital_signature: SignatureStatus::NotChecked,
                 external_manifest: None,
                 is_dotnet: false,
+                dotnet_runtime_version: None,
                 embedded_manifest: false,
                 requested_execution_level: None,
                 sxs_dependencies: Vec::new(),

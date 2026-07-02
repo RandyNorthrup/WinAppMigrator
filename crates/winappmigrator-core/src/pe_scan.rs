@@ -47,7 +47,7 @@ pub fn scan_pe(path: &Path) -> Result<PeScanResult> {
     let bytes = fs::read(path).map_err(|source| WinAppMigratorError::io(path, source))?;
     let pe = PeFile::from_bytes(&bytes)
         .map_err(|source| WinAppMigratorError::pe(path, source.to_string()))?;
-    let metadata = file_metadata(path, &pe)?;
+    let metadata = file_metadata(path, &pe, &bytes)?;
     let architecture = architecture_from_machine(pe.file_header().Machine);
     let mut warnings = Vec::new();
     let mut direct_imports = read_imports(path, &pe, &mut warnings);
@@ -91,7 +91,7 @@ pub fn read_pe_architecture(path: &Path) -> Result<AppArchitecture> {
     Ok(architecture_from_machine(pe.file_header().Machine))
 }
 
-fn file_metadata(path: &Path, pe: &PeFile<'_>) -> Result<ExecutableMetadata> {
+fn file_metadata(path: &Path, pe: &PeFile<'_>, bytes: &[u8]) -> Result<ExecutableMetadata> {
     let metadata = fs::metadata(path).map_err(|source| WinAppMigratorError::io(path, source))?;
     let modified_utc = metadata.modified().ok().and_then(format_system_time_utc);
     let external_manifest =
@@ -115,6 +115,9 @@ fn file_metadata(path: &Path, pe: &PeFile<'_>) -> Result<ExecutableMetadata> {
         digital_signature: signature_status(pe),
         external_manifest,
         is_dotnet: is_dotnet_image(pe),
+        dotnet_runtime_version: is_dotnet_image(pe)
+            .then(|| dotnet_metadata_version(bytes))
+            .flatten(),
         embedded_manifest: embedded_manifest_xml.is_some(),
         requested_execution_level,
         sxs_dependencies,
@@ -410,6 +413,49 @@ fn is_dotnet_image(pe: &PeFile<'_>) -> bool {
         .is_some_and(|directory| directory.VirtualAddress != 0 && directory.Size != 0)
 }
 
+/// The version string in a managed image's CLI metadata root, e.g. `v2.0.50727`
+/// or `v4.0.30319`. The metadata root begins with the `BSJB` signature followed
+/// by two `u16` version fields, a reserved `u32`, a `u32` length, then the
+/// UTF-8 version string of that length. Scanning the file bytes for `BSJB` finds
+/// it without mapping RVAs, and a managed image has exactly one such root.
+fn dotnet_metadata_version(bytes: &[u8]) -> Option<String> {
+    const SIGNATURE: &[u8; 4] = b"BSJB";
+    const HEADER_PREFIX: usize = 12; // signature(4) + major(2) + minor(2) + reserved(4)
+    const MAX_VERSION_LEN: usize = 256;
+
+    let start = bytes
+        .windows(SIGNATURE.len())
+        .position(|window| window == SIGNATURE)?;
+    let length_offset = start + HEADER_PREFIX;
+    let string_offset = length_offset + 4;
+    if string_offset > bytes.len() {
+        return None;
+    }
+    let length = u32::from_le_bytes([
+        bytes[length_offset],
+        bytes[length_offset + 1],
+        bytes[length_offset + 2],
+        bytes[length_offset + 3],
+    ]) as usize;
+    if length == 0 || length > MAX_VERSION_LEN {
+        return None;
+    }
+    let end = string_offset.checked_add(length)?;
+    let raw = bytes.get(string_offset..end.min(bytes.len()))?;
+    let text: String = raw
+        .iter()
+        .take_while(|&&byte| byte != 0)
+        .map(|&byte| byte as char)
+        .collect();
+    let trimmed = text.trim();
+    // A real runtime string starts with 'v' and a digit (e.g. `v4.0.30319`).
+    let mut chars = trimmed.chars();
+    match (chars.next(), chars.next()) {
+        (Some('v'), Some(second)) if second.is_ascii_digit() => Some(trimmed.to_owned()),
+        _ => None,
+    }
+}
+
 fn read_embedded_manifest(pe: &PeFile<'_>) -> Option<String> {
     pe.resources()
         .ok()
@@ -486,6 +532,41 @@ fn format_system_time_utc(value: SystemTime) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn metadata_root(version: &str) -> Vec<u8> {
+        // BSJB signature, major(2), minor(2), reserved(4), length(4), version.
+        let mut bytes = b"BSJB".to_vec();
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let mut version_bytes = version.as_bytes().to_vec();
+        version_bytes.push(0);
+        while !version_bytes.len().is_multiple_of(4) {
+            version_bytes.push(0);
+        }
+        bytes.extend_from_slice(&(version_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&version_bytes);
+        bytes
+    }
+
+    #[test]
+    fn reads_clr_metadata_version_from_root() {
+        let blob = metadata_root("v2.0.50727");
+        assert_eq!(
+            dotnet_metadata_version(&blob).as_deref(),
+            Some("v2.0.50727")
+        );
+        let blob4 = metadata_root("v4.0.30319");
+        assert_eq!(
+            dotnet_metadata_version(&blob4).as_deref(),
+            Some("v4.0.30319")
+        );
+    }
+
+    #[test]
+    fn ignores_bytes_without_a_metadata_root() {
+        assert_eq!(dotnet_metadata_version(b"not a managed image"), None);
+    }
 
     #[test]
     fn parses_imports_from_current_test_binary() -> Result<()> {

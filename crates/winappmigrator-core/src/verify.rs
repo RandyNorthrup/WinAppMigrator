@@ -50,6 +50,7 @@ pub fn verify_package(options: &VerificationOptions) -> Result<VerificationRepor
             target_root,
             &manifest,
             options.restore_user_data,
+            options.restore_license,
             &mut items,
             &mut warnings,
             &mut errors,
@@ -204,6 +205,7 @@ fn verify_restored_target(
     target_root: &Path,
     manifest: &PackageManifest,
     restore_user_data: bool,
+    restore_license: bool,
     items: &mut Vec<VerificationItem>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
@@ -211,15 +213,19 @@ fn verify_restored_target(
     let path_rewrites = path_rewrites(manifest, target_root, restore_user_data)?;
     verify_restored_files(target_root, manifest, restore_user_data, items, errors)?;
     verify_prerequisites(manifest, items);
-    verify_license_restored(manifest, &path_rewrites, restore_user_data, items, errors)?;
+    // License artifacts and their transferable registry values are only expected
+    // on the target when the restore was told to write them.
+    if restore_license {
+        verify_license_restored(manifest, &path_rewrites, restore_user_data, items, errors)?;
+        verify_registry_entries(
+            &manifest.license_registry_entries,
+            &path_rewrites,
+            items,
+            errors,
+        );
+    }
     verify_registry_entries(
         &manifest.registry_keys_exported,
-        &path_rewrites,
-        items,
-        errors,
-    );
-    verify_registry_entries(
-        &manifest.license_registry_entries,
         &path_rewrites,
         items,
         errors,

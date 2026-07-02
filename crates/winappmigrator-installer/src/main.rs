@@ -1,0 +1,36 @@
+//! The WinAppMigrator self-extracting installer.
+//!
+//! This is the stub the WinAppMigrator app embeds into every installer it
+//! builds. Run on a target machine it reinstalls the packaged application, its
+//! data, and its runtime prerequisites, then hash-verifies the result.
+//!
+//! It has two front ends:
+//! - **GUI** (double-click, no arguments): a window that shows the app, lets the
+//!   user pick the install location and — when they were captured at build time
+//!   — whether to restore user data and license data, then installs with live
+//!   progress. Release builds request administrator elevation on launch.
+//! - **Headless** (any arguments): the classic `--target-root … --apply` flow,
+//!   for automation, CI, and the end-to-end test.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod gui;
+mod headless;
+
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    // Arguments beyond the program name mean a scripted/headless restore; a bare
+    // double-click (argv == [exe]) opens the GUI. Deciding on argument count also
+    // keeps the GUI path from ever touching CLI parsing.
+    if std::env::args_os().count() > 1 {
+        return headless::run();
+    }
+    match gui::run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}

@@ -1,14 +1,13 @@
-//! The self-extracting installer stub produced by WinAppMigrator.
+//! Headless (command-line) restore, used by automation, CI, and the e2e test.
 //!
-//! This binary is not a builder. Building installers is the job of the
-//! WinAppMigrator app on the source machine, which embeds a copy of this stub
-//! plus the application package into one self-extracting `.exe`. When that
-//! installer is run on the **target** machine it reinstalls the application and
-//! its bundled data, then hash-verifies the result. Restore therefore lives
-//! here, in the installer — never in the app.
+//! Behaviorally identical to the previous console stub: extract the embedded
+//! package, restore it to `--target-root`, and hash-verify. License restore is
+//! on by default (opt out with `--no-restore-license`); user-data restore is
+//! opt-in (`--restore-user-data`).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use clap::Parser;
 use winappmigrator_core::{
@@ -19,7 +18,7 @@ use winappmigrator_core::{
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_FAILURE: u8 = 1;
 
-/// Arguments accepted by the installer when it carries an embedded package.
+/// Arguments accepted by the installer when driven headlessly.
 #[derive(Debug, Parser)]
 #[command(name = "winappmigrator-installer")]
 #[command(about = "Reinstall an embedded WinAppMigrator application package and hash-verify it.")]
@@ -42,9 +41,23 @@ pub struct InstallerCli {
     /// locations instead of staging it under the target root.
     #[arg(long = "restore-user-data")]
     pub restore_user_data: bool,
+
+    /// Skip restoring captured license artifacts and license registry values.
+    #[arg(long = "no-restore-license")]
+    pub no_restore_license: bool,
 }
 
-pub fn run<I, T>(args: I) -> Result<u8>
+pub fn run() -> ExitCode {
+    match run_inner(std::env::args_os()) {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_inner<I, T>(args: I) -> Result<u8>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -53,8 +66,8 @@ where
     let executable = std::env::current_exe()
         .map_err(|source| WinAppMigratorError::io("current executable path", source))?;
 
-    // A bare stub (no embedded package) is only ever the template the app
-    // copies when building an installer — it has nothing to install.
+    // A bare stub (no embedded package) is only ever the template the app copies
+    // when building an installer — it has nothing to install.
     if !has_embedded_self_archive(&executable)? {
         println!("WinAppMigrator installer stub — it carries no application package.");
         println!(
@@ -71,8 +84,9 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     let cli = InstallerCli::parse_from(raw_args);
     let Some(target_root) = cli.target_root else {
         println!("WinAppMigrator self-extracting installer.");
-        println!("Preview the reinstall: --target-root <DIR>");
-        println!("Reinstall:             --target-root <DIR> --apply");
+        println!("Run it with no arguments to open the graphical installer, or:");
+        println!("  preview the reinstall: --target-root <DIR>");
+        println!("  reinstall:             --target-root <DIR> --apply");
         return Ok(EXIT_SUCCESS);
     };
 
@@ -86,6 +100,7 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     }
 
     let applied = cli.apply;
+    let restore_license = !cli.no_restore_license;
     let result = restore_package(&RestoreOptions {
         package_root: temp_dir.path().to_path_buf(),
         target_root: target_root.clone(),
@@ -93,6 +108,7 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
         apply: cli.apply,
         force: cli.force,
         restore_user_data: cli.restore_user_data,
+        restore_license,
     })?;
     println!(
         "Reinstall {}.",
@@ -109,6 +125,7 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
         target_root: applied.then_some(target_root),
         output_dir: None,
         restore_user_data: cli.restore_user_data,
+        restore_license,
     })?;
     println!("Package hashes valid: {}", verification.package_valid);
     let restore_ok = match verification.restore_valid {
@@ -138,29 +155,29 @@ mod tests {
     }
 
     #[test]
-    fn parses_apply_target_and_user_data() -> Result<()> {
+    fn license_restore_is_on_by_default() -> Result<()> {
+        let cli = InstallerCli::try_parse_from(["winappmigrator-installer"])
+            .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))?;
+        assert!(!cli.no_restore_license, "license restore defaults to on");
+        Ok(())
+    }
+
+    #[test]
+    fn parses_apply_target_and_flags() -> Result<()> {
         let cli = InstallerCli::try_parse_from([
             "winappmigrator-installer",
             "--target-root",
             r"C:\Restored",
             "--apply",
             "--restore-user-data",
+            "--no-restore-license",
         ])
         .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))?;
 
         assert!(cli.apply);
         assert!(cli.restore_user_data);
+        assert!(cli.no_restore_license);
         assert_eq!(cli.target_root, Some(PathBuf::from(r"C:\Restored")));
-        Ok(())
-    }
-
-    #[test]
-    fn defaults_to_preview() -> Result<()> {
-        let cli = InstallerCli::try_parse_from(["winappmigrator-installer"])
-            .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))?;
-
-        assert!(!cli.apply);
-        assert!(cli.target_root.is_none());
         Ok(())
     }
 }

@@ -25,6 +25,7 @@ use crate::models::{
 use crate::path_utils::hidden_command;
 
 const WINGET_EXE: &str = "winget";
+const DISM_EXE: &str = "dism";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 /// Hard cap on a single prerequisite install so a hung or interactive installer
 /// cannot wedge the whole restore. Large runtimes (.NET, winget) can be slow, so
@@ -44,6 +45,9 @@ pub struct PrerequisiteSpec {
     pub success_exit_codes: Vec<i32>,
     pub reboot_exit_codes: Vec<i32>,
     pub winget_id: Option<String>,
+    /// Windows optional feature to enable via DISM (e.g. `NetFx3`) instead of
+    /// running a payload/winget. `None` for ordinary redistributables.
+    pub windows_feature: Option<String>,
     pub requires_admin: bool,
     pub probe: Option<PrerequisiteRegistryProbe>,
 }
@@ -67,6 +71,8 @@ pub fn spec(
     match kind {
         RuntimePrerequisiteKind::VisualCppRedistributable => Some(visual_cpp_spec(architecture)),
         RuntimePrerequisiteKind::DotNetDesktopRuntime => Some(dotnet_desktop_spec()),
+        RuntimePrerequisiteKind::DotNetFramework35 => Some(dotnet_framework35_spec()),
+        RuntimePrerequisiteKind::DotNetFramework4x => Some(dotnet_framework4x_spec()),
         _ => None,
     }
 }
@@ -115,6 +121,7 @@ pub fn bundle_from_spec(
         success_exit_codes: spec.success_exit_codes.clone(),
         reboot_exit_codes: spec.reboot_exit_codes.clone(),
         winget_id: spec.winget_id.clone(),
+        windows_feature: spec.windows_feature.clone(),
         requires_admin: spec.requires_admin,
     }
 }
@@ -158,6 +165,11 @@ pub fn install_bundle(
     bundle: &PrerequisiteBundle,
     package_root: &Path,
 ) -> PrerequisiteInstallOutcome {
+    // A Windows optional feature (e.g. NetFx3) is enabled via DISM, never a
+    // payload or winget, so it takes precedence over the other mechanisms.
+    if let Some(feature) = bundle.windows_feature.as_deref() {
+        return run_windows_feature(feature);
+    }
     if let Some(relative) = bundle.package_relative_path.as_ref() {
         match package_destination_path(package_root, relative) {
             Ok(payload) if payload.is_file() => return run_payload(&payload, bundle),
@@ -193,6 +205,40 @@ fn run_payload(payload: &Path, bundle: &PrerequisiteBundle) -> PrerequisiteInsta
         ),
         WaitOutcome::StartFailed(error) => PrerequisiteInstallOutcome::Failed(format!(
             "could not start bundled installer: {error}"
+        )),
+    }
+}
+
+/// Enable a Windows optional feature on the target via DISM. Used for runtimes
+/// that ship as an on-demand Windows feature rather than a redistributable —
+/// notably `.NET Framework 3.5` (`NetFx3`), whose payload comes from Windows
+/// Update or install media. Best-effort: on failure the caller surfaces an
+/// actionable fallback message.
+fn run_windows_feature(feature: &str) -> PrerequisiteInstallOutcome {
+    let mut command = hidden_command(DISM_EXE);
+    command.args([
+        "/online",
+        "/enable-feature",
+        &format!("/featurename:{feature}"),
+        "/all",
+        "/norestart",
+    ]);
+    match wait_with_timeout(command, INSTALL_TIMEOUT) {
+        // 0 = enabled, 3010 = enabled but a reboot is required to complete it.
+        WaitOutcome::Exited(Some(0)) => PrerequisiteInstallOutcome::Installed,
+        WaitOutcome::Exited(Some(3010)) => PrerequisiteInstallOutcome::InstalledNeedsReboot,
+        WaitOutcome::Exited(code) => PrerequisiteInstallOutcome::Failed(format!(
+            "DISM could not enable the {feature} Windows feature (exit {}); the payload likely \
+             could not be downloaded. Enable it via Windows Features, or run \
+             `dism /online /enable-feature /featurename:{feature} /all /Source:<install-media>\\sources\\sxs /LimitAccess`.",
+            code.map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        )),
+        WaitOutcome::TimedOut => PrerequisiteInstallOutcome::Failed(format!(
+            "enabling the {feature} Windows feature did not finish within the timeout and was terminated"
+        )),
+        WaitOutcome::StartFailed(error) => PrerequisiteInstallOutcome::Failed(format!(
+            "DISM is not available to enable the {feature} Windows feature: {error}"
         )),
     }
 }
@@ -297,6 +343,7 @@ fn visual_cpp_spec(architecture: &AppArchitecture) -> PrerequisiteSpec {
         // 3010 = success, reboot required to complete.
         reboot_exit_codes: vec![3010],
         winget_id: Some(winget_id.to_owned()),
+        windows_feature: None,
         requires_admin: true,
         probe: Some(PrerequisiteRegistryProbe {
             key_paths: vec![
@@ -305,6 +352,53 @@ fn visual_cpp_spec(architecture: &AppArchitecture) -> PrerequisiteSpec {
             ],
             value_name: "Installed".to_owned(),
             min_value: 1,
+        }),
+    }
+}
+
+/// .NET Framework 3.5 (CLR v2.0). On Windows 10/11 it is an on-demand Windows
+/// feature (`NetFx3`) whose payload comes from Windows Update or install media,
+/// so it is enabled via DISM rather than a downloadable installer. Presence is
+/// probed via `NDP\v3.5\Install`.
+fn dotnet_framework35_spec() -> PrerequisiteSpec {
+    PrerequisiteSpec {
+        bundleable: false,
+        file_name: "netfx3-windows-feature",
+        download_url:
+            "https://learn.microsoft.com/dotnet/framework/install/dotnet-35-windows".to_owned(),
+        silent_install_args: Vec::new(),
+        success_exit_codes: vec![0],
+        reboot_exit_codes: vec![3010],
+        winget_id: None,
+        windows_feature: Some("NetFx3".to_owned()),
+        requires_admin: true,
+        probe: Some(PrerequisiteRegistryProbe {
+            key_paths: vec![r"SOFTWARE\Microsoft\NET Framework Setup\NDP\v3.5".to_owned()],
+            value_name: "Install".to_owned(),
+            min_value: 1,
+        }),
+    }
+}
+
+/// .NET Framework 4.x (CLR v4.0). Ships with Windows 10/11, so there is nothing
+/// to install; the spec exists only to carry a presence probe (`NDP\v4\Full\
+/// Release` >= 528040, i.e. 4.8) so the prerequisite can be listed and confirmed.
+fn dotnet_framework4x_spec() -> PrerequisiteSpec {
+    PrerequisiteSpec {
+        bundleable: false,
+        file_name: "dotnet-framework-4x-inbox",
+        download_url:
+            "https://dotnet.microsoft.com/download/dotnet-framework".to_owned(),
+        silent_install_args: Vec::new(),
+        success_exit_codes: vec![0],
+        reboot_exit_codes: vec![3010],
+        winget_id: None,
+        windows_feature: None,
+        requires_admin: false,
+        probe: Some(PrerequisiteRegistryProbe {
+            key_paths: vec![r"SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full".to_owned()],
+            value_name: "Release".to_owned(),
+            min_value: 528_040,
         }),
     }
 }
@@ -332,6 +426,7 @@ fn dotnet_desktop_spec() -> PrerequisiteSpec {
         success_exit_codes: vec![0, 1638],
         reboot_exit_codes: vec![3010],
         winget_id: Some("Microsoft.DotNet.DesktopRuntime.8".to_owned()),
+        windows_feature: None,
         requires_admin: true,
         probe: None,
     }
@@ -384,5 +479,46 @@ mod tests {
         assert!(!spec.bundleable);
         assert!(spec.winget_id.is_some());
         assert!(spec.probe.is_none());
+    }
+
+    #[test]
+    fn dotnet_framework35_is_a_windows_feature() {
+        let spec = dotnet_framework35_spec();
+        assert!(!spec.bundleable);
+        assert_eq!(spec.windows_feature.as_deref(), Some("NetFx3"));
+        assert!(spec.winget_id.is_none());
+        assert!(spec.requires_admin);
+        assert!(
+            matches!(spec.probe, Some(ref probe) if probe.value_name == "Install" && probe.min_value == 1),
+            "framework 3.5 is confirmed via NDP\\v3.5\\Install >= 1"
+        );
+    }
+
+    #[test]
+    fn dotnet_framework4x_is_inbox_and_probe_only() {
+        let spec = dotnet_framework4x_spec();
+        assert!(spec.windows_feature.is_none());
+        assert!(spec.winget_id.is_none());
+        assert!(!spec.requires_admin);
+        assert!(spec.probe.is_some(), "4.x is confirmed via a presence probe");
+    }
+
+    #[test]
+    fn spec_maps_dotnet_framework_kinds() {
+        assert!(matches!(
+            spec(&RuntimePrerequisiteKind::DotNetFramework35, &AppArchitecture::X86),
+            Some(resolved) if resolved.windows_feature.as_deref() == Some("NetFx3")
+        ));
+        assert!(matches!(
+            spec(&RuntimePrerequisiteKind::DotNetFramework4x, &AppArchitecture::X64),
+            Some(resolved) if resolved.windows_feature.is_none() && !resolved.requires_admin
+        ));
+    }
+
+    #[test]
+    fn framework35_bundle_carries_the_windows_feature() {
+        let bundle = bundle_from_spec(&dotnet_framework35_spec(), None, None, None);
+        assert_eq!(bundle.windows_feature.as_deref(), Some("NetFx3"));
+        assert!(bundle.package_relative_path.is_none());
     }
 }
