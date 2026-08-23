@@ -274,3 +274,9 @@ Licensed under the [MIT License](LICENSE) © 2026 Randy Northrup.
 
 All dependencies are permissively licensed (MIT / Apache-2.0 / BSD / Zlib / ISC
 and similar).
+
+## Support this project
+
+If this project saves you time, you can
+[buy me a coffee](https://www.paypal.com/donate/?hosted_button_id=Q9VC7B42R7K82)
+via PayPal. Thank you!
