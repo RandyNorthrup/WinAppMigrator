@@ -1,10 +1,13 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer};
 use walkdir::WalkDir;
 
 use crate::models::{ScheduledTaskEntry, Warning, WarningSeverity};
-use crate::path_utils::{POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command};
+use crate::path_utils::{
+    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, path_is_within,
+};
 use crate::system_context::SystemContext;
 
 const OFFLINE_TASKS_SUBDIR: &str = r"System32\Tasks";
@@ -131,7 +134,18 @@ $items | ConvertTo-Json -Depth 4
         .into_iter()
         .filter_map(|action| task_from_action(context, action))
         .collect();
-    (tasks, warnings)
+    (one_entry_per_task(tasks), warnings)
+}
+
+/// The query gives one row per action, and each row carries the task's whole definition, so
+/// a task with two programs would otherwise be restored twice. The second would find the
+/// first already there.
+fn one_entry_per_task(mut tasks: Vec<ScheduledTaskEntry>) -> Vec<ScheduledTaskEntry> {
+    let mut seen = HashSet::new();
+    tasks.retain(|task| {
+        seen.insert(format!("{}{}", task.task_path, task.task_name).to_ascii_lowercase())
+    });
+    tasks
 }
 
 fn task_from_action(
@@ -139,7 +153,8 @@ fn task_from_action(
     action: PowerShellTaskAction,
 ) -> Option<ScheduledTaskEntry> {
     let command = action.execute?;
-    let command_path = PathBuf::from(expand_env_markers(&command));
+    // Installers write the command both with quotes and without, and they mean the same.
+    let command_path = PathBuf::from(expand_env_markers(command.trim().trim_matches('"')));
     if !path_matches(context, &command_path) {
         return None;
     }
@@ -407,7 +422,7 @@ fn path_matches(context: &TaskScanContext, candidate: &Path) -> bool {
         || context
             .install_location
             .as_ref()
-            .is_some_and(|root| candidate.starts_with(root))
+            .is_some_and(|root| path_is_within(candidate, root))
 }
 
 fn expand_env_markers(value: &str) -> String {
@@ -422,6 +437,67 @@ fn expand_env_markers(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn context() -> TaskScanContext {
+        TaskScanContext {
+            executable_path: PathBuf::from(r"C:\Program Files\Demo\demo.exe"),
+            install_location: Some(PathBuf::from(r"C:\Program Files\Demo")),
+        }
+    }
+
+    fn action(name: &str, execute: &str) -> PowerShellTaskAction {
+        PowerShellTaskAction {
+            task_name: Some(name.to_owned()),
+            task_path: Some(r"\Demo\".to_owned()),
+            execute: Some(execute.to_owned()),
+            arguments: None,
+            working_directory: None,
+            trigger_summary: None,
+            run_level: None,
+            account: None,
+            definition_xml: None,
+        }
+    }
+
+    #[test]
+    fn a_quoted_command_is_the_same_program_as_a_bare_one() {
+        for execute in [
+            r#""C:\Program Files\Demo\demo.exe""#,
+            r"C:\Program Files\Demo\demo.exe",
+            r#"  "C:\Program Files\Demo\demo.exe"  "#,
+            r"c:\program files\demo\bin\other.exe",
+        ] {
+            let task = task_from_action(&context(), action("Update", execute));
+            assert!(
+                task.is_some_and(|task| !task.action_command.to_string_lossy().contains('"')),
+                "{execute}"
+            );
+        }
+        assert!(
+            task_from_action(
+                &context(),
+                action("Other", r#""C:\Program Files\Demos\x.exe""#)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_task_with_two_programs_is_one_task() {
+        let tasks = [
+            action("Update", r"C:\Program Files\Demo\demo.exe"),
+            action("UPDATE", r"C:\Program Files\Demo\second.exe"),
+            action("Other", r"C:\Program Files\Demo\demo.exe"),
+        ]
+        .into_iter()
+        .filter_map(|action| task_from_action(&context(), action))
+        .collect();
+        let names: Vec<String> = one_entry_per_task(tasks)
+            .into_iter()
+            .map(|task| task.task_name)
+            .collect();
+        assert_eq!(names, ["Update", "Other"]);
+    }
 
     const SAMPLE_TASK_XML: &str = r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">

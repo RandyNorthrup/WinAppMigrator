@@ -731,6 +731,8 @@ fn app_files() -> Vec<(&'static str, &'static [u8])> {
         (r"conf\readonly.dat", b"an earlier install left this\r\n"),
         (r"plugins\a\plugin.txt", b"a\r\n"),
         (r"plugins\Größe.txt", b"not ASCII\r\n"),
+        // A device's name with an extension is an ordinary file on this version of Windows.
+        (r"include\aux.h", b"// not a device\r\n"),
     ]
 }
 
@@ -1361,8 +1363,9 @@ fn check_driver(checks: &mut Checks, root: &str) -> TestResult {
 
 fn check_tasks(checks: &mut Checks, root: &str) -> TestResult {
     let names = powershell(&format!(
-        "Get-ScheduledTask -TaskPath {} -ErrorAction SilentlyContinue | \
-         ForEach-Object {{ $_.TaskName }} | Sort-Object",
+        "$ErrorActionPreference = 'Continue'; \
+         Get-ScheduledTask -TaskPath {} -ErrorAction SilentlyContinue | \
+         ForEach-Object {{ $_.TaskName }} | Sort-Object; exit 0",
         quoted(TASK_FOLDER)
     ))?;
     checks.same(
@@ -1602,6 +1605,7 @@ fn check_scan(checks: &mut Checks, manifest: &PackageManifest) {
         r"bin\WAM E2E Shell.dll",
         r"conf\app.conf",
         r"plugins\Größe.txt",
+        r"include\aux.h",
     ] {
         checks.that(
             &format!("scan: the file {wanted}"),
@@ -2737,11 +2741,7 @@ fn staging_folder_is_locked_down_and_fails_closed() -> TestResult {
          ForEach-Object {{ $_.FullName }}",
         quoted(FAT32_DRIVE)
     ))?;
-    checks.same(
-        "the volume with no permissions never held the staging folder",
-        left.trim(),
-        "",
-    );
+    checks.same("no staging folder is left on that volume", left.trim(), "");
 
     checks.finish()
 }

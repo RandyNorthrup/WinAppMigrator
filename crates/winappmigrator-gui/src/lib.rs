@@ -456,19 +456,20 @@ fn run_build(
     // self-extracting installer. The name is random and removal is automatic, even
     // if the build fails or is cancelled.
     // Elevated code reads from here to build the installer, so other processes must not
-    // be able to change it in the meantime. The build stops if that cannot be arranged.
-    let staging_parent = match ProtectedFolder::new_in(
-        staging_base(&job.installer_dir),
-        STAGING_PREFIX,
-    ) {
-        Ok(directory) => directory,
-        Err(error) => {
-            return MigrateMessage::Failed(format!(
-                "Could not create a protected staging folder near {}, so nothing was built: {error}",
-                job.installer_dir.display()
-            ));
-        }
-    };
+    // be able to change it in the meantime. A drive that keeps no permissions, such as a
+    // FAT32 or exFAT USB stick, cannot arrange that, so the system's temp folder is used
+    // instead. The build stops if neither can.
+    let staging_parent =
+        match ProtectedFolder::new_in(staging_base(&job.installer_dir), STAGING_PREFIX)
+            .or_else(|_| ProtectedFolder::new_in_temp(STAGING_PREFIX))
+        {
+            Ok(directory) => directory,
+            Err(error) => {
+                return MigrateMessage::Failed(format!(
+                    "Could not create a protected staging folder, so nothing was built: {error}",
+                ));
+            }
+        };
     let staging = staging_parent.path().join(&job.base_name);
 
     let options = PackageOptions {

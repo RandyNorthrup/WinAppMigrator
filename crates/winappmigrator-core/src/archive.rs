@@ -126,17 +126,23 @@ fn extract_zip_reader<R: Read + Seek>(reader: R, destination_root: &Path) -> Res
         let mut file = archive
             .by_index(index)
             .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
-        let Some(enclosed_name) = file.enclosed_name() else {
-            let name = file
-                .name()
-                .map_or_else(|_| "<invalid name>".to_owned(), |name| name.into_owned());
+        // Not `enclosed_name`, which up to at least zip 9.2.2 panics when a name's third byte
+        // falls inside a character, as in `Größe.txt`. It also refuses `aux.h`, which a scan
+        // rightly copies, so one such file would stop the whole install. These checks are
+        // what it was for: only plain names below the destination get through.
+        let name = file
+            .name()
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?
+            .into_owned();
+        if name.contains('\0') {
             return Err(WinAppMigratorError::Archive(format!(
                 "zip entry has unsafe path: {name}"
             )));
-        };
-        reject_unsafe_components(&enclosed_name)
+        }
+        let relative = Path::new(&name);
+        reject_unsafe_components(relative)
             .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
-        let destination = destination_root.join(enclosed_name);
+        let destination = destination_root.join(relative);
 
         if file.is_dir() {
             fs::create_dir_all(&destination)
@@ -712,10 +718,17 @@ mod tests {
     fn extraction_refuses_names_that_are_not_plain_files() -> Result<()> {
         for name in [
             "files/CON",
-            "files/nul.txt",
+            "files/nul",
             "files/a.exe:stream",
             "files/.. ",
             "../outside.txt",
+            "files/../../outside.txt",
+            "/outside.txt",
+            "C:/outside.txt",
+            "C:outside.txt",
+            r"\\server\share\outside.txt",
+            "files/a?b.txt",
+            "files/a\0b.txt",
         ] {
             let root =
                 tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
@@ -732,6 +745,27 @@ mod tests {
                     .count(),
                 0
             );
+        }
+        Ok(())
+    }
+
+    /// The zip crate panics on the first of these if its own name check gets to see it.
+    #[test]
+    fn extraction_keeps_names_that_are_not_ascii() -> Result<()> {
+        let names = [
+            "files/Größe.txt",
+            "files/Grüße/Größe.txt",
+            "files/a日本語.txt",
+            "files/日本語.txt",
+            "files/ab\u{1F600}.txt",
+        ];
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let zip = zip_holding(&names)?;
+
+        extract_zip_reader(io::Cursor::new(zip), root.path())?;
+
+        for name in names {
+            assert!(root.path().join(name).is_file(), "{name}");
         }
         Ok(())
     }

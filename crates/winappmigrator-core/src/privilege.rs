@@ -14,6 +14,17 @@ const ADMINISTRATORS_SID: &str = "*S-1-5-32-544";
 const ADMINISTRATORS_ONLY_GRANTS: [&str; 2] = ["*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"];
 /// The mandatory labels of a process running with full rights: High, and System.
 const ELEVATED_LABELS: [&str; 2] = ["S-1-16-12288", "S-1-16-16384"];
+const POWERSHELL_EXE: &str = "powershell.exe";
+/// The path travels in this variable, so that no quoting can go wrong.
+const ACL_PATH_VARIABLE: &str = "WAM_ACL_PATH";
+const READ_SDDL_SCRIPT: &str = "(Get-Acl -LiteralPath $env:WAM_ACL_PATH).Sddl";
+/// The owner a protected folder has in SDDL, the form that reads the same in any language.
+const SDDL_ADMINISTRATORS_OWNER: &str = "O:BA";
+const SDDL_GROUP_MARKER: &str = "G:";
+const SDDL_DACL_MARKER: &str = "D:";
+const SDDL_DACL_PROTECTED_FLAG: char = 'P';
+/// [`ADMINISTRATORS_ONLY_GRANTS`] as Windows writes them back, in sorted order.
+const SDDL_ADMINISTRATORS_ONLY_ACES: [&str; 2] = ["A;OICI;FA;;;BA", "A;OICI;FA;;;SY"];
 const FILE_SHARE_READ: u32 = 0x0000_0001;
 const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 /// What lets `CreateFile` open a folder at all.
@@ -107,6 +118,7 @@ fn protect_staging_folder(folder: &Path) -> io::Result<()> {
         Some(true) => {
             take_ownership_for_administrators(folder)?;
             restrict_to_administrators(folder)?;
+            confirm_administrators_only(folder)?;
             refuse_anything_already_inside(folder)
         }
         Some(false) => Ok(()),
@@ -156,6 +168,54 @@ fn take_ownership_for_administrators(folder: &Path) -> io::Result<()> {
 
 fn restrict_to_administrators(folder: &Path) -> io::Result<()> {
     run_icacls(folder, administrators_only_arguments(folder))
+}
+
+/// Ask Windows what the folder's permissions came out as. `icacls` reports success on a
+/// volume that keeps none, such as FAT32 or exFAT, where the folder stays open to everyone,
+/// so it is the result that counts and not the exit code.
+fn confirm_administrators_only(folder: &Path) -> io::Result<()> {
+    let output = hidden_command(POWERSHELL_EXE)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            READ_SDDL_SCRIPT,
+        ])
+        .env(ACL_PATH_VARIABLE, folder)
+        .output()?;
+    let sddl = String::from_utf8_lossy(&output.stdout);
+    if output.status.success() && sddl_is_administrators_only(sddl.trim()) {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "{} could not be restricted to administrators, and its drive may not keep permissions: \
+         {}{}",
+        folder.display(),
+        sddl.trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
+/// True when a security descriptor says administrators own the folder, it inherits nothing,
+/// and only administrators and SYSTEM are on it, with full access to it and what is inside.
+fn sddl_is_administrators_only(sddl: &str) -> bool {
+    let Some((owner_and_group, dacl)) = sddl.split_once(SDDL_DACL_MARKER) else {
+        return false;
+    };
+    let owner = owner_and_group
+        .split_once(SDDL_GROUP_MARKER)
+        .map_or(owner_and_group, |(owner, _)| owner);
+    let Some((flags, aces)) = dacl.split_once('(') else {
+        return false;
+    };
+    let Some(aces) = aces.strip_suffix(')') else {
+        return false;
+    };
+    let mut aces: Vec<&str> = aces.split(")(").collect();
+    aces.sort_unstable();
+    owner == SDDL_ADMINISTRATORS_OWNER
+        && flags.contains(SDDL_DACL_PROTECTED_FLAG)
+        && aces == SDDL_ADMINISTRATORS_ONLY_ACES
 }
 
 /// The folder was empty when it was created. Anything there now arrived in the moment
@@ -252,6 +312,41 @@ mod tests {
             ]
             .map(OsString::from)
         );
+    }
+
+    #[test]
+    fn only_what_was_asked_for_counts_as_protected() {
+        const GROUP: &str = "G:S-1-5-21-2150206276-3426440022-602146264-513";
+        for good in [
+            format!("O:BA{GROUP}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"),
+            format!("O:BA{GROUP}D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)"),
+            "O:BAG:DUD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_owned(),
+            "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_owned(),
+        ] {
+            assert!(sddl_is_administrators_only(&good), "{good}");
+        }
+        for bad in [
+            // What a FAT32 or exFAT folder reports, whatever was asked of it.
+            "O:WDG:WDD:PAI(A;OICI;FA;;;WD)".to_owned(),
+            // The signed-in user still owns it, and so can change it.
+            format!("O:S-1-5-21-1-2-3-1001{GROUP}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"),
+            // Still inheriting from its parent.
+            format!("O:BA{GROUP}D:AI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"),
+            // Someone else on it, or only half of it.
+            format!("O:BA{GROUP}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;WD)"),
+            format!("O:BA{GROUP}D:PAI(A;OICI;FA;;;BU)(A;OICI;FA;;;BA)"),
+            format!("O:BA{GROUP}D:PAI(A;OICI;FA;;;BA)"),
+            // Not what was granted.
+            format!("O:BA{GROUP}D:PAI(A;;FA;;;SY)(A;;FA;;;BA)"),
+            format!("O:BA{GROUP}D:PAI(D;OICI;FA;;;SY)(A;OICI;FA;;;BA)"),
+            // No permissions at all means open to everyone.
+            format!("O:BA{GROUP}D:NO_ACCESS_CONTROL"),
+            format!("O:BA{GROUP}D:P"),
+            format!("O:BA{GROUP}"),
+            String::new(),
+        ] {
+            assert!(!sddl_is_administrators_only(&bad), "{bad}");
+        }
     }
 
     /// Runs the real command on a temp folder. A normal shell is locked out by it, which
