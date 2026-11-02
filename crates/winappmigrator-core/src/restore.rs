@@ -1,7 +1,9 @@
 use std::borrow::Cow;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use filetime::{FileTime, set_file_times};
 use tempfile::TempDir;
@@ -12,8 +14,9 @@ use winreg::enums::REG_NONE;
 use crate::archive::extract_zip_archive;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
-    ensure_within_root, package_destination_path, restore_destination_for_entry,
-    safe_relative_path, split_user_data_relative, user_data_real_destination,
+    ensure_target_root, ensure_within_root, package_destination_path, reject_unsafe_components,
+    restore_destination, restore_destination_for_entry, safe_relative_path,
+    split_user_data_relative, user_data_real_destination, write_root_for,
 };
 use crate::models::{
     DriverEntry, DriverKind, EnvironmentVariableEntry, PackageManifest, RegistryEntry,
@@ -23,6 +26,7 @@ use crate::models::{
 use crate::package::read_manifest;
 use crate::path_utils::{
     escape_powershell_single, hidden_command, is_drive_root, sanitize_filename,
+    strip_prefix_ignore_case,
 };
 use crate::prerequisites::{PrerequisiteInstallOutcome, install_bundle, is_present};
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
@@ -30,16 +34,22 @@ use crate::registry_target::{
     app_path_entries, environment_registry_target, is_path_variable, merge_path_entries,
     registry_hive_name, registry_raw_type, registry_root, registry_value_name,
 };
-use crate::verify::verify_package;
+use crate::verify::verify_prepared_package;
 
 const RESTORE_LOG_JSON: &str = "restore_log.json";
 const RESTORE_LOG_MARKDOWN: &str = "restore_log.md";
 const ZIP_EXTENSION: &str = "zip";
 const POWERSHELL_EXE: &str = "powershell.exe";
 const SC_EXE: &str = "sc.exe";
+/// Buffer for copying a file out of the package. Large files are the slow ones.
+const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
 pub fn plan_restore(options: &RestoreOptions) -> Result<RestorePlan> {
     let manifest = read_manifest(&options.package_root)?;
+    Ok(plan_from_manifest(manifest, options))
+}
+
+fn plan_from_manifest(manifest: PackageManifest, options: &RestoreOptions) -> RestorePlan {
     let mut warnings = manifest.warnings.clone();
     let mut planned_file_writes = Vec::new();
 
@@ -60,7 +70,7 @@ pub fn plan_restore(options: &RestoreOptions) -> Result<RestorePlan> {
         planned_file_writes.push(file);
     }
 
-    Ok(RestorePlan {
+    RestorePlan {
         package_root: options.package_root.clone(),
         target_root: options.target_root.clone(),
         dry_run: !options.apply || options.dry_run,
@@ -72,7 +82,7 @@ pub fn plan_restore(options: &RestoreOptions) -> Result<RestorePlan> {
         planned_shortcut_changes: manifest.shortcuts_detected,
         planned_environment_changes: manifest.environment_variables_detected,
         warnings,
-    })
+    }
 }
 
 pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
@@ -92,12 +102,14 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     let prepared = PreparedPackage::new(options)?;
     let mut effective_options = options.clone();
     effective_options.package_root = prepared.package_root().to_path_buf();
+    // Read once. Everything below works from this copy, so nothing can change between
+    // the hash check and the install, even if the file on disk does.
+    let manifest = read_manifest(&effective_options.package_root)?;
     if options.apply {
-        refuse_damaged_package(&effective_options)?;
+        refuse_damaged_package(&effective_options, &manifest)?;
     }
 
-    let manifest = read_manifest(&effective_options.package_root)?;
-    let plan = plan_restore(&effective_options)?;
+    let plan = plan_from_manifest(manifest.clone(), &effective_options);
     if options.apply && restore_requires_admin(&plan) && !is_elevated() {
         return Err(WinAppMigratorError::InvalidInput(
             "restore plan includes admin-only registry, service, scheduled task, shortcut, or protected target changes"
@@ -122,6 +134,9 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     }
 
     let path_rewrites = path_rewrites(&manifest, &options.target_root, options.restore_user_data)?;
+    if options.apply {
+        ensure_target_root(&options.target_root)?;
+    }
     let output_dir = restore_output_dir(&options.package_root, &effective_options.package_root);
     let mut changes_logged = Vec::new();
     let mut warnings = plan.warnings.clone();
@@ -214,13 +229,17 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     );
 
     let verification = if options.apply {
-        match verify_package(&VerificationOptions {
-            package_root: effective_options.package_root.clone(),
-            target_root: Some(options.target_root.clone()),
-            output_dir: Some(output_dir.clone()),
-            restore_user_data: options.restore_user_data,
-            restore_license: options.restore_license,
-        }) {
+        match verify_prepared_package(
+            &effective_options.package_root,
+            &manifest,
+            &VerificationOptions {
+                package_root: effective_options.package_root.clone(),
+                target_root: Some(options.target_root.clone()),
+                output_dir: Some(output_dir.clone()),
+                restore_user_data: options.restore_user_data,
+                restore_license: options.restore_license,
+            },
+        ) {
             Ok(report) => {
                 if !report.package_valid || report.restore_valid == Some(false) {
                     errors.extend(report.errors.clone());
@@ -296,7 +315,7 @@ fn restore_files(
         }
 
         if options.apply {
-            copy_restore_file(&source, &destination)?;
+            copy_restore_file(&source, &destination, &options.target_root)?;
             changes_logged.push(format!(
                 "copied {} -> {}",
                 source.display(),
@@ -603,9 +622,9 @@ fn restore_license(
             continue;
         }
         let result = if is_dir {
-            copy_license_dir(&source, &destination)
+            copy_license_dir(&source, &destination, &options.target_root)
         } else {
-            copy_restore_file(&source, &destination)
+            copy_restore_file(&source, &destination, &options.target_root)
         };
         match result {
             Ok(()) => changes_logged.push(format!(
@@ -653,7 +672,7 @@ fn license_destination(
     Ok(PathBuf::from(rewritten))
 }
 
-fn copy_license_dir(source: &Path, destination: &Path) -> Result<()> {
+fn copy_license_dir(source: &Path, destination: &Path, target_root: &Path) -> Result<()> {
     for entry in WalkDir::new(source).follow_links(false) {
         let entry = entry.map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
         if !entry.file_type().is_file() {
@@ -663,7 +682,7 @@ fn copy_license_dir(source: &Path, destination: &Path) -> Result<()> {
             .path()
             .strip_prefix(source)
             .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
-        copy_restore_file(entry.path(), &destination.join(relative))?;
+        copy_restore_file(entry.path(), &destination.join(relative), target_root)?;
     }
     Ok(())
 }
@@ -739,7 +758,7 @@ fn restore_drivers(
                 continue;
             }
         };
-        if let Err(error) = copy_restore_file(&source, &destination) {
+        if let Err(error) = copy_restore_file(&source, &destination, &options.target_root) {
             errors.push(Warning::new(
                 "driver_copy_failed",
                 WarningSeverity::Error,
@@ -830,7 +849,9 @@ fn driver_restore_destination(
         &driver.image_path.to_string_lossy(),
         path_rewrites,
     ));
-    if ensure_within_root(target_root, &rewritten).is_ok() {
+    if strip_prefix_ignore_case(&rewritten, target_root).is_some_and(|relative| {
+        !relative.as_os_str().is_empty() && reject_unsafe_components(&relative).is_ok()
+    }) {
         return Ok(rewritten);
     }
     let leaf = driver
@@ -838,11 +859,10 @@ fn driver_restore_destination(
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| format!("{}.sys", sanitize_filename(&driver.service_name)));
-    let destination = target_root
-        .join("drivers")
-        .join(safe_relative_path(Path::new(&leaf)));
-    ensure_within_root(target_root, &destination)?;
-    Ok(destination)
+    restore_destination(
+        target_root,
+        &Path::new("drivers").join(safe_relative_path(Path::new(&leaf))),
+    )
 }
 
 fn restore_scheduled_tasks(
@@ -942,14 +962,18 @@ fn restore_shortcuts(
 
 /// Hash-check the package before anything is written, so a truncated or damaged
 /// copy is refused instead of running prerequisites and overwriting the app first.
-fn refuse_damaged_package(options: &RestoreOptions) -> Result<()> {
-    let report = verify_package(&VerificationOptions {
-        package_root: options.package_root.clone(),
-        target_root: None,
-        output_dir: None,
-        restore_user_data: options.restore_user_data,
-        restore_license: options.restore_license,
-    })?;
+fn refuse_damaged_package(options: &RestoreOptions, manifest: &PackageManifest) -> Result<()> {
+    let report = verify_prepared_package(
+        &options.package_root,
+        manifest,
+        &VerificationOptions {
+            package_root: options.package_root.clone(),
+            target_root: None,
+            output_dir: None,
+            restore_user_data: options.restore_user_data,
+            restore_license: options.restore_license,
+        },
+    )?;
     if report.package_valid {
         return Ok(());
     }
@@ -1316,18 +1340,72 @@ fn apply_shortcut(
         .map(|_| format!("restored shortcut {}", shortcut.original_lnk_path.display()))
 }
 
-fn copy_restore_file(source: &Path, destination: &Path) -> Result<()> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
+/// Put a file from the package at its destination. It is written beside the destination
+/// under a new name, then renamed over it. A rename replaces whatever is at the
+/// destination and cannot be carried through it, unlike opening it for writing, which
+/// follows a link and also writes through a hard link. It also means a failure part-way
+/// through a file leaves the old one in place.
+fn copy_restore_file(source: &Path, destination: &Path, target_root: &Path) -> Result<()> {
+    let root = write_root_for(destination, target_root).ok_or_else(|| {
+        WinAppMigratorError::InvalidInput(format!(
+            "refusing to write outside the install location and the known data folders: {}",
+            destination.display()
+        ))
+    })?;
+    ensure_within_root(&root, destination)?;
+    let parent = destination.parent().ok_or_else(|| {
+        WinAppMigratorError::InvalidInput(format!(
+            "destination has no parent folder: {}",
+            destination.display()
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
+
+    let partial = parent.join(partial_file_name());
+    let copied = write_partial_copy(source, &partial).and_then(|()| {
+        fs::rename(&partial, destination)
+            .map_err(|error| WinAppMigratorError::io(destination, error))
+    });
+    if copied.is_err() {
+        let _ = fs::remove_file(&partial);
     }
-    fs::copy(source, destination).map_err(|error| WinAppMigratorError::io(destination, error))?;
-    let metadata = fs::metadata(source).map_err(|error| WinAppMigratorError::io(source, error))?;
-    fs::set_permissions(destination, metadata.permissions())
-        .map_err(|error| WinAppMigratorError::io(destination, error))?;
+    copied
+}
+
+/// A name no other copy in this run is using. It is opened with `create_new`, which
+/// fails on anything already there, so the name does not need to be secret.
+fn partial_file_name() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        ".wam-{}-{}.partial",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn write_partial_copy(source: &Path, partial: &Path) -> Result<()> {
+    let mut input = File::open(source).map_err(|error| WinAppMigratorError::io(source, error))?;
+    let output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(partial)
+        .map_err(|error| WinAppMigratorError::io(partial, error))?;
+    let mut output = BufWriter::with_capacity(COPY_BUFFER_BYTES, output);
+    io::copy(&mut input, &mut output).map_err(|error| WinAppMigratorError::io(partial, error))?;
+    drop(
+        output
+            .into_inner()
+            .map_err(|error| WinAppMigratorError::io(partial, error.into_error()))?,
+    );
+    let metadata = input
+        .metadata()
+        .map_err(|error| WinAppMigratorError::io(source, error))?;
     let accessed = FileTime::from_last_access_time(&metadata);
     let modified = FileTime::from_last_modification_time(&metadata);
-    set_file_times(destination, accessed, modified)
-        .map_err(|error| WinAppMigratorError::io(destination, error))?;
+    set_file_times(partial, accessed, modified)
+        .map_err(|error| WinAppMigratorError::io(partial, error))?;
+    fs::set_permissions(partial, metadata.permissions())
+        .map_err(|error| WinAppMigratorError::io(partial, error))?;
     Ok(())
 }
 
@@ -1701,6 +1779,111 @@ mod tests {
         };
 
         assert!(restore_package(&options).is_err());
+    }
+
+    fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
+        }
+        fs::write(path, bytes).map_err(|error| WinAppMigratorError::io(path, error))
+    }
+
+    fn temp_folder() -> Result<TempDir> {
+        tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp folder", error))
+    }
+
+    #[test]
+    fn copying_creates_the_file_and_leaves_nothing_else_behind() -> Result<()> {
+        let work = temp_folder()?;
+        let source = work.path().join("source.bin");
+        write_file(&source, b"new")?;
+        let root = work.path().join("target");
+        fs::create_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
+        let destination = root.join(r"bin\app.exe");
+
+        copy_restore_file(&source, &destination, &root)?;
+        write_file(&source, b"newer")?;
+        copy_restore_file(&source, &destination, &root)?;
+
+        assert_eq!(
+            fs::read(&destination).map_err(|error| WinAppMigratorError::io(&destination, error))?,
+            b"newer"
+        );
+        let names: Vec<_> = fs::read_dir(root.join("bin"))
+            .map_err(|error| WinAppMigratorError::io(&root, error))?
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(names, ["app.exe"]);
+        Ok(())
+    }
+
+    #[test]
+    fn copying_refuses_a_destination_outside_the_known_folders() -> Result<()> {
+        let work = temp_folder()?;
+        let source = work.path().join("source.bin");
+        write_file(&source, b"x")?;
+        let root = work.path().join("target");
+        fs::create_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
+        // Not a temp path: temp folders sit inside %LOCALAPPDATA%, which is a known folder.
+        let outside = Path::new(r"Z:\wam-not-a-known-folder\outside.bin");
+
+        let refused = copy_restore_file(&source, outside, &root);
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::InvalidInput(message)) if message.contains("refusing")),
+            "{refused:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn copying_replaces_a_hard_link_instead_of_writing_through_it() -> Result<()> {
+        let work = temp_folder()?;
+        let source = work.path().join("source.bin");
+        write_file(&source, b"new")?;
+        let root = work.path().join("target");
+        fs::create_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
+        let victim = work.path().join("victim.bin");
+        write_file(&victim, b"keep")?;
+        let destination = root.join("app.exe");
+        fs::hard_link(&victim, &destination)
+            .map_err(|error| WinAppMigratorError::io(&destination, error))?;
+
+        copy_restore_file(&source, &destination, &root)?;
+
+        assert_eq!(
+            fs::read(&victim).map_err(|error| WinAppMigratorError::io(&victim, error))?,
+            b"keep"
+        );
+        assert_eq!(
+            fs::read(&destination).map_err(|error| WinAppMigratorError::io(&destination, error))?,
+            b"new"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn copying_refuses_a_file_symbolic_link_at_the_destination() -> Result<()> {
+        let work = temp_folder()?;
+        let source = work.path().join("source.bin");
+        write_file(&source, b"new")?;
+        let root = work.path().join("target");
+        fs::create_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
+        let victim = work.path().join("victim.bin");
+        write_file(&victim, b"keep")?;
+        let destination = root.join("app.exe");
+        // Symbolic links need Developer Mode or elevation, so this cannot always run.
+        if std::os::windows::fs::symlink_file(&victim, &destination).is_err() {
+            eprintln!("skipping: this shell cannot create a symbolic link");
+            return Ok(());
+        }
+
+        assert!(copy_restore_file(&source, &destination, &root).is_err());
+        assert_eq!(
+            fs::read(&victim).map_err(|error| WinAppMigratorError::io(&victim, error))?,
+            b"keep"
+        );
+        Ok(())
     }
 
     #[test]

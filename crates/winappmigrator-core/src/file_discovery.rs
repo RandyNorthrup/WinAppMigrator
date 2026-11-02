@@ -204,26 +204,171 @@ pub fn package_destination_path(
     package_relative_path: &Path,
 ) -> Result<PathBuf> {
     let relative = safe_relative_path(package_relative_path);
-    let destination = package_root.join(relative);
-    ensure_within_root(package_root, &destination)?;
-    Ok(destination)
+    reject_reserved_device_names(&relative)?;
+    Ok(package_root.join(relative))
 }
 
+/// Check a path just before writing to it. `root` must already exist and be absolute,
+/// `candidate` must lie inside it by its components alone, and nothing from `root` down
+/// to `candidate` may be a link. Windows reports junctions, symbolic links, and mount
+/// points the same way, and each would carry the write somewhere else. A cloud
+/// placeholder is a reparse point too, but it is not reported as a link and redirects
+/// nothing, so a folder synced by OneDrive stays usable.
+///
+/// A link at or above `root` is the caller's business: the install location is checked
+/// once by [`ensure_target_root`], and an ancestor can legitimately be a mounted volume.
 pub fn ensure_within_root(root: &Path, candidate: &Path) -> Result<()> {
-    let canonical_root = canonical_or_current(root)?;
-    let canonical_parent = candidate
-        .parent()
-        .map(canonical_or_current)
-        .transpose()?
-        .unwrap_or_else(|| canonical_root.clone());
-    if canonical_parent.starts_with(&canonical_root) {
-        Ok(())
-    } else {
-        Err(WinAppMigratorError::InvalidInput(format!(
-            "path escapes intended root: {}",
-            candidate.display()
-        )))
+    if !root.is_absolute() {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "the folder to write under must be a full path: {}",
+            root.display()
+        )));
     }
+    if !fs::metadata(root)
+        .map_err(|source| WinAppMigratorError::io(root, source))?
+        .is_dir()
+    {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "the folder to write under is not a folder: {}",
+            root.display()
+        )));
+    }
+    let relative = strip_prefix_ignore_case(candidate, root)
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .ok_or_else(|| {
+            WinAppMigratorError::InvalidInput(format!(
+                "path escapes intended root: {}",
+                candidate.display()
+            ))
+        })?;
+    reject_unsafe_components(&relative)?;
+
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(WinAppMigratorError::InvalidInput(format!(
+                    "refusing to write through a link: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            // Nothing below a missing folder can exist.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(WinAppMigratorError::io(&current, error)),
+        }
+    }
+    Ok(())
+}
+
+/// Create the install location and confirm it is a real folder. Run once, before
+/// anything is written: a junction planted there would carry the whole install
+/// somewhere else.
+pub fn ensure_target_root(target_root: &Path) -> Result<()> {
+    if !target_root.is_absolute() {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "the install location must be a full path: \"{}\"",
+            target_root.display()
+        )));
+    }
+    fs::create_dir_all(target_root)
+        .map_err(|source| WinAppMigratorError::io(target_root, source))?;
+    let metadata = fs::symlink_metadata(target_root)
+        .map_err(|source| WinAppMigratorError::io(target_root, source))?;
+    if metadata.file_type().is_symlink() {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "the install location is a link to somewhere else: {}",
+            target_root.display()
+        )));
+    }
+    Ok(())
+}
+
+/// The folder a restored file's location is checked against: the install location, or
+/// the real user-data folder it was re-anchored to. `None` for anything else, which
+/// nothing should be writing to.
+pub fn write_root_for(destination: &Path, target_root: &Path) -> Option<PathBuf> {
+    if path_is_within(destination, target_root) {
+        return Some(target_root.to_path_buf());
+    }
+    USER_DATA_ANCHORS
+        .iter()
+        .filter_map(|(anchor, _)| user_data_base(*anchor))
+        .find(|base| path_is_within(destination, base))
+}
+
+/// True for the names Windows opens as a device instead of a file. The extension does
+/// not help: on Windows 10 `con.txt` still opens the console.
+pub fn is_reserved_device_name(component: &str) -> bool {
+    let stem = component.split('.').next().unwrap_or_default().trim_end();
+    let upper = stem.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let (Some(prefix), Some(suffix)) = (upper.get(..3), upper.get(3..)) else {
+        return false;
+    };
+    matches!(prefix, "COM" | "LPT")
+        && matches!(
+            suffix,
+            "0" | "1"
+                | "2"
+                | "3"
+                | "4"
+                | "5"
+                | "6"
+                | "7"
+                | "8"
+                | "9"
+                | "\u{b9}"
+                | "\u{b2}"
+                | "\u{b3}"
+        )
+}
+
+/// True when any folder or file in `path` has a name Windows opens as a device.
+pub fn has_reserved_device_name(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        Component::Normal(value) => is_reserved_device_name(&value.to_string_lossy()),
+        _ => false,
+    })
+}
+
+fn reject_reserved_device_names(path: &Path) -> Result<()> {
+    if has_reserved_device_name(path) {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "path uses a name reserved for a Windows device: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse a path relative to some root unless every part of it is an ordinary name.
+/// `:` would address an alternate data stream, and Windows silently drops a trailing
+/// dot or space, so `..` could be spelled `.. .`.
+pub(crate) fn reject_unsafe_components(relative: &Path) -> Result<()> {
+    reject_reserved_device_names(relative)?;
+    for component in relative.components() {
+        let safe = match component {
+            Component::Normal(value) => {
+                let value = value.to_string_lossy();
+                !value.contains(':') && !value.ends_with(['.', ' '])
+            }
+            _ => false,
+        };
+        if !safe {
+            return Err(WinAppMigratorError::InvalidInput(format!(
+                "unsafe path: {}",
+                relative.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The per-user/per-machine data root an archived file originally lived under.
@@ -254,15 +399,17 @@ const USER_DATA_ANCHORS: &[(UserDataAnchor, &str)] = &[
 /// Sandbox restore destination: strip the package `files` root and join the
 /// remaining relative path onto `target_root`. This is the conservative default
 /// for every archived file, and the fallback for user data that cannot be
-/// re-anchored. Guards against path traversal out of `target_root`.
+/// re-anchored. Working on names alone, it touches no disk, so a preview can use it for
+/// a location that does not exist yet: [`safe_relative_path`] leaves no way out of
+/// `target_root`, and [`ensure_within_root`] checks the real path before anything is
+/// written.
 pub fn restore_destination(target_root: &Path, package_relative_path: &Path) -> Result<PathBuf> {
     let relative = safe_relative_path(package_relative_path);
+    reject_reserved_device_names(&relative)?;
     let without_files = relative
         .strip_prefix(PACKAGE_FILES_ROOT)
         .unwrap_or(&relative);
-    let destination = target_root.join(without_files);
-    ensure_within_root(target_root, &destination)?;
-    Ok(destination)
+    Ok(target_root.join(without_files))
 }
 
 /// Resolve where a packaged file should be written on restore.
@@ -318,9 +465,8 @@ pub fn user_data_real_destination(original_path: &Path) -> Result<Option<PathBuf
     let Some(base) = user_data_base(anchor) else {
         return Ok(None);
     };
-    let destination = base.join(&tail);
-    ensure_within_root(&base, &destination)?;
-    Ok(Some(destination))
+    reject_reserved_device_names(&tail)?;
+    Ok(Some(base.join(&tail)))
 }
 
 /// Split a source path into its user-data anchor and the path relative to that
@@ -851,9 +997,21 @@ fn add_file(
         FileClassification::MachineAppData => include_program_data,
         _ => false,
     };
+    // A file named like a device can only exist if something bypassed Windows' own
+    // rules, and on the target the name would open the device. It stays out of the
+    // package, and restoring refuses a manifest that names one anyway.
+    let reserved_name = has_reserved_device_name(path);
+    if reserved_name && base_should_copy {
+        warnings.push(Warning::new(
+            "file_reserved_name_skipped",
+            WarningSeverity::Warning,
+            "This file's name is reserved for a Windows device, so it was not copied.",
+            Some(path.display().to_string()),
+        ));
+    }
     // An online-only cloud placeholder has no local data; copying it would
     // hydrate or fail, so it is reported but never copied.
-    let should_copy = base_should_copy && !online_only;
+    let should_copy = base_should_copy && !online_only && !reserved_name;
 
     let hash_sha256 = if include_hashes && should_copy {
         match sha256_file(path) {
@@ -1115,22 +1273,13 @@ fn sanitize_component(value: &str) -> String {
             value => output.push(value),
         }
     }
-    let trimmed = output.trim().trim_end_matches('.').to_owned();
+    // Dots and spaces in any order: Windows drops them from the end of a name, which
+    // would turn `.. .` into `..`.
+    let trimmed = output.trim_start().trim_end_matches(['.', ' ']).to_owned();
     if trimmed.is_empty() {
         "_".to_owned()
     } else {
         trimmed
-    }
-}
-
-fn canonical_or_current(path: &Path) -> Result<PathBuf> {
-    if path.exists() {
-        path.canonicalize()
-            .map_err(|source| WinAppMigratorError::io(path, source))
-    } else if let Some(parent) = path.parent() {
-        canonical_or_current(parent)
-    } else {
-        Ok(path.to_path_buf())
     }
 }
 
@@ -1144,6 +1293,159 @@ mod tests {
 
         assert!(!safe.to_string_lossy().contains(".."));
         assert!(!safe.to_string_lossy().contains(':'));
+    }
+
+    #[test]
+    fn no_spelling_of_a_parent_folder_survives() {
+        for name in [
+            r"a\..\b",
+            r"a\.. .\b",
+            r"a\. .\b",
+            r"a\ ..\b",
+            r"a\...\b",
+            r"a\.. ",
+        ] {
+            let safe = safe_relative_path(Path::new(name));
+            for component in safe.components() {
+                let Component::Normal(value) = component else {
+                    panic!("{name} kept {component:?}");
+                };
+                let value = value.to_string_lossy();
+                assert_ne!(value, "..", "{name}");
+                assert!(!value.ends_with(['.', ' ']), "{name} became {value:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn device_names_are_recognized_with_any_case_or_extension() {
+        for name in [
+            "CON",
+            "con",
+            "NUL",
+            "nul.txt",
+            "Com1",
+            "COM9.log",
+            "lpt1",
+            "AUX.h",
+            "PRN",
+            "CONIN$",
+            "COM\u{b9}",
+            "nul .txt",
+        ] {
+            assert!(is_reserved_device_name(name), "{name}");
+        }
+        for name in [
+            "console",
+            "CONTRIBUTING.md",
+            "null",
+            "COM",
+            "COM10",
+            "LPT",
+            "auxiliary.dll",
+            "prn2",
+            "a.con",
+        ] {
+            assert!(!is_reserved_device_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn destinations_refuse_device_names_and_keep_ordinary_files() -> Result<()> {
+        let root = Path::new(r"C:\Target");
+        assert_eq!(
+            restore_destination(root, Path::new(r"files\bin\console.exe"))?,
+            PathBuf::from(r"C:\Target\bin\console.exe")
+        );
+        assert_eq!(
+            package_destination_path(root, Path::new(r"files\com.dll"))?,
+            PathBuf::from(r"C:\Target\files\com.dll")
+        );
+        assert!(restore_destination(root, Path::new(r"files\CON")).is_err());
+        assert!(restore_destination(root, Path::new(r"files\NUL\x.dat")).is_err());
+        assert!(package_destination_path(root, Path::new(r"files\com1.txt")).is_err());
+        Ok(())
+    }
+
+    /// A junction needs no special privilege, unlike a symbolic link, so this runs in a
+    /// normal shell. Temp folders only.
+    fn make_junction(link: &Path, target: &Path) -> bool {
+        crate::path_utils::hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn temp_base() -> Result<tempfile::TempDir> {
+        tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp folder", error))
+    }
+
+    #[test]
+    fn writing_through_a_junction_is_refused() -> Result<()> {
+        let base = temp_base()?;
+        let root = base.path().join("target");
+        let elsewhere = base.path().join("elsewhere");
+        fs::create_dir_all(root.join("real"))
+            .map_err(|error| WinAppMigratorError::io(&root, error))?;
+        fs::create_dir_all(&elsewhere).map_err(|error| WinAppMigratorError::io(&root, error))?;
+        assert!(make_junction(&root.join("linked"), &elsewhere));
+
+        assert!(ensure_within_root(&root, &root.join(r"real\app.exe")).is_ok());
+        assert!(ensure_within_root(&root, &root.join(r"real\new\deep\app.exe")).is_ok());
+        assert!(ensure_within_root(&root, &root.join(r"linked\app.exe")).is_err());
+        assert!(ensure_within_root(&root, &root.join(r"linked\new\app.exe")).is_err());
+        assert!(ensure_within_root(&root, &root.join("linked")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_symbolic_link_at_the_destination_is_refused() -> Result<()> {
+        let base = temp_base()?;
+        let elsewhere = base.path().join("outside.txt");
+        fs::write(&elsewhere, b"x").map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
+        let link = base.path().join("app.exe");
+        // Symbolic links need Developer Mode or elevation, so this cannot always run.
+        if std::os::windows::fs::symlink_file(&elsewhere, &link).is_err() {
+            eprintln!("skipping: this shell cannot create a symbolic link");
+            return Ok(());
+        }
+        assert!(ensure_within_root(base.path(), &link).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn write_checks_need_a_real_absolute_root_and_a_path_inside_it() -> Result<()> {
+        let base = temp_base()?;
+        let root = base.path();
+        assert!(ensure_within_root(Path::new("relative"), Path::new(r"relative\a")).is_err());
+        assert!(ensure_within_root(&root.join("missing"), &root.join(r"missing\a")).is_err());
+        assert!(ensure_within_root(root, &root.join(r"..\a")).is_err());
+        assert!(ensure_within_root(root, &root.join(r"a\..\..\b")).is_err());
+        assert!(ensure_within_root(root, &root.join("CON")).is_err());
+        assert!(ensure_within_root(root, &root.join("a:stream")).is_err());
+        assert!(ensure_within_root(root, root).is_err());
+        assert!(ensure_within_root(root, Path::new(r"C:\Windows\System32\x.dll")).is_err());
+        assert!(ensure_within_root(root, &root.join("a.txt")).is_ok());
+        assert!(ensure_within_root(root, &root.join(r"new\folder\a.txt")).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn a_target_root_is_created_and_must_be_a_real_folder() -> Result<()> {
+        let base = temp_base()?;
+        let fresh = base.path().join(r"new\target");
+        ensure_target_root(&fresh)?;
+        assert!(fresh.is_dir());
+        assert!(ensure_target_root(Path::new("relative")).is_err());
+
+        let linked = base.path().join("linked");
+        assert!(make_junction(&linked, &fresh));
+        assert!(ensure_target_root(&linked).is_err());
+        Ok(())
     }
 
     #[test]

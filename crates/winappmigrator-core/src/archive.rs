@@ -7,7 +7,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::ensure_within_root;
+use crate::file_discovery::reject_unsafe_components;
 use crate::models::InstallerStub;
 use crate::progress::{BuildMonitor, BuildStep};
 
@@ -119,8 +119,9 @@ fn extract_zip_reader<R: Read + Seek>(reader: R, destination_root: &Path) -> Res
                 "zip entry has unsafe path: {name}"
             )));
         };
+        reject_unsafe_components(&enclosed_name)
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
         let destination = destination_root.join(enclosed_name);
-        ensure_within_root(destination_root, &destination)?;
 
         if file.is_dir() {
             fs::create_dir_all(&destination)
@@ -130,7 +131,12 @@ fn extract_zip_reader<R: Read + Seek>(reader: R, destination_root: &Path) -> Res
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
         }
-        let mut output = File::create(&destination)
+        // Extraction goes into a new, empty folder, so anything already at this path was
+        // not put there by this package, and opening it could follow a link.
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
             .map_err(|error| WinAppMigratorError::io(&destination, error))?;
         io::copy(&mut file, &mut output)
             .map_err(|error| WinAppMigratorError::io(&destination, error))?;
@@ -542,6 +548,66 @@ mod tests {
         assert!(extract_root.join("manifest.json").is_file());
         assert!(extract_root.join("files").join("app.exe").is_file());
         fs::remove_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
+        Ok(())
+    }
+
+    fn zip_holding(names: &[&str]) -> Result<Vec<u8>> {
+        let mut bytes = io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(&mut bytes);
+        for name in names {
+            writer
+                .start_file(*name, SimpleFileOptions::default())
+                .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+            writer
+                .write_all(b"x")
+                .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+        }
+        writer
+            .finish()
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+        Ok(bytes.into_inner())
+    }
+
+    #[test]
+    fn extraction_refuses_names_that_are_not_plain_files() -> Result<()> {
+        for name in [
+            "files/CON",
+            "files/nul.txt",
+            "files/a.exe:stream",
+            "files/.. ",
+            "../outside.txt",
+        ] {
+            let root =
+                tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+            let zip = zip_holding(&[name])?;
+            assert!(
+                extract_zip_reader(io::Cursor::new(zip), root.path()).is_err(),
+                "{name} should be refused"
+            );
+            assert_eq!(
+                fs::read_dir(root.path())
+                    .map_err(|error| WinAppMigratorError::io(root.path(), error))?
+                    .filter_map(std::result::Result::ok)
+                    .filter(|entry| entry.path().is_file())
+                    .count(),
+                0
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn extraction_never_opens_something_already_at_the_destination() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let planted = root.path().join("a.txt");
+        fs::write(&planted, b"keep").map_err(|error| WinAppMigratorError::io(&planted, error))?;
+        let zip = zip_holding(&["a.txt"])?;
+
+        assert!(extract_zip_reader(io::Cursor::new(zip), root.path()).is_err());
+        assert_eq!(
+            fs::read(&planted).map_err(|error| WinAppMigratorError::io(&planted, error))?,
+            b"keep"
+        );
         Ok(())
     }
 

@@ -467,8 +467,9 @@ running the installer, and when the same file exists in two accounts the last on
 Elevating with a different administrator account means that account's `%APPDATA%`.
 
 Safety: ProgramData (and other machine-wide protected roots) require elevation on apply —
-`privilege::destination_requires_admin` gates this; each re-anchored destination is bounded
-to its base by `ensure_within_root`; headless restore overwrites existing files only with
+`privilege::destination_requires_admin` gates this; a re-anchored destination's path cannot
+leave its base, and `ensure_within_root` refuses a link anywhere below that base just before
+writing; headless restore overwrites existing files only with
 `--force`, while the installer's window always overwrites and warns first if the install
 folder has files; and the built-in verification runs with the same user-data setting so it
 checks the real locations.

@@ -4,6 +4,21 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **Staging folders are locked down while elevated.** The installer's extraction folder and
+  the app's build folder are restricted to Administrators and SYSTEM before anything is
+  written to them, and the work stops if that fails. A process that is not elevated could
+  otherwise change what elevated code was about to read. An installer no longer deletes an
+  extraction folder newer than an hour, which could belong to another running installer, and
+  no longer follows a link given that folder's name.
+- **Writes cannot be carried somewhere else by a link.** A link anywhere from the install
+  location down to a file is refused, including at the install location itself, and each
+  file is written beside its destination and renamed into place, so a hard link there is
+  replaced rather than written through. Names Windows opens as devices, such as `CON` or
+  `nul.txt`, are left out of packages and refused when restoring. `.. .` can no longer pass
+  for an ordinary name.
+- **The manifest is read once per install,** so the install acts on what its hash check saw.
+- **Elevation is asked about once.** The answer took about a second to get, and was asked for
+  repeatedly inside per-item loops.
 - **The app is now signed.** Releases sign `winappmigrator.exe` with Azure Artifact
   Signing through GitHub's OIDC token, with no stored secret, and record build
   provenance. See `docs/signing.md`. The installer stub deliberately stays unsigned:

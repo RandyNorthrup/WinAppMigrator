@@ -34,21 +34,30 @@ const POWERSHELL_EXE: &str = "powershell.exe";
 
 pub fn verify_package(options: &VerificationOptions) -> Result<VerificationReport> {
     let prepared = PreparedPackage::new(&options.package_root)?;
-    let package_root = prepared.package_root().to_path_buf();
-    let manifest = read_manifest(&package_root)?;
+    let manifest = read_manifest(prepared.package_root())?;
+    verify_prepared_package(prepared.package_root(), &manifest, options)
+}
+
+/// Verify a package that is already unpacked, against a manifest that was already read.
+/// Restoring goes through here, so it checks the same manifest it acts on.
+pub(crate) fn verify_prepared_package(
+    package_root: &Path,
+    manifest: &PackageManifest,
+    options: &VerificationOptions,
+) -> Result<VerificationReport> {
     let mut items = Vec::new();
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
 
-    verify_manifest(&manifest, &mut items, &mut errors);
-    verify_package_files(&package_root, &manifest, &mut items, &mut errors);
-    verify_packaged_license(&package_root, &manifest, &mut items, &mut errors);
-    verify_packaged_prerequisites(&package_root, &manifest, &mut items, &mut errors);
+    verify_manifest(manifest, &mut items, &mut errors);
+    verify_package_files(package_root, manifest, &mut items, &mut errors);
+    verify_packaged_license(package_root, manifest, &mut items, &mut errors);
+    verify_packaged_prerequisites(package_root, manifest, &mut items, &mut errors);
 
     let restore_valid = if let Some(target_root) = options.target_root.as_ref() {
         verify_restored_target(
             target_root,
-            &manifest,
+            manifest,
             options.restore_user_data,
             options.restore_license,
             &mut items,
@@ -80,11 +89,11 @@ pub fn verify_package(options: &VerificationOptions) -> Result<VerificationRepor
         })
         .any(|item| item.status == VerificationStatus::Failed);
 
-    let (report_json, report_markdown) = verification_artifact_paths(options, &package_root);
+    let (report_json, report_markdown) = verification_artifact_paths(options, package_root);
     let mut report = VerificationReport {
         schema_version: VERIFICATION_SCHEMA_VERSION.to_owned(),
         verified_at_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,
-        package_root,
+        package_root: package_root.to_path_buf(),
         target_root: options.target_root.clone(),
         package_valid,
         restore_valid,

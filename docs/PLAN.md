@@ -87,36 +87,34 @@ From the audit of 2026-11-01. Items are removed from this list as they are fixed
    the preview.
 5. **Prerequisite downloads and payloads** are not checked by signature, and HTTPS is not
    enforced on redirects.
-6. **Staging folders** are user-writable while elevated work reads from them. Use an
-   admin-only ACL and hash files while holding their handles.
-7. **Services** are restored with unquoted paths, lose their arguments, and LocalService or
+6. **Services** are restored with unquoted paths, lose their arguments, and LocalService or
    NetworkService become LocalSystem.
-8. **No rollback.** The first copy failure stops the install part-way, and existing files
+7. **No rollback.** The first copy failure stops the install part-way, and existing files
    are overwritten with no backup.
-9. **Secrets.** All values under an app's registry keys and license files in its install
+8. **Secrets.** All values under an app's registry keys and license files in its install
    folder are captured even with the license option off. Apply the license classifiers
    when opted out, and redact secret-named values.
 
 **Performance**
 
-10. Path rewriting checks every value against every file's rule, repeatedly: minutes at
+9. Path rewriting checks every value against every file's rule, repeatedly: minutes at
     100,000 files. Rewrite by root instead.
-11. Every byte is read about five times to build and four times to install. Hash while
+10. Every byte is read about five times to build and four times to install. Hash while
     copying, in parallel.
-12. Compression is single-threaded, and recompresses formats that are already compressed.
-13. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
+11. Compression is single-threaded, and recompresses formats that are already compressed.
+12. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
     lost if one contains a character that breaks the JSON. The offline XML reader could
     serve live scans too.
 
 **Features**
 
-14. Footprint preview with include and exclude before building, offering folders that nearly
+13. Footprint preview with include and exclude before building, offering folders that nearly
     match the product's name, which are now left out.
-15. Size and free-space check before building.
-16. A way past the 4 GiB limit: a small loader plus a data file beside it.
-17. Installer progress, persistent logs, and a change journal enabling rollback and a
+14. Size and free-space check before building.
+15. A way past the 4 GiB limit: a small loader plus a data file beside it.
+16. Installer progress, persistent logs, and a change journal enabling rollback and a
     generated uninstaller.
-18. Target OS and architecture check.
+17. Target OS and architecture check.
 
 ## Not in scope for this release line
 

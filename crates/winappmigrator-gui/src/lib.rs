@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use winappmigrator_core::path_utils::system_root;
+use winappmigrator_core::privilege::protect_staging_folder;
 use winappmigrator_core::{
     AppSelection, BuildMonitor, BuildStep, InstalledApp, InstallerStub, PackageOptions,
     PackageResult, ScanSource, SystemContext, VerificationOptions, VerificationReport,
@@ -466,6 +467,13 @@ fn run_build(
             ));
         }
     };
+    // Elevated code reads from here to build the installer, so other processes must not
+    // be able to change it in the meantime. The build stops if that cannot be arranged.
+    if let Err(error) = protect_staging_folder(staging_parent.path()) {
+        return MigrateMessage::Failed(format!(
+            "Could not protect the staging folder, so nothing was built: {error}"
+        ));
+    }
     let staging = staging_parent.path().join(&job.base_name);
 
     let options = PackageOptions {

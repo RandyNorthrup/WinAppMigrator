@@ -117,6 +117,10 @@ after the application** (`safe_file_stem`), e.g.
 installer likewise extracts its embedded package onto the **install destination's
 drive** (falling back to the installer's own drive, then the system temp drive).
 
+Elevated code reads from both folders, so `privilege::protect_staging_folder` restricts
+them to Administrators and SYSTEM before anything is written there, and the work stops if
+that fails. It does nothing without elevation, where there is no boundary to protect.
+
 ## The produced installer (`winappmigrator-installer`)
 
 Each installer is a standalone GUI self-extractor (its own crate, always embedding a
