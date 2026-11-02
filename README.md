@@ -128,9 +128,10 @@ Please read these before relying on it, especially on a one-way trip from a fail
   a kept service, task, or value still uses stays with it. If part of it is on a drive that is not
   connected, the entry stays, so connect the drive and run it again.
 - **An install location has to be on a drive of this PC, and not under a link.** A network share is refused,
-  and so is a folder that is a link or under one, which says the place it leads to. Use that instead. If a
-  data folder such as `%AppData%` is under a link, and the app has data to restore there, the install fails.
-  A volume mounted on a folder is fine.
+  and so is a folder that is a link or under one. Use the place it leads to instead. If a data folder such as
+  `%AppData%` is under a link, and the app has data to restore there, it is refused before anything changes,
+  so install it without its user data. A volume mounted on a folder is allowed if it has no drive letter of
+  its own.
 - **A file replaced on another drive comes back with its folder's permissions.** Only a file on the same
   drive as `ProgramData` can be moved aside as it is. One elsewhere is copied, and if it had permissions of
   its own, they are not kept.

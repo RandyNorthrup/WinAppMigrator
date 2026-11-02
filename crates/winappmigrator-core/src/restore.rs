@@ -14,8 +14,8 @@ use winreg::enums::{REG_DWORD, REG_NONE, REG_SZ};
 use crate::archive::EmbeddedPackage;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
-    ensure_target_root, ensure_within_root, package_destination_path, pin_path_below_root,
-    safe_relative_path, split_user_data_relative, write_root_for,
+    ensure_target_root, ensure_within_root, first_link_to, link_refusal, package_destination_path,
+    pin_path_below_root, safe_relative_path, split_user_data_relative, write_root_for,
 };
 use crate::hashing::sha256_file;
 use crate::journal::{
@@ -271,6 +271,10 @@ pub fn restore_package_monitored(
     if options.apply && !options.force {
         refuse_replacing_anything(&review)?;
     }
+    refuse_roots_under_links(
+        &roots_outside_the_install_location(&review, &options.target_root),
+        &options.target_root,
+    )?;
 
     let app_name = app_display_name(&manifest);
     let mut target_hold = None;
@@ -540,6 +544,58 @@ fn refuse_replacing_anything(review: &ReviewedPackage<'_>) -> Result<()> {
         ))),
         None => Ok(()),
     }
+}
+
+/// The folders outside the install location that what must be restored would be checked against.
+/// A Desktop or Start Menu shortcut is only a way in, so one that cannot be made is left out then.
+fn roots_outside_the_install_location(
+    review: &ReviewedPackage<'_>,
+    target_root: &Path,
+) -> Vec<PathBuf> {
+    let files = review
+        .files
+        .iter()
+        .filter_map(|file| review.map.destination_of(&file.original_path));
+    let licenses = review
+        .license
+        .iter()
+        .map(|license| license.destination.as_path());
+    let mut roots: Vec<PathBuf> = files
+        .chain(licenses)
+        .filter_map(|destination| write_root_for(destination, target_root))
+        .collect();
+    roots.extend(
+        review
+            .shortcuts
+            .iter()
+            .filter(|shortcut| shortcut.placement.autostart)
+            .map(|shortcut| shortcut.placement.root.clone()),
+    );
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Writing under a link is refused when the first file gets there, which would be after runtimes
+/// and other files. This can be told before anything has happened, and the way out is not the
+/// same as for the install location, which can be chosen.
+fn refuse_roots_under_links(roots: &[PathBuf], target_root: &Path) -> Result<()> {
+    for root in roots
+        .iter()
+        .filter(|root| !path_is_within(root, target_root))
+    {
+        if let Some(link) = first_link_to(root) {
+            return Err(WinAppMigratorError::InvalidInput(format!(
+                "this app has things to restore to {}, and {} is a link to somewhere else, which \
+                 others may be able to change, so nothing was installed. Install it without its \
+                 user data and license data if that is what goes there, or put that folder back \
+                 where it was",
+                root.display(),
+                link.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// How a file should be treated when the app is uninstalled.
@@ -1874,6 +1930,7 @@ fn com_classes_to_leave_alone(
                     .and_then(|key| key.get_value::<String, _>(""))
                     .ok()?;
                 com_server_refusal(
+                    server,
                     &existing,
                     &package_has(server),
                     map.target_root(),
@@ -2337,6 +2394,16 @@ fn apply_shortcut(
 ) -> std::result::Result<String, Warning> {
     let placement = &shortcut.placement;
     let destination = &placement.destination;
+    // Before anything is recorded, because whether a record can be kept is another matter: not
+    // being able to is worth undoing an install for, and this may not be.
+    if let Some(link) = first_link_to(&placement.root) {
+        return Err(Warning::new(
+            "shortcut_destination_invalid",
+            WarningSeverity::Error,
+            link_refusal(&link),
+            Some(destination.display().to_string()),
+        ));
+    }
     let journal_failed = |error: WinAppMigratorError| {
         Warning::new(
             "journal_write_failed",
@@ -4475,6 +4542,60 @@ mod tests {
         }
         assert!(names_in(&elsewhere)?.is_empty(), "nothing went through it");
         drop(hold);
+        Ok(())
+    }
+
+    #[test]
+    fn a_data_folder_under_a_link_is_refused_up_front_and_says_what_can_be_done() -> Result<()> {
+        let work = temp_folder()?;
+        let target_root = work.path().join("target");
+        let real = work.path().join(r"real\data");
+        fs::create_dir_all(&real).map_err(|error| WinAppMigratorError::io(&real, error))?;
+        let link = work.path().join("link");
+        junction(&link, &work.path().join("real"))?;
+
+        assert!(refuse_roots_under_links(std::slice::from_ref(&real), &target_root).is_ok());
+        let refused = refuse_roots_under_links(&[real, link.join("data")], &target_root);
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::InvalidInput(message))
+                if message.contains("is a link") && message.contains("without its user data")),
+            "{refused:?}"
+        );
+        // The install location has a rule of its own, and a way out of its own.
+        assert!(refuse_roots_under_links(&[link.join("data")], &link.join("data")).is_ok());
+        Ok(())
+    }
+
+    /// Not worth undoing an install for, so it must not read as the record failing.
+    #[test]
+    fn a_shortcut_folder_under_a_link_is_a_warning_and_nothing_is_recorded() -> Result<()> {
+        let work = temp_folder()?;
+        let elsewhere = work.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere)
+            .map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
+        let link = work.path().join("link");
+        junction(&link, &elsewhere)?;
+        let options = restore_options(work.path(), work.path().join("no package"), true);
+        let mut journal = journal_for_test(&options)?;
+        let shortcut = ReviewedShortcut {
+            placement: crate::restore_policy::ShortcutPlacement {
+                destination: link.join("Acme.lnk"),
+                root: link.clone(),
+                for_all_users: false,
+                autostart: false,
+            },
+            target: work.path().join("acme.exe"),
+            arguments: None,
+            working_directory: None,
+            icon: None,
+        };
+        let refused = apply_shortcut(&mut journal, &shortcut);
+        assert_eq!(
+            refused.err().map(|warning| warning.code).as_deref(),
+            Some("shortcut_destination_invalid")
+        );
+        assert!(names_in(&elsewhere)?.is_empty());
+        assert!(journal.read_back()?.changes.is_empty());
         Ok(())
     }
 

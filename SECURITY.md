@@ -57,7 +57,8 @@ may be able to write to.
   whoever could read it before still can, by a path they would have to know.
 - **Links.** An install location that is a link or under one is refused, and so is a data folder it would
   write to, because whoever can write beside a link can change where it leads at any moment, with no need
-  to empty anything. Use the place it leads to instead. A volume mounted on a folder is fine. For each
+  to empty anything. Use the place it leads to instead. A volume mounted on a folder is allowed if it has no
+  drive letter of its own, though if others can write beside that folder, they can change that too. For each
   delete and restore, and each file an install writes, it holds every folder on the way and keeps a hidden
   file open in the last one until it is done. A held folder cannot be moved, and a folder with something held
   in it cannot be emptied, which it would have to be to become a link. The folder it is all under is held
@@ -104,15 +105,16 @@ that matter most for deciding whether to run an installer:
 - An install location outside a protected folder, such as `D:\Apps`, stays writable by other
   programs on the PC, which can change the installed files afterward. Choose a location under
   `C:\Program Files` for anything that installs a service or a driver. While one is being installed or
-  undone, [each folder is pinned](#undoing-an-install), and a program running with ordinary rights has one way
-  left past that, which is to win a race. It has to turn an empty folder on the way into a link just as the
+  undone, [each folder is pinned](#undoing-an-install), and a program running with ordinary rights has one kind
+  of way left past that, which is to win a race. It has to turn an empty folder on the way into a link just as the
   hidden file goes in, so that it lands elsewhere, then read that file's name, turn the folder back, and
   put a file of that name there, all before the next check a few microseconds later. An oplock
   cannot pause the steps it has to beat: on Windows 11 we measured the file going in, and the checks on the
   folder and the file, none of them waiting, though a rename's source did wait for over 5 seconds.
-  But an oplock on the folder does tell it the moment the file goes in, and a program keeping every CPU
-  busy could stretch that gap, so this has not been shown to be impossible. An install stops at the first
-  sign of it, and so does an uninstall for that folder, so each run gives it one try. Closing it needs
+  But an oplock on the folder does tell it the moment the file goes in, a program keeping every CPU
+  busy could stretch that gap, and other ways of stalling a file being made, such as a cloud sync provider's,
+  were not tested, so this has not been shown to be impossible. An install stops at the first sign of it, and
+  so does an uninstall for that folder, so a run gives it a few tries at most, and not one for each file. Closing it needs
   acting through a handle to the folder rather than by a path, which this project's rules on `unsafe` code do
   not allow. A power cut in that moment leaves an empty hidden `.wam-pin-` file, which does nothing, and
   goes if the folder it is in does.

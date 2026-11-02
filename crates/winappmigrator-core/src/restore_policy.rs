@@ -457,9 +457,11 @@ const STARTUP_FOLDER: &str = r"start menu\programs\startup\";
 /// Of [`REFUSED_DATA_FOLDERS`], what only matters for where data goes. A whole app can be in a
 /// folder of that name anywhere else, including one that is this program.
 const FINE_FOR_AN_INSTALL_LOCATION: &[&str] = &[r"desktop\", r"start menu\", r"winappmigrator\"];
-/// The handler COM itself provides, which any class can name. Nothing about whose a class is
-/// follows from it.
+/// The handler COM itself provides, which any class can name. As a handler, nothing about whose
+/// a class is follows from it. As a server it does: there are classes that have it as their only
+/// one.
 const COM_DEFAULT_HANDLER: &str = "ole32.dll";
+const COM_HANDLER_KEY: &str = "inprochandler32";
 const SHORTCUT_EXTENSION: &str = "lnk";
 /// A real data location an app's user data has no business in, whichever base it is under.
 const REFUSED_DATA_FOLDERS: &[&str] = &[
@@ -825,15 +827,16 @@ fn system_key_refusal(
 /// like `mscoree.dll` for .NET. Taking over a class that is already something else's
 /// is how code gets loaded into Explorer, and `--force` does not make it right.
 pub fn com_server_refusal(
+    server_key: &str,
     existing: &str,
     new_value: &str,
     target_root: &Path,
     windows_dir: &Path,
 ) -> Option<String> {
     let existing = existing.trim();
-    if existing.is_empty()
-        || existing.eq_ignore_ascii_case(new_value.trim())
-        || existing.eq_ignore_ascii_case(COM_DEFAULT_HANDLER)
+    let is_default_handler = server_key.eq_ignore_ascii_case(COM_HANDLER_KEY)
+        && existing.eq_ignore_ascii_case(COM_DEFAULT_HANDLER);
+    if existing.is_empty() || existing.eq_ignore_ascii_case(new_value.trim()) || is_default_handler
     {
         return None;
     }
@@ -1282,22 +1285,23 @@ mod tests {
     }
 
     #[test]
-    fn what_com_gives_every_class_says_nothing_about_whose_it_is() {
+    fn what_com_gives_every_class_says_nothing_about_whose_it_is_as_a_handler_only() {
         let target = Path::new(r"C:\Apps\Acme");
+        let windows = Path::new(WINDOWS);
+        let new = r"C:\Apps\Acme\a.dll";
         for own in ["ole32.dll", "OLE32.DLL", " ole32.dll "] {
             assert_eq!(
-                com_server_refusal(own, r"C:\Apps\Acme\a.dll", target, Path::new(WINDOWS)),
+                com_server_refusal("inprochandler32", own, new, target, windows),
                 None
+            );
+            assert!(
+                com_server_refusal("inprocserver32", own, new, target, windows).is_some(),
+                "a class can have it as its only server"
             );
         }
         assert!(
-            com_server_refusal(
-                r"C:\Other\b.dll",
-                r"C:\Apps\Acme\a.dll",
-                target,
-                Path::new(WINDOWS)
-            )
-            .is_some()
+            com_server_refusal("inprochandler32", r"C:\Other\b.dll", new, target, windows)
+                .is_some()
         );
     }
 
@@ -2063,11 +2067,12 @@ mod tests {
         let target = Path::new(r"D:\Apps\Acme");
         let windows = Path::new(WINDOWS);
         assert_eq!(
-            com_server_refusal("", r"D:\Apps\Acme\a.dll", target, windows),
+            com_server_refusal("inprocserver32", "", r"D:\Apps\Acme\a.dll", target, windows),
             None
         );
         assert_eq!(
             com_server_refusal(
+                "inprocserver32",
                 r"D:\Apps\Acme\old.dll",
                 r"D:\Apps\Acme\a.dll",
                 target,
@@ -2078,6 +2083,7 @@ mod tests {
         );
         assert_eq!(
             com_server_refusal(
+                "inprocserver32",
                 r"C:\Windows\System32\mscoree.dll",
                 r"c:\windows\system32\MSCOREE.DLL",
                 target,
@@ -2088,6 +2094,7 @@ mod tests {
         );
         assert!(
             com_server_refusal(
+                "inprocserver32",
                 r"%SystemRoot%\System32\shell32.dll",
                 r"D:\Apps\Acme\a.dll",
                 target,
@@ -2097,6 +2104,7 @@ mod tests {
         );
         assert_eq!(
             com_server_refusal(
+                "inprocserver32",
                 r"D:\Apps\Acme\My Tools\old.dll",
                 r"D:\Apps\Acme\a.dll",
                 target,
@@ -2107,6 +2115,7 @@ mod tests {
         );
         assert!(
             com_server_refusal(
+                "inprocserver32",
                 r"D:\Apps\Other\b.dll",
                 r"D:\Apps\Acme\a.dll",
                 target,

@@ -37,7 +37,9 @@ use winreg::enums::{HKEY_USERS, KEY_READ, KEY_SET_VALUE};
 use winreg::{RegKey, RegValue};
 
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{PinnedPath, hold_path_below_root, pin_path_below_root};
+use crate::file_discovery::{
+    PinnedPath, expand_env_vars, hold_path_below_root, pin_path_below_root,
+};
 use crate::hashing::sha256_file;
 use crate::journal::{
     Backup, Change, ItemKind, Journal, JournalLock, ReadJournal, STAGING_PREFIX, ServiceConfig,
@@ -513,6 +515,12 @@ impl Undoer<'_> {
         Ok(pinned)
     }
 
+    /// Note what stays, as it would be read when it runs.
+    fn note_kept_text(&mut self, text: &str) {
+        self.kept_mentions
+            .push(expand_env_vars(text).replace("&amp;", "&"));
+    }
+
     /// Whether what stays still names this file.
     fn is_still_named(&self, path: &Path) -> bool {
         !matches!(self.mode, UndoMode::Rollback)
@@ -869,7 +877,7 @@ impl Undoer<'_> {
             ValueAction::Nothing => {}
             ValueAction::Keep => {
                 if let Some(Ok(value)) = current.as_ref().map(StoredValue::to_reg) {
-                    self.kept_mentions.push(value.to_string());
+                    self.note_kept_text(&value.to_string());
                 }
                 self.kept(format!(
                     "{label} stays, because it has changed since it was installed."
@@ -987,7 +995,7 @@ impl Undoer<'_> {
         };
         if !image_path_matches(&current, binary, arguments, system_root()) {
             if prior.is_none_or(|prior| prior.image_path != current) {
-                self.kept_mentions.push(current);
+                self.note_kept_text(&current);
                 self.kept(format!(
                     "The {kind} {name} stays, because it has changed since it was installed."
                 ));
@@ -1021,7 +1029,7 @@ impl Undoer<'_> {
         }
         // Still set to run that, until this is tried again.
         if self.report.failed.len() > failed_before {
-            self.kept_mentions.push(current);
+            self.note_kept_text(&current);
         }
     }
 
@@ -1133,7 +1141,7 @@ impl Undoer<'_> {
             TaskAction::Keep => {
                 if let Some(xml) = live.as_deref() {
                     // A path in a task's definition is followed by the tag that ends it.
-                    self.kept_mentions.push(xml.replace('<', "\""));
+                    self.note_kept_text(&xml.replace('<', "\""));
                 }
                 self.kept(format!(
                     "The task {label} stays, because it has changed since it was installed."
@@ -2091,6 +2099,15 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn what_stays_is_read_as_it_would_be_when_it_runs() {
+        let journal = journal_with(Vec::new(), false);
+        let mut undoer = undoer_for(&journal, &[], KEEP);
+        undoer.note_kept_text(r#""%SystemRoot%\Acme\a&amp;b.exe" --changed"#);
+        assert!(undoer.is_still_named(&system_root().join(r"Acme\a&b.exe")));
+        assert!(!undoer.is_still_named(&system_root().join(r"Acme\other.exe")));
     }
 
     /// Once it has been seen to change, there is no second try in this run.

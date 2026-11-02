@@ -510,10 +510,16 @@ impl Journal {
         if self.known_roots.contains(&folded(root)) {
             return Ok(());
         }
+        let hold = hold_root(root).map_err(|error| {
+            if error.kind() == io::ErrorKind::Other {
+                WinAppMigratorError::InvalidInput(link_refusal(root))
+            } else {
+                WinAppMigratorError::io(root, error)
+            }
+        })?;
         if let Some(link) = first_link_to(root) {
             return Err(WinAppMigratorError::InvalidInput(link_refusal(&link)));
         }
-        let hold = hold_root(root).map_err(|error| WinAppMigratorError::io(root, error))?;
         let real = real_path(root).map_err(|error| WinAppMigratorError::io(root, error))?;
         self.note_new(Change::Root {
             path: root.to_path_buf(),
@@ -996,16 +1002,19 @@ pub(crate) struct JournalLock {
 
 impl JournalLock {
     /// Add to a record that is held and being undone. What was last written may have been cut
-    /// off, and must not be joined to this.
+    /// off. What it described never started, so it goes, and is not left to look like damage
+    /// once something follows it.
     pub(crate) fn note(&mut self, change: Change) -> io::Result<()> {
-        let mut line = Vec::new();
-        self.file.seek(SeekFrom::End(-1))?;
-        let mut last = [0; 1];
-        self.file.read_exact(&mut last)?;
-        if last[0] != b'\n' {
-            line.push(b'\n');
-        }
-        line.extend(serde_json::to_vec(&Record::Change(change)).map_err(io::Error::other)?);
+        let mut written = Vec::new();
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.read_to_end(&mut written)?;
+        let whole = written
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |last| last + 1);
+        self.file
+            .set_len(u64::try_from(whole).map_err(io::Error::other)?)?;
+        let mut line = serde_json::to_vec(&Record::Change(change)).map_err(io::Error::other)?;
         line.push(b'\n');
         self.file.seek(SeekFrom::End(0))?;
         self.file.write_all(&line)?;
@@ -1072,6 +1081,104 @@ pub(crate) fn has_no_journal(folder: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether the install finished or not, and whether what was last written was whole or not,
+    /// what is added is read, and nothing is taken for damage.
+    #[test]
+    fn what_is_added_to_a_held_record_can_be_read_back() -> Result<()> {
+        for (finished, cut_off) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (_work, state) = temp_state()?;
+            let mut journal = Journal::begin(&state, "Acme", Path::new(r"C:\Acme"), None, None)?;
+            journal.note(Change::Prerequisite {
+                name: "Runtime".to_owned(),
+            })?;
+            if finished {
+                journal.commit()?;
+            }
+            let folder = journal.folder().to_path_buf();
+            drop(journal);
+            if cut_off {
+                OpenOptions::new()
+                    .append(true)
+                    .open(folder.join(JOURNAL_FILE))
+                    .and_then(|mut file| file.write_all(b"{\"change\":{\"cha"))
+                    .map_err(|error| WinAppMigratorError::io(&folder, error))?;
+            }
+            let mut lock =
+                lock_journal(&folder).map_err(|error| WinAppMigratorError::io(&folder, error))?;
+            lock.note(Change::OnlyLeftOn {
+                roots: vec![PathBuf::from(r"E:\Apps")],
+                keeps_entry: finished,
+            })
+            .map_err(|error| WinAppMigratorError::io(&folder, error))?;
+            drop(lock);
+
+            let read = read_journal(&folder)?;
+            assert_eq!(read.committed, finished, "{finished} {cut_off}");
+            assert!(!read.damaged, "{finished} {cut_off}");
+            assert!(
+                read.settled_changes().is_empty(),
+                "what was undone is dropped: {finished} {cut_off}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn what_is_left_is_only_what_is_on_the_drive_and_an_entry_if_it_is_to_be_finished_from_there() {
+        let left = PathBuf::from(r"E:\Apps");
+        let here = PathBuf::from(r"C:\Apps");
+        let file = |root: &Path| Change::File {
+            path: root.join("a.dat"),
+            root: root.to_path_buf(),
+            item: ItemKind::Program,
+            backup: None,
+            sha256: None,
+            partial: None,
+        };
+        let entry = Change::RegistryKeyCreated {
+            hive: RegistryHive::LocalMachine,
+            key: r"Software\Acme".to_owned(),
+            item: ItemKind::UninstallEntry,
+        };
+        let other_key = Change::RegistryKeyCreated {
+            hive: RegistryHive::LocalMachine,
+            key: r"Software\Other".to_owned(),
+            item: ItemKind::Program,
+        };
+        for keeps_entry in [true, false] {
+            let read = ReadJournal {
+                header: JournalHeader {
+                    schema: SCHEMA_VERSION,
+                    id: "wam-abc".to_owned(),
+                    app_name: "Acme".to_owned(),
+                    target_root: left.clone(),
+                    user_sid: None,
+                    started_at_utc: String::new(),
+                    staging: None,
+                    ui_theme: None,
+                },
+                changes: vec![
+                    file(&left),
+                    file(&here),
+                    entry.clone(),
+                    other_key.clone(),
+                    Change::OnlyLeftOn {
+                        roots: vec![left.clone()],
+                        keeps_entry,
+                    },
+                ],
+                committed: true,
+                damaged: false,
+                folder: PathBuf::from(r"C:\Not\There"),
+            };
+            let settled = read.settled_changes();
+            let wanted = if keeps_entry { 2 } else { 1 };
+            assert_eq!(settled.len(), wanted, "{settled:?}");
+            assert!(matches!(&settled[0], Change::File { root, .. } if *root == left));
+            assert_eq!(settled.len() > 1, keeps_entry);
+        }
+    }
 
     fn temp_state() -> Result<(tempfile::TempDir, PathBuf)> {
         let work = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;

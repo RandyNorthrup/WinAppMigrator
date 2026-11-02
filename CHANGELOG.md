@@ -33,9 +33,11 @@ All notable project changes are tracked here.
   and a link could all pass for somewhere else. **A network share is now refused,** since it can be this PC's
   own drive by another name, and so is a part Windows would read differently, such as one ending in a dot.
   **A location under a link is now refused too,** where it used to be a warning, since whoever can write
-  beside the link can change where it leads while an install is running. So is a data folder under one, which
-  fails the install. Use the place it leads to. A volume mounted on a folder is still fine. So is a Startup
-  folder, or any folder that belongs to Windows or whose contents run by themselves.
+  beside the link can change where it leads while an install is running. Use the place it leads to. A volume
+  mounted on a folder is still allowed if it has no drive letter of its own. With a data folder under a link,
+  an app that has things to restore there is refused before anything changes, and a Desktop or Start Menu
+  under one only loses the shortcut, with a warning. A Startup folder, or any folder that belongs to Windows
+  or whose contents run by themselves, is refused as a location as well.
 - **Writing a file can no longer be led somewhere else by making it wait.** Each file is written with the
   way there held, and with something held open in the last folder, so that none of them can become a link.
 - **A COM class that belongs to something else is now left alone whole,** in the 32-bit registry and in a
