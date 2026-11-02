@@ -6,6 +6,8 @@ use std::sync::OnceLock;
 use winreg::RegKey;
 use winreg::enums::HKEY_LOCAL_MACHINE;
 
+use crate::privilege::is_elevated;
+
 const EXE_EXTENSION: &str = "exe";
 const WINDOWS_VERSION_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
 const SYSTEM_ROOT_VALUE: &str = "SystemRoot";
@@ -18,13 +20,16 @@ const POWERSHELL_HOME: &str = r"WindowsPowerShell\v1.0";
 /// The start of a person's SID: a local or domain account, and an Entra ID one.
 const PERSON_SID_PREFIXES: [&str; 2] = ["S-1-5-21-", "S-1-12-1-"];
 const SHELL_FILE: &str = "explorer.exe";
-/// Each `explorer.exe` in this session, with who it runs as. Its path and SID, not names, which
-/// read differently on other languages of Windows.
+/// Each `explorer.exe` in this session, with who it runs as, by its path and SID, which read the
+/// same on every language of Windows. `-IncludeUserName` needs elevation, which is the only case
+/// where the question comes up. Not through CIM, which took 20 seconds on Windows Server.
 const SESSION_SHELL_SCRIPT: &str = "$ErrorActionPreference = 'Stop'; \
      $session = [Diagnostics.Process]::GetCurrentProcess().SessionId; \
-     Get-CimInstance Win32_Process -Filter \"Name='explorer.exe' AND SessionId=$session\" | \
-     ForEach-Object { '{0}|{1}' -f $_.ExecutablePath, \
-     (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid).Sid }";
+     foreach ($process in @(Get-Process -Name explorer -IncludeUserName -ErrorAction Ignore)) { \
+       if ($process.SessionId -eq $session -and $process.UserName) { \
+         '{0}|{1}' -f $process.Path, ([Security.Principal.NTAccount]$process.UserName).\
+Translate([Security.Principal.SecurityIdentifier]).Value } }; \
+     exit 0";
 /// What PowerShell and the modules it uses read from the environment, none of which can
 /// load code. Paths to the Windows folder are set separately, from the registry.
 const POWERSHELL_ENVIRONMENT: &[&str] = &[
@@ -68,7 +73,6 @@ pub const POWERSHELL_IMPORT_UTILITY: &str = "Import-Module Microsoft.PowerShell.
 pub const POWERSHELL_IMPORT_MANAGEMENT: &str = "Import-Module Microsoft.PowerShell.Management; ";
 pub const POWERSHELL_IMPORT_TASKS: &str = "Import-Module ScheduledTasks; ";
 pub const POWERSHELL_IMPORT_APPX: &str = "Import-Module Appx; ";
-pub const POWERSHELL_IMPORT_CIM: &str = "Import-Module CimCmdlets; ";
 
 /// Build a `Command` that does not pop up a console window for the child
 /// process. Every external tool WinAppMigrator runs (sc.exe, PowerShell, winget,
@@ -83,6 +87,9 @@ pub fn hidden_command(program: impl AsRef<OsStr>) -> Command {
     if is_powershell {
         set_powershell_environment(&mut command);
     }
+    // Never where this process happens to be. A folder dialog moves that to whatever was chosen,
+    // such as a drive from another PC, and a program looks there for what it loads.
+    command.current_dir(system_root());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -258,7 +265,16 @@ pub fn signed_in_user_if_known() -> Option<&'static SignedInUser> {
 static SIGNED_IN_USER: OnceLock<SignedInUser> = OnceLock::new();
 
 fn query_signed_in_user() -> SignedInUser {
-    let script = format!("{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_CIM}{SESSION_SHELL_SCRIPT}");
+    // Not elevated, this process is the one on the desktop, whoever else is on the PC.
+    if !is_elevated() {
+        return signed_in_user_from(
+            current_user_sid().map(str::to_owned).into_iter().collect(),
+            current_user_sid(),
+            &profile_of_sid,
+        );
+    }
+    let script =
+        format!("{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_MANAGEMENT}{SESSION_SHELL_SCRIPT}");
     let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
         .output();
@@ -286,9 +302,9 @@ fn query_signed_in_user() -> SignedInUser {
 }
 
 /// Who owns the desktop of this session, going by what asking Windows printed: a line of the
-/// program's path and its owner for each `explorer.exe` in it. Only the real one counts, since a
-/// program of that name can be started from anywhere, by whoever is signed in or by anyone else
-/// with a password.
+/// program's path and its owner for each `explorer.exe` in it. One from anywhere else does not
+/// count, since a program of that name can be started by whoever is signed in or by anyone else
+/// with a password. One whose path could not be read is not ruled out by that.
 fn desktop_owners(shown: &str, windows_dir: &Path) -> Vec<String> {
     let shell = windows_dir.join(SHELL_FILE);
     let mut owners: Vec<String> = Vec::new();
@@ -296,7 +312,7 @@ fn desktop_owners(shown: &str, windows_dir: &Path) -> Vec<String> {
         let Some((path, sid)) = line.trim().split_once('|') else {
             continue;
         };
-        if paths_are_the_same(Path::new(path), &shell)
+        if (path.is_empty() || paths_are_the_same(Path::new(path), &shell))
             && !owners.iter().any(|known| known.eq_ignore_ascii_case(sid))
         {
             owners.push(sid.to_owned());
@@ -722,11 +738,21 @@ mod tests {
                 "C:\\WINDOWS\\Explorer.EXE|S-1-5-21-1-1-1-1001\r\n\
                  C:\\Windows\\explorer.exe|s-1-5-21-1-1-1-1001\r\n\
                  C:\\Users\\Public\\explorer.exe|S-1-5-21-9-9-9-1002\r\n\
-                 |S-1-5-21-9-9-9-1003\r\n\
                  nonsense\r\n",
                 windows
             ),
             vec!["S-1-5-21-1-1-1-1001".to_owned()]
+        );
+        // Windows would not say where this one is from, so it could be real.
+        assert_eq!(
+            desktop_owners(
+                "C:\\Windows\\explorer.exe|S-1-5-21-1-1-1-1001\r\n|S-1-5-21-9-9-9-1003\r\n",
+                windows
+            ),
+            vec![
+                "S-1-5-21-1-1-1-1001".to_owned(),
+                "S-1-5-21-9-9-9-1003".to_owned()
+            ]
         );
         assert!(desktop_owners("", windows).is_empty());
     }
@@ -856,6 +882,12 @@ mod tests {
     fn this_windows_has_a_build_number_and_this_account_a_sid() {
         assert!(windows_build() > 0);
         assert!(current_user_sid().is_some_and(|sid| sid.starts_with("S-1-")));
+    }
+
+    #[test]
+    fn what_this_runs_does_not_start_in_whatever_folder_this_process_is_in() {
+        let command = hidden_command("reg");
+        assert_eq!(command.get_current_dir(), Some(system_root()));
     }
 
     #[test]
