@@ -336,8 +336,21 @@ scheduled task, SSH, or a build agent, there is no one else it could be meant fo
 account running this.
 
 A folder in another account's profile is left out, by where it really is, however a value came to name
-it, unless it is where the app itself is installed. A Burn bundle or a hostile uninstall string can name
-one.
+it. A Burn bundle, a hostile uninstall string, or a shortcut can name one. The exception is the install location in an
+app's machine-wide record, as it is written with no link on the way. That is the only one of these an account cannot
+write with no rights at all.
+
+An app installed for one account is held to more, because all of what describes it is that account's to write
+(`SystemContext::is_the_accounts_own`). Its program and install location have to be in that account's profile, or owned by
+that account, which reads the folder's owner. Its roots go no further than its install location and that profile, nothing
+machine-wide goes by its name (`FileDiscoveryContext.installed_for_one_account`), and its install log can only name its own
+registry (`recorded_keys_of_one_account`). A machine-wide app's Inno Setup or NSIS log is only used if an administrator
+wrote it (`privilege::was_written_by_an_administrator`). None of these apply on a drive, whose accounts are all the
+owner's to read, but which is held to the rule above about whose folder something is in.
+
+A folder named for an app in `ProgramData` or Public Documents that is a link is left out, since any account can make one.
+A build asks again before and after copying each file on this PC whether it leads into another account's folder
+(`OtherAccountsFolders`), since whoever can write in a scanned folder can change what is there.
 
 `profile_survey.rs` finds out who has data for an app, so that the app can ask. It loads every hive once,
 when the list of apps is read, and keeps only the names of keys under `Software`. Asking about an app
@@ -382,7 +395,9 @@ copyable_bytes, included }` groups the inventory by root for the report.
   files under `Windows\System32\Tasks`, whichever PC they are on. The Task Scheduler only knows this
   PC, and asking it through PowerShell took one call per task and lost them all to one that broke the
   JSON. A file that cannot be read now costs a warning for that task and no others, and it reads
-  UTF-16, with or without a byte order mark, and UTF-8. A task with two programs is one task.
+  UTF-16, with or without a byte order mark, and UTF-8. A task with two programs is one task. One whose
+  principal is anyone but the account being read or one of Windows' own is left out, with
+  `scheduled_task_left_out`.
 - `shortcut_scan.rs` captures the Start Menu and Desktop shortcuts of the account being scanned and
   of everyone. On this PC, WScript.Shell reads them. On a drive, the `.lnk` files are parsed directly,
   since COM would resolve what it found against this PC.
@@ -479,10 +494,19 @@ drive maps to one, in ordinary names:
 | `\\server\x`, `\\?\UNC\…`, `\\.\x` | not followed: a server would get this account's password hash |
 | `C:\a\NUL`, `C:\a:stream` | not followed |
 
+**Nothing that is not on a disk of this PC is looked at, on a scan of this PC.** A value in any account's registry can
+name a share, and looking at it connects as the administrator running this. `SystemContext::may_read` refuses `\\server`,
+`\\?\UNC`, `\\.\`, `\\?\GLOBALROOT`, `\\?\Volume{}`, and rooted forms such as `\??\UNC`, by how the path is written.
+A known folder there gets `user_folder_out_of_reach`, and anything else is listed in `network_paths_not_followed`.
+
 **No link on a drive is followed,** since a junction or symbolic link on another PC's disk resolves against
 this PC. `VolumeMap::may_read` walks from the drive's root to a path, and everything that opens a file or
 folder there asks it first: each base folder, each root, each hive, each log and shortcut, each candidate for
-the main executable, and again just before each copy. A walk does not go through a link it finds.
+the main executable, and again from the top just before each copy. A walk does not go through a link it finds, and goes
+through `path_utils::walk_asking`, which asks about each entry by name before doing anything with it. `walkdir` opens a
+folder before its filter is asked, and what a listing calls the folder `x.` opens as the link `x` beside it, since Windows
+drops a dot or a space from the end of a name. `is_ordinary_name` refuses those, names that are not text, and names this
+Windows would open as a device.
 
 What was not followed is listed in a warning, `drive_paths_not_followed`. A variable in a value means what it
 would on that PC (`expand_source_variables`), and not what it means here: only the folders every Windows has

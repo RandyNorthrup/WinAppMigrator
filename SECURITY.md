@@ -50,22 +50,62 @@ controlled. So:
   would depend on where this process is, `..` could climb out of a volume mounted on a folder, and a share would
   hand its server this account's password hash. All of those are left unread, and the build lists them.
 - **No link on the drive is followed.** A junction or symbolic link on another PC's disk is resolved against this
-  PC when opened, whatever it looked like there. Each path is checked from the drive's root down when it is found
-  and again just before it is read. The Windows folder, the hives, and the profiles are checked too.
+  PC when opened, whatever it looked like there, and looking through one to a share is enough to connect to it. Each
+  path is checked from the drive's root down when it is found and again just before it is read, and that check comes
+  before anything else looks at it. The Windows folder, the hives, and the profiles are checked too.
+- **What a folder's listing says is not what opening it does.** Windows drops a dot or a space from the end of a name,
+  so a real folder `x.` opens the link `x` beside it, and a link `x ` reads as the real `x`. So each thing found by
+  listing a folder is asked about by name before it is opened, and a walk goes in only after that. A name that ends
+  that way, a name that is not text, or one this Windows would open as a device, is not read.
+- **There are limits on what a drive can make this do.** A hive is copied by reading it, up to 4 GiB, and 32 GiB for
+  all of a run's. There are limits on a program, an install log, an AppX manifest, a task, how many tasks an app keeps,
+  how many accounts are listed, and how much of the registry is captured. How much of an app's own files can be staged
+  is left to the free-space check that is planned.
 - **The drive is not written to.** Loading a registry hive can replay its logs into it, so hives are copied to an
   administrators-only folder under `%ProgramData%\WinAppMigrator\hives`, and the copies are loaded. They can hold
   secrets, and are removed afterward. A run that dies leaves them, and hives loaded, so the app sweeps those when
   it starts. It goes by a lease each run holds, so it leaves another run's alone, and it only touches a key named
   the way this app names one.
+- **Registry links depend on Windows.** A key in a hive can be a link to somewhere else in the registry, and this does
+  not open them specially. On the runner, Windows refused to follow one out of a hive this loaded, from each of
+  `SOFTWARE`, `SYSTEM`, and `NTUSER.DAT`, which is tested. If Windows ever allowed that, nothing here would stop it.
 - **Loading a hive runs Windows' own parser on it.** A drive made to attack that parser needs no bug here, and this
   project cannot do anything about one. Read a drive from someone you do not trust on a machine you can lose.
 
 ## Another account's data
 
 An installer holds one account's data. A scan loads only the hive of that account, and leaves out what is in
-another's folder, unless it is where the app itself is installed, however a value came to name it. A folder name is
-what is compared, by where it really is, so a short name or a redirected folder that points at another account's
-is left out too.
+another's folder, however a value came to name it. A folder name is what is compared, by where it really is, so a short
+name, or a link that points at another account's folder, is left out too.
+
+An account can write some of what says where an app is with no rights at all: an uninstall entry and an App Paths key in
+its own registry, and its own shortcuts. So what these say does not count for much:
+
+- Only the install location in an app's machine-wide record may be in another account's folder, and only as it is
+  written, with no link on the way. Any account may be able to make a folder on `C:\`.
+- An app installed for one account has to be in that account's profile or be owned by that account. That covers a
+  redirected folder outside a profile, which no profile check would see. On this PC that is asked of Windows' owner for
+  the folder, so an app that account's installer put somewhere as an administrator is refused too, and says so.
+- Such an app gets nothing machine-wide by its name, since its name is whatever its entry says and `ProgramData\<name>`
+  may be anyone's. Its install log can only name that account's registry and files in its own folders.
+- A machine-wide app's install log is only believed if an administrator wrote it, going by its owner. It names files and
+  registry values to package, and it sits in the app's own folder.
+- A folder in `ProgramData` or Public Documents that is a link is not followed, because anyone can make one there. A
+  license store there is treated the same way.
+- A scheduled task that runs as anyone but the account being read or one of Windows' own is left out, with a warning.
+  Task principals are usually SIDs. A name that cannot be told from a person's counts as one.
+
+**On this PC, a share is not looked at** either, since a value in any account's registry could name one, and looking
+would connect as the administrator running this, including when the app starts. Anything not on a disk of this PC, in any
+spelling, such as `\\localhost\C$`, `\\?\GLOBALROOT`, or `\??\UNC`, is left out, and the build lists it. So a Documents
+folder redirected to a share is not included, and an app on a share cannot be built from.
+
+**What is left is a race.** A build asks again before and after copying each file whether it leads into another account's
+folder. Whoever can write in a scanned folder could make part of it a link and undo that around the moment a file is
+opened, and they would have to know a name that is there. Closing that needs the opened file's own path from Windows,
+which takes `unsafe` code this project does not otherwise have in the core. A symbolic link to a share, which needs
+Developer Mode or that right, is also still followed on this PC when finding where a folder really is. Folder and task
+names of other accounts can appear in a package's warnings.
 
 An elevated process can be run by another administrator than the person at the PC, whose `%APPDATA%` and
 `HKEY_CURRENT_USER` are not that person's. So who a scan or an install is for comes from the owner of this session's

@@ -15,6 +15,13 @@ All notable project changes are tracked here.
   to this PC's files or to the network. A rooted, relative, `..`, other-drive, or UNC path is not followed, and
   neither is any link on the drive. This also closes reading an uninstall string as it was, which opened a file on
   this PC or on any server it named. What was not followed is listed.
+- **A drive cannot make this connect to anything by what its names are.** Looking through a link to a share is enough
+  to connect to it, and a real folder `x.` opens the link `x` beside it, so everything found on a drive is asked about by
+  name before it is looked at, and folders are not opened until then. There are limits on what a drive can make this read
+  and copy, including hives, logs, and how much of the registry is captured.
+- **A share is not looked at on this PC either.** A value in any account's registry could name one, and looking would
+  connect as the administrator running this, including when the app starts. A Documents folder on a share is left out, with
+  a warning, and an app on a share cannot be built from.
 - **The app no longer writes to a connected drive.** Loading a hive where it is can replay its logs into it, so the
   hives are copied to an administrators-only folder and the copies are loaded. The same is done for an account on
   this PC that is not signed in. A run that dies with hives loaded is swept when the app next starts, and only what
@@ -25,7 +32,15 @@ All notable project changes are tracked here.
   profile folders in Documents are refused, as a Startup folder is, because PowerShell runs them.
 - **An installer holds one account's data.** Every profile's data used to collapse into one. A scan reads whoever is
   signed in, the app's owner if it was installed for one account, or whoever you choose in **Whose data**, which only
-  appears when there is a choice. Another account's folders are left out, however a value came to name them.
+  appears when there is a choice. Another account's folders are left out, however a value came to name them, and so are
+  scheduled tasks that run as someone else.
+- **What an account can write with no rights no longer decides what is packaged.** An uninstall entry in its own registry
+  or a shortcut could name another account's folder, or any folder an administrator can read, and it would be packaged as
+  the app. An app installed for one account now has to be in that account's profile or owned by it, and gets nothing
+  machine-wide by its name. Only a machine-wide record can place an app in someone's profile, and an install log is only
+  believed if an administrator wrote it, unless it is for one account, when it can only name that account's things. A
+  folder in `ProgramData` or Public Documents that is a link is not followed, license stores included. A build asks again
+  just before each copy whether a file leads into another account's folders.
 - **Another administrator at the UAC prompt no longer gets the data.** Reading and restoring used that account's
   `%APPDATA%` and `HKEY_CURRENT_USER`, not those of the person at the PC. Both now go by whoever is signed in, through
   `HKEY_USERS\<SID>`, and the installer says so when that is not the account running it. If it cannot be told, it

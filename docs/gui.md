@@ -68,7 +68,8 @@ visibly off-center.
    on and more than one account to offer, a **Whose data** row of `segmented` controls appears,
    starting at the signed-in user. On a connected drive, the only account with data needs no
    asking, and otherwise it starts at whoever last signed in there. If who is signed in cannot
-   be told, a notice says so and no one is chosen until someone is. Selecting an app looks this
+   be told, a notice says so and no one is chosen until someone is, even if only one account has
+   data. Selecting an app looks this
    up on a worker thread, because it reads folders that may be on a failing drive. What it needs
    from each account's registry was read once, when the list of apps was.
 3. **Create the installer.** One background pipeline reverse-engineers the app
