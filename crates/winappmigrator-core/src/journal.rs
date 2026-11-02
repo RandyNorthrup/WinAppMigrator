@@ -267,6 +267,13 @@ pub enum Change {
         name: String,
         direction: String,
         program: PathBuf,
+        /// What tells it from another of that name, way, and program.
+        #[serde(default)]
+        protocol: Option<String>,
+        #[serde(default)]
+        local_ports: Vec<String>,
+        #[serde(default)]
+        remote_ports: Vec<String>,
         /// What it does, for telling whether it is still as it was added.
         fingerprint: String,
     },

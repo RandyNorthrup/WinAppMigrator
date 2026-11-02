@@ -484,7 +484,8 @@ impl<'a> ReviewedPackage<'a> {
             .iter()
             .filter_map(|file| self.map.destination_of(&file.original_path))
             .collect();
-        self.registrations = PackageRegistrations::of(&entries, &destinations, &self.map, expand);
+        self.registrations =
+            PackageRegistrations::of(&entries, &destinations, &self.map, expand, system_root());
         let mut units: HashMap<String, Vec<&RegistryEntry>> = HashMap::new();
         for entry in &entries {
             if let Some(unit) = registration_unit_of(entry) {
@@ -1203,7 +1204,7 @@ fn describe_firewall_rules(rules: &[ReviewedFirewallRule<'_>]) -> Vec<SystemChan
 /// classes it takes.
 fn describe_registrations(review: &ReviewedPackage<'_>) -> Vec<SystemChange> {
     let mut changes = Vec::new();
-    let mut listed: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut listed: BTreeSet<(String, String, String)> = BTreeSet::new();
     let mut classes_by_server: BTreeMap<String, usize> = BTreeMap::new();
     let mut support = (0_usize, 0_usize, 0_usize);
     let mut settings = 0_usize;
@@ -1239,6 +1240,27 @@ fn describe_registrations(review: &ReviewedPackage<'_>) -> Vec<SystemChange> {
                     everyone_or_you(entry)
                 ),
                 false,
+            ),
+            Registration::DefaultVerb { of } => (
+                SystemChangeKind::ShellCommand,
+                of,
+                format!(
+                    "Changes what opening one of these does, {}",
+                    everyone_or_you(entry)
+                ),
+                true,
+            ),
+            Registration::ClientEntry { name } => (
+                SystemChangeKind::DefaultApps,
+                name,
+                "Can be chosen as the program for this. Nothing is changed to it".to_owned(),
+                false,
+            ),
+            Registration::AppIdAccess => (
+                SystemChangeKind::ComServer,
+                "COM permissions".to_owned(),
+                "Says who may start its COM classes, or what they run as".to_owned(),
+                true,
             ),
             Registration::UrlProtocol { name } => (
                 SystemChangeKind::UrlProtocol,
@@ -1323,7 +1345,12 @@ fn describe_registrations(review: &ReviewedPackage<'_>) -> Vec<SystemChange> {
                 false,
             ),
         };
-        if listed.insert((kind.label().to_owned(), title.clone())) {
+        // A verb called `open` on two types is two lines, and how a name is written is not.
+        if listed.insert((
+            kind.label().to_owned(),
+            title.to_lowercase(),
+            detail.to_lowercase(),
+        )) {
             changes.push(SystemChange {
                 kind,
                 title,

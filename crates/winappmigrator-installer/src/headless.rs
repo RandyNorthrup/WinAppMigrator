@@ -93,6 +93,11 @@ where
     run_installer(raw_args, &executable)
 }
 
+/// What a warning is about, for a line of its own in what a script reads.
+fn about_what(source: Option<&str>) -> String {
+    source.map_or_else(String::new, |source| format!(" ({source})"))
+}
+
 fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     let cli = InstallerCli::parse_from(raw_args);
     if cli.target_root.is_none() && !cli.apply && !cli.dry_run {
@@ -136,6 +141,22 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
 
     let applied = cli.apply;
     let restore_license = !cli.no_restore_license;
+    // The same list the window asks about, before any of it, so that a script can see what it
+    // agreed to.
+    if let Ok(changes) = system_changes(&manifest) {
+        println!("Sets up: {}", changes.changes.len());
+        for change in &changes.changes {
+            println!(
+                "  {}: {}: {}",
+                change.kind.label(),
+                change.title,
+                change.detail
+            );
+        }
+        for note in &changes.notes {
+            println!("  Note: {note}");
+        }
+    }
     let result = restore_package_monitored(
         &RestoreOptions {
             package_root: temp_dir.path().to_path_buf(),
@@ -155,30 +176,25 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
         if applied { "applied" } else { "previewed" }
     );
     println!("Changes logged: {}", result.changes_logged.len());
-    // The same list the window asks about, so that a script can read what it agreed to.
-    if let Ok(changes) = system_changes(&manifest) {
-        println!("Sets up: {}", changes.changes.len());
-        for change in &changes.changes {
-            println!(
-                "  {}: {}: {}",
-                change.kind.label(),
-                change.title,
-                change.detail
-            );
-        }
-        for note in &changes.notes {
-            println!("  Note: {note}");
-        }
-    }
     // The restore logs are in the staging folder, which is removed when this returns, so
     // this is the only place automation can see what went wrong.
     println!("Warnings: {}", result.warnings.len());
     for warning in &result.warnings {
-        println!("  {}: {}", warning.code, warning.message);
+        println!(
+            "  {}: {}{}",
+            warning.code,
+            warning.message,
+            about_what(warning.source.as_deref())
+        );
     }
     println!("Errors: {}", result.errors.len());
     for error in &result.errors {
-        println!("  {}: {}", error.code, error.message);
+        println!(
+            "  {}: {}{}",
+            error.code,
+            error.message,
+            about_what(error.source.as_deref())
+        );
     }
     println!("Refused: {}", result.refused.len());
     for refused in &result.refused {

@@ -48,7 +48,7 @@ use crate::journal::{
     StoredValue, checked_install_folder, find_backup, has_no_journal, install_folders, is_in_use,
     lock_journal, lock_state, read_journal, real_path,
 };
-use crate::models::{EnvironmentScope, RegistryHive, UndoReport};
+use crate::models::{EnvironmentScope, FirewallRuleEntry, RegistryHive, UndoReport};
 use crate::path_utils::{
     POWERSHELL_IMPORT_UTILITY, current_user_sid, escape_powershell_single, hidden_command,
     path_is_within, system_root, text_mentions_path,
@@ -65,7 +65,8 @@ use crate::restore::{
 };
 use crate::restore_policy::{ServiceAccount, existing_task_refusal, image_path_matches};
 use crate::restore_policy::{
-    firewall_fingerprint, netsh_delete_rule_arguments, stored_firewall_rule_matches,
+    firewall_fingerprint, firewall_identity, netsh_delete_rule_arguments,
+    stored_firewall_rule_matches,
 };
 use crate::task_scan::live_task_xml;
 
@@ -453,8 +454,17 @@ impl Undoer<'_> {
                 name,
                 direction,
                 program,
+                protocol,
+                local_ports,
+                remote_ports,
                 fingerprint,
-            } => self.undo_firewall_rule(name, direction, program, fingerprint),
+            } => self.undo_firewall_rule(
+                name,
+                direction,
+                program,
+                (protocol.as_deref(), local_ports, remote_ports),
+                fingerprint,
+            ),
             Change::Prerequisite { name } => self.report.left_behind.push(format!(
                 "{name} was installed, or may have been, and stays, because other programs may \
                  be using it."
@@ -1110,12 +1120,14 @@ impl Undoer<'_> {
     }
 
     /// Take out a rule this install added. One that says something else by now is someone's, unless
-    /// the install failed just now, and a rule of the same name for anything else is not touched.
+    /// the install failed just now, and a rule of the same name for anything else is not touched,
+    /// nor one for another protocol or port.
     fn undo_firewall_rule(
         &mut self,
         name: &str,
         direction: &str,
         program: &Path,
+        (protocol, local_ports, remote_ports): (Option<&str>, &[String], &[String]),
         fingerprint: &str,
     ) {
         let label = format!("The firewall rule {name}");
@@ -1127,17 +1139,25 @@ impl Undoer<'_> {
                 return;
             }
         };
-        let found: Vec<&String> = stored
+        let identity = firewall_identity(protocol, local_ports, remote_ports);
+        let found: Vec<FirewallRuleEntry> = stored
             .iter()
             .filter(|rule| stored_firewall_rule_matches(rule, name, direction, program))
+            .filter_map(|rule| crate::integration_scan::parse_firewall_rule(rule))
+            .filter(|rule| {
+                firewall_identity(
+                    rule.protocol.as_deref(),
+                    &rule.local_ports,
+                    &rule.remote_ports,
+                ) == identity
+            })
             .collect();
         if found.is_empty() {
             return;
         }
-        let as_it_was = found.iter().any(|rule| {
-            crate::integration_scan::parse_firewall_rule(rule)
-                .is_some_and(|rule| firewall_fingerprint(&rule) == fingerprint)
-        });
+        let as_it_was = found
+            .iter()
+            .any(|rule| firewall_fingerprint(rule) == fingerprint);
         if !as_it_was && !matches!(self.mode, UndoMode::Rollback) {
             self.note_kept_text(&program.display().to_string());
             self.kept(format!(
@@ -1146,7 +1166,14 @@ impl Undoer<'_> {
             return;
         }
         let deleted = hidden_command("netsh.exe")
-            .args(netsh_delete_rule_arguments(name, direction, program))
+            .args(netsh_delete_rule_arguments(
+                name,
+                direction,
+                program,
+                protocol,
+                local_ports,
+                remote_ports,
+            ))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
