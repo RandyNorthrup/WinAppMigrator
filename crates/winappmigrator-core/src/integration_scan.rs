@@ -124,7 +124,10 @@ const ODBC_SOURCES: &[&str] = &[
 pub(crate) const ODBC_DRIVER_LIST: &str = "ODBC Drivers";
 pub(crate) const ODBC_SOURCE_LIST: &str = "ODBC Data Sources";
 const ODBC_NOT_DRIVERS: &[&str] = &["odbc core", "odbc drivers", "odbc translators"];
-const ODBC_NOT_SOURCES: &[&str] = &["odbc data sources", "odbc file dsn"];
+const PROXY_STUB: &str = "ProxyStubClsid32";
+/// More than this does not go any faster, since they all read one registry.
+const MOST_WALKERS: usize = 8;
+const ODBC_NOT_SOURCES: &[&str] = &["odbc", "odbc data sources", "odbc file dsn"];
 const DRIVER_VALUE: &str = "Driver";
 const SETUP_VALUE: &str = "Setup";
 const FONTS: &str = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts";
@@ -338,6 +341,44 @@ pub(crate) fn scan_integrations(
     scan.found
 }
 
+/// The subkeys of a big key that `is_it` says so of, in the order the key has them. A PC has tens
+/// of thousands of these, and an app a few, so the going through is done on a few threads, each with
+/// a handle of its own, and only reads. What is then done with those few is done one at a time.
+fn subkeys_where<F>(root: &RegRoot<'_>, path: &str, is_it: F) -> Vec<String>
+where
+    F: Fn(&RegKey, &str) -> bool + Sync,
+{
+    let Ok(parent) = root.open(path, KEY_READ) else {
+        return Vec::new();
+    };
+    let names: Vec<String> = parent.enum_keys().flatten().collect();
+    let walkers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(MOST_WALKERS);
+    let each = names.len().div_ceil(walkers).max(1);
+    std::thread::scope(|scope| {
+        let running: Vec<_> = names
+            .chunks(each)
+            .map(|some| {
+                let is_it = &is_it;
+                scope.spawn(move || {
+                    let Ok(parent) = root.open(path, KEY_READ) else {
+                        return Vec::new();
+                    };
+                    some.iter()
+                        .filter(|name| is_it(&parent, name))
+                        .cloned()
+                        .collect::<Vec<String>>()
+                })
+            })
+            .collect();
+        running
+            .into_iter()
+            .flat_map(|walker| walker.join().unwrap_or_default())
+            .collect()
+    })
+}
+
 fn default_value(key: &RegKey) -> String {
     key.get_raw_value("")
         .map(|value| raw_value_to_display(&value))
@@ -413,23 +454,27 @@ impl Scan<'_> {
         let of_32_bit = root.open(CLASSES_32_BIT, KEY_READ);
         // A class and an interface are their own for each view. A type library and an AppID are
         // one thing for both, which Windows shows in each, so only the one is read.
+        let mut plain_has_some = false;
+        let mut other_has_some = false;
         if let Ok(classes) = plain.as_ref() {
-            self.com_classes(root, CLASSES, classes);
+            plain_has_some = self.com_classes(root, CLASSES, classes);
         }
         if let Ok(classes) = of_32_bit.as_ref() {
-            self.com_classes(root, CLASSES_32_BIT, classes);
+            other_has_some = self.com_classes(root, CLASSES_32_BIT, classes);
         }
         if let Ok(classes) = plain.as_ref() {
             self.type_libraries(root, CLASSES, classes);
         }
-        // With nothing of the app's for one to lead to, this big key says nothing about the app.
-        if !self.owned.clsids.is_empty() || !self.owned.type_libraries.is_empty() {
-            if let Ok(classes) = plain.as_ref() {
-                self.interfaces(root, CLASSES, classes);
-            }
-            if let Ok(classes) = of_32_bit.as_ref() {
-                self.interfaces(root, CLASSES_32_BIT, classes);
-            }
+        // This is the biggest key there is, and with nothing of the app's for one to lead to it says
+        // nothing about the app. A proxy is in the view its class is in. A type library is for both,
+        // and a person's own key has little in it.
+        let any_view = !self.owned.type_libraries.is_empty()
+            || (matches!(root, RegRoot::User(_)) && !self.owned.clsids.is_empty());
+        if any_view || plain_has_some {
+            self.interfaces(root, CLASSES);
+        }
+        if any_view || other_has_some {
+            self.interfaces(root, CLASSES_32_BIT);
         }
         if let Ok(classes) = plain.as_ref() {
             self.app_ids(root, CLASSES, classes);
@@ -441,21 +486,30 @@ impl Scan<'_> {
     /// someone else's is theirs, whatever else in it mentions the app. One with a server of
     /// Windows', such as `mscoree.dll` for a .NET class or `shell32.dll` for a folder in Explorer,
     /// says whose it is by what it gives that.
-    fn com_classes(&mut self, root: &RegRoot, view: &str, classes: &RegKey) {
+    fn com_classes(&mut self, root: &RegRoot, view: &str, classes: &RegKey) -> bool {
         let Ok(clsids) = classes.open_subkey_with_flags(CLSID, KEY_READ) else {
-            return;
+            return false;
         };
-        for name in clsids.enum_keys().flatten() {
-            let Ok(class) = clsids.open_subkey_with_flags(&name, KEY_READ) else {
+        let theirs = subkeys_where(root, &format!(r"{view}\{CLSID}"), |clsids, name| {
+            clsids
+                .open_subkey_with_flags(name, KEY_READ)
+                .is_ok_and(|class| self.class_is_the_apps(&class))
+        });
+        for name in &theirs {
+            let Ok(class) = clsids.open_subkey_with_flags(name, KEY_READ) else {
                 continue;
             };
-            if !self.class_is_the_apps(&class) {
-                continue;
-            }
-            self.owned.clsids.insert(lower_trimmed(&name));
+            self.owned.clsids.insert(lower_trimmed(name));
+            // What a class says it is called is only so if that says it is this class. A class
+            // cannot make `Word.Document` the app's by naming it.
             for link in ["ProgID", "VersionIndependentProgID"] {
                 let prog_id = default_of(&class, link);
-                if !prog_id.trim().is_empty() {
+                if !prog_id.trim().is_empty()
+                    && lower_trimmed(&default_of(
+                        classes,
+                        &format!(r"{}\{CLASS_REFERENCE}", prog_id.trim()),
+                    )) == lower_trimmed(name)
+                {
                     self.owned.prog_ids.insert(lower_trimmed(&prog_id));
                 }
             }
@@ -485,6 +539,7 @@ impl Scan<'_> {
             }
             self.capture(root, &format!(r"{view}\{CLSID}\{name}"));
         }
+        !theirs.is_empty()
     }
 
     fn class_is_the_apps(&self, class: &RegKey) -> bool {
@@ -567,27 +622,17 @@ impl Scan<'_> {
     }
 
     /// An interface says how calls to it cross processes: by a proxy stub class, or a type library.
-    fn interfaces(&mut self, root: &RegRoot, view: &str, classes: &RegKey) {
-        let Ok(interfaces) = classes.open_subkey_with_flags(INTERFACE, KEY_READ) else {
-            return;
-        };
-        for interface in interfaces.enum_keys().flatten() {
-            let Ok(key) = interfaces.open_subkey_with_flags(&interface, KEY_READ) else {
-                continue;
-            };
-            let stub_is_the_apps = ["ProxyStubClsid32", "ProxyStubClsid"].iter().any(|name| {
-                self.owned
-                    .clsids
-                    .contains(&lower_trimmed(&default_of(&key, name)))
-            });
-            if stub_is_the_apps
-                || self
-                    .owned
-                    .type_libraries
-                    .contains(&lower_trimmed(&default_of(&key, TYPE_LIB)))
-            {
-                self.capture(root, &format!(r"{view}\{INTERFACE}\{interface}"));
-            }
+    fn interfaces(&mut self, root: &RegRoot, view: &str) {
+        let path = format!(r"{view}\{INTERFACE}");
+        let theirs = subkeys_where(root, &path, |interfaces, name| {
+            let named_by =
+                |what: &str| lower_trimmed(&default_of(interfaces, &format!(r"{name}\{what}")));
+            (!self.owned.clsids.is_empty() && self.owned.clsids.contains(&named_by(PROXY_STUB)))
+                || (!self.owned.type_libraries.is_empty()
+                    && self.owned.type_libraries.contains(&named_by(TYPE_LIB)))
+        });
+        for interface in theirs {
+            self.capture(root, &format!(r"{path}\{interface}"));
         }
     }
 
@@ -618,11 +663,11 @@ impl Scan<'_> {
     }
 
     fn file_types_and_protocols(&mut self, root: &RegRoot, classes: &RegKey) {
-        let names: Vec<String> = classes.enum_keys().flatten().collect();
         // A file type is found through what it opens with, so those come first.
-        let (extensions, others): (Vec<&String>, Vec<&String>) =
-            names.iter().partition(|name| name.starts_with('.'));
-        for name in others {
+        let types = subkeys_where(root, CLASSES, |classes, name| {
+            !name.starts_with('.') && self.type_has_something_of_the_apps(classes, name)
+        });
+        for name in &types {
             self.class(root, classes, name);
         }
         for shared in NESTED_SHARED_CLASSES {
@@ -631,9 +676,59 @@ impl Scan<'_> {
             }
         }
         self.system_file_associations(root, classes);
-        for extension in extensions {
+        let extensions = subkeys_where(root, CLASSES, |classes, name| {
+            name.starts_with('.') && self.extension_has_something_of_the_apps(classes, name)
+        });
+        for extension in &extensions {
             self.extension(root, classes, extension);
         }
+    }
+
+    /// Whether [`Self::class`] would find anything in this.
+    fn type_has_something_of_the_apps(&self, classes: &RegKey, name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        if NOT_CLASSES.contains(&lower.as_str()) || NEVER_AN_APPS.contains(&lower.as_str()) {
+            return false;
+        }
+        classes
+            .open_subkey_with_flags(name, KEY_READ)
+            .is_ok_and(|key| {
+                (!SHARED_CLASSES.contains(&lower.as_str()) && self.type_is_the_apps(&key))
+                    || !self.verbs_added_to(&key).is_empty()
+                    || !self.shell_extensions_added_to(&key).is_empty()
+            })
+    }
+
+    /// Whether [`Self::extension`] would find anything in this.
+    fn extension_has_something_of_the_apps(&self, classes: &RegKey, extension: &str) -> bool {
+        let Ok(key) = classes.open_subkey_with_flags(extension, KEY_READ) else {
+            return false;
+        };
+        self.owned
+            .prog_ids
+            .contains(&lower_trimmed(&default_value(&key)))
+            || key
+                .open_subkey_with_flags(OPEN_WITH_PROGIDS, KEY_READ)
+                .is_ok_and(|list| {
+                    list.enum_values()
+                        .flatten()
+                        .any(|(name, _)| self.owned.prog_ids.contains(&name.to_ascii_lowercase()))
+                })
+            || key
+                .open_subkey_with_flags(OPEN_WITH_LIST, KEY_READ)
+                .is_ok_and(|list| {
+                    list.enum_keys()
+                        .flatten()
+                        .any(|program| self.is_opened_with_the_app(&program))
+                })
+            || !self.shell_extensions_added_to(&key).is_empty()
+    }
+
+    fn is_opened_with_the_app(&self, program: &str) -> bool {
+        self.owned
+            .server_files
+            .contains(&program.to_ascii_lowercase())
+            || self.is_the_apps_program_name(program)
     }
 
     /// One top-level key under `Classes`. If what it opens with is the app, or the class it
@@ -648,7 +743,7 @@ impl Scan<'_> {
             return;
         };
         let key_path = format!(r"{CLASSES}\{name}");
-        if !SHARED_CLASSES.contains(&lower.as_str()) && self.type_is_the_apps(&key, &lower) {
+        if !SHARED_CLASSES.contains(&lower.as_str()) && self.type_is_the_apps(&key) {
             self.owned.prog_ids.insert(lower);
             self.capture(root, &key_path);
             return;
@@ -660,16 +755,13 @@ impl Scan<'_> {
     /// counts if nothing says what opens it: an icon is nothing to go by when a command says
     /// otherwise. PowerShell 7 adds a verb to Windows' `LibraryFolder`, which does not make that
     /// type or its other verbs PowerShell's.
-    fn type_is_the_apps(&self, key: &RegKey, lower_name: &str) -> bool {
-        if self.owned.prog_ids.contains(lower_name) {
-            return true;
-        }
+    fn type_is_the_apps(&self, key: &RegKey) -> bool {
         if let Some(opened_with) = self.what_opens(key) {
             return self.runs_the_app(&opened_with);
         }
         let class = default_of(key, CLASS_REFERENCE);
-        if !class.trim().is_empty() && self.owned.clsids.contains(&lower_trimmed(&class)) {
-            return true;
+        if !class.trim().is_empty() {
+            return self.owned.clsids.contains(&lower_trimmed(&class));
         }
         self.runs_the_app(&default_of(key, DEFAULT_ICON))
     }
@@ -691,26 +783,32 @@ impl Scan<'_> {
 
     /// The verbs and shell extensions an app added to a type that is not its own.
     fn what_was_added_to(&mut self, root: &RegRoot, key: &RegKey, key_path: &str) {
-        if let Ok(shell) = key.open_subkey_with_flags(SHELL, KEY_READ) {
-            for verb in shell.enum_keys().flatten() {
-                let Ok(verb_key) = shell.open_subkey_with_flags(&verb, KEY_READ) else {
-                    continue;
+        for verb in self.verbs_added_to(key) {
+            self.capture(root, &format!(r"{key_path}\{SHELL}\{verb}"));
+        }
+        self.shell_extensions_of(root, key, key_path);
+    }
+
+    fn verbs_added_to(&self, key: &RegKey) -> Vec<String> {
+        let Ok(shell) = key.open_subkey_with_flags(SHELL, KEY_READ) else {
+            return Vec::new();
+        };
+        shell
+            .enum_keys()
+            .flatten()
+            .filter(|verb| {
+                let Ok(verb_key) = shell.open_subkey_with_flags(verb, KEY_READ) else {
+                    return false;
                 };
-                let runs_it = self.runs_the_app(&default_of(&verb_key, COMMAND));
-                let handled_by_it = VERB_HANDLER_VALUES.iter().any(|name| {
-                    self.handler_is_the_apps(&verb_key, name)
-                        || verb_key
-                            .open_subkey_with_flags(COMMAND, KEY_READ)
-                            .is_ok_and(|command| self.handler_is_the_apps(&command, name))
-                });
-                if runs_it || handled_by_it {
-                    self.capture(root, &format!(r"{key_path}\{SHELL}\{verb}"));
-                }
-            }
-        }
-        if !self.owned.clsids.is_empty() {
-            self.shell_extensions_of(root, key, key_path);
-        }
+                self.runs_the_app(&default_of(&verb_key, COMMAND))
+                    || VERB_HANDLER_VALUES.iter().any(|name| {
+                        self.handler_is_the_apps(&verb_key, name)
+                            || verb_key
+                                .open_subkey_with_flags(COMMAND, KEY_READ)
+                                .is_ok_and(|command| self.handler_is_the_apps(&command, name))
+                    })
+            })
+            .collect()
     }
 
     fn handler_is_the_apps(&self, key: &RegKey, name: &str) -> bool {
@@ -721,32 +819,42 @@ impl Scan<'_> {
         })
     }
 
-    /// `shellex\<kind>\<name>` holds a class, as its value or its name, and `shellex\{guid}` too.
     fn shell_extensions_of(&mut self, root: &RegRoot, key: &RegKey, key_path: &str) {
+        for extension in self.shell_extensions_added_to(key) {
+            self.capture(root, &format!(r"{key_path}\{SHELLEX}\{extension}"));
+        }
+    }
+
+    /// `shellex\<kind>\<name>` holds a class, as its value or its name, and `shellex\{guid}` too.
+    fn shell_extensions_added_to(&self, key: &RegKey) -> Vec<String> {
+        let mut found = Vec::new();
+        if self.owned.clsids.is_empty() {
+            return found;
+        }
         let Ok(extensions) = key.open_subkey_with_flags(SHELLEX, KEY_READ) else {
-            return;
+            return found;
         };
         for kind in extensions.enum_keys().flatten() {
             let Ok(kind_key) = extensions.open_subkey_with_flags(&kind, KEY_READ) else {
                 continue;
             };
-            let kind_path = format!(r"{key_path}\{SHELLEX}\{kind}");
             if self
                 .owned
                 .clsids
                 .contains(&lower_trimmed(&default_value(&kind_key)))
             {
-                self.capture(root, &kind_path);
+                found.push(kind.clone());
             }
             for handler in kind_key.enum_keys().flatten() {
                 let named = default_of(&kind_key, &handler);
                 if self.owned.clsids.contains(&lower_trimmed(&named))
                     || self.owned.clsids.contains(&lower_trimmed(&handler))
                 {
-                    self.capture(root, &format!(r"{kind_path}\{handler}"));
+                    found.push(format!(r"{kind}\{handler}"));
                 }
             }
         }
+        found
     }
 
     fn system_file_associations(&mut self, root: &RegRoot, classes: &RegKey) {
@@ -800,20 +908,13 @@ impl Scan<'_> {
             let programs: Vec<String> = open_with
                 .enum_keys()
                 .flatten()
-                .filter(|program| {
-                    self.owned
-                        .server_files
-                        .contains(&program.to_ascii_lowercase())
-                        || self.is_the_apps_program_name(program)
-                })
+                .filter(|program| self.is_opened_with_the_app(program))
                 .collect();
             for program in programs {
                 self.capture(root, &format!(r"{key_path}\{OPEN_WITH_LIST}\{program}"));
             }
         }
-        if !self.owned.clsids.is_empty() {
-            self.shell_extensions_of(root, &key, &key_path);
-        }
+        self.shell_extensions_of(root, &key, &key_path);
     }
 
     fn is_the_apps_program_name(&self, program: &str) -> bool {
@@ -1246,6 +1347,11 @@ pub(crate) fn parse_firewall_rule(text: &str) -> Option<FirewallRuleEntry> {
             "RA4" | "RA6" => rule.remote_addresses.push(value.to_owned()),
             // What group it is in, and what Windows Firewall uses to show it. It works without.
             "EmbedCtxt" | "PCat" | "LUOwn" | "TTK" => {}
+            // Leaving it to the app whether to come in through NAT, which Windows' prompt for a new
+            // program sets. Without it the rule does less, so this is not a reason to refuse it.
+            "Defer" => {}
+            // This only says anything when it lets that in.
+            "Edge" if !value.eq_ignore_ascii_case("TRUE") => {}
             "RA42" | "RA62" => rule.remote_addresses.push(value.to_owned()),
             other => rule.not_carried.push(other.to_owned()),
         }
@@ -1535,7 +1641,7 @@ mod tests {
         );
         assert_eq!(
             edge.map(|rule| rule.not_carried),
-            Some(vec!["Edge".to_owned(), "Defer".to_owned()])
+            Some(vec!["Edge".to_owned()])
         );
         assert_eq!(
             parse_firewall_rule(r"v2.33|Action=Allow|Active=TRUE|Dir=In|LPort=80|Name=all|"),

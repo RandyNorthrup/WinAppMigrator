@@ -605,6 +605,10 @@ fn dotnet_runtime_spec(
     let (product, winget) = match flavor {
         DotNetFlavor::Core => ("dotnet-runtime", "Runtime"),
         DotNetFlavor::Desktop => ("windowsdesktop-runtime", "DesktopRuntime"),
+        // Microsoft has no such build for Arm64: that address gives a small page, not an installer.
+        DotNetFlavor::AspNetCore if major == 6 && *architecture == AppArchitecture::Arm64 => {
+            return None;
+        }
         DotNetFlavor::AspNetCore => ("aspnetcore-runtime", "AspNetCore"),
     };
     Some(PrerequisiteSpec {

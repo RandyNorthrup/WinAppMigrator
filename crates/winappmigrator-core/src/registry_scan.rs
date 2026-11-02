@@ -48,10 +48,10 @@ impl RegRoot<'_> {
     }
 }
 
-const APP_PATHS: [&str; 2] = [
-    r"Software\Microsoft\Windows\CurrentVersion\App Paths",
-    r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths",
-];
+const APP_PATHS: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths";
+/// On Windows 10 and 11 this is the same key as the other, seen through the 32-bit view, and a
+/// mounted hive has no such link to read. So only what the other does not have is its own.
+const APP_PATHS_32_BIT: &str = r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths";
 const HKLM_UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const HKLM_WOW6432_UNINSTALL: &str =
     r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
@@ -458,15 +458,22 @@ fn scan_app_paths(
     entries: &mut Vec<RegistryEntry>,
     warnings: &mut Vec<Warning>,
 ) {
-    for view in APP_PATHS {
-        scan_app_paths_view(context, root, view, entries, warnings);
-    }
+    scan_app_paths_view(context, root, APP_PATHS, None, entries, warnings);
+    scan_app_paths_view(
+        context,
+        root,
+        APP_PATHS_32_BIT,
+        Some(APP_PATHS),
+        entries,
+        warnings,
+    );
 }
 
 fn scan_app_paths_view(
     context: &RegistryScanContext,
     root: &RegRoot,
     view: &str,
+    other_view: Option<&str>,
     entries: &mut Vec<RegistryEntry>,
     warnings: &mut Vec<Warning>,
 ) {
@@ -500,7 +507,13 @@ fn scan_app_paths_view(
                 }
             }
         }
-        if matched {
+        let is_in_the_other_view = other_view.is_some_and(|other| {
+            let key = format!(r"{other}\{child_name}");
+            entries
+                .iter()
+                .any(|entry| entry.key_path.eq_ignore_ascii_case(&key))
+        });
+        if matched && !is_in_the_other_view {
             capture_registry_subtree(
                 root,
                 &format!(r"{view}\{child_name}"),
