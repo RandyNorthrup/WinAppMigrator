@@ -102,12 +102,7 @@ From the audit of 2026-11-01. Items are removed from this list as they are fixed
 8. Compression is single-threaded, and recompresses formats that are already compressed.
 9. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
     lost if one contains a character that breaks the JSON. The offline XML reader could
-    serve live scans too. Separately, a PowerShell call that has to find a command looks through
-    every module when there is no module cache, and a call that short never saves one. The fixed
-    environment drops the cache location CI sets, and such a call took 23 seconds on CI's Windows
-    Server, so a small app takes 6 minutes to install there. On a Windows 11 PC with no cache it
-    costs about half a second. Importing the module by name first avoided most of that on Windows
-    11, and has not been tried on Windows Server.
+    serve live scans too.
 
 **Features**
 

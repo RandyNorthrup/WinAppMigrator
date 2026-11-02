@@ -4,6 +4,11 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **PowerShell calls no longer search every module.** A call that had to find a command took 23
+  seconds on Windows Server with no module cache, so a small app took more than 6 minutes to install
+  there. Scripts now import what they use by name. On CI's Windows Server, a preview went from 23
+  seconds to under half a second, a small install from 6 minutes 33 seconds to 6.4 seconds, and the
+  elevated CI job from 34 minutes to 3.
 - **The code that changes a PC has now run for real.** A CI job on GitHub's throwaway Windows runner
   sets up a harmless app, builds an installer from it with the real code, removes it, installs it,
   and checks the machine with `sc.exe`, `reg.exe`, `schtasks.exe`, and the shell. It starts the
