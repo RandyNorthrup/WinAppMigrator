@@ -355,8 +355,10 @@ app's own folder. None of these ownership checks apply on a drive, whose account
 is held to the rule above about whose folder something is in.
 
 A folder named for an app in `ProgramData` or Public Documents that is a link is left out, since any account can make one.
-A build asks again before and after copying each file on this PC whether it leads into another account's folder
-(`OtherAccountsFolders`), since whoever can write in a scanned folder can change what is there.
+Whether something is in a folder goes by where both really are (`is_really_within`), and a place with no name to give, such
+as a shadow copy, cannot be told at all (`location_can_be_told`), so it counts as refused. A build asks again before and
+after copying each file on this PC whether it leads into another account's folder or goes through a link that was not there
+when it was scanned (`OtherAccountsFolders`), since whoever can write in a scanned folder can change what is there.
 
 `profile_survey.rs` finds out who has data for an app, so that the app can ask. It loads every hive once,
 when the list of apps is read, and keeps only the names of keys under `Software`. Asking about an app
@@ -403,7 +405,8 @@ copyable_bytes, included }` groups the inventory by root for the report.
   JSON. A file that cannot be read now costs a warning for that task and no others, and it reads
   UTF-16, with or without a byte order mark, and UTF-8. A task with two programs is one task. One whose
   principal is anyone but the account being read or one of Windows' own is left out, with
-  `scheduled_task_left_out`.
+  `scheduled_task_left_out`, and so is one that says it runs as Windows, on this PC, whose file others than
+  administrators can change, because any account can make a file in that folder.
 - `shortcut_scan.rs` captures the Start Menu and Desktop shortcuts of the account being scanned and
   of everyone. On this PC, WScript.Shell reads them. On a drive, the `.lnk` files are parsed directly,
   since COM would resolve what it found against this PC.

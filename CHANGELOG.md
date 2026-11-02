@@ -41,7 +41,8 @@ All notable project changes are tracked here.
   program. Only a machine-wide record can place an app in someone's profile, and its install log is only believed if only
   administrators can change it. What is found by an app's name in an account's own folders has to be that account's. A
   folder in `ProgramData` or Public Documents that is a link is not followed, license stores included. A build asks again
-  before and after each copy whether a file leads into another account's folders.
+  before and after each copy whether a file leads into another account's folders or through a link that is new since the
+  scan. A task that says it runs as Windows is only taken if only administrators can change its file.
 - **Another administrator at the UAC prompt no longer gets the data.** Reading and restoring used that account's
   `%APPDATA%` and `HKEY_CURRENT_USER`, not those of the person at the PC. Both now go by whoever is signed in, through
   `HKEY_USERS\<SID>`, and the installer says so when that is not the account running it. If it cannot be told, it

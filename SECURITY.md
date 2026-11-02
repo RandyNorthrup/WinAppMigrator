@@ -100,7 +100,9 @@ its own registry, and its own shortcuts. So what these say does not count for mu
 - A folder in `ProgramData` or Public Documents that is a link is not followed, because anyone can make one there. A
   license store there is treated the same way.
 - A scheduled task that runs as anyone but the account being read or one of Windows' own is left out, with a warning.
-  Task principals are usually SIDs. A name that cannot be told from a person's counts as one.
+  Task principals are usually SIDs. A name that cannot be told from a person's counts as one. One that says it runs as
+  Windows, on this PC, has to be a file only administrators can change, since tasks are read from files and any account
+  can make a file in that folder, which the Task Scheduler would never run but a package would register.
 
 **On this PC, a share is not looked at** either, since a value in any account's registry could name one, and looking
 would connect as the administrator running this, including when the app starts. Anything not on a disk of this PC, in any
@@ -108,9 +110,11 @@ spelling, such as `\\localhost\C$`, `\\?\GLOBALROOT`, or `\??\UNC`, is left out,
 folder redirected to a share is not included, and an app on a share cannot be built from.
 
 **What is left is a race.** A build asks again before and after copying each file whether it leads into another account's
-folder. Whoever can write in a scanned folder could make part of it a link and undo that around the moment a file is
-opened, and they would have to know a name that is there. Closing that needs the opened file's own path from Windows,
-which takes `unsafe` code this project does not otherwise have in the core. A symbolic link to a share, which needs
+folder, or goes through a link that was not there when it was scanned. Whoever can write in a scanned folder could make
+part of it a link and undo that around the moment a file is opened, and they would have to know a name that is there.
+Closing that needs the opened file's own path from Windows, which takes `unsafe` code this project does not otherwise
+have in the core. A stale machine-wide record that names a folder any account can make, on `C:\`, can lead to wherever a
+link there does, as long as that is not in another account's profile. A symbolic link to a share, which needs
 Developer Mode or that right, is also still followed on this PC when finding where a folder really is. Folder and task
 names of other accounts can appear in a package's warnings. The folder picker is Windows' own and runs before any of
 this, so what the shell itself does on browsing a hostile drive is not something this controls. An installer is written
