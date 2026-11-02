@@ -143,3 +143,91 @@ jobs:
       - name: Packaging
         shell: pwsh
         run: cargo test --locked -p winappmigrator-installer --test elevated_packaging -- --nocapture --test-threads=1
+
+  # A real package past what Windows can start as one executable, with a real file of over 4 GiB in
+  # it, so it needs a runner with the room to itself.
+  elevated-big-package:
+    name: Elevated big package
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      WAM_ELEVATED_E2E: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The version comes from rust-toolchain.toml.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Cache build output
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Big package
+        shell: pwsh
+        run: cargo test --locked -p winappmigrator-installer --test elevated_big_package -- --nocapture --test-threads=1
+
+  # The first half of a real move between two PCs. What it uploads is unsigned, holds only a fake app
+  # set up here, and is gone in a day.
+  move-build:
+    name: Move between PCs, build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      WAM_ELEVATED_E2E: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The version comes from rust-toolchain.toml.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Cache build output
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Build the installers
+        shell: pwsh
+        env:
+          WAM_MOVE_OUTPUT: ${{ runner.temp }}\wam-move
+        run: cargo test --locked -p winappmigrator-installer --test elevated_move -- --nocapture --test-threads=1
+
+      - name: Hand them on
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wam-move-installers
+          path: ${{ runner.temp }}\wam-move
+          retention-days: 1
+          if-no-files-found: error
+
+  # The second half, on runners that have never seen it, with no Rust and nothing but those files and
+  # Windows' own tools. Each is its own PC, on a Windows of its own.
+  move-install:
+    name: Move between PCs, install on ${{ matrix.os }}
+    needs: move-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-2022, windows-11-arm]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Take what the other runner built
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wam-move-installers
+          path: ${{ runner.temp }}\wam-move
+
+      - name: Install it here, and look
+        shell: pwsh
+        run: .github/scripts/check-moved-app.ps1 -Folder "${{ runner.temp }}\wam-move"
