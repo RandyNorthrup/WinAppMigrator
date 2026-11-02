@@ -50,6 +50,8 @@ services, and runtimes, and packs them into a single `.exe`.
 - **Says what it will do.** Before installing, it lists the services, drivers, scheduled tasks, autostart
   entries, shortcuts, and `Path` changes it sets up, and whether it is signed and by whom. A preview goes
   further, listing every change.
+- **Can be undone.** If anything goes wrong, or you cancel, everything is put back. Later, you can uninstall
+  it from Settings like any other app, and files it replaced come back.
 
 ## How it works
 
@@ -78,7 +80,7 @@ Follow the progress, or cancel. You get one file, named after what it contains, 
 ### 3. Run it on the other PC
 
 Copy the installer over and run it. Check the install location, preview the changes if you like, then
-click **Install**.
+click **Install**. Follow the progress, or cancel, which puts back whatever it has done so far.
 
 <p align="center">
   <picture>
@@ -116,8 +118,18 @@ Please read these before relying on it, especially on a one-way trip from a fail
 - **Building to a FAT32 or exFAT drive needs room on your system drive.** Those drives cannot keep the
   build's working files private, so they go in the system's temp folder, and only the installer is
   written to the drive.
-- **Installs have no rollback, and no uninstaller is created.** A failure can leave an install part-way,
-  and files with the same names are replaced. The window warns you if the folder already has files.
+- **What an uninstall leaves.** Files and settings that changed after the install stay, and it says which,
+  and in that case what they replaced does not come back.
+  So do files you added, with the folders they are in, and user data and licenses unless you ask for them
+  to go. A runtime it installed stays, because other programs may be using it, including when a failed
+  install is rolled back. A service that ran as a custom account does not get its password back, because it
+  was never in the installer. Uninstalling an install made over another brings the earlier one back,
+  which has its own entry in Settings.
+- **A file replaced on another drive comes back with its folder's permissions.** Only a file on the same
+  drive as `ProgramData` can be moved aside as it is. One elsewhere is copied, and if it had permissions of
+  its own, they are not kept.
+- **An uninstaller shows "Unknown publisher" at its UAC prompt,** even for an installer you signed, because
+  [the stub must never be signed](docs/signing.md).
 - **Building from a connected drive captures less than building from the running PC.** COM, file
   associations, Run keys, and environment variables often do not match, shortcuts are not recreated, and
   the default install location keeps the drive's letter, so change it. Windows may also write to a
@@ -135,6 +147,9 @@ Please read these before relying on it, especially on a one-way trip from a fail
 - **Shortcuts go to your own Desktop and Start Menu.** One from a Desktop folder with an unusual name is left
   out and reported.
 - **Some licenses will not move.** Anything tied to the old machine may need reactivating.
+- **A file named like a device, such as `aux.h`, cannot be installed before Windows 11.** Earlier versions
+  open that name as the device instead. An installer holding one stops and says so, before anything is
+  installed. This goes by Microsoft's documented rule, because it has not been run on Windows 10.
 - **It is only for software you are licensed to move.** That part is up to you.
 
 The full list, with planned fixes, is in the [plan](docs/PLAN.md#open-issues-most-important-first).
@@ -154,8 +169,9 @@ More in [SECURITY.md](SECURITY.md).
 
 ## Automating the installer
 
-Run with any argument, an installer skips its window. With `--target-root` it previews unless you pass
-`--apply`, and exits non-zero if anything fails to verify. Without `--target-root` it prints usage.
+Run with any argument, an installer skips its window. It previews unless you pass `--apply`, and exits
+non-zero if anything fails, after putting back what it did. With no arguments that say what to do, it
+prints usage.
 
 ```powershell
 # Preview
@@ -163,20 +179,30 @@ Run with any argument, an installer skips its window. With `--target-root` it pr
 
 # Install
 .\App_installer.exe --target-root "C:\Program Files\App" --apply --force
+
+# Uninstall, with the id it printed, or the QuietUninstallString in its entry in Settings
+& "C:\ProgramData\WinAppMigrator\installs\wam-abc123\uninstall.exe" --uninstall wam-abc123 --quiet
 ```
 
 | Flag | Effect |
 | --- | --- |
-| `--target-root <DIR>` | Where to install. Must be a full path |
+| `--target-root <DIR>` | Where to install. Must be a full path. Without it, `--apply` and `--dry-run` use where the app was, if the checks the window makes allow that |
 | `--apply` | Actually install. Without it nothing is installed: the package is unpacked to a temporary folder, which is then removed |
 | `--dry-run` | Preview, stated explicitly |
 | `--force` | Replace existing files, registry values, services, tasks, shortcuts, and environment variables. Without it, an existing file stops the install before anything changes |
 | `--restore-user-data` | Put user data in the real AppData and ProgramData folders, not under the target |
 | `--no-restore-license` | Skip captured license data, which is otherwise restored |
+| `--log <FILE>` | Also write the log to this file, which must not exist yet |
 
-It prints its warnings and errors, and what it left out. Pipe the output somewhere to read it, for example
-`| Out-String`. The installer is a windowed program, so it does not write to an interactive console.
-Automation still needs an elevated shell, because the installer demands elevation.
+An uninstaller takes `--uninstall <ID>`, with `--quiet` for no window, `--remove-user-data` to also remove user
+data and licenses, and `--log <FILE>`. It reads only the record in the fixed location.
+
+Both print what they did, their warnings and errors, and what they left out. Pipe the output somewhere to read
+it, for example `| Out-String`. An installer is a windowed program, so it does not write to an interactive
+console. Automation still needs an elevated shell, because it demands elevation.
+
+Logs are in `%ProgramData%\WinAppMigrator\logs`, which only administrators can read, with the last 20 kept.
+They hold paths and key names, and never what a registry value, license file, or environment variable holds.
 
 ## Building from source
 

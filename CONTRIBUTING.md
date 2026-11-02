@@ -29,7 +29,8 @@ cargo deny check
 ```
 
 From a normal shell, the end-to-end test skips its reinstall step, because the installer demands
-elevation. Run it from an elevated shell to cover the whole flow. It only installs to a temp folder.
+elevation. From an elevated shell it stops at a preview, because an install writes to `ProgramData`
+and to Settings. It installs for real only on GitHub's runner.
 
 ## Tests must not change the machine
 
@@ -43,14 +44,23 @@ removes all of it, runs the installer, and checks the machine with Windows' own 
 app's verifier. Packages written by hand cover what a scan cannot produce, such as asking for what
 the rules refuse.
 
+It then takes that install back out every way that can happen, comparing the machine before and after:
+an uninstall run from the command line Windows has for it, with and without things another program
+changed in between, a failure late in an install, and an installer killed part-way and while undoing
+that. A real account that is not an administrator tries to change what an uninstaller trusts.
+
 It does nothing unless `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`, and
 `WAM_ELEVATED_E2E=1` are all set, and with them set it fails if it is not elevated. **Never set those
 on a real PC.** Without them it skips, so it is safe to run locally, and that shows only that it
 compiles.
 
-When you change how something is restored, extend this test, and push to see it run. What it cannot
-do: load a driver, since one that is not signed must never start, and sign in, so Run values and
-Startup shortcuts are checked but not run.
+When you change how something is restored, record what it replaces in the journal, teach
+`rollback.rs` to undo it, extend this test, and push to see it run. What it cannot do: load a driver,
+since one that is not signed must never start, sign in, so Run values and Startup shortcuts are checked
+but not run, and click in a window, so the uninstaller's is only started.
+
+**Logs hold paths and key names only.** What a registry value, license file, or environment variable holds
+must never reach one. `crates/winappmigrator-core/tests/log_has_no_secrets.rs` pins that.
 
 Keep the docs true: update the README, `docs/`, and `CHANGELOG.md` in the same change as the code.
 

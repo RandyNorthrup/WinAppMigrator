@@ -30,7 +30,10 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   volume. The app writes nothing to the drive, though Windows may replay a hive's
   transaction logs on load. The app runs elevated, so there is no mid-task UAC prompt.
 - Installer stub: hash-check the package → reinstall → hash-verify the reinstalled
-  files; non-zero exit on any mismatch.
+  files, with progress and cancel; non-zero exit on any mismatch.
+- A change journal for each install, in an admin-only folder, with rollback on any failure,
+  cancel, or an install that never finished, and a generated uninstaller run from the app's
+  entry in Settings. Persistent, secret-free logs.
 - Layered footprint discovery (MSI component DB, Inno `unins*.dat`, NSIS
   `uninstall.log`, App Paths, plus a Program Files/ProgramData/AppData walk), PE/delay-import/SxS/.NET analysis, runtime-prerequisite
   detection, and authoritative file counts.
@@ -42,7 +45,8 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   headless UI tests drive the real screens of the app and the installer.
 - Elevated round trip (`crates/winappmigrator-installer/tests/elevated_round_trip.rs`), run only by
   its own CI job on GitHub's throwaway runner: scan, package, remove, and reinstall a fake app, then
-  check the machine with Windows' own tools. See [CONTRIBUTING](../CONTRIBUTING.md).
+  check the machine with Windows' own tools, and undo it every way that can happen. See
+  [CONTRIBUTING](../CONTRIBUTING.md).
 - Dev/release build profiles tuned (deps + first-party optimized in dev for fast
   tests; LTO + single codegen unit + strip in release).
 
@@ -89,30 +93,26 @@ From the audit of 2026-11-01. Items are removed from this list as they are fixed
    folder also stays writable by other programs on the PC, which can race the link checks and
    change installed files afterward. A program already on the PC can swap a running installer's
    file in the moment before it opens it, which a handle to the running image would close.
-5. **No rollback.** The first copy failure stops the install part-way, and existing files
-   are overwritten with no backup.
-6. **Secrets.** All values under an app's registry keys and license files in its install
+5. **Secrets.** All values under an app's registry keys and license files in its install
    folder are captured even with the license option off. Apply the license classifiers
    when opted out, and redact secret-named values.
 
 **Performance**
 
-7. Every byte is read about five times to build and four times to install. Hash while
-    copying, in parallel.
-8. Compression is single-threaded, and recompresses formats that are already compressed.
-9. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
-    lost if one contains a character that breaks the JSON. The offline XML reader could
-    serve live scans too.
+6. Every byte is read about five times to build and four times to install. Hash while
+   copying, in parallel.
+7. Compression is single-threaded, and recompresses formats that are already compressed.
+8. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
+   lost if one contains a character that breaks the JSON. The offline XML reader could
+   serve live scans too.
 
 **Features**
 
-10. Footprint preview with include and exclude before building, offering folders that nearly
-    match the product's name, which are now left out.
-11. Size and free-space check before building.
-12. A way past the 4 GiB limit: a small loader plus a data file beside it.
-13. Installer progress, persistent logs, and a change journal enabling rollback and a
-    generated uninstaller.
-14. Target OS and architecture check.
+9. Footprint preview with include and exclude before building, offering folders that nearly
+   match the product's name, which are now left out.
+10. Size and free-space check before building.
+11. A way past the 4 GiB limit: a small loader plus a data file beside it.
+12. Target OS and architecture check.
 
 ## Not in scope for this release line
 

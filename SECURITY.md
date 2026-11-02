@@ -40,6 +40,41 @@ installer is about to trust, and an honest package reaching too far:
   renamed and replaced, and it will not write through a link at or below the install location. From
   the moment it opens its own file, that cannot be changed or swapped.
 
+## Undoing an install
+
+A rollback and an uninstall both run elevated, and do what a record says, on locations other programs
+may be able to write to.
+
+- **The record is in one fixed place.** Each install has a folder at
+  `%ProgramData%\WinAppMigrator\installs\<id>`, and nothing reads a record from anywhere else, or takes
+  a path to one. Anyone can make a folder in `ProgramData`, so each level is checked to be a real folder
+  that administrators own and only they can change, and one that is not is never used. If it cannot be
+  made safe, the install does not start, since it could not be undone. An id must be what this code
+  would have named a folder before it goes near a path. Nothing a package installs can go there.
+- **It can hold secrets.** The record keeps registry values and environment variables as they were, so
+  it is closed to everyone else. None of that goes in a log, which holds paths and key names only, and
+  which only administrators can read. A file it replaced is moved aside with the permissions it had, so
+  whoever could read it before still can, by a path they would have to know.
+- **Links.** Before each delete and restore, it holds every folder on the way, checks that none of them has
+  become a link, and that the folder it is all under still leads where it did during the install.
+  Whatever fails that is left alone and reported, even if what is at the other end is byte for byte what it
+  would have removed. It checks again after the last thing that can be made to wait. This is by path, so
+  what is listed under [known gaps](#known-gaps) for an install location others can write to applies here too.
+- **Only what it did.** An uninstall, and undoing an install that never finished, delete a file only if it is
+  still what the install wrote, and put back a value only if it still holds what the install wrote. They
+  remove only the entries added to `Path`, a key or folder only if it is empty, and a service or task only if
+  it still runs what was installed. The package's own say-so about how to remove it, such as
+  `UninstallString`, is dropped when installing. Only one install or uninstall runs at a time.
+- **The uninstaller is never in the install folder,** where non-admins may be able to replace it. Settings
+  runs it elevated, so it is in the admin-only folder, where anyone can start it and find out it needs
+  elevation, and only administrators can change it. It is never signed, even when the installer was:
+  [why](docs/signing.md#the-uninstaller).
+- **It removes itself without running anything from a place others can write to.** A running program cannot
+  delete its own file, so after it exits, `cmd.exe` from the Windows folder removes the folder. It runs
+  from its own folder, with the whole command on its command line and `ping` by its full path, and with
+  `/D`, so that the `AutoRun` command in the signed-in user's registry does not run with it. If it cannot, what
+  is left is that file, in that folder, and the next install removes it.
+
 ## An installer can contain secrets
 
 Treat an installer as being as sensitive as the PC it came from. WinAppMigrator does not hunt
@@ -61,9 +96,15 @@ the installer stub must never be signed.
 that matter most for deciding whether to run an installer:
 
 - An install location outside a protected folder, such as `D:\Apps`, stays writable by other
-  programs on the PC. Links are checked just before each file is written, but a program running at
-  that moment could still race the check, and it can change the installed files afterward. Choose a
-  location under `C:\Program Files` for anything that installs a service or a driver.
+  programs on the PC. Links are checked just before each file is written, removed, or put back, but a
+  program running at that moment could still race the check, which matters most for what an elevated
+  uninstall deletes. It can also change the installed files afterward. Choose a location under
+  `C:\Program Files` for anything that installs a service or a driver. Closing this needs acting through a
+  handle to the folder rather than by a path, which this project's rules on `unsafe` code do not allow.
+- A file or folder in an install that someone else can write to can be kept open to make an undo fail. It
+  is reported and can be tried again, and an install that never finished stops the next install until it
+  can be undone. If that cannot ever happen, an administrator removes its folder under
+  `%ProgramData%\WinAppMigrator\installs`.
 - A program already running on the PC can rename a running installer and put another file at its
   path in the moment before the installer opens its own file. The installer then reads that file's
   package, and shows that file's signature, not the one you approved at the UAC prompt. So read the

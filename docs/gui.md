@@ -143,13 +143,30 @@ The package also suggests the install location, so **Install** stays disabled wh
 drive, the Windows folder, or a folder such as `Program Files` that holds other things side by side.
 
 **Install** and **Preview changes** unpack the package on a worker thread only at that
-point, then run `restore_package`. **Install** hash-checks each file before writing
+point, then run `restore_package_monitored`. **Install** hash-checks each file before writing
 anything and verifies the result afterward. **Preview changes** only works out the changes,
 checking no file hashes beyond the package's own; it lists the first 300, with what reaches
 beyond files first. The result appears first in the
 window, and a clean install offers **Close** and **Open install folder**. Given command-line args it instead runs headlessly
 (`--target-root … --apply`) for automation and the end-to-end test. The stub reuses
 `winappmigrator-ui` for its look.
+
+While either runs, an `InstallMonitor`, which is the same `Monitor` the app's build uses, reports
+each step with a count where there is one, and carries the request to cancel. That takes effect at
+the next file or item, and an install that has begun then puts back what it did. A failed
+install says so, lists what could not be put back and what stays, such as a runtime, and says
+where the log is. The card above the options says the install can be undone.
+
+## The uninstaller (`uninstall.rs`, `uninstall_gui.rs`)
+
+An install leaves a bare copy of the stub in its admin-only folder, and the app's entry in Settings
+runs it with `--uninstall <id>`. Its window opens at once and reads the record on a worker
+thread, because checking who can change that record runs other programs. It says what will be
+removed and what will stay, has one option, to also remove user data and licenses, which is off,
+shows progress, and then lists what it undid, what it left and why, and what it could not do,
+with where the log is if anything failed. `--quiet` does the same with no window, for
+`QuietUninstallString`. An uninstall that could not finish keeps the entry in Settings, so it can
+be run again from there.
 
 ## Conventions
 
@@ -175,8 +192,8 @@ and disrupts the desktop). Instead:
 
 - `cargo fmt`, `clippy -D warnings`, and the tests. `egui_kittest` drives the real
   screens of both the app and the installer headlessly, and needs no elevation or GPU.
-- To see the result, set `WAM_UI_PREVIEW_DIR` and run the UI tests. The main states are
-  written there as PNGs:
+- To see the result, set `WAM_UI_PREVIEW_DIR` and run the UI tests. The main states of the
+  app, the installer, and the uninstaller are written there as PNGs:
 
   ```powershell
   $env:WAM_UI_PREVIEW_DIR = "$env:TEMP\wam-preview"

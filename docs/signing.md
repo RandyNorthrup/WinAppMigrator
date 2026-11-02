@@ -48,6 +48,19 @@ An installer's window says who signed it, or "Not signed: publisher unknown". Si
 thing that proves where one came from. The SHA-256 in its footer is checked before anything is read,
 which catches a truncated copy or an edited manifest, but whoever edits a package can update that too.
 
+## The uninstaller
+
+An install leaves a copy of the stub behind, for the app's entry in Settings to run. A validly signed
+copy would be exactly the signed stub this page says must never exist, so it has no signature, even if
+the installer it came from has one. When it is carved out of an installer, the package and the certificate
+table are cut off, and the table's location and the checksum, which signing writes into the headers,
+are cleared. It comes out byte for byte the stub the installer was built from, and Windows reports it as
+`NotSigned`. The elevated round trip checks that with `Get-AuthenticodeSignature`, for an installer given a
+valid signature from a throwaway certificate made on the runner.
+
+So its UAC prompt says "Unknown publisher". That is the price of the rule, and what makes it safe is where
+it is: a folder only administrators can write to.
+
 ## How release signing is set up
 
 Signing uses [Azure Artifact Signing][signing] with no stored password or certificate:

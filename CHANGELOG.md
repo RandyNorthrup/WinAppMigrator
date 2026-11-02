@@ -4,6 +4,38 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **An install can be undone.** It keeps a journal, in an admin-only folder of its own under
+  `%ProgramData%\WinAppMigrator\installs`, recording what each change replaces before making it, with files
+  it overwrites kept as backups.
+  - Any failure puts everything back in reverse order and says what could not be. So does cancelling, and
+    so does the check after installing. An install killed or cut off by a power cut is found and undone by
+    the next one, which is safe however far the last attempt got. A preview only mentions it.
+  - **What fails an install has changed.** A step the package asked for that fails now means the install
+    failed, including registry values, tasks, and licenses, which used to be listed and left. The only
+    exceptions are a service's description, and a shortcut anywhere but a Startup folder. What the rules
+    refuse is still left out and does not fail anything, including a task or COM class that belongs to
+    something else, which they can only refuse at the moment it would be done.
+  - Runtimes it installed stay, and are reported as left behind.
+  - Without the record being safe to keep, an install no longer starts, and only one install or uninstall
+    runs at a time.
+- **An app installed this way has an uninstaller.** Its entry in Settings runs a bare copy of the stub kept
+  in that same folder, never in the install folder, and with `QuietUninstallString`, no window. It undoes
+  only what the journal says that install did: a file or value that has changed since is kept and reported,
+  overwritten files come back, only added `Path` entries come out, what you added stays, and so do user
+  data and licenses unless you ask. It stops a service before deleting it. It can be run again if it could
+  not finish, and removes itself after it exits. The source PC's `UninstallString`, `QuietUninstallString`,
+  `ModifyPath`, and `WindowsInstaller` no longer survive. A package with no entry gets one.
+- **Logs are kept,** in `%ProgramData%\WinAppMigrator\logs`, which only administrators can read, with a limit
+  on size and on how many are kept. They hold paths and key names only, and a test pins that. `--log <FILE>`
+  adds a file of your own. Both windows say where the log is when something fails. Warnings that used to
+  vanish, and errors a windowed program could not print, now go there.
+- **An installer's window shows its progress,** for unpacking and each step, and can be cancelled.
+- **`--apply` no longer needs `--target-root`.** It defaults to where the app was, if the checks the window
+  makes allow that.
+- **A service set to start automatically but delayed keeps that.** It came back as plain automatic.
+- **A file named like a device, such as `aux.h`, now stops an install before Windows 11 with a clear
+  message.** It reached the device, which threw its data away and reported a failed hash check, or could hang
+  on a real serial port. This has not been run on Windows 10.
 - **PowerShell calls no longer search every module.** A call that had to find a command took 23
   seconds on Windows Server with no module cache, so a small app took more than 6 minutes to install
   there. Scripts now import what they use by name. On CI's Windows Server, a preview went from 23
