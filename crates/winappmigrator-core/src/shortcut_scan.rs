@@ -113,6 +113,7 @@ fn read_shortcuts_on_a_drive(
         for entry in WalkDir::new(folder)
             .follow_links(false)
             .into_iter()
+            .filter_entry(|entry| system.may_read(entry.path()))
             .flatten()
         {
             let path = entry.path();

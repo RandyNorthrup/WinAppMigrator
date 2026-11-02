@@ -13,6 +13,8 @@ use crate::restore_policy::service_image_path_value;
 use crate::system_context::SystemContext;
 
 const POWERSHELL_EXE: &str = "powershell.exe";
+/// Each one starts PowerShell, and a registry can name any number.
+const MAX_DRIVER_SIGNERS_ASKED: usize = 16;
 
 const SERVICES_KEY: &str = r"SYSTEM\CurrentControlSet\Services";
 const SERVICE_KERNEL_DRIVER: u32 = 0x0000_0001;
@@ -132,6 +134,7 @@ pub fn scan_drivers(
 ) -> (Vec<DriverEntry>, Vec<Warning>) {
     let mut drivers = Vec::new();
     let mut warnings = Vec::new();
+    let mut signers_asked = 0_usize;
     let windows_dir = logical_windows_dir(system);
     let expand = |text: &str| system.expand_source_variables(text);
     let services_key = match system.open_hklm(SERVICES_KEY, KEY_READ) {
@@ -170,7 +173,13 @@ pub fn scan_drivers(
         let app_owned = readable
             .as_deref()
             .is_some_and(|file| is_app_owned_driver(context, &binary_path, file));
-        let signer = readable.as_deref().and_then(driver_signer);
+        let signer = readable
+            .as_deref()
+            .filter(|_| signers_asked < MAX_DRIVER_SIGNERS_ASKED)
+            .and_then(|file| {
+                signers_asked += 1;
+                driver_signer(file)
+            });
         let restore_instructions =
             driver_restore_instructions(&service_name, &binary_path, &kind, app_owned, &signer);
 

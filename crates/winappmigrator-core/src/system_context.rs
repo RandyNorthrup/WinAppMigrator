@@ -33,6 +33,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
+use std::io::Read as _;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::Mutex;
@@ -44,13 +45,14 @@ use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::is_reserved_device_name;
+use crate::file_discovery::opens_as_device_on;
 use crate::journal::machine_state_root;
 use crate::models::{Warning, WarningSeverity};
 use crate::package::copy_file_backup_mode;
 use crate::path_utils::{
-    SignedInUser, file_name_string, hidden_command, is_person_sid, path_is_within,
-    resolved_location, signed_in_user, strip_prefix_ignore_case, system_root,
+    SignedInUser, file_name_string, hidden_command, is_on_a_local_disk, is_person_sid,
+    path_is_within, resolved_location, signed_in_user, strip_prefix_ignore_case, system_root,
+    windows_build,
 };
 use crate::privilege::{ProtectedFolder, ensure_protected_folder, is_elevated};
 
@@ -89,6 +91,19 @@ const ERROR_SHARING_VIOLATION: i32 = 32;
 /// made big enough to fill this PC's disk, for each account it says it has.
 const MAX_HIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ACCOUNTS: usize = 64;
+/// As a task names them, in English. A task usually has a SID for these instead.
+const WINDOWS_OWN_ACCOUNTS: &[&str] = &[
+    "SYSTEM",
+    "LOCAL SERVICE",
+    "LocalService",
+    "NETWORK SERVICE",
+    "NetworkService",
+    "INTERACTIVE",
+    "Authenticated Users",
+    "Users",
+    "Administrators",
+    "Everyone",
+];
 const MAX_HIVE_BYTES_IN_ALL: u64 = 32 * 1024 * 1024 * 1024;
 const UNLOAD_ATTEMPTS: u32 = 20;
 const UNLOAD_RETRY_WAIT: Duration = Duration::from_millis(250);
@@ -220,7 +235,8 @@ impl VolumeMap {
             }
             current.push(name);
             // As it is written. On NTFS a folder can be made case-sensitive, and on a drive made
-            // to attack this, `Data` and `DATA` can be a folder and a link.
+            // to attack this, `Data` and `DATA` can be a folder and a link. Names that are not text
+            // were refused just now, so that no two come out the same here.
             let key = current.to_string_lossy().into_owned();
             if checked.contains(&key) {
                 continue;
@@ -239,17 +255,20 @@ impl VolumeMap {
     }
 }
 
-/// What a value on a drive may not put in a path: a stream, a device, a second separator after a
-/// `\\?\`, or what Windows would strip from the end of a name, which is how `..` can be spelled
-/// so that nothing here sees it.
+/// What a name on a drive may not be: a stream, a device, a second separator after a `\\?\`, or
+/// what Windows would strip from the end of a name. That is how `..` can be spelled so that nothing
+/// here sees it, and how a real folder `x.` opens the link `x` beside it. A name that is not text
+/// cannot be written to a manifest, or told from another by what is kept of it.
 fn is_ordinary_name(name: &OsStr) -> bool {
-    let name = name.to_string_lossy();
+    let Some(name) = name.to_str() else {
+        return false;
+    };
     !name.is_empty()
         && !name.ends_with(['.', ' '])
         && !name
             .chars()
             .any(|character| matches!(character, ':' | '/' | '\\') || character.is_control())
-        && !is_reserved_device_name(&name)
+        && !opens_as_device_on(name, windows_build())
 }
 
 /// What the PC an app was on called itself, and which Windows it ran.
@@ -562,8 +581,14 @@ fn copy_a_hive_file(source: &Path, destination: &Path) -> Result<u64> {
             source.display()
         )));
     }
-    match fs::copy(source, destination) {
-        Ok(_) => {}
+    // By reading it, since `fs::copy` also brings the streams stored under its name, of any size.
+    match File::open(source) {
+        Ok(from) => {
+            let mut to = File::create(destination)
+                .map_err(|error| WinAppMigratorError::io(destination, error))?;
+            std::io::copy(&mut from.take(MAX_HIVE_BYTES), &mut to)
+                .map_err(|error| WinAppMigratorError::io(source, error))?;
+        }
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             copy_file_backup_mode(source, destination)?;
         }
@@ -588,6 +613,33 @@ struct OfflineHives {
     system_mount: Option<String>,
     control_set: String,
     identity: SourceIdentity,
+}
+
+/// Where other accounts' folders really are on this PC, to ask about again just before a file is
+/// copied. Whoever can write in a folder that was scanned can make part of it a link to someone
+/// else's after that. Empty for a drive, where nothing that may be read goes through a link.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OtherAccountsFolders {
+    folders: Vec<PathBuf>,
+    /// Where the app is, which is allowed to be in one if the scan found that it may be.
+    app_folder: Option<PathBuf>,
+}
+
+impl OtherAccountsFolders {
+    /// Whether a path leads into one of them now, wherever it says it is.
+    pub fn hold(&self, path: &Path) -> bool {
+        if self.folders.is_empty() {
+            return false;
+        }
+        let real = resolved_location(path);
+        self.folders
+            .iter()
+            .any(|folder| path_is_within(&real, folder))
+            && !self
+                .app_folder
+                .as_deref()
+                .is_some_and(|folder| path_is_within(&real, folder))
+    }
 }
 
 /// What this scan has been told about the accounts to read, and whose they are.
@@ -938,6 +990,7 @@ impl SystemContext {
             .map(|refused| refused.iter().cloned().collect::<Vec<String>>())
             .unwrap_or_default();
         if !refused.is_empty() {
+            let on_a_drive = self.offline.is_some();
             let shown = refused
                 .iter()
                 .take(MAX_LISTED_REFUSALS)
@@ -950,21 +1003,34 @@ impl SystemContext {
             } else {
                 String::new()
             };
-            warnings.push(Warning::new(
-                "drive_paths_not_followed",
-                WarningSeverity::Warning,
-                format!(
-                    "{} recorded on this drive could not be read, so nothing there was included. \
-                     Each is on another disk, is not a full path, or goes through a link, which \
-                     would lead off the drive: {shown}{more}",
-                    if refused.len() == 1 {
-                        "A path"
-                    } else {
-                        "Some paths"
-                    }
-                ),
-                None,
-            ));
+            let some = if refused.len() == 1 {
+                "A path"
+            } else {
+                "Some paths"
+            };
+            warnings.push(if on_a_drive {
+                Warning::new(
+                    "drive_paths_not_followed",
+                    WarningSeverity::Warning,
+                    format!(
+                        "{some} recorded on this drive could not be read, so nothing there was \
+                         included. Each is on another disk, is not a full path, or goes through a \
+                         link, which would lead off the drive: {shown}{more}"
+                    ),
+                    None,
+                )
+            } else {
+                Warning::new(
+                    "network_paths_not_followed",
+                    WarningSeverity::Warning,
+                    format!(
+                        "{some} recorded on this PC could not be read, so nothing there was \
+                         included. Each is not on a disk of this PC, and looking at it would \
+                         connect to it: {shown}{more}"
+                    ),
+                    None,
+                )
+            });
         }
         warnings
     }
@@ -1219,22 +1285,45 @@ impl SystemContext {
         if !self.may_read(path) {
             return true;
         }
+        let path = resolved_location(path);
+        self.folders_of_others()
+            .iter()
+            .any(|folder| path_is_within(&path, folder))
+    }
+
+    /// Where every account's folder is but those of who this scan is about.
+    fn folders_of_others(&self) -> Vec<PathBuf> {
         let readers: Vec<String> = self
             .user_hives()
             .iter()
             .map(|user| comparison_key(&resolved_location(&user.profile_dir)))
             .collect();
-        let path = resolved_location(path);
         let mut profiles = self.user_profiles();
         profiles.extend(self.listed.iter().map(|profile| profile.dir.clone()));
-        profiles.into_iter().any(|profile| {
-            let real = resolved_location(&profile);
-            !readers.contains(&comparison_key(&real)) && path_is_within(&path, &real)
-        })
+        let mut folders: Vec<PathBuf> = profiles
+            .iter()
+            .map(|profile| resolved_location(profile))
+            .filter(|real| !readers.contains(&comparison_key(real)))
+            .collect();
+        folders.sort();
+        folders.dedup();
+        folders
     }
 
-    /// Whether an account a scheduled task runs as is a person other than the one this scan is
-    /// about. That is theirs, along with what it was told to do.
+    /// What a build asks about again just before it copies each file on this PC.
+    pub fn other_accounts_folders(&self, app_folder: Option<&Path>) -> OtherAccountsFolders {
+        if self.offline.is_some() {
+            return OtherAccountsFolders::default();
+        }
+        OtherAccountsFolders {
+            folders: self.folders_of_others(),
+            app_folder: app_folder.map(resolved_location),
+        }
+    }
+
+    /// Whether an account a scheduled task runs as is anyone but the one this scan is about, or
+    /// one of Windows' own. That is theirs, along with what it was told to do. An account that
+    /// cannot be told apart from a person counts as one: all it costs is a warning.
     pub fn is_another_persons_account(&self, account: &str) -> bool {
         let name = account.rsplit('\\').next().unwrap_or(account);
         let is_the_one = self.user_hives().iter().any(|user| {
@@ -1242,13 +1331,24 @@ impl SystemContext {
                 .as_deref()
                 .is_some_and(|sid| sid.eq_ignore_ascii_case(account))
                 || user.name.eq_ignore_ascii_case(name)
+                // A folder is `bob.PC` when a `bob` had one already.
+                || user
+                    .name
+                    .split_once('.')
+                    .is_some_and(|(stem, _)| stem.eq_ignore_ascii_case(name))
         });
-        !is_the_one
-            && (is_person_sid(account)
-                || self
-                    .listed
-                    .iter()
-                    .any(|profile| profile.name.eq_ignore_ascii_case(name)))
+        if is_the_one {
+            return false;
+        }
+        if account
+            .get(..4)
+            .is_some_and(|start| start.eq_ignore_ascii_case("S-1-"))
+        {
+            return is_person_sid(account);
+        }
+        !WINDOWS_OWN_ACCOUNTS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(name))
     }
 
     // ---- Path re-rooting ----------------------------------------------------
@@ -1263,7 +1363,11 @@ impl SystemContext {
     /// [`Self::may_read`]. What it will not follow is listed in [`Self::warnings`].
     pub fn resolve_source_path(&self, recorded: &Path) -> Option<PathBuf> {
         let Some(hives) = &self.offline else {
-            return Some(recorded.to_path_buf());
+            if self.may_read(recorded) {
+                return Some(recorded.to_path_buf());
+            }
+            self.note_refused(recorded);
+            return None;
         };
         let on_volume = hives
             .map
@@ -1275,11 +1379,12 @@ impl SystemContext {
         on_volume
     }
 
-    /// Whether a path found while scanning can be read. Always, on this PC. On a drive, see
-    /// [`VolumeMap::may_read`], which every path is asked again just before reading it.
+    /// Whether a path found while scanning can be read. On this PC, if it is on a disk of this PC.
+    /// On a drive, see [`VolumeMap::may_read`], which every path is asked again just before reading
+    /// it. That has to come first, since nearly any other look at a path follows a link.
     pub fn may_read(&self, path: &Path) -> bool {
         let Some(hives) = &self.offline else {
-            return true;
+            return is_on_a_local_disk(path);
         };
         match self.checked.lock() {
             Ok(mut checked) => hives.map.may_read_noting(path, &mut checked),
@@ -1970,12 +2075,115 @@ mod tests {
             "S-1-12-1-1-2-3-4",
             "bob",
             r"OLD-PC\BOB",
+            r"CORP\carol",
         ] {
             assert!(
                 system.is_another_persons_account(someone_else),
                 "{someone_else}"
             );
         }
+    }
+
+    #[test]
+    fn a_name_windows_would_read_as_another_is_not_ordinary() {
+        use std::os::windows::ffi::OsStringExt;
+        for name in ["x.", "x ", "x..", "x. .", "CON", "nul", "a:b", "a\\b"] {
+            assert!(!is_ordinary_name(OsStr::new(name)), "{name}");
+        }
+        assert!(
+            !is_ordinary_name(&std::ffi::OsString::from_wide(&[0x78, 0xD800])),
+            "a name that is not text"
+        );
+        for name in ["x", "x.y", ".x", "a b", "Größe", "console"] {
+            assert!(is_ordinary_name(OsStr::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_real_folder_named_for_a_link_with_a_dot_is_asked_about_as_the_link() -> std::io::Result<()>
+    {
+        let work = tempfile::tempdir()?;
+        let volume = work.path().join("volume");
+        let outside = work.path().join("this PC");
+        fs::create_dir_all(&volume)?;
+        fs::create_dir_all(&outside)?;
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(volume.join("x"))
+            .arg(&outside)
+            .output()?;
+        assert!(made.status.success());
+        let twin = volume.join("x.");
+        fs::create_dir(format!(r"\\?\{}", twin.display()))?;
+        let map = VolumeMap {
+            volume_root: volume,
+            system_drive: 'C',
+        };
+        assert!(!map.may_read(&twin));
+        assert!(!map.may_read(&twin.join("y")));
+        Ok(())
+    }
+
+    #[test]
+    fn what_a_folder_leads_to_is_asked_about_again_whatever_it_says_it_is() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let bob = work.path().join("bob");
+        let mine = work.path().join("mine");
+        fs::create_dir_all(&bob)?;
+        fs::create_dir_all(mine.join("app"))?;
+        let swapped = mine.join("app").join("swapped");
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&swapped)
+            .arg(&bob)
+            .output()?;
+        assert!(made.status.success());
+        let others = OtherAccountsFolders {
+            folders: vec![resolved_location(&bob)],
+            app_folder: Some(resolved_location(&mine.join("app"))),
+        };
+        assert!(others.hold(&swapped.join("secret.txt")));
+        assert!(others.hold(&bob.join("secret.txt")));
+        assert!(!others.hold(&mine.join(r"app\own.txt")));
+        let in_theirs = OtherAccountsFolders {
+            folders: vec![resolved_location(&bob)],
+            app_folder: Some(resolved_location(&bob.join("Apps"))),
+        };
+        assert!(
+            !in_theirs.hold(&bob.join(r"Apps\x.exe")),
+            "where the app itself was found to be"
+        );
+        assert!(in_theirs.hold(&bob.join("letter.txt")));
+        assert!(!OtherAccountsFolders::default().hold(&bob.join("secret.txt")));
+        Ok(())
+    }
+
+    #[test]
+    fn on_this_pc_a_path_that_is_not_on_a_disk_here_is_not_looked_at() {
+        let system = SystemContext::live();
+        for path in [
+            r"\\attacker\share\x",
+            r"\\localhost\C$\Users\bob",
+            r"\??\UNC\attacker\share",
+        ] {
+            let path = Path::new(path);
+            assert!(!system.may_read(path));
+            assert!(!system.is_dir(path));
+            assert!(!system.is_file(path));
+            assert_eq!(system.resolve_source_path(path), None);
+            assert!(system.is_in_another_profile(path));
+        }
+        assert!(system.may_read(Path::new(r"C:\Windows")));
+        assert!(
+            system
+                .warnings()
+                .iter()
+                .any(|warning| warning.code == "network_paths_not_followed")
+        );
     }
 
     #[test]

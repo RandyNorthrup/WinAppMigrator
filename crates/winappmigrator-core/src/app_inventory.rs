@@ -334,13 +334,13 @@ fn guess_executable_from_install_dir(
     // Many modern installers place the launcher in a subdirectory (commonly
     // `bin`) rather than the install root, so check the root first and then a
     // few well-known subdirectories before giving up.
-    if let Some(path) = find_executable_in_dir(install_location, display_name) {
+    if let Some(path) = find_executable_in_dir(install_location, display_name, system) {
         return Some(path);
     }
     for subdir in ["bin", "app", "Application", "program", "Programs"] {
         let candidate_dir = install_location.join(subdir);
         if system.is_dir(&candidate_dir)
-            && let Some(path) = find_executable_in_dir(&candidate_dir, display_name)
+            && let Some(path) = find_executable_in_dir(&candidate_dir, display_name, system)
         {
             return Some(path);
         }
@@ -348,7 +348,11 @@ fn guess_executable_from_install_dir(
     None
 }
 
-fn find_executable_in_dir(dir: &Path, display_name: &str) -> Option<PathBuf> {
+fn find_executable_in_dir(
+    dir: &Path,
+    display_name: &str,
+    system: &SystemContext,
+) -> Option<PathBuf> {
     let entries = fs::read_dir(dir).ok()?;
     let normalized_display = normalize_name_for_match(display_name);
     let mut executable_paths = Vec::new();
@@ -356,7 +360,7 @@ fn find_executable_in_dir(dir: &Path, display_name: &str) -> Option<PathBuf> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if !looks_like_executable(&path) {
+        if !looks_like_executable(&path) || !system.may_read(&path) {
             continue;
         }
         if is_auxiliary_executable(&path) {
@@ -601,7 +605,7 @@ mod tests {
         for name in ["git-bash.exe", "git-cmd.exe", "git.exe"] {
             fs::write(base.join(name), b"MZ")?;
         }
-        let found = find_executable_in_dir(&base, "Git");
+        let found = find_executable_in_dir(&base, "Git", &SystemContext::live());
         let _ = fs::remove_dir_all(&base);
 
         assert_eq!(found, Some(base.join("git.exe")));

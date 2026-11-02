@@ -74,11 +74,14 @@ const EXECUTABLE_FOLDER_NAMES: &[&str] = &[
 
 /// Far more than the largest real one, which was tens of megabytes, on a VS Code with years of
 /// updates. On a drive from elsewhere, one could be made big enough to run this out of memory.
-const MAX_INSTALL_LOG_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_INSTALL_LOG_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_APPX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// A file read whole, if it is of a size that makes sense for it.
-fn read_within(path: &Path, limit: u64) -> Option<Vec<u8>> {
+fn read_within(path: &Path, limit: u64, system: &SystemContext) -> Option<Vec<u8>> {
+    if !system.may_read(path) {
+        return None;
+    }
     let size = std::fs::metadata(path).ok()?.len();
     (size <= limit).then(|| std::fs::read(path).ok()).flatten()
 }
@@ -209,7 +212,7 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
             // anchor it directly.
             if let Some(dir) = primary_install_dir(app)
                 && system.may_read(&dir.join(APPX_MANIFEST))
-                && let Some(identity) = appx_identity_name(&dir)
+                && let Some(identity) = appx_identity_name(&dir, system)
             {
                 evidence.push(format!("AppxManifest identity: {identity}"));
                 let package_roots = msix_package_data_roots(&identity, system);
@@ -445,6 +448,7 @@ fn read_start_menu_shortcuts(system: &SystemContext) -> Vec<ShortcutHint> {
         for entry in WalkDir::new(&folder)
             .max_depth(MAX_START_MENU_DEPTH)
             .into_iter()
+            .filter_entry(|entry| system.may_read(entry.path()))
             .flatten()
         {
             let path = entry.path();
@@ -520,7 +524,7 @@ pub fn primary_executable(
     }
 
     for dir in source.roots.iter().map(PathBuf::as_path).chain(location) {
-        collect_tree_executables(dir, &mut candidates);
+        collect_tree_executables(dir, &mut candidates, system);
     }
     pick_primary_executable(
         candidates
@@ -684,11 +688,12 @@ fn collect_dir_executables(dir: &Path, out: &mut Vec<PathBuf>, system: &SystemCo
     }
 }
 
-fn collect_tree_executables(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_tree_executables(dir: &Path, out: &mut Vec<PathBuf>, system: &SystemContext) {
     let executables = WalkDir::new(dir)
         .max_depth(MAX_EXECUTABLE_SEARCH_DEPTH)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|entry| system.may_read(entry.path()))
         .flatten()
         .filter(|entry| entry.file_type().is_file() && looks_like_executable(entry.path()))
         .map(|entry| entry.into_path());
@@ -860,7 +865,7 @@ struct InnoManifest {
 /// path corrupted by the byte after it. Such a path fails the existence check, so the
 /// result is an undercount and never a wrong file.
 fn inno_manifest(log_path: &Path, system: &SystemContext) -> InnoManifest {
-    let Some(data) = read_within(log_path, MAX_INSTALL_LOG_BYTES) else {
+    let Some(data) = read_within(log_path, MAX_INSTALL_LOG_BYTES, system) else {
         return InnoManifest::default();
     };
     if !is_inno_log(&data) {
@@ -1104,7 +1109,7 @@ fn is_nsis_log_name(name: &str) -> bool {
 /// scans for resolved absolute path strings and keeps the ones that exist,
 /// which is robust across AdvUninstLog versions and UTF-16/ANSI encodings.
 fn nsis_manifest_files(log_path: &Path, system: &SystemContext) -> Vec<PathBuf> {
-    let Some(data) = read_within(log_path, MAX_INSTALL_LOG_BYTES) else {
+    let Some(data) = read_within(log_path, MAX_INSTALL_LOG_BYTES, system) else {
         return Vec::new();
     };
     existing_files(scanned_path_strings(&data), system)
@@ -1333,8 +1338,12 @@ fn squirrel_version_key(app_dir: &Path) -> Vec<u64> {
 /// Read the `Identity` element `Name` from a package's `AppxManifest.xml`
 /// (for example `Microsoft.WindowsTerminal`). A targeted attribute scan avoids
 /// pulling in an XML dependency for a single well-known element.
-fn appx_identity_name(install_dir: &Path) -> Option<String> {
-    let data = read_within(&install_dir.join(APPX_MANIFEST), MAX_APPX_MANIFEST_BYTES)?;
+fn appx_identity_name(install_dir: &Path, system: &SystemContext) -> Option<String> {
+    let data = read_within(
+        &install_dir.join(APPX_MANIFEST),
+        MAX_APPX_MANIFEST_BYTES,
+        system,
+    )?;
     let text = String::from_utf8_lossy(&data);
     let identity = &text[text.find("<Identity")?..];
     let after_name = &identity[identity.find("Name=\"")? + "Name=\"".len()..];
@@ -3011,7 +3020,7 @@ mod tests {
 </Package>"#,
         )?;
 
-        let name = appx_identity_name(&base);
+        let name = appx_identity_name(&base, &SystemContext::live());
         let _ = std::fs::remove_dir_all(&base);
 
         assert_eq!(name.as_deref(), Some("Microsoft.WindowsTerminal"));

@@ -682,6 +682,7 @@ mod tests {
             schema_version: SCAN_SCHEMA_VERSION.to_owned(),
             generated_at_utc: "2026-06-12T00:00:00Z".to_owned(),
             source_volume: None,
+            other_accounts: Default::default(),
             source_computer_name: None,
             source_windows_version: None,
             user_data_profile: None,

@@ -21,9 +21,11 @@ use crate::models::{
     RuntimePrerequisite, RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport,
     ScheduledTaskEntry, ServiceEntry, ShortcutEntry, Warning, WarningSeverity,
 };
-use crate::path_utils::{is_drive_root, looks_like_executable};
+use crate::path_utils::{is_drive_root, looks_like_executable, path_is_within};
 use crate::pe_scan::scan_pe;
-use crate::registry_scan::{RegistryScanContext, scan_registry_artifacts};
+use crate::registry_scan::{
+    RegistryScanContext, recorded_keys_of_one_account, scan_registry_artifacts,
+};
 use crate::reporting::{artifact_paths, write_scan_reports};
 use crate::service_scan::{ServiceScanContext, scan_drivers, scan_services};
 use crate::shortcut_scan::{ShortcutScanContext, scan_shortcuts};
@@ -98,20 +100,38 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         .unwrap_or(executable_path);
     // Whatever led here, on a drive nothing is read through a link or from off the drive.
     if !system.may_read(&executable_path) {
+        let why = if system.is_offline() {
+            "goes through a link or is not on the connected drive"
+        } else {
+            "is not on a disk of this PC"
+        };
         return Err(WinAppMigratorError::InvalidInput(format!(
-            "{} goes through a link or is not on the connected drive, so it was not read.",
+            "{} {why}, so it was not read.",
             executable_path.display()
         )));
     }
-    // An uninstall entry in one account's own registry can be written with no rights at all, and
-    // could otherwise name another's folder as its app, for an administrator to package.
+    // What an app is allowed to have in another account's folders is what its machine-wide record
+    // says. An uninstall entry in an account's own registry can be written with no rights at all,
+    // and so can a shortcut, and either could otherwise name someone else's folder as the app, for
+    // an administrator to package.
     let installed_for_one_account = source_app
         .as_ref()
         .is_some_and(|app| app.install_scope == InstallScope::PerUser);
-    if installed_for_one_account && system.is_in_another_profile(&executable_path) {
+    let machine_record = source_app
+        .as_ref()
+        .filter(|_| !installed_for_one_account)
+        .and_then(|app| app.install_location.clone());
+    let is_someone_elses = |path: &Path| {
+        source_app.is_some()
+            && !machine_record
+                .as_deref()
+                .is_some_and(|recorded| path_is_within(path, recorded))
+            && system.is_in_another_profile(path)
+    };
+    if is_someone_elses(&executable_path) {
         return Err(WinAppMigratorError::InvalidInput(format!(
-            "{} is in another account's folders, and this app was installed for one account, so \
-             it was not read.",
+            "{} is in another account's folders, and this app's own record does not say it belongs \
+             there, so it was not read.",
             executable_path.display()
         )));
     }
@@ -169,7 +189,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             .filter(|parent| !is_drive_root(parent))
             .map(Path::to_path_buf),
     }
-    .filter(|location| !(installed_for_one_account && system.is_in_another_profile(location)));
+    .filter(|location| !is_someone_elses(location));
     let recorded_location = source_app
         .as_ref()
         .and_then(|app| app.install_location.clone());
@@ -202,6 +222,13 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             recorded_keys: install_source
                 .as_ref()
                 .map(|source| source.registry_keys.clone())
+                .map(|keys| {
+                    if installed_for_one_account {
+                        recorded_keys_of_one_account(keys)
+                    } else {
+                        keys
+                    }
+                })
                 .unwrap_or_default(),
         },
         &system,
@@ -337,6 +364,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         schema_version: SCAN_SCHEMA_VERSION.to_owned(),
         generated_at_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,
         source_volume: system.volume_map().cloned(),
+        other_accounts: system.other_accounts_folders(install_location.as_deref()),
         source_computer_name: identity.computer_name,
         source_windows_version: identity.windows_version,
         user_data_profile,

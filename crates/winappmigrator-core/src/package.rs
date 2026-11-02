@@ -21,12 +21,12 @@ use crate::models::{
     RegistryEntry, RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions, ScanReport,
     ScheduledTaskEntry, Warning, WarningSeverity,
 };
-use crate::path_utils::{hidden_command, sanitize_filename};
+use crate::path_utils::{hidden_command, is_on_a_local_disk, sanitize_filename};
 use crate::prerequisites::PREREQUISITES_DIR;
 use crate::privilege::ProtectedFolder;
 use crate::progress::{BuildMonitor, BuildStep};
 use crate::scan::scan_and_write_reports;
-use crate::system_context::VolumeMap;
+use crate::system_context::{OtherAccountsFolders, VolumeMap};
 
 const FILES_DIR: &str = "files";
 const REGISTRY_DIR: &str = "registry";
@@ -273,6 +273,7 @@ pub fn create_package_monitored(
 struct SourceReader {
     volume: Option<VolumeMap>,
     checked: HashSet<String>,
+    other_accounts: OtherAccountsFolders,
 }
 
 impl SourceReader {
@@ -280,19 +281,27 @@ impl SourceReader {
         Self {
             volume: report.source_volume.clone(),
             checked: HashSet::new(),
+            other_accounts: report.other_accounts.clone(),
         }
     }
 
-    /// Fails for a path on a drive that goes off it or through a link.
+    /// Fails for a path on a drive that goes off it or through a link, and on this PC, for one that
+    /// is not on a disk here, or that leads into another account's folders by now.
     fn check(&mut self, path: &Path) -> Result<()> {
-        match self.volume.as_ref() {
+        let refusal = match self.volume.as_ref() {
             Some(volume) if !volume.may_read_noting(path, &mut self.checked) => {
-                Err(WinAppMigratorError::InvalidInput(format!(
-                    "{} goes through a link or is not on the connected drive, so it was not read",
-                    path.display()
-                )))
+                Some("goes through a link or is not on the connected drive")
             }
-            _ => Ok(()),
+            None if !is_on_a_local_disk(path) => Some("is not on a disk of this PC"),
+            None if self.other_accounts.hold(path) => Some("leads into another account's folders"),
+            _ => None,
+        };
+        match refusal {
+            Some(why) => Err(WinAppMigratorError::InvalidInput(format!(
+                "{} {why}, so it was not read",
+                path.display()
+            ))),
+            None => Ok(()),
         }
     }
 
@@ -583,7 +592,7 @@ fn package_one_license_artifact(
     if !source.is_dir() {
         return false;
     }
-    artifact.store_files = copy_license_store(&source, &destination, warnings);
+    artifact.store_files = copy_license_store(&source, &destination, reader, warnings);
     if artifact.store_files.is_empty() {
         return false;
     }
@@ -597,10 +606,18 @@ fn package_one_license_artifact(
 fn copy_license_store(
     source: &Path,
     destination: &Path,
+    reader: &mut SourceReader,
     warnings: &mut Vec<Warning>,
 ) -> Vec<LicenseStoreFile> {
     let mut copied = Vec::new();
-    for entry in walkdir::WalkDir::new(source).follow_links(false) {
+    // Each is asked about, by name. Nothing is followed, not even at the top: it was a folder when
+    // it was scanned, and any account can make what is there now.
+    let entries = walkdir::WalkDir::new(source)
+        .follow_links(false)
+        .follow_root_links(false)
+        .into_iter()
+        .filter_entry(|entry| reader.check(entry.path()).is_ok());
+    for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -619,10 +636,10 @@ fn copy_license_store(
         let Ok(relative) = entry.path().strip_prefix(source) else {
             continue;
         };
-        if has_reserved_device_name(relative) {
+        if has_reserved_device_name(relative) || relative.to_str().is_none() {
             continue;
         }
-        let target = destination.join(relative);
+        let target = destination.join(safe_relative_path(relative));
         match copy_file_preserving_basic_metadata(entry.path(), &target)
             .and_then(|()| staged_fingerprint(&target))
         {
@@ -1051,7 +1068,17 @@ mod tests {
             .map_err(|error| WinAppMigratorError::io(&store, error))?;
         let mut warnings = Vec::new();
 
-        let mut copied = copy_license_store(&store, &root.path().join("stage"), &mut warnings);
+        let mut reader = SourceReader {
+            volume: None,
+            checked: HashSet::new(),
+            other_accounts: OtherAccountsFolders::default(),
+        };
+        let mut copied = copy_license_store(
+            &store,
+            &root.path().join("stage"),
+            &mut reader,
+            &mut warnings,
+        );
         copied.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
 
         assert_eq!(copied.len(), 2);

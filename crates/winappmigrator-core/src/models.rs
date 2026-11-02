@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::file_discovery::UserDataAnchor;
-use crate::system_context::{ProfileChoice, ScanSource, VolumeMap};
+use crate::system_context::{OtherAccountsFolders, ProfileChoice, ScanSource, VolumeMap};
 
 pub const SCAN_SCHEMA_VERSION: &str = "winappmigrator.scan.v1";
 pub const PACKAGE_SCHEMA_VERSION: &str = "winappmigrator.package.v1";
@@ -161,6 +161,10 @@ pub struct ScanReport {
     /// of them is now, for reading it.
     #[serde(default)]
     pub source_volume: Option<VolumeMap>,
+    /// For a scan of this PC, what a build asks about again just before it copies each file. It
+    /// says where other accounts' folders are, and goes no further than this run.
+    #[serde(skip)]
+    pub other_accounts: OtherAccountsFolders,
     /// The name of the PC the app was on, as that PC recorded it.
     #[serde(default)]
     pub source_computer_name: Option<String>,

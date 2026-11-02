@@ -129,9 +129,10 @@ pub struct ProfileRow {
 }
 
 impl ProfilePicker {
-    /// Whether there is a choice to show. Only more than one account can make one.
+    /// Whether there is a choice to show: more than one account, or one account that no one has
+    /// said it should be.
     pub fn offers_a_choice(&self) -> bool {
-        self.rows.len() > 1
+        self.rows.len() > 1 || (self.selected.is_none() && !self.rows.is_empty())
     }
 }
 
@@ -225,6 +226,7 @@ impl ProfileSurvey {
                 && WalkDir::new(&root.path)
                     .follow_links(false)
                     .into_iter()
+                    .filter_entry(|entry| drive.is_none_or(|drive| drive.may_read(entry.path())))
                     .flatten()
                     .any(|entry| entry.file_type().is_file())
         })
@@ -278,15 +280,6 @@ fn pick(rows: Vec<ProfileRow>, on_a_drive: bool, unknown_user: Option<&str>) -> 
                 rows: Vec::new(),
                 selected: None,
                 note: Some(note),
-            },
-            [only] => ProfilePicker {
-                selected: Some(only.id.clone()),
-                note: Some(format!(
-                    "{note} {} is the only account with data for this app, so it is theirs that \
-                     goes in.",
-                    only.name
-                )),
-                rows: Vec::new(),
             },
             many => {
                 let rows = many.iter().map(|row| (*row).clone()).collect();
@@ -423,14 +416,11 @@ mod tests {
             false,
             Some("why"),
         );
-        assert_eq!(picker.selected.as_deref(), Some("a"));
-        assert!(!picker.offers_a_choice());
-        assert!(
-            picker
-                .note
-                .as_deref()
-                .is_some_and(|note| note.contains("only account"))
+        assert_eq!(
+            picker.selected, None,
+            "not even the only one with data, which may be someone else's"
         );
+        assert!(picker.offers_a_choice());
 
         let picker = pick(vec![row("a", false, false)], false, Some("why"));
         assert_eq!(picker.selected, None);

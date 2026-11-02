@@ -64,6 +64,8 @@ const HKLM_CLASSES_CLSID: &str = r"Software\Classes\CLSID";
 const HKLM_WOW6432_CLASSES_CLSID: &str = r"Software\WOW6432Node\Classes\CLSID";
 const MAX_REGISTRY_CAPTURE_DEPTH: usize = 8;
 const MAX_REGISTRY_CAPTURE_KEYS: usize = 512;
+/// Each value is kept as text and hex too, so this is a good deal more in memory.
+const MAX_REGISTRY_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REGISTRY_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_REGISTRY_MATCH_SCAN_DEPTH: usize = 4;
 /// How far under `Software\<Vendor>` to look for a key recording the install folder.
@@ -324,6 +326,7 @@ struct RegistryCaptureContext<'a> {
     entries: &'a mut Vec<RegistryEntry>,
     warnings: &'a mut Vec<Warning>,
     keys_seen: usize,
+    bytes_seen: usize,
 }
 
 fn scan_class_registrations(
@@ -724,6 +727,24 @@ fn scan_recorded_keys(
     }
 }
 
+/// What a record can say about an app installed for one account. Without rights it could not have
+/// written anywhere else in the registry, and the record is a file in that account's own folder,
+/// which could name a machine's secrets, for an administrator to package. `HKEY_CLASSES_ROOT` is
+/// that account's own classes when it writes to it.
+pub fn recorded_keys_of_one_account(keys: Vec<RecordedRegistryKey>) -> Vec<RecordedRegistryKey> {
+    keys.into_iter()
+        .filter_map(|key| match key.root {
+            RecordedRegistryRoot::CurrentUser => Some(key),
+            RecordedRegistryRoot::ClassesRoot => Some(RecordedRegistryKey {
+                root: RecordedRegistryRoot::CurrentUser,
+                key_path: format!(r"{HKLM_CLASSES}\{}", key.key_path),
+                ..key
+            }),
+            RecordedRegistryRoot::LocalMachine => None,
+        })
+        .collect()
+}
+
 /// Where a recorded key lives in `hive`, most likely path first. Empty when it belongs
 /// to the other hive. `HKEY_CLASSES_ROOT` is a merged view, so it can be either's
 /// `Software\Classes`. A key recorded in the 32-bit view is under `WOW6432Node` on 64-bit
@@ -923,6 +944,7 @@ fn capture_registry_subtree(
         entries,
         warnings,
         keys_seen: 0,
+        bytes_seen: 0,
     };
     capture_registry_subtree_inner(&mut context, key_path, 0);
 }
@@ -969,6 +991,18 @@ fn capture_registry_subtree_inner(
                 Some(format!("{key_path}\\{value_name}")),
             ));
             continue;
+        }
+        context.bytes_seen += raw_value.bytes.len();
+        if context.bytes_seen > MAX_REGISTRY_CAPTURE_BYTES {
+            // The same stop as for too many keys, which says so at the next one it comes to.
+            context.keys_seen = MAX_REGISTRY_CAPTURE_KEYS;
+            context.warnings.push(Warning::new(
+                "registry_capture_truncated",
+                WarningSeverity::Warning,
+                "Registry subtree capture reached the configured safety limit.",
+                Some(key_path.to_owned()),
+            ));
+            return;
         }
         context.entries.push(entry_from_raw_value(
             context.hive.clone(),
@@ -1292,6 +1326,38 @@ fn registry_server_path(value: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_app_for_one_account_can_only_say_things_about_that_accounts_registry() {
+        let key = |root, key_path: &str| RecordedRegistryKey {
+            root,
+            key_path: key_path.to_owned(),
+            value_name: None,
+            wow64_32: false,
+        };
+        let kept = recorded_keys_of_one_account(vec![
+            key(RecordedRegistryRoot::CurrentUser, r"Software\Vendor"),
+            key(RecordedRegistryRoot::ClassesRoot, r"Vendor.File"),
+            key(
+                RecordedRegistryRoot::LocalMachine,
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon",
+            ),
+        ]);
+        let shown: Vec<(RecordedRegistryRoot, &str)> = kept
+            .iter()
+            .map(|key| (key.root, key.key_path.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (RecordedRegistryRoot::CurrentUser, r"Software\Vendor"),
+                (
+                    RecordedRegistryRoot::CurrentUser,
+                    r"Software\Classes\Vendor.File"
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn registry_value_match_does_not_match_short_tokens_in_username() {

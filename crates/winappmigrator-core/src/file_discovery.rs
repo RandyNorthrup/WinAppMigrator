@@ -538,7 +538,7 @@ pub fn has_reserved_device_name(path: &Path) -> bool {
 /// Before Windows 11, `aux.h` reaches `AUX` and `nul.txt` reaches `NUL`. Unpacking one there
 /// would throw its data away, or hang writing to a real serial port. This cannot be run on
 /// anything older than the Windows 11 it was written on, so it goes by the documented rule.
-fn opens_as_device_on(component: &str, windows_build: u32) -> bool {
+pub(crate) fn opens_as_device_on(component: &str, windows_build: u32) -> bool {
     is_reserved_device_name(component)
         || (windows_build < FIRST_BUILD_WITH_ORDINARY_DEVICE_EXTENSIONS
             && component
@@ -948,6 +948,19 @@ fn left_out_warning(path: &Path) -> Warning {
     )
 }
 
+/// Whether any account can make a folder at the top of this kind of place, and so make it a link to
+/// wherever an administrator can read.
+fn anyone_can_create_in(kind: &FootprintKind) -> bool {
+    matches!(
+        kind,
+        FootprintKind::ProgramData | FootprintKind::PublicDocuments
+    )
+}
+
+fn is_a_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+}
+
 /// Whether what a scan found may be read for it: on a drive, it has to be on the drive with no
 /// link on the way. And another account's folder is its own, unless it is where this app is.
 fn may_take_from(path: &Path, install_root: Option<&Path>, system: &SystemContext) -> bool {
@@ -1037,6 +1050,7 @@ fn collect_roots(
     let mut roots: Vec<DiscoveryRoot> = Vec::new();
     for root in raw {
         let is_for_this_scan = system.may_read(&root.path)
+            && !(anyone_can_create_in(&root.kind) && is_a_link(&root.path))
             && (!root.path.exists()
                 || may_take_from(&root.path, context.install_location.as_deref(), system));
         if !is_for_this_scan {
@@ -1237,16 +1251,26 @@ pub(crate) fn user_folder_of(
             .and_then(|key| key.get_value::<String, _>(name).ok())
     };
     let logical_profile = system.logical_path(&user.profile_dir);
-    let folder = expand_user_folder(&recorded, &logical_profile, &lookup)
-        .and_then(|logical| system.resolve_source_path(&logical));
+    let logical = expand_user_folder(&recorded, &logical_profile, &lookup);
+    let on_a_drive = system.is_offline();
+    let out_of_reach = on_a_drive
+        || logical
+            .as_deref()
+            .is_some_and(|folder| !system.may_read(folder));
+    let folder = logical.and_then(|logical| system.resolve_source_path(&logical));
     match folder {
         Some(folder) if system.is_dir(&folder) => Some(folder),
-        _ if system.is_offline() => {
+        _ if out_of_reach => {
+            let not_on = if on_a_drive {
+                "this drive"
+            } else {
+                "a disk of this PC"
+            };
             warnings.push(Warning::new(
                 "user_folder_out_of_reach",
                 WarningSeverity::Warning,
                 format!(
-                    "{}'s {default} folder was at {recorded}, which is not on this drive, so what \
+                    "{}'s {default} folder was at {recorded}, which is not on {not_on}, so what \
                      is there was not included.",
                     user.name
                 ),
@@ -1321,8 +1345,11 @@ pub(crate) fn collect_matching_dirs(
     if drive.is_some_and(|drive| !drive.may_read(base)) {
         return;
     }
-    let is_link = |path: &Path| {
-        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    // Asked of each one by name, on a drive. What a folder's listing calls a folder can open as the
+    // link beside it, if its name ends in a dot, and that listing cannot tell.
+    let is_not_to_follow = |path: &Path| {
+        drive.is_some_and(|drive| !drive.may_read(path))
+            || (anyone_can_create_in(&kind) && is_a_link(path))
     };
     let entries = match fs::read_dir(base) {
         Ok(entries) => entries,
@@ -1348,8 +1375,8 @@ pub(crate) fn collect_matching_dirs(
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let link = is_link(&path);
-        let not_to_follow = link && drive.is_some();
+        let link = is_a_link(&path);
+        let not_to_follow = is_not_to_follow(&path);
         if (!not_to_follow && !path.is_dir()) || is_volatile_dir(&path, true) {
             continue;
         }
@@ -1384,7 +1411,7 @@ pub(crate) fn collect_matching_dirs(
         };
         for child in children.flatten() {
             let child_path = child.path();
-            let not_to_follow = drive.is_some() && is_link(&child_path);
+            let not_to_follow = is_not_to_follow(&child_path);
             if (not_to_follow || child_path.is_dir())
                 && !is_volatile_dir(&child_path, true)
                 && names.matches_nested(&folder_name, &file_name_string(&child_path), scope)
@@ -1440,7 +1467,9 @@ fn discover_tree(
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| {
-            !prune_volatile || !is_volatile_dir(entry.path(), entry.file_type().is_dir())
+            // Asked of each by name, not by what the listing says it is. See `collect_matching_dirs`.
+            system.may_read(entry.path())
+                && (!prune_volatile || !is_volatile_dir(entry.path(), entry.file_type().is_dir()))
         });
 
     for entry in walker {
@@ -1812,6 +1841,14 @@ pub(crate) fn known_base_dirs(system: &SystemContext) -> Vec<PathBuf> {
         bases.push(profile);
     }
     bases.push(system.windows_dir());
+    // Where each really is too, for comparing with where a folder really is. Finding that out
+    // looks through links, so not where a link may not be followed.
+    let real: Vec<PathBuf> = bases
+        .iter()
+        .filter(|base| system.may_read(base))
+        .map(|base| resolved_location(base))
+        .collect();
+    bases.extend(real);
     bases
 }
 
@@ -2438,6 +2475,12 @@ mod tests {
         for folder in [alice.join(r"AppData\Local"), volume.join("ProgramData")] {
             fs::create_dir_all(&folder).map_err(|error| WinAppMigratorError::io(&folder, error))?;
         }
+        // A real folder and a real file whose names open the link beside them, which what a
+        // listing says about them cannot show.
+        let twin_of = |link: &Path| format!(r"\\?\{}.", link.display());
+        assert!(make_junction(&install.join("twin"), &host.join("Demo App")));
+        fs::create_dir(twin_of(&install.join("twin")))
+            .map_err(|error| WinAppMigratorError::io(&install, error))?;
         // Inside what is walked, named for the app, on the way to a vendor's folder, and given as
         // a root by something on the drive.
         assert!(make_junction(
@@ -2526,7 +2569,7 @@ mod tests {
         // A link stands in for a short name here. Each is another way to write the same place.
         let other_name = base.path().join("BOB1");
         assert!(make_junction(&other_name, &bob));
-        let bases = vec![bob.clone()];
+        let bases = vec![bob.clone(), resolved_location(&bob)];
         assert!(holds_a_known_base_dir(&bob, &bases));
         assert!(holds_a_known_base_dir(&profiles, &bases));
         assert!(holds_a_known_base_dir(&other_name, &bases));

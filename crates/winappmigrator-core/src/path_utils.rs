@@ -558,6 +558,19 @@ fn comparable_path(path: &Path) -> String {
     text.to_ascii_lowercase()
 }
 
+/// Whether a path is on a disk of this PC, going by how it is written. Only looking at a share
+/// connects to it, as whoever is looking, which here is an administrator. That is what a value in
+/// any account's registry could ask for, and `\\?\GLOBALROOT` and `\??\UNC` are other ways to say it.
+pub fn is_on_a_local_disk(path: &Path) -> bool {
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => {
+            matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        }
+        Some(Component::RootDir) => false,
+        _ => true,
+    }
+}
+
 /// Where a location really is, as far as it exists yet: links followed and short names spelled
 /// out for what is there, and the rest as it was given. For what must not be fooled by either.
 pub fn resolved_location(path: &Path) -> PathBuf {
@@ -882,6 +895,33 @@ mod tests {
     fn this_windows_has_a_build_number_and_this_account_a_sid() {
         assert!(windows_build() > 0);
         assert!(current_user_sid().is_some_and(|sid| sid.starts_with("S-1-")));
+    }
+
+    #[test]
+    fn only_a_path_on_a_disk_of_this_pc_counts_as_one() {
+        for local in [
+            r"C:\Users\me",
+            r"C:relative",
+            r"\\?\C:\Users\me",
+            r"relative\path",
+        ] {
+            assert!(is_on_a_local_disk(Path::new(local)), "{local}");
+        }
+        for elsewhere in [
+            r"\\server\share\folder",
+            r"\\localhost\C$\Users\bob",
+            "//server/share/folder",
+            r"\\?\UNC\server\share",
+            r"\\.\C:\Users\bob",
+            r"\\.\pipe\name",
+            r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\bob",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\Users\bob",
+            r"\??\UNC\server\share",
+            r"\Device\Mup\server\share",
+            r"\Windows",
+        ] {
+            assert!(!is_on_a_local_disk(Path::new(elsewhere)), "{elsewhere}");
+        }
     }
 
     #[test]

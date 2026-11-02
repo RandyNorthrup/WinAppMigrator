@@ -100,7 +100,8 @@ pub fn scan_scheduled_tasks(
     let windows_dir = system.logical_path(&system.windows_dir());
     let mut tasks = Vec::new();
     let mut left_out = Vec::new();
-    let mut warnings = for_each_task_file(&tasks_root, &mut |file| {
+    let may_read = |path: &Path| system.may_read(path);
+    let mut warnings = for_each_task_file(&tasks_root, &may_read, &mut |file| {
         let Some(task) = task_entry(context, &file, &expand, &windows_dir) else {
             return;
         };
@@ -137,7 +138,7 @@ pub fn scan_scheduled_tasks(
 /// with it. Links are not followed, so a folder of tasks stays in itself, whatever is in it.
 pub fn read_task_files(tasks_root: &Path) -> (Vec<TaskFile>, Vec<Warning>) {
     let mut files = Vec::new();
-    let warnings = for_each_task_file(tasks_root, &mut |file| files.push(file));
+    let warnings = for_each_task_file(tasks_root, &|_| true, &mut |file| files.push(file));
     files.sort_by(|left, right| {
         (left.task_path.as_str(), left.task_name.as_str())
             .cmp(&(right.task_path.as_str(), right.task_name.as_str()))
@@ -146,9 +147,17 @@ pub fn read_task_files(tasks_root: &Path) -> (Vec<TaskFile>, Vec<Warning>) {
 }
 
 /// Hand over each task as it is read, with nothing kept that is not wanted, however many there are.
-fn for_each_task_file(tasks_root: &Path, visit: &mut dyn FnMut(TaskFile)) -> Vec<Warning> {
+fn for_each_task_file(
+    tasks_root: &Path,
+    may_read: &dyn Fn(&Path) -> bool,
+    visit: &mut dyn FnMut(TaskFile),
+) -> Vec<Warning> {
     let mut warnings = Vec::new();
-    for entry in WalkDir::new(tasks_root).follow_links(false) {
+    let entries = WalkDir::new(tasks_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| may_read(entry.path()));
+    for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -278,7 +287,13 @@ fn parse_task_xml(xml: &str) -> Result<ParsedTask, String> {
             "RunLevel" if parsed.run_level.is_none() => {
                 parsed.run_level = Some(node_text(node)).filter(|text| !text.is_empty());
             }
-            "UserId" | "GroupId" if parsed.account.is_none() => {
+            // Who it runs as. A trigger can have a `UserId` too, which comes first, and is not.
+            "UserId" | "GroupId"
+                if parsed.account.is_none()
+                    && node
+                        .parent_element()
+                        .is_some_and(|parent| parent.tag_name().name() == "Principal") =>
+            {
                 parsed.account = Some(node_text(node)).filter(|text| !text.is_empty());
             }
             "Triggers" if parsed.trigger_summary.is_none() => {
@@ -419,6 +434,21 @@ mod tests {
             account: None,
             definition_xml: String::new(),
         }
+    }
+
+    #[test]
+    fn who_a_task_runs_as_is_its_principal_and_not_whoever_triggers_it() {
+        let parsed = parse_task_xml(
+            r#"<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+                 <Triggers><LogonTrigger><UserId>PC\alice</UserId></LogonTrigger></Triggers>
+                 <Principals><Principal id="Author"><UserId>S-1-5-21-1-2-3-1002</UserId></Principal></Principals>
+                 <Actions><Exec><Command>x.exe</Command></Exec></Actions>
+               </Task>"#,
+        );
+        assert_eq!(
+            parsed.ok().and_then(|parsed| parsed.account).as_deref(),
+            Some("S-1-5-21-1-2-3-1002")
+        );
     }
 
     fn entry_for(file: TaskFile) -> Option<ScheduledTaskEntry> {
