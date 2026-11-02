@@ -1467,20 +1467,18 @@ impl SystemContext {
     /// [`Self::may_read`]. What it will not follow is listed in [`Self::warnings`].
     pub fn resolve_source_path(&self, recorded: &Path) -> Option<PathBuf> {
         let read = as_windows_reads_it(recorded);
-        let Some(hives) = &self.offline else {
-            if let Some(read) = read.filter(|read| self.may_read(read)) {
-                return Some(read);
-            }
-            self.note_refused(recorded);
-            return None;
+        let resolved = match &self.offline {
+            None => read.filter(|read| self.may_read(read)),
+            Some(hives) => read
+                .and_then(|read| hives.map.to_volume(&read))
+                .filter(|on_volume| self.may_read(on_volume)),
         };
-        let on_volume = read
-            .and_then(|read| hives.map.to_volume(&read))
-            .filter(|on_volume| self.may_read(on_volume));
-        if on_volume.is_none() {
+        if resolved.is_none() {
             self.note_refused(recorded);
         }
-        on_volume
+        // An MSI component that keys on a folder says so by ending in a separator.
+        let names_a_folder = recorded.to_string_lossy().ends_with(['\\', '/']);
+        resolved.map(|path| if names_a_folder { path.join("") } else { path })
     }
 
     /// Whether a path found while scanning can be read. On this PC, if it is on a disk of this PC and
@@ -2380,6 +2378,19 @@ mod tests {
         assert_eq!(
             system.resolve_source_path(Path::new(r"C:\Windows.\System32")),
             Some(PathBuf::from(r"C:\Windows\System32"))
+        );
+        // What says it is a folder still does, here and on a drive.
+        assert_eq!(
+            system.resolve_source_path(Path::new(r"C:\Windows\System32\")),
+            Some(PathBuf::from(r"C:\Windows\System32\"))
+        );
+        let on_a_drive = SystemContext::with_offline(hives("ControlSet001"));
+        let folder = on_a_drive.resolve_source_path(Path::new(r"C:\Program Files\App\"));
+        assert!(
+            folder
+                .as_ref()
+                .is_some_and(|path| path.to_string_lossy().ends_with(r"Program Files\App\")),
+            "{folder:?}"
         );
     }
 
