@@ -116,6 +116,7 @@ pub fn hold_folder(folder: &Path) -> io::Result<File> {
 fn protect_staging_folder(folder: &Path) -> io::Result<()> {
     match elevation() {
         Some(true) => {
+            reset_to_what_it_inherits(folder)?;
             take_ownership_for_administrators(folder)?;
             restrict_to_administrators(folder)?;
             confirm_administrators_only(folder)?;
@@ -126,6 +127,13 @@ fn protect_staging_folder(folder: &Path) -> io::Result<()> {
             "could not tell whether this process is elevated",
         )),
     }
+}
+
+/// A new folder can come with permissions that are not marked as inherited, when the folder
+/// above holds them in an older form. They can name the signed-in user, and cutting off
+/// inheritance leaves them in place. Resetting marks all of them as inherited.
+fn reset_arguments(folder: &Path) -> Vec<OsString> {
+    vec![folder.as_os_str().to_owned(), OsString::from("/reset")]
 }
 
 /// The owner of a folder can always change its permissions, so the owner has to be
@@ -160,6 +168,10 @@ fn run_icacls(folder: &Path, arguments: Vec<OsString>) -> io::Result<()> {
         String::from_utf8_lossy(&output.stdout).trim(),
         String::from_utf8_lossy(&output.stderr).trim()
     )))
+}
+
+fn reset_to_what_it_inherits(folder: &Path) -> io::Result<()> {
+    run_icacls(folder, reset_arguments(folder))
 }
 
 fn take_ownership_for_administrators(folder: &Path) -> io::Result<()> {
@@ -292,6 +304,14 @@ mod tests {
     }
 
     #[test]
+    fn the_reset_arguments_name_the_folder() {
+        assert_eq!(
+            reset_arguments(Path::new(r"D:\Stage Here")),
+            [r"D:\Stage Here", "/reset"].map(OsString::from)
+        );
+    }
+
+    #[test]
     fn the_owner_arguments_name_administrators() {
         assert_eq!(
             administrators_owner_arguments(Path::new(r"D:\Stage Here")),
@@ -326,8 +346,11 @@ mod tests {
             assert!(sddl_is_administrators_only(&good), "{good}");
         }
         for bad in [
-            // What a FAT32 or exFAT folder reports, whatever was asked of it.
-            "O:WDG:WDD:PAI(A;OICI;FA;;;WD)".to_owned(),
+            // What a FAT32 folder reports, whatever was asked of it.
+            "O:WDG:WD".to_owned(),
+            // What cutting off inheritance leaves when the folder above holds its
+            // permissions in an older form.
+            format!("O:BA{GROUP}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)"),
             // The signed-in user still owns it, and so can change it.
             format!("O:S-1-5-21-1-2-3-1001{GROUP}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"),
             // Still inheriting from its parent.

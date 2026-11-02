@@ -372,15 +372,19 @@ fn task_xml(full_name: &str) -> TestResult<Option<String>> {
     Ok(output.status.success().then(|| text(&output.stdout)))
 }
 
-/// The SHA-256 of every file under `root`, by path below it, from `Get-FileHash`.
+/// The SHA-256 of every file under `root`, by path below it. Read through a `\\?\` path,
+/// because Windows PowerShell's own path handling takes `aux.h` for a device.
 fn tree_hashes(root: &str) -> TestResult<BTreeMap<String, String>> {
     if !Path::new(root).exists() {
         return Ok(BTreeMap::new());
     }
     let shown = powershell(&format!(
-        "$root = {}; Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object {{ \
-           '{{0}}|{{1}}' -f $_.FullName.Substring($root.Length + 1), \
-           (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }}",
+        "$root = {}; $sha = [Security.Cryptography.SHA256]::Create(); \
+         Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object {{ \
+           $file = [IO.File]::OpenRead('\\\\?\\' + $_.FullName); \
+           $hash = [BitConverter]::ToString($sha.ComputeHash($file)) -replace '-', ''; \
+           $file.Close(); \
+           '{{0}}|{{1}}' -f $_.FullName.Substring($root.Length + 1), $hash }}",
         quoted(root)
     ))?;
     Ok(shown
@@ -1104,10 +1108,7 @@ fn remove_fake_app(
         r"{}\Programs\{APP_NAME}",
         folders.common_start_menu
     ));
-    powershell(&format!(
-        "Remove-Item -LiteralPath {} -Recurse -Force",
-        quoted(root)
-    ))?;
+    fs::remove_dir_all(root)?;
     for path in data {
         if let Some(parent) = path.parent() {
             let _ = fs::remove_dir_all(parent);
@@ -1219,7 +1220,7 @@ fn check_restored(
 ) -> TestResult {
     let actual_hashes = tree_hashes(root)?;
     checks.same(
-        "Get-FileHash: exactly the app's files, with the same contents",
+        "SHA-256 from .NET: exactly the app's files, with the same contents",
         &actual_hashes,
         file_hashes,
     );
@@ -2592,6 +2593,28 @@ fn attach_fat32_volume(folder: &Path) -> TestResult {
     Ok(())
 }
 
+/// What `Get-Acl` says of a protected folder, wherever it is.
+fn check_is_protected(checks: &mut Checks, folder: &str) -> TestResult {
+    let shown = powershell(&format!(
+        "$acl = Get-Acl -LiteralPath {}; $acl.Owner; $acl.AreAccessRulesProtected; \
+         $acl.Access | ForEach-Object {{ '{{0}}|{{1}}|{{2}}|{{3}}|{{4}}' -f \
+           $_.IdentityReference, $_.AccessControlType, $_.FileSystemRights, $_.IsInherited, \
+           $_.InheritanceFlags }} | Sort-Object",
+        quoted(folder)
+    ))?;
+    checks.same(
+        "Get-Acl: administrators own it, nothing is inherited, and only they and SYSTEM are on it",
+        shown.lines().map(str::trim).collect::<Vec<_>>(),
+        vec![
+            r"BUILTIN\Administrators",
+            "True",
+            r"BUILTIN\Administrators|Allow|FullControl|False|ContainerInherit, ObjectInherit",
+            r"NT AUTHORITY\SYSTEM|Allow|FullControl|False|ContainerInherit, ObjectInherit",
+        ],
+    );
+    Ok(())
+}
+
 #[test]
 fn staging_folder_is_locked_down_and_fails_closed() -> TestResult {
     if !may_change_this_machine()? {
@@ -2609,24 +2632,7 @@ fn staging_folder_is_locked_down_and_fails_closed() -> TestResult {
     let staging = ProtectedFolder::new_in(Path::new(&parent), "wam-e2e-stage-")?;
     let folder = staging.path().display().to_string();
     println!("{}", must("icacls", &[&folder])?);
-    let shown = powershell(&format!(
-        "$acl = Get-Acl -LiteralPath {}; $acl.Owner; $acl.AreAccessRulesProtected; \
-         $acl.Access | ForEach-Object {{ '{{0}}|{{1}}|{{2}}|{{3}}|{{4}}' -f \
-           $_.IdentityReference, $_.AccessControlType, $_.FileSystemRights, $_.IsInherited, \
-           $_.InheritanceFlags }} | Sort-Object",
-        quoted(&folder)
-    ))?;
-    let lines: Vec<&str> = shown.lines().map(str::trim).collect();
-    checks.same(
-        "Get-Acl: administrators own it, nothing is inherited, and only they and SYSTEM are on it",
-        lines,
-        vec![
-            r"BUILTIN\Administrators",
-            "True",
-            r"BUILTIN\Administrators|Allow|FullControl|False|ContainerInherit, ObjectInherit",
-            r"NT AUTHORITY\SYSTEM|Allow|FullControl|False|ContainerInherit, ObjectInherit",
-        ],
-    );
+    check_is_protected(&mut checks, &folder)?;
 
     section("A real account that is not an administrator tries to write there");
     let planted = format!(r"{folder}\planted.txt");
@@ -2711,15 +2717,11 @@ fn staging_folder_is_locked_down_and_fails_closed() -> TestResult {
             .starts_with(FAT32_DRIVE),
         fallback.path().display(),
     );
-    let fallback_owner = powershell(&format!(
-        "(Get-Acl -LiteralPath {}).Owner",
-        quoted(&fallback.path().display().to_string())
-    ))?;
-    checks.same(
-        "Get-Acl: and that folder is protected",
-        fallback_owner.trim(),
-        r"BUILTIN\Administrators",
+    println!(
+        "the temp folder's own permissions: {}",
+        powershell("(Get-Acl -LiteralPath $env:TEMP).Sddl")?.trim()
     );
+    check_is_protected(&mut checks, &fallback.path().display().to_string())?;
     drop(fallback);
     let package = hand_built_package("WAM E2E Plain Source")?;
     let installer = package.build("plain")?;
