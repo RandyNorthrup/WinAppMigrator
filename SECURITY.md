@@ -31,13 +31,14 @@ installer is about to trust, and an honest package reaching too far:
   over a service, task, or COM class already on the PC. Which installer runs for a runtime, and how,
   is compiled in, and the file must be signed by Microsoft. What is refused is listed. The lists are
   of what is known to be dangerous, so a package can still do something they do not name.
-- **What ties an app into Windows has rules of its own,** in one place. A class, interface, type library,
-  AppID, event source, and ODBC driver or source is all or nothing, and one part refused takes the rest with it:
+- **What ties an app into Windows has rules of its own,** in one place. What makes a class, interface, type
+  library, AppID, event source, or ODBC driver or source unusable takes all of it, and a value refused for what it
+  says by itself, such as an icon on a share, takes only that value:
   - A COM class's server, a link protocol's command, and what a shell extension loads have to be files the
     package installs. Windows' own only counts as a server from a short list of what hosts a class, by exact name
     and with nothing after it. So `scrobj.dll` and `cmd.exe` do not count, and neither does a share.
   - A file type can run through a program of Windows' only from a short list, such as `wscript.exe` and
-    `rundll32.exe`, and only if it is handed a file of the package straight away. `cmd.exe /c anything <file>` does
+    `rundll32.exe`, by its full path, and only if it is handed a file of the package straight away. `cmd.exe /c anything <file>` does
     not count, and what comes after that file goes to it. A value registering any of this cannot start with a network
     path, even for an icon, since Windows opens one just by showing it. One that reaches a share through a variable is
     not caught by that, and it is shown in the list of what is set up.
@@ -49,7 +50,7 @@ installer is about to trust, and an honest package reaching too far:
     can only run what its command says: `IsolatedCommand` is held to the same rule, and `CommandStore` is refused.
   - A firewall rule is for one program the package installs, never for all, and cannot override other rules or let
     traffic in through NAT. It is set through `netsh`, and an uninstall takes out a rule of that name, way, program,
-    protocol, and ports, if it is still as it was added.
+    protocol, and ports, if it is still as it was added. One that says something else by now stays, and it says so.
   - An event log source is only a new one, whose messages come from files the package installs. Nothing about a log
     itself can be changed, and no source is added to the Security log.
   - An ODBC driver's files have to be the package's, and a source's driver has to be the package's or Windows', with
@@ -67,9 +68,10 @@ installer is about to trust, and an honest package reaching too far:
     file, and `http` and the like can gain one too, while what opens them now stays.
   - **Being in the install location says nothing by itself.** A package suggests that place, so a package that said its
     home was another app's folder could otherwise call everything of that app's its own. What is on this PC only counts
-    as an earlier install there if a record in the admin-only folder says one was. That goes for services, drivers, and
-    tasks too. It does not go for files: `--force` replaces a file of the same name wherever it is put, which the
-    installer warns of, and an uninstall puts back.
+    as an earlier install there if a record in the admin-only folder says one was, of any app. That goes for services,
+    drivers, and tasks too, and a service left out takes what would have gone under its key along. It does not go for
+    files: `--force` replaces a file of the same name wherever it is put, which the installer warns of, and an uninstall
+    puts back.
 - **The rules do not make a package safe.** A package may still run its own files, as a service
   with full rights if it asks to. That is what installing an app is. Before anything happens, the
   installer's window lists the services, drivers, scheduled tasks, autostart entries, shortcuts,

@@ -302,11 +302,7 @@ fn is_a_placeholder(text: &str) -> bool {
 /// connection string with a password in it, or a URL with a user's password or a key.
 pub fn value_holds_credentials(text: &str) -> bool {
     // `Password = x` is as good as `Password=x` to whatever reads a connection string.
-    let text = text
-        .replace(" =", "=")
-        .replace("\t=", "=")
-        .replace("= ", "=")
-        .replace("=\t", "=");
+    let text = text.split('=').map(str::trim).collect::<Vec<_>>().join("=");
     url_has_a_password(&text)
         || text
             .split([';', '&', '?', ' ', '\t', '\n', '\r'])
@@ -381,7 +377,11 @@ pub fn is_secret_registry_value(entry: &RegistryEntry) -> bool {
         && !NOT_A_CREDENTIAL.contains(&text.trim().to_ascii_lowercase().as_str());
     let is_text = matches!(
         entry.value_kind,
-        None | Some(RegistryValueKind::String | RegistryValueKind::ExpandString)
+        None | Some(
+            RegistryValueKind::String
+                | RegistryValueKind::ExpandString
+                | RegistryValueKind::MultiString
+        )
     );
     !holds_nothing
         && (named_for_it
@@ -1006,6 +1006,7 @@ mod tests {
             "app.exe --password=hunter2",
             "Server=db; Password = hunter2;",
             "Pwd =hunter2",
+            "Password  =  hunter2",
         ] {
             assert!(value_holds_credentials(text), "{text}");
         }

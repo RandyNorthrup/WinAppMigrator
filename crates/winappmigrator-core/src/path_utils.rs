@@ -759,6 +759,10 @@ pub fn strip_prefix_ignore_case(path: &Path, root: &Path) -> Option<PathBuf> {
 /// True when `path` names something strictly below `root` by its components alone. Unlike
 /// [`path_is_within`], a `..` in `path` means no, because it may not stay inside.
 pub fn path_is_strictly_inside(path: &Path, root: &Path) -> bool {
+    // Nothing is inside no place at all, and everything not written as a full path would look it.
+    if root.as_os_str().is_empty() {
+        return false;
+    }
     strip_prefix_ignore_case(path, root).is_some_and(|relative| {
         !relative.as_os_str().is_empty()
             && relative
@@ -1274,6 +1278,22 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn nothing_is_inside_no_place_at_all() {
+        for path in [
+            "txtfile",
+            r"bin\a.exe",
+            r"%SystemRoot%\x.exe",
+            r"C:\App\a.exe",
+            "",
+        ] {
+            assert!(
+                !path_is_strictly_inside(Path::new(path), Path::new("")),
+                "{path}"
+            );
+        }
     }
 
     #[test]

@@ -1871,8 +1871,9 @@ fn class_command_refusal(
 }
 
 /// Whether a command is a program of Windows' given a file this package installs, straight after
-/// its name, as `wscript.exe "C:\App\a.vbs"` and `rundll32.exe "C:\App\a.dll",Run` are. Not
-/// `cmd.exe /c anything "C:\App\a.txt"`, whose file only comes along.
+/// its name, as `C:\Windows\System32\wscript.exe "C:\App\a.vbs"` is. Not
+/// `cmd.exe /c anything "C:\App\a.txt"`, whose file only comes along, and by its whole path, since
+/// a name by itself can be found in the folder of the file being opened.
 fn command_gives_a_restored_file_to_windows(
     command: &str,
     map: &RestoreMap,
@@ -1883,7 +1884,8 @@ fn command_gives_a_restored_file_to_windows(
     };
     let mut words = command_words(command);
     let _program = words.next();
-    is_a_program_of_windows(&program, windows_dir)
+    program.is_absolute()
+        && is_a_program_of_windows(&program, windows_dir)
         && WINDOWS_FILE_HOSTS.contains(&file_name_of(&program).to_ascii_lowercase().as_str())
         && words.next().is_some_and(|word| {
             let file = word.split_once(',').map_or(word, |(file, _)| file);
@@ -4747,6 +4749,26 @@ mod tests {
             "the file only comes along, and it runs whatever it is told"
         );
         assert!(refusal("Acme.File", COMMAND, from_a_share, false).is_some());
+        assert!(
+            refusal(
+                "Acme.File",
+                COMMAND,
+                r#"wscript.exe "C:\Program Files\Acme\My Tools\run.cmd""#,
+                false
+            )
+            .is_some(),
+            "a name by itself can be found beside the file being opened"
+        );
+        assert!(
+            refusal(
+                "Acme.File",
+                COMMAND,
+                r#"C:\Windows\System32\ssh.exe "C:\Program Files\Acme\acme.exe""#,
+                false
+            )
+            .is_some(),
+            "it runs what it is told as well as what it is given"
+        );
         assert!(
             refusal("Acme.File", "CLSID", OTHER_CLASS, false).is_some(),
             "it would create what this package does not install"

@@ -5814,6 +5814,16 @@ fn hostile_integration_state() -> TestResult<BTreeMap<String, String>> {
             None,
         ),
         (
+            "what a service in the folder the package suggests is set to",
+            format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{HOSTILE_SERVICE_THERE}\Parameters"),
+            Some("Hostile"),
+        ),
+        (
+            "what that service runs",
+            format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{HOSTILE_SERVICE_THERE}"),
+            Some("ImagePath"),
+        ),
+        (
             "the second existing source's other messages",
             format!(r"{EVENT_LOG_APPLICATION}\{HOSTILE_SECOND_SOURCE}"),
             Some("CategoryMessageFile"),
@@ -5869,6 +5879,7 @@ const HOSTILE_OWN_CLASS: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0004}";
 const HOSTILE_SERVICE_CLASS: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0006}";
 const HOSTILE_CLASS_THERE: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0007}";
 const HOSTILE_TARGET: &str = r"C:\Program Files\WAM E2E Taking";
+const HOSTILE_SERVICE_THERE: &str = "WamHostileThere";
 
 /// What can only be refused at the moment it would be done, since it depends on what is here.
 fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResult {
@@ -5935,6 +5946,17 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         "REG_SZ",
         &format!(r"{HOSTILE_TARGET}\theirs.dll"),
     )?;
+    must(
+        "sc.exe",
+        &[
+            "create",
+            HOSTILE_SERVICE_THERE,
+            "binPath=",
+            &format!("\"{HOSTILE_TARGET}\\theirs.exe\""),
+            "start=",
+            "demand",
+        ],
+    )?;
     // And what a program is opened as, for a name that happens to be the package's program too.
     let open_program =
         format!(r"{classes}\Applications\WAM E2E Taking Source.exe\shell\open\command");
@@ -5951,7 +5973,19 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
     let own = package.program.clone();
     let command = format!("\"{own}\" \"%1\"");
     let (machine, sz) = (RegistryHive::LocalMachine, RegistryValueKind::String);
+    // A service of another's in that folder, and a setting of it, as it came in by the way.
+    package
+        .manifest
+        .services_detected
+        .push(service_entry(HOSTILE_SERVICE_THERE, &own, Vec::new()));
     package.manifest.registry_keys_exported.extend([
+        registry_entry(
+            machine.clone(),
+            &format!(r"SYSTEM\CurrentControlSet\Services\{HOSTILE_SERVICE_THERE}\Parameters"),
+            Some("Hostile"),
+            "x",
+            sz.clone(),
+        ),
         // `http` and every other one, each running the package's own file, which it may not.
         registry_entry(
             machine.clone(),
@@ -6126,6 +6160,7 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         HOSTILE_SERVICE_CLASS,
         HOSTILE_CLASS_THERE,
         r"Applications\WAM E2E Taking Source.exe",
+        HOSTILE_SERVICE_THERE,
     ] {
         checks.that(
             &format!("reported as left out: {wanted}"),
@@ -6173,6 +6208,7 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
     reg_delete_key(&existing_source);
     reg_delete_key(&second_source);
     reg_delete_key(&format!(r"{classes}\CLSID\{HOSTILE_EXISTING_CLASS}"));
+    let _ = tool("sc.exe", &["delete", HOSTILE_SERVICE_THERE]);
     reg_delete_key(&format!(r"{classes}\CLSID\{HOSTILE_SERVICE_CLASS}"));
     reg_delete_key(&format!(r"{classes}\CLSID\{HOSTILE_CLASS_THERE}"));
     reg_delete_key(&format!(
@@ -6377,6 +6413,34 @@ fn integrations_come_and_go_and_take_nothing_else() -> TestResult {
     let records = installs_on_record()?;
     let install = run_installer(&installer, &["--target-root", INT_TARGET, "--apply"])?;
     checks.that("the install succeeded", install.success, &install.output);
+    check_integrations_restored(&mut checks, INT_TARGET, &thumbprint)?;
+
+    section(
+        "Installing it again over itself leaves nothing out, and undoing that leaves the first",
+    );
+    let again = run_installer(
+        &installer,
+        &["--target-root", INT_TARGET, "--apply", "--force"],
+    )?;
+    checks.that("the second install succeeded", again.success, &again.output);
+    checks.that(
+        "a record of the first says what is there is its own",
+        !again.output.lines().any(|line| {
+            line.contains("was left out")
+                && ["WamInt", "WAM Int", "wamint"]
+                    .iter()
+                    .any(|name| line.contains(name))
+        }),
+        &again.output,
+    );
+    check_integrations_restored(&mut checks, INT_TARGET, &thumbprint)?;
+    let second_id = install_id_in(&again.output)?;
+    let run = uninstall_quietly(&mut checks, &second_id, "")?;
+    checks.that(
+        "uninstalling the second succeeded",
+        run.success,
+        &run.output,
+    );
     check_integrations_restored(&mut checks, INT_TARGET, &thumbprint)?;
     for gone in [r"license.lic", ".env", r"conf\server.pem"] {
         checks.that(

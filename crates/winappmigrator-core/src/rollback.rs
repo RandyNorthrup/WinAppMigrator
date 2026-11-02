@@ -1153,6 +1153,15 @@ impl Undoer<'_> {
             })
             .collect();
         if found.is_empty() {
+            let another_like_it = stored
+                .iter()
+                .any(|rule| stored_firewall_rule_matches(rule, name, direction, program));
+            if another_like_it {
+                self.note_kept_text(&program.display().to_string());
+                self.kept(format!(
+                    "{label} stays, because what is there by that name says something else."
+                ));
+            }
             return;
         }
         let as_it_was = found

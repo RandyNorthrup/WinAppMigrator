@@ -957,10 +957,10 @@ pub struct SystemChanges {
 /// item is allowed does not depend on where the app is installed, so this is right for any
 /// install location chosen later. `Err` means the package would be refused whole.
 pub fn system_changes(manifest: &PackageManifest) -> Result<SystemChanges> {
-    system_changes_restoring(manifest, true)
+    system_changes_restoring(manifest, manifest.included_license_data)
 }
 
-/// The same, for when licenses may be asked not to be restored, as they can from a command line.
+/// The same, for when what is asked of licenses comes from a command line.
 pub fn system_changes_restoring(
     manifest: &PackageManifest,
     restore_license: bool,
@@ -970,7 +970,7 @@ pub fn system_changes_restoring(
         manifest,
         &target,
         true,
-        manifest.included_license_data && restore_license,
+        restore_license,
         &current_known_folders(),
         &expand_env_vars,
         // Whether an existing service may be replaced depends on where it is being installed.

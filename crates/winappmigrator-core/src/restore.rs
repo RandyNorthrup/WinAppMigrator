@@ -49,11 +49,12 @@ use crate::registry_target::{
     registry_value_name, service_image_path, stored_firewall_rules,
 };
 use crate::restore_policy::{
-    COM_SERVER_KEYS, EVENT_LOG_PREFIX, Registration, ServiceAccount, com_class_key,
-    com_server_refusal, existing_service_refusal, existing_task_refusal, firewall_fingerprint,
-    firewall_identity, is_autostart_entry, is_uninstall_entry_key, netsh_add_rule_arguments,
-    paths_equal, registration_of, registration_unit_of, restored_value_bytes, restored_value_name,
-    restored_value_text, service_image_path_value, stored_firewall_rule_matches,
+    COM_SERVER_KEYS, EVENT_LOG_PREFIX, Registration, SERVICES_PREFIX, ServiceAccount,
+    com_class_key, com_server_refusal, existing_service_refusal, existing_task_refusal,
+    firewall_fingerprint, firewall_identity, is_autostart_entry, is_uninstall_entry_key,
+    netsh_add_rule_arguments, paths_equal, registration_of, registration_unit_of,
+    restored_value_bytes, restored_value_name, restored_value_text, service_image_path_value,
+    stored_firewall_rule_matches,
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
@@ -102,10 +103,13 @@ const REFUSALS_FOUND_WHEN_INSTALLING: [&str; 6] = [
 const COM_CLASS_EXISTS_CODE: &str = "registry_com_class_exists";
 const REGISTRATION_EXISTS_CODE: &str = "registration_exists_elsewhere";
 const CLASS_IS_SOMEONES: &str = "this COM class is already on this PC, as something else's";
+const SERVICES_LEFT_ALONE_CODES: [&str; 2] =
+    ["service_exists_elsewhere", "driver_exists_elsewhere"];
 /// How far down to look for what says a unit on this PC is the app's: a type library's file is
 /// `{id}\<version>\<language>\<build>`.
 const DEEPEST_LOOK_IN_A_UNIT: usize = 4;
 const APP_ID_KEY_PREFIX: &str = r"software\classes\appid\";
+const APP_PATHS_KEY_PREFIX: &str = r"software\microsoft\windows\currentversion\app paths\";
 const CLASS_REFERENCE_KEY: &str = "CLSID";
 /// As a place to compare with, this has nothing in it.
 const NOWHERE: &str = "";
@@ -901,6 +905,16 @@ impl Run<'_, '_> {
             self.com_classes_left_alone = com_classes_to_leave_alone(&entries, on_this_pc);
             self.registrations_left_alone =
                 registrations_to_leave_alone(&entries, on_this_pc, &self.com_classes_left_alone);
+            // A service or driver left out just now takes what would have gone under it along.
+            self.registrations_left_alone
+                .extend(self.refused.iter().filter_map(|refused| {
+                    let is_a_service = SERVICES_LEFT_ALONE_CODES.contains(&refused.code.as_str());
+                    let name = refused.source.as_deref().filter(|_| is_a_service)?;
+                    Some(LeftAlone {
+                        key: format!("{SERVICES_PREFIX}{}", name.to_ascii_lowercase()),
+                        value: None,
+                    })
+                }));
         }
         for (done, entry) in review.registry.iter().enumerate() {
             if self.stopped() {
@@ -2381,10 +2395,13 @@ fn unit_is_someones(unit: &str, of_it: &[&RegistryEntry], on_this_pc: OnThisPc<'
             .all(|entry| is_as_it_is_on_this_pc(entry, on_this_pc.map))
 }
 
-/// `AppID\<program>` applies to a program by its file name alone, so this PC's own go by what they
-/// have. A file of that name in a package does not make it the same program.
-fn app_id_is_for_a_windows_program(unit: &str) -> bool {
-    let Some(name) = unit.strip_prefix(APP_ID_KEY_PREFIX) else {
+/// `AppID\<program>` and `App Paths\<program>` go by a program's file name alone, so this PC's own
+/// go by what they have. A file of that name in a package does not make it the same program.
+fn names_a_program_of_windows(unit: &str) -> bool {
+    let Some(name) = unit
+        .strip_prefix(APP_ID_KEY_PREFIX)
+        .or_else(|| unit.strip_prefix(APP_PATHS_KEY_PREFIX))
+    else {
         return false;
     };
     !name.starts_with('{')
@@ -2428,7 +2445,7 @@ fn registrations_to_leave_alone(
             .and_then(|rest| rest.split_once('\\'))
             .is_some_and(|(log, source)| event_source_is_in_another_log(log, source));
         if source_elsewhere
-            || app_id_is_for_a_windows_program(unit)
+            || names_a_program_of_windows(unit)
             || unit_is_someones(unit, of_it, on_this_pc)
             || of_it
                 .iter()
@@ -5091,6 +5108,22 @@ mod tests {
         assert!(on_this_pc(true).runs_from_an_earlier_install(inside));
         assert!(!on_this_pc(false).runs_from_an_earlier_install(inside));
         assert!(!on_this_pc(true).runs_from_an_earlier_install(r"C:\Program Files\Other\o.exe"));
+        // Whatever it is written as. Most of what is in the registry is not a full path.
+        for not_a_full_path in [
+            "txtfile",
+            "{00000000-0000-0000-0000-000000000000}",
+            "arial.ttf",
+            r"%SystemRoot%\system32\notepad.exe %1",
+            "Someone's",
+            r"bin\a.exe",
+        ] {
+            for earlier in [true, false] {
+                assert!(
+                    !on_this_pc(earlier).runs_from_an_earlier_install(not_a_full_path),
+                    "{not_a_full_path}"
+                );
+            }
+        }
         Ok(())
     }
 
