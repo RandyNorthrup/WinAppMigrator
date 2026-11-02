@@ -303,8 +303,8 @@ fn tree_state(root: &str) -> TestResult<BTreeMap<String, String>> {
                $name = $path.Substring($root.Length);
                if ($name -like 'System Volume Information*' -or $name -like '$RECYCLE.BIN*') {{ continue }}
                if ($attributes -band [IO.FileAttributes]::ReparsePoint) {{
-                 $item = Get-Item -LiteralPath $path -Force;
-                 '{{0}}|link|{{1}}' -f $name, ($item.Target -join ',');
+                 $target = try {{ (Get-Item -LiteralPath $path -Force).Target -join ',' }} catch {{ 'unreadable' }};
+                 '{{0}}|link|{{1}}' -f $name, $target;
                }} elseif ($attributes -band [IO.FileAttributes]::Directory) {{
                  '{{0}}|folder' -f $name;
                  Walk $path;
@@ -1051,11 +1051,9 @@ fn edit_the_drives_registry(paths: &Paths) -> TestResult {
             reg_add(&service, Some("Start"), "REG_DWORD", "3")?;
         }
         // What is captured with the app's own service, that is this machine's registry.
-        registry_link(
-            &format!(r"{control_set}\Services\{SERVICE}\Parameters"),
-            "HostLink",
-            HOST_REGISTRY_TARGET,
-        )?;
+        let parameters = format!(r"{control_set}\Services\{SERVICE}\Parameters");
+        reg_add(&parameters, Some("Marker"), "REG_SZ", "the app's own")?;
+        registry_link(&parameters, "HostLink", HOST_REGISTRY_TARGET)?;
         Ok(())
     })?;
     edit_hive(&format!(r"{config}\SOFTWARE"), |key| {
@@ -1231,6 +1229,32 @@ fn plant_the_links(paths: &Paths, program: &Path) -> TestResult {
         }
         must("cmd", &["/C", "mklink", "/D", &link, HOST_SHARE])?;
     }
+    // A real folder whose name opens the link beside it, since Windows drops a dot from the end of
+    // a name. What a folder's listing says about it does not show that. In each place something
+    // walks, and at the top of a license store, which any account can make on a PC.
+    for link in [
+        format!(r"{DRIVE_FOLDER}\Program Files\{APP}\twin"),
+        format!(r"{DRIVE_FOLDER}\ProgramData\FlexLM\twin"),
+        format!(r"{DRIVE_FOLDER}\ProgramData\Microsoft\Windows\Start Menu\Programs\twin"),
+        format!(r"{DRIVE_FOLDER}\Windows\System32\Tasks\twin"),
+        format!(r"{profile}\AppData\Roaming\{APP}\twin"),
+    ] {
+        if let Some(parent) = Path::new(&link).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        must("cmd", &["/C", "mklink", "/D", &link, HOST_SHARE])?;
+        fs::create_dir(format!(r"\\?\{link}."))?;
+    }
+    // A store with a real license, and a junction to this machine's marker beside it with its twin.
+    fs::write(
+        format!(r"{DRIVE_FOLDER}\ProgramData\FlexLM\real.lic"),
+        b"a real license",
+    )?;
+    junction(
+        &format!(r"{DRIVE_FOLDER}\ProgramData\FlexLM\hosted"),
+        &host_data,
+    )?;
+    fs::create_dir(format!(r"\\?\{DRIVE_FOLDER}\ProgramData\FlexLM\hosted."))?;
     let on_the_share = format!(r"{HOST_SHARE}\{APP}\host.exe");
     for link in [
         format!(r"{DRIVE_FOLDER}\Program Files\{APP}\share.dll"),
@@ -2075,6 +2099,21 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
         }
     }
 
+    section("A license store on the drive with links in it gets its own files and no others");
+    let licensed = create_package(&PackageOptions {
+        include_license_data: true,
+        ..package_options(
+            &app,
+            &work.path().join("licensed"),
+            source.clone(),
+            ProfileChoice::Default,
+        )
+    })?;
+    let holding = files_holding(&licensed.package_root, HOST_SECRET)?;
+    checks.same("the marker is in no file", holding.trim(), "");
+    let holding = files_holding(&licensed.package_root, "a real license")?;
+    checks.that("its own license is there", !holding.trim().is_empty(), "no");
+
     section("Another account on the drive, on request");
     let other = create_package(&package_options(
         &app,
@@ -2486,16 +2525,50 @@ fn run_as_account(
     let out = format!(r"{SHARED_FOLDER}\{script_name}.out");
     let err = format!(r"{SHARED_FOLDER}\{script_name}.err");
     fs::write(&script_path, script)?;
+    // What a UAC prompt gives: that administrator's whole token, in this session. Start-Process
+    // -Credential gives the filtered one. A batch logon gets the whole one, and with the secondary
+    // logon service, the process is in this session.
+    let command = format!("cmd.exe /c \"\"{script_path}\" > \"{out}\" 2> \"{err}\"\"");
     let shown = powershell(&format!(
-        r#"$credential = New-Object System.Management.Automation.PSCredential({account}, (ConvertTo-SecureString {password} -AsPlainText -Force));
-           $process = Start-Process -FilePath 'C:\Windows\System32\cmd.exe' -ArgumentList '/c', {script} -Credential $credential -LoadUserProfile -WorkingDirectory {folder} -RedirectStandardOutput {out} -RedirectStandardError {err} -Wait -PassThru -WindowStyle Hidden;
-           $process.ExitCode"#,
-        account = quoted(&format!(r".\{account}")),
+        r#"Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class WamElevated {{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct STARTUPINFO {{ public int cb; public string lpReserved; public string lpDesktop; public string lpTitle; public int dwX; public int dwY; public int dwXSize; public int dwYSize; public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute; public int dwFlags; public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError; }}
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROCESS_INFORMATION {{ public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }}
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool LogonUserW(string user, string domain, string password, int type, int provider, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool DuplicateTokenEx(IntPtr token, int access, IntPtr attributes, int level, int type, out IntPtr result);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CreateProcessWithTokenW(IntPtr token, int logonFlags, string application, StringBuilder command, int flags, IntPtr environment, string folder, ref STARTUPINFO startup, out PROCESS_INFORMATION process);
+    [DllImport("kernel32.dll")]
+    public static extern int WaitForSingleObject(IntPtr handle, int milliseconds);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetExitCodeProcess(IntPtr handle, out int code);
+}}
+'@;
+           $last = {{ [Runtime.InteropServices.Marshal]::GetLastWin32Error() }};
+           $token = [IntPtr]::Zero;
+           if (-not [WamElevated]::LogonUserW({account}, '.', {password}, 4, 0, [ref]$token)) {{ throw "LogonUser: $(& $last)" }};
+           $primary = [IntPtr]::Zero;
+           if (-not [WamElevated]::DuplicateTokenEx($token, 0x02000000, [IntPtr]::Zero, 2, 1, [ref]$primary)) {{ throw "DuplicateTokenEx: $(& $last)" }};
+           $startup = New-Object 'WamElevated+STARTUPINFO';
+           $startup.cb = [Runtime.InteropServices.Marshal]::SizeOf([type]'WamElevated+STARTUPINFO');
+           $process = New-Object 'WamElevated+PROCESS_INFORMATION';
+           $line = New-Object Text.StringBuilder({command}, 4096);
+           if (-not [WamElevated]::CreateProcessWithTokenW($primary, 1, 'C:\Windows\System32\cmd.exe', $line, 0x08000000, [IntPtr]::Zero, {folder}, [ref]$startup, [ref]$process)) {{ throw "CreateProcessWithToken: $(& $last)" }};
+           [void][WamElevated]::WaitForSingleObject($process.hProcess, -1);
+           $code = 0;
+           [void][WamElevated]::GetExitCodeProcess($process.hProcess, [ref]$code);
+           $code"#,
+        account = quoted(account),
         password = quoted(password),
-        script = quoted(&format!("\"{script_path}\"")),
+        command = quoted(&command),
         folder = quoted(SHARED_FOLDER),
-        out = quoted(&out),
-        err = quoted(&err),
     ))?;
     let exit = shown.trim().to_owned();
     let output = format!(
@@ -2775,9 +2848,147 @@ fn accounts_are_kept_apart() -> TestResult {
         None => reg_delete_value(&shell_folders, SAVED_GAMES_VALUE),
     }
 
+    what_can_name_another_accounts_folder(&mut checks, &program, &other_profile, work.path())?;
     another_administrator_at_the_uac_prompt(&mut checks, &password)?;
 
     checks.finish()
+}
+
+/// What an account can write with no rights at all that names another's folder, or a share. An
+/// elevated build reads what it is told to, so none of this may be what tells it.
+fn what_can_name_another_accounts_folder(
+    checks: &mut Checks,
+    program: &Path,
+    other_profile: &Path,
+    work: &Path,
+) -> TestResult {
+    let other_data = format!(r"AppData\Roaming\{PROFILES_APP}");
+    let other_name = other_profile
+        .file_name()
+        .ok_or("the profile has no name")?
+        .to_string_lossy()
+        .into_owned();
+    let my_profile = PathBuf::from(std::env::var("USERPROFILE")?);
+    let sessions_before = sessions_accepted()?;
+
+    section("A value in another account's hive that names a share, when the app starts");
+    let hive = other_profile.join("NTUSER.DAT").display().to_string();
+    edit_hive(&hive, |key| {
+        reg_add(
+            &format!(r"{key}\{USER_SHELL_FOLDERS}"),
+            Some("Personal"),
+            "REG_EXPAND_SZ",
+            r"\\127.0.0.1\C$\Windows",
+        )
+    })?;
+    let survey = survey_profiles(&ScanSource::Live)?;
+    let apps = list_installed_apps_from(&SystemContext::live())?;
+    println!("{:?}", survey.picker_for(&find_app(&apps, PROFILES_APP)?));
+    checks.same(
+        "reading that connected to nothing, by this machine's own server",
+        sessions_accepted()?,
+        sessions_before,
+    );
+    edit_hive(&hive, |key| {
+        reg_add(
+            &format!(r"{key}\{USER_SHELL_FOLDERS}"),
+            Some("Personal"),
+            "REG_EXPAND_SZ",
+            r"%USERPROFILE%\Documents",
+        )
+    })?;
+
+    section("A per-user entry whose location is another account's folder, by a share");
+    let mine = my_profile.join(r"AppData\Local\WAM By A Share");
+    fs::create_dir_all(&mine)?;
+    let exe = mine.join("wam-by-a-share.exe");
+    fs::copy(program, &exe)?;
+    let entry = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\WAM By A Share";
+    reg_add(entry, Some("DisplayName"), "REG_SZ", "WAM By A Share")?;
+    reg_add(
+        entry,
+        Some("DisplayIcon"),
+        "REG_SZ",
+        &exe.display().to_string(),
+    )?;
+    reg_add(
+        entry,
+        Some("InstallLocation"),
+        "REG_SZ",
+        &format!(r"\\127.0.0.1\C$\Users\{other_name}\{other_data}"),
+    )?;
+    let apps = list_installed_apps_from(&SystemContext::live())?;
+    let by_a_share = find_app(&apps, "WAM By A Share")?;
+    println!("it reads as {by_a_share:?}");
+    checks.same(
+        "the location is no use",
+        by_a_share.install_location.clone(),
+        None,
+    );
+    let package = create_package(&package_options(
+        &by_a_share,
+        &work.join("by a share"),
+        ScanSource::Live,
+        ProfileChoice::Default,
+    ))?;
+    let holding = files_holding(&package.package_root, "private to theirs")?;
+    checks.same("none of that account's data is in it", holding.trim(), "");
+    checks.same(
+        "and nothing connected, by this machine's own server",
+        sessions_accepted()?,
+        sessions_before,
+    );
+    reg_delete_key(entry);
+
+    section("A shortcut of this account's that names the program of a machine-wide app");
+    let theirs = other_profile.join(&other_data);
+    fs::create_dir_all(&theirs)?;
+    let their_program = theirs.join("wam-hinted.exe");
+    fs::copy(program, &their_program)?;
+    let machine_entry = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\WAM Hinted App";
+    reg_add(
+        machine_entry,
+        Some("DisplayName"),
+        "REG_SZ",
+        "WAM Hinted App",
+    )?;
+    let shortcut = my_profile
+        .join(r"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\WAM Hinted App.lnk");
+    if let Some(folder) = shortcut.parent() {
+        fs::create_dir_all(folder)?;
+    }
+    create_shortcut(
+        &shortcut.display().to_string(),
+        &their_program.display().to_string(),
+        "",
+    )?;
+    let apps = list_installed_apps_from(&SystemContext::live())?;
+    let hinted = find_app(&apps, "WAM Hinted App")?;
+    println!("it reads as {hinted:?}");
+    checks.same(
+        "the shortcut is what it goes by, so this is what is being tried",
+        hinted.main_executable.clone(),
+        Some(their_program.clone()),
+    );
+    let attempt = create_package(&package_options(
+        &hinted,
+        &work.join("hinted"),
+        ScanSource::Live,
+        ProfileChoice::Default,
+    ));
+    println!(
+        "building it: {:?}",
+        attempt.as_ref().map(|result| result.files_copied)
+    );
+    checks.that(
+        "that does not make their folder the app's: it will not build",
+        attempt.is_err(),
+        "it was built",
+    );
+    fs::remove_file(&shortcut)?;
+    fs::remove_file(&their_program)?;
+    reg_delete_key(machine_entry);
+    Ok(())
 }
 
 /// What an elevated process run by another administrator does. Needs a desktop in this session
@@ -2820,6 +3031,34 @@ fn another_administrator_at_the_uac_prompt(checks: &mut Checks, password: &str) 
         "REG_SZ",
         "mine",
     )?;
+
+    let here = std::process::id();
+    let this_session = powershell(&format!("(Get-Process -Id {here}).SessionId"))?;
+    let probe = run_as_account(
+        OTHER_ADMIN,
+        password,
+        "probe",
+        "@echo off\r\nwhoami /groups\r\npowershell -NoProfile -Command \"'session=' +          [Diagnostics.Process]::GetCurrentProcess().SessionId\"\r\n",
+    );
+    let (is_whole_token, in_this_session) = match &probe {
+        Ok((_, shown)) => (
+            shown.contains("S-1-16-12288"),
+            shown.contains(&format!("session={}", this_session.trim())),
+        ),
+        Err(error) => {
+            println!("could not start anything as that administrator: {error}");
+            (false, false)
+        }
+    };
+    println!("whole token: {is_whole_token}, in this session: {in_this_session}");
+    if !(is_whole_token && in_this_session) {
+        println!(
+            "NOT PROVEN: this runner would not start a process as another administrator with \
+             that administrator's whole token in this session, which is what a UAC prompt does. \
+             The rule itself is covered by a unit test of what each case comes to."
+        );
+        return Ok(());
+    }
 
     let test_binary = std::env::current_exe()?;
     fs::write(Path::new(SHARED_FOLDER).join("scan-request"), b"")?;
@@ -2993,7 +3232,14 @@ fn tasks_by_schtasks() -> TestResult<BTreeMap<String, Vec<String>>> {
             break;
         };
         let end = close + "</Task>".len();
-        let document = roxmltree::Document::parse(&after[open..end])?;
+        // It writes `]]>` as it is, in text, which a strict parser will not take.
+        let definition = after[open..end].to_owned();
+        let definition = if definition.contains("<![CDATA[") {
+            definition
+        } else {
+            definition.replace("]]>", "]]&gt;")
+        };
+        let document = roxmltree::Document::parse(&definition)?;
         let commands = document
             .descendants()
             .filter(|node| node.tag_name().name() == "Exec")
