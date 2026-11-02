@@ -22,7 +22,7 @@ use crate::models::{
     ScheduledTaskEntry, ServiceEntry, ShortcutEntry, Warning, WarningSeverity,
 };
 use crate::path_utils::{
-    has_parent_step, is_drive_root, looks_like_executable, path_is_within, resolved_location,
+    is_drive_root, is_really_within, looks_like_executable, path_is_within, resolved_location,
 };
 use crate::pe_scan::scan_pe;
 use crate::registry_scan::{
@@ -132,7 +132,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     let is_someone_elses = |path: &Path| {
         let is_where_its_record_says = machine_record
             .as_deref()
-            .is_some_and(|recorded| path_is_within(path, recorded) && !has_parent_step(path));
+            .is_some_and(|recorded| is_really_within(path, recorded));
         source_app.is_some()
             && !is_where_its_record_says
             && (system.is_in_another_profile(path)
@@ -301,10 +301,10 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         // folder, which could say anything. It goes no further than the app and that account.
         if installed_for_one_account {
             let stays = |path: &PathBuf| {
-                !has_parent_step(path)
+                system.may_read(path)
                     && (install_location
                         .as_deref()
-                        .is_some_and(|location| path_is_within(path, location))
+                        .is_some_and(|location| is_really_within(path, location))
                         || system.is_in_the_accounts_profile(path))
             };
             source.roots.retain(stays);
@@ -392,7 +392,19 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         schema_version: SCAN_SCHEMA_VERSION.to_owned(),
         generated_at_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,
         source_volume: system.volume_map().cloned(),
-        other_accounts: system.other_accounts_folders(install_location.as_deref()),
+        other_accounts: system.other_accounts_folders(
+            install_location.as_deref(),
+            file_inventory
+                .iter()
+                .filter(|file| file.should_copy)
+                .map(|file| file.path.as_path())
+                .chain(drivers.iter().map(|driver| driver.image_path.as_path()))
+                .chain(
+                    license_artifacts
+                        .iter()
+                        .filter_map(|artifact| artifact.path.as_deref()),
+                ),
+        ),
         source_computer_name: identity.computer_name,
         source_windows_version: identity.windows_version,
         user_data_profile,

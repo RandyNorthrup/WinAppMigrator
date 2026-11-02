@@ -54,7 +54,9 @@ use crate::path_utils::{
     is_person_sid, location_can_be_told, path_is_within, resolved_location, signed_in_user,
     strip_prefix_ignore_case, system_root, windows_build,
 };
-use crate::privilege::{ProtectedFolder, ensure_protected_folder, is_elevated, owner_of};
+use crate::privilege::{
+    ProtectedFolder, confirm_protected_folder, ensure_protected_folder, is_elevated, owner_of,
+};
 
 /// Profile directory names under `Users\` that are not real user profiles.
 pub const NON_USER_PROFILE_NAMES: &[&str] = &["All Users", "Default", "Default User", "Public"];
@@ -506,6 +508,14 @@ pub fn sweep_leaked_hive_mounts() -> SweepReport {
             }
         }
     }
+    // Anyone can have made this before this app first ran, as a link to somewhere else, and what is
+    // below deletes what is in it.
+    let is_this_apps = hives.parent().is_some_and(|parent| {
+        !fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    }) && confirm_protected_folder(&hives).is_ok();
+    if !is_this_apps {
+        return report;
+    }
     let Ok(entries) = fs::read_dir(&hives) else {
         return report;
     };
@@ -609,23 +619,33 @@ struct OfflineHives {
     identity: SourceIdentity,
 }
 
-/// Where other accounts' folders really are on this PC, to ask about again just before a file is
-/// copied. Whoever can write in a folder that was scanned can make part of it a link to someone
-/// else's after that. Empty for a drive, where nothing that may be read goes through a link.
+/// What a scan of this PC saw, to ask about again just before a file is copied. Whoever can write in
+/// a folder that was scanned can make part of it a link to someone else's, or anywhere else, after
+/// that. Nothing for a drive, where nothing that may be read goes through a link.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OtherAccountsFolders {
+    is_of_this_pc: bool,
     folders: Vec<PathBuf>,
     /// Where the app is, which is allowed to be in one if the scan found that it may be.
     app_folder: Option<PathBuf>,
+    /// The links that were on the way to what is being copied, such as a folder moved to another
+    /// disk. Any other has been made since. A walk does not go through a link, so all of these are
+    /// above where it started.
+    links_seen: BTreeSet<String>,
 }
 
 impl OtherAccountsFolders {
-    /// Whether a path leads into one of them now, wherever it says it is.
+    /// Whether a path leads somewhere it should not now, wherever it says it is: through a link that
+    /// was not there when it was scanned, or into one of the other accounts' folders.
     pub fn hold(&self, path: &Path) -> bool {
-        if self.folders.is_empty() {
+        if !self.is_of_this_pc {
             return false;
         }
-        if !location_can_be_told(path) {
+        let has_a_new_link = path.ancestors().any(|step| {
+            fs::symlink_metadata(step).is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && !self.links_seen.contains(&comparison_key(step))
+        });
+        if has_a_new_link || !location_can_be_told(path) {
             return true;
         }
         let real = resolved_location(path);
@@ -1342,22 +1362,41 @@ impl SystemContext {
     }
 
     /// What a build asks about again just before it copies each file on this PC.
-    pub fn other_accounts_folders(&self, app_folder: Option<&Path>) -> OtherAccountsFolders {
+    pub fn other_accounts_folders<'a>(
+        &self,
+        app_folder: Option<&Path>,
+        to_copy: impl Iterator<Item = &'a Path>,
+    ) -> OtherAccountsFolders {
         if self.offline.is_some() {
             return OtherAccountsFolders::default();
         }
+        let mut looked_at = BTreeSet::new();
+        let mut links_seen = BTreeSet::new();
+        for path in to_copy {
+            for step in path.ancestors() {
+                let key = comparison_key(step);
+                if !looked_at.insert(key.clone()) {
+                    break;
+                }
+                if fs::symlink_metadata(step)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    links_seen.insert(key);
+                }
+            }
+        }
         OtherAccountsFolders {
+            is_of_this_pc: true,
             folders: self.folders_of_others(),
             app_folder: app_folder.map(resolved_location),
+            links_seen,
         }
     }
 
-    /// Whether an account a scheduled task runs as is anyone but the one this scan is about, or
-    /// one of Windows' own. That is theirs, along with what it was told to do. An account that
-    /// cannot be told apart from a person counts as one: all it costs is a warning.
-    pub fn is_another_persons_account(&self, account: &str) -> bool {
+    /// Whether an account a scheduled task runs as is the one this scan is about.
+    pub fn is_the_account(&self, account: &str) -> bool {
         let name = account.rsplit('\\').next().unwrap_or(account);
-        let is_the_one = self.user_hives().iter().any(|user| {
+        self.user_hives().iter().any(|user| {
             user.sid
                 .as_deref()
                 .is_some_and(|sid| sid.eq_ignore_ascii_case(account))
@@ -1367,10 +1406,17 @@ impl SystemContext {
                     .name
                     .split_once('.')
                     .is_some_and(|(stem, _)| stem.eq_ignore_ascii_case(name))
-        });
-        if is_the_one {
+        })
+    }
+
+    /// Whether an account a scheduled task runs as is anyone but the one this scan is about, or
+    /// one of Windows' own. That is theirs, along with what it was told to do. An account that
+    /// cannot be told apart from a person counts as one: all it costs is a warning.
+    pub fn is_another_persons_account(&self, account: &str) -> bool {
+        if self.is_the_account(account) {
             return false;
         }
+        let name = account.rsplit('\\').next().unwrap_or(account);
         if account
             .get(..4)
             .is_some_and(|start| start.eq_ignore_ascii_case("S-1-"))
@@ -2181,15 +2227,19 @@ mod tests {
             .output()?;
         assert!(made.status.success());
         let others = OtherAccountsFolders {
+            is_of_this_pc: true,
             folders: vec![resolved_location(&bob)],
             app_folder: Some(resolved_location(&mine.join("app"))),
+            links_seen: BTreeSet::new(),
         };
         assert!(others.hold(&swapped.join("secret.txt")));
         assert!(others.hold(&bob.join("secret.txt")));
         assert!(!others.hold(&mine.join(r"app\own.txt")));
         let in_theirs = OtherAccountsFolders {
+            is_of_this_pc: true,
             folders: vec![resolved_location(&bob)],
             app_folder: Some(resolved_location(&bob.join("Apps"))),
+            links_seen: BTreeSet::new(),
         };
         assert!(
             !in_theirs.hold(&bob.join(r"Apps\x.exe")),
@@ -2197,6 +2247,33 @@ mod tests {
         );
         assert!(in_theirs.hold(&bob.join("letter.txt")));
         assert!(!OtherAccountsFolders::default().hold(&bob.join("secret.txt")));
+
+        // A link to anywhere at all that was not there when it was scanned, and one that was.
+        let elsewhere = work.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere)?;
+        let moved = mine.join("moved");
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&moved)
+            .arg(&elsewhere)
+            .output()?;
+        assert!(made.status.success());
+        let scanned_before = OtherAccountsFolders {
+            is_of_this_pc: true,
+            ..OtherAccountsFolders::default()
+        };
+        assert!(scanned_before.hold(&moved.join("x.txt")), "it is new");
+        let system = SystemContext::live();
+        let moved_file = moved.join("x.txt");
+        let scanned_after =
+            system.other_accounts_folders(None, std::iter::once(moved_file.as_path()));
+        assert!(!scanned_after.links_seen.is_empty());
+        assert!(
+            scanned_after.links_seen.contains(&comparison_key(&moved)),
+            "it was there"
+        );
         Ok(())
     }
 

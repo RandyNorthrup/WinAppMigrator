@@ -6,6 +6,7 @@ use crate::path_utils::{
     DEEPEST_WALK, POWERSHELL_IMPORT_TASKS, POWERSHELL_UTF8_OUTPUT, escape_powershell_single,
     hidden_command, path_is_strictly_inside, walk_asking,
 };
+use crate::privilege::only_administrators_can_change;
 use crate::restore_policy::{is_system_account, node_text};
 use crate::system_context::SystemContext;
 
@@ -65,6 +66,8 @@ pub struct TaskFile {
     pub run_level: Option<String>,
     pub account: Option<String>,
     pub definition_xml: String,
+    /// The file this was read from.
+    pub file: PathBuf,
 }
 
 /// One program a task runs.
@@ -108,7 +111,18 @@ pub fn scan_scheduled_tasks(
             .account
             .as_deref()
             .is_some_and(|account| system.is_another_persons_account(account));
-        if someone_elses || tasks.len() >= MAX_TASKS_OF_AN_APP {
+        // This reads files, and the folder lets any account make one, which the Task Scheduler
+        // would never run. One that says it runs as Windows has to be what only an administrator
+        // could have written, or it would be packaged to be registered that way on the next PC.
+        let runs_as_the_account = task
+            .account
+            .as_deref()
+            .is_some_and(|account| system.is_the_account(account));
+        let anyone_could_have_written_it = !system.is_offline()
+            && !someone_elses
+            && !runs_as_the_account
+            && !only_administrators_can_change(&file.file);
+        if someone_elses || anyone_could_have_written_it || tasks.len() >= MAX_TASKS_OF_AN_APP {
             left_out.push(format!("{}{}", task.task_path, task.task_name));
         } else {
             tasks.push(task);
@@ -120,7 +134,8 @@ pub fn scan_scheduled_tasks(
             WarningSeverity::Warning,
             format!(
                 "The scheduled task {task} was left out: it runs as another account than the one \
-                 whose settings are being included, or the app has too many to keep."
+                 whose settings are being included, others than administrators can change its \
+                 file, or the app has too many to keep."
             ),
             Some(task),
         )
@@ -203,6 +218,7 @@ fn read_task_file(tasks_root: &Path, path: &Path) -> Result<TaskFile, String> {
         run_level: parsed.run_level,
         account: parsed.account,
         definition_xml,
+        file: path.to_path_buf(),
     })
 }
 
@@ -427,6 +443,7 @@ mod tests {
             run_level: None,
             account: None,
             definition_xml: String::new(),
+            file: PathBuf::new(),
         }
     }
 

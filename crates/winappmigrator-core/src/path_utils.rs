@@ -662,6 +662,15 @@ pub fn has_parent_step(path: &Path) -> bool {
         .any(|component| component == Component::ParentDir)
 }
 
+/// Whether a path is really in a folder, going by where both really are and not how they are spelled.
+/// `C:\\app\\data\\x` is not in `C:\\app` if `data` is a link to somewhere else. Finding that out looks
+/// through links, so on a drive, ask only about a path that may be read.
+pub fn is_really_within(path: &Path, folder: &Path) -> bool {
+    !has_parent_step(path)
+        && location_can_be_told(path)
+        && path_is_within(&resolved_location(path), &resolved_location(folder))
+}
+
 /// Whether a path is on a disk of this PC, going by how it is written. Only looking at a share
 /// connects to it, as whoever is looking, which here is an administrator. That is what a value in
 /// any account's registry could ask for, and `\\?\GLOBALROOT` and `\??\UNC` are other ways to say it.
@@ -677,13 +686,16 @@ pub fn is_on_a_local_disk(path: &Path) -> bool {
 
 /// Whether [`resolved_location`] can say where a path really is. Being missing is not a problem,
 /// since nothing is there. Anything else is: it can be listed through a link to a place with no
-/// name to give, such as a shadow copy, which would read as being wherever the link is.
+/// name to give, such as a shadow copy or a volume with no letter, which would read as being wherever
+/// the link is. Windows says such a place is not found when asked its name, so it takes looking
+/// at whether something is there.
 pub fn location_can_be_told(path: &Path) -> bool {
     let mut current = path;
     loop {
         match std::fs::canonicalize(current) {
             Ok(_) => return true,
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return false,
+            Err(_) if std::fs::symlink_metadata(current).is_ok() => return false,
             Err(_) => {}
         }
         match current.parent() {
@@ -1060,6 +1072,56 @@ mod tests {
             .collect();
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("not there"));
+        Ok(())
+    }
+
+    #[test]
+    fn being_inside_a_folder_goes_by_where_it_really_is() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let app = work.path().join("app");
+        let elsewhere = work.path().join("elsewhere");
+        std::fs::create_dir_all(app.join("data"))?;
+        std::fs::create_dir_all(&elsewhere)?;
+        let linked = app.join("linked");
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&linked)
+            .arg(&elsewhere)
+            .output()?;
+        assert!(made.status.success());
+        assert!(is_really_within(&app.join(r"data\x.txt"), &app));
+        assert!(is_really_within(&app.join("not yet there"), &app));
+        assert!(!is_really_within(&linked.join("x.txt"), &app));
+        assert!(!is_really_within(
+            &app.join(r"data\..\..\elsewhere\x"),
+            &app
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_link_to_a_place_with_no_name_cannot_have_its_location_told() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let gone = work.path().join("gone");
+        let link = work.path().join("link");
+        std::fs::create_dir_all(&gone)?;
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&link)
+            .arg(&gone)
+            .output()?;
+        assert!(made.status.success());
+        // A link that leads nowhere reads as not found when asked its name, just as a place with
+        // no letter does, and it is there all the same.
+        std::fs::remove_dir(&gone)?;
+        assert!(!location_can_be_told(&link));
+        assert!(!location_can_be_told(&link.join("x.txt")));
+        assert!(location_can_be_told(&work.path().join(r"not there\x.txt")));
+        assert!(location_can_be_told(work.path()));
         Ok(())
     }
 

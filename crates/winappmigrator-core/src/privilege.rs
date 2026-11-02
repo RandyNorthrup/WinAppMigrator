@@ -22,11 +22,15 @@ const ACL_PATH_VARIABLE: &str = "WAM_ACL_PATH";
 const READ_SDDL_SCRIPT: &str = "(Get-Acl -LiteralPath $env:WAM_ACL_PATH).Sddl";
 const READ_OWNER_SCRIPT: &str = "(Get-Acl -LiteralPath $env:WAM_ACL_PATH).\
 GetOwner([Security.Principal.SecurityIdentifier]).Value";
-/// `yes` if only Administrators, SYSTEM, and TrustedInstaller own a file and can change it. The bits
-/// are every right that writes to a file or its permissions, and the generic ones that include them.
-const ONLY_ADMINISTRATORS_CAN_CHANGE_SCRIPT: &str = "$acl = Get-Acl -LiteralPath $env:WAM_ACL_PATH; \
-$admins = 'S-1-5-32-544', 'S-1-5-18', \
-'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'; \
+/// `yes` if only Administrators, its members, SYSTEM, and TrustedInstaller own a file and can change
+/// it. The bits are every right that writes to a file or its permissions, and the generic ones that
+/// include them. An administrator who made a file is named on it by their own account.
+const ONLY_ADMINISTRATORS_CAN_CHANGE_SCRIPT: &str = "Import-Module Microsoft.PowerShell.LocalAccounts \
+-ErrorAction Ignore; \
+$acl = Get-Acl -LiteralPath $env:WAM_ACL_PATH; \
+$admins = @('S-1-5-32-544', 'S-1-5-18', \
+'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464') + \
+@(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Ignore | ForEach-Object { $_.SID.Value }); \
 $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; \
 $write = 0x2 -bor 0x4 -bor 0x10 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000; \
 $others = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | \

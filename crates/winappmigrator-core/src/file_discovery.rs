@@ -15,7 +15,7 @@ use crate::models::{
     Warning, WarningSeverity,
 };
 use crate::path_utils::{
-    UserAccount, file_name_string, has_parent_step, is_auxiliary_executable, is_drive_root,
+    UserAccount, file_name_string, is_auxiliary_executable, is_drive_root, is_really_within,
     path_has_extension, path_is_strictly_inside, path_is_within, program_data_dir,
     public_profile_dir, resolved_location, signed_in_user, strip_prefix_ignore_case, walk_asking,
     windows_build,
@@ -983,7 +983,7 @@ fn is_a_link(path: &Path) -> bool {
 /// link on the way. And another account's folder is its own, unless it is where this app is.
 fn may_take_from(path: &Path, install_root: Option<&Path>, system: &SystemContext) -> bool {
     system.may_read(path)
-        && (install_root.is_some_and(|root| path_is_within(path, root) && !has_parent_step(path))
+        && (install_root.is_some_and(|root| is_really_within(path, root))
             || !system.is_in_another_profile(path))
 }
 
