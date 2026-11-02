@@ -65,7 +65,7 @@ a single launched-window screenshot — never scripted clicks on a live window.
 
 ## Open issues, most important first
 
-From the audit of 2026-11-01. None of these are fixed yet.
+From the audit of 2026-11-01. Items are removed from this list as they are fixed.
 
 **Accuracy**
 
@@ -117,14 +117,6 @@ From the audit of 2026-11-01. None of these are fixed yet.
 17. Installer progress, persistent logs, and a change journal enabling rollback and a
     generated uninstaller.
 18. Target OS and architecture check.
-
-**Project health**
-
-19. GitHub shows no run of `ci.yml`, ever, though Release runs. Find out why, then require
-    it on `main`.
-20. Tags (`v0.4.2.1`) cannot match the SemVer version in `Cargo.toml` (`0.4.2`). Use SemVer
-    tags and fail a release on a mismatch.
-21. The release workflow runs no tests and does not pin the toolchain.
 
 ## Not in scope for this release line
 
