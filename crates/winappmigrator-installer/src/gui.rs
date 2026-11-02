@@ -168,6 +168,8 @@ struct InstallerApp {
     version: String,
     source_computer: String,
     target_root: String,
+    /// The account on the source PC whose data this holds.
+    user_data_profile: String,
 
     show_user_data: bool,
     show_license: bool,
@@ -205,6 +207,7 @@ impl InstallerApp {
             source_computer: String::new(),
             checked_target: std::cell::RefCell::new(None),
             target_root: String::new(),
+            user_data_profile: String::new(),
             show_user_data: false,
             show_license: false,
             restore_user_data: false,
@@ -310,6 +313,7 @@ impl InstallerApp {
             .unwrap_or_default();
         self.version = meta.and_then(|app| app.version.clone()).unwrap_or_default();
         self.source_computer = manifest.source_computer_name.clone().unwrap_or_default();
+        self.user_data_profile = manifest.user_data_profile.clone().unwrap_or_default();
         self.target_root = default_install_location(manifest)
             .map(|path| path.display().to_string())
             .unwrap_or_default();
@@ -760,10 +764,17 @@ impl InstallerApp {
                         theme,
                         &mut self.restore_user_data,
                         "User data",
-                        "On: app settings go to their usual folders, and Documents and Saved Games \
-                         under the install folder. Off: all of it goes under the install folder.",
+                        "On: settings, Documents, and Saved Games go to the usual folders of \
+                         whoever is signed in. Off: all of it goes under the install folder.",
                         enabled,
                     );
+                    if !self.user_data_profile.is_empty() {
+                        widgets::hint(
+                            ui,
+                            theme,
+                            &format!("This holds the data of {}.", self.user_data_profile),
+                        );
+                    }
                 }
                 if self.show_license {
                     widgets::option_row(
@@ -913,6 +924,10 @@ fn system_changes_ui(ui: &mut egui::Ui, theme: &Theme, changes: &SystemChanges) 
     for change in &changes.changes {
         system_change_row(ui, theme, change);
         ui.add_space(SPACE_XS);
+    }
+    for note in &changes.notes {
+        ui.add_space(SPACE_SM);
+        widgets::notice(ui, theme, Role::Warning, note);
     }
     refused_ui(ui, theme, &changes.refused);
 }
