@@ -1,4 +1,4 @@
 [toolchain]
-channel = "stable"
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]
 targets = ["x86_64-pc-windows-msvc"]

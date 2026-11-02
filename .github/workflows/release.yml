@@ -30,10 +30,41 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The version comes from rust-toolchain.toml.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      - name: Check the tag matches the version
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $version = ((cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object name -eq 'winappmigrator-gui').version
+          if ($env:TAG -ne "v$version") { throw "The tag is $env:TAG, but Cargo.toml says the version is $version." }
+
+      - name: Lint
+        shell: pwsh
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        shell: pwsh
+        run: cargo test --locked --workspace --all-features
+
+      # Regenerate the open-source attribution bundle so it always matches the
+      # dependencies actually compiled into this release. This installs a tool from
+      # crates.io, so it runs before anything can sign in to Azure.
+      - name: Generate third-party license attribution
+        shell: pwsh
+        run: |
+          cargo install cargo-about --locked --features cli
+          cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md
+          if (-not (Test-Path THIRD-PARTY-LICENSES.md)) { throw 'THIRD-PARTY-LICENSES.md was not generated' }
 
       # Build the installer stub first so the app can embed the freshly built
       # stub (the app is a single portable exe that carries the stub inside it).
@@ -56,6 +87,14 @@ jobs:
         env:
           WINAPPMIGRATOR_INSTALLER_STUB: ${{ github.workspace }}\target\release\winappmigrator-installer.exe
         run: cargo build --locked --release -p winappmigrator-gui
+
+      # An app without the stub inside it would build no installers.
+      - name: Check the app embeds the stub
+        shell: pwsh
+        run: |
+          $app = (Get-Item target/release/winappmigrator.exe).Length
+          $stub = (Get-Item target/release/winappmigrator-installer.exe).Length
+          if ($app -le $stub) { throw "The app ($app bytes) is not larger than the stub ($stub bytes), so the stub was not embedded." }
 
       # Code signing with Azure Artifact Signing, under the maintainer's verified
       # identity (CN=Randy Northrup). No password is stored anywhere: Azure accepts
@@ -87,15 +126,6 @@ jobs:
           if ($signature.SignerCertificate.Subject -notmatch 'CN=Randy Northrup') { throw "Signed by someone else: $($signature.SignerCertificate.Subject)" }
           if (-not $signature.TimeStamperCertificate) { throw 'The signature has no timestamp.' }
           Write-Host "Signed by $($signature.SignerCertificate.Subject), timestamped by $($signature.TimeStamperCertificate.Subject)"
-
-      # Regenerate the open-source attribution bundle so it always matches the
-      # dependencies actually compiled into this release.
-      - name: Generate third-party license attribution
-        shell: pwsh
-        run: |
-          cargo install cargo-about --locked --features cli
-          cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md
-          if (-not (Test-Path THIRD-PARTY-LICENSES.md)) { throw 'THIRD-PARTY-LICENSES.md was not generated' }
 
       # Checksums come last, so they describe the signed files.
       - name: Stage release artifacts
@@ -129,7 +159,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         shell: pwsh
         run: |
-          $notes = "WinAppMigrator $env:TAG - portable Windows x64 build. A single elevated app (winappmigrator.exe) that carries the self-extracting installer stub inside it. See CHANGELOG.md for details.`n`n**Code signing:** winappmigrator.exe is signed with Azure Artifact Signing (publisher: Randy Northrup). Installers you build with it are not signed unless you sign them yourself; see docs/signing.md.`n`nCheck any download with ``gh attestation verify <file> --repo RandyNorthrup/WinAppMigrator``."
+          $notes = "WinAppMigrator $env:TAG - portable Windows x64 build. A single elevated app (winappmigrator.exe) that carries the self-extracting installer stub inside it. See CHANGELOG.md for details.`n`n**Code signing:** winappmigrator.exe is signed with Azure Artifact Signing (publisher: Randy Northrup). Installers you build with it are not signed unless you sign them yourself; see docs/signing.md.`n`nCheck the exe or the zip with ``gh attestation verify <file> --repo RandyNorthrup/WinAppMigrator``."
           gh release create $env:TAG `
             "dist/WinAppMigrator-$env:TAG-windows-x64.zip" `
             "dist/WinAppMigrator-$env:TAG.exe" `
