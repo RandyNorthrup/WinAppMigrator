@@ -744,14 +744,15 @@ fn verify_registry_entry(
     entry: &RegistryEntry,
     map: &RestoreMap,
 ) -> std::result::Result<VerificationItem, Warning> {
-    let root = registry_root(&entry.hive);
-    let key = root.open_subkey(&entry.key_path).map_err(|error| {
-        registry_warning(
-            "verification_registry_key_missing",
-            entry,
-            format!("Registry key is missing or unreadable: {error}"),
-        )
-    })?;
+    let key = registry_root(&entry.hive)
+        .and_then(|root| root.open_subkey(&entry.key_path))
+        .map_err(|error| {
+            registry_warning(
+                "verification_registry_key_missing",
+                entry,
+                format!("Registry key is missing or unreadable: {error}"),
+            )
+        })?;
     if entry.value_name.is_none() && entry.value_kind == Some(RegistryValueKind::None) {
         return Ok(passed_item(
             VerificationCategory::Registry,
@@ -794,10 +795,9 @@ fn verify_environment_variables(
     errors: &mut Vec<Warning>,
 ) {
     for variable in variables {
-        let (root, key_path) = environment_registry_target(&variable.scope);
         let name = format!("{:?}\\{}", variable.scope, variable.name);
-        let item = match root
-            .open_subkey(key_path)
+        let item = match environment_registry_target(&variable.scope)
+            .and_then(|(root, key_path)| root.open_subkey(key_path))
             .and_then(|key| key.get_raw_value(&variable.name))
         {
             Ok(actual) => {

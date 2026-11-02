@@ -10,16 +10,22 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
 use crate::file_discovery::{
-    expand_env_vars, first_link_to, has_reserved_device_name, known_base_dirs, link_refusal,
-    split_user_data_relative, user_data_base, user_shell_folder,
+    DESKTOP_FALLBACK, DESKTOP_VALUE, START_MENU_FALLBACK, START_MENU_VALUE, UserDataAnchor,
+    UserFolderPlace, account_shell_folder, data_location_of, expand_env_vars, first_link_to,
+    has_reserved_device_name, known_base_dirs, link_refusal, split_user_data_relative,
+    user_data_base, user_folder_place,
 };
 use crate::journal::machine_state_root;
 use crate::models::{
-    DriverEntry, EnvironmentVariableEntry, FileEntry, LicenseArtifact, PackageManifest,
-    RegistryEntry, RegistryHive, ScheduledTaskEntry, ServiceEntry, Warning, WarningSeverity,
+    DriverEntry, EnvironmentScope, EnvironmentVariableEntry, FileClassification, FileEntry,
+    LicenseArtifact, PackageManifest, RegistryEntry, RegistryHive, ScheduledTaskEntry,
+    ServiceEntry, Warning, WarningSeverity,
 };
 use crate::path_rewrite::RestoreMap;
-use crate::path_utils::{path_is_within, resolved_location, strip_prefix_ignore_case, system_root};
+use crate::path_utils::{
+    SignedInUser, current_user_sid, path_is_within, resolved_location, signed_in_user,
+    strip_prefix_ignore_case, system_root,
+};
 use crate::registry_target::{app_path_entries, is_path_variable, service_image_path};
 use crate::restore_policy::{
     KnownFolders, SERVICES_PREFIX, ServiceAccount, ShortcutPlacement, driver_destination,
@@ -30,9 +36,14 @@ use crate::restore_policy::{
 };
 use crate::system_context::SystemContext;
 
-const DESKTOP_SHELL_FOLDER: &str = "Desktop";
 const DESKTOP_FOLDER: &str = "Desktop";
 const START_MENU_SUBFOLDER: &str = r"Microsoft\Windows\Start Menu";
+const NO_USER_ACCOUNT_REFUSAL: &str =
+    "it belongs to one account's settings, and who is signed in could not be told";
+/// What a person installing is told about whose folders and settings these are, or where they
+/// went instead. Shown before they install.
+const USER_ACCOUNT_NOTE_CODE: &str = "user_account_note";
+const USER_FOLDER_ELSEWHERE_CODE: &str = "user_folder_elsewhere";
 const PARAMETERS_SUBKEY: &str = "parameters";
 const REFUSED_CODE: &str = "restore_refused";
 const DISPLAY_NAME_VALUE: &str = "DisplayName";
@@ -114,6 +125,7 @@ pub(crate) struct ReviewedPackage<'a> {
     pub refused: Vec<Warning>,
     /// Problems with the package short of a refusal.
     pub warnings: Vec<Warning>,
+    user_account_known: bool,
 }
 
 impl<'a> ReviewedPackage<'a> {
@@ -161,9 +173,23 @@ impl<'a> ReviewedPackage<'a> {
             environment: Vec::new(),
             refused: Vec::new(),
             warnings: Vec::new(),
+            user_account_known: folders.user_account_known,
             map,
         };
+        if let Some(note) = folders.user_account_note.as_deref()
+            && package_has_something_per_user(manifest)
+        {
+            review.warnings.push(Warning::new(
+                USER_ACCOUNT_NOTE_CODE,
+                WarningSeverity::Warning,
+                note,
+                None,
+            ));
+        }
         review.review_files(manifest);
+        if restore_user_data {
+            review.review_user_folders(target_root, &user_folder_place);
+        }
         review.review_services(manifest, expand, existing_service);
         review.review_drivers(manifest, existing_service);
         let restored_services = review.restored_service_names();
@@ -208,6 +234,61 @@ impl<'a> ReviewedPackage<'a> {
                 self.files.push(file);
             }
         }
+    }
+
+    /// Say where what should go in Documents or Saved Games goes instead, when those folders are
+    /// not somewhere this writes. Nothing is lost, and it should not be a surprise.
+    fn review_user_folders(
+        &mut self,
+        target_root: &Path,
+        place_of: &dyn Fn(UserDataAnchor) -> UserFolderPlace,
+    ) {
+        for (anchor, label) in [
+            (UserDataAnchor::Documents, "Documents"),
+            (UserDataAnchor::SavedGames, "Saved Games"),
+        ] {
+            let count = self
+                .files
+                .iter()
+                .filter(|file| {
+                    data_location_of(file).is_some_and(|(found, _)| found == anchor)
+                        && file.classification == FileClassification::UserData
+                })
+                .count();
+            if count == 0 {
+                continue;
+            }
+            let why = match place_of(anchor) {
+                UserFolderPlace::Usable(_) => continue,
+                UserFolderPlace::Elsewhere(folder) => format!(
+                    "this PC's {label} folder is at {}, and only a folder inside your profile is \
+                     written to",
+                    folder.display()
+                ),
+                UserFolderPlace::Unknown => {
+                    format!("where this PC's {label} folder is could not be told")
+                }
+            };
+            self.warnings.push(Warning::new(
+                USER_FOLDER_ELSEWHERE_CODE,
+                WarningSeverity::Warning,
+                format!(
+                    "{count} files from {label} go under {} instead, in a folder named _external, \
+                     because {why}. To use them, move them to your {label} folder yourself.",
+                    target_root.display()
+                ),
+                None,
+            ));
+        }
+    }
+
+    /// Whether this is to be left out for going to an account that could not be told, saying so.
+    fn left_out_for_no_account(&mut self, is_per_user: bool, item: impl Into<String>) -> bool {
+        if is_per_user && !self.user_account_known {
+            self.refuse(item, NO_USER_ACCOUNT_REFUSAL);
+            return true;
+        }
+        false
     }
 
     /// Why a name already taken on this PC must be left alone, if so. This has to be known
@@ -359,6 +440,12 @@ impl<'a> ReviewedPackage<'a> {
         expand: &dyn Fn(&str) -> String,
     ) {
         for entry in &manifest.registry_keys_exported {
+            if self.left_out_for_no_account(
+                entry.hive == RegistryHive::CurrentUser,
+                registry_item(entry),
+            ) {
+                continue;
+            }
             match registry_refusal(entry, &self.map, restored_services, expand) {
                 None => {
                     self.note_uninstall_entry(entry);
@@ -437,6 +524,12 @@ impl<'a> ReviewedPackage<'a> {
                     format!("The license value {}", registry_item(entry)),
                     "a license has no reason to start anything",
                 );
+                continue;
+            }
+            if self.left_out_for_no_account(
+                entry.hive == RegistryHive::CurrentUser,
+                registry_item(entry),
+            ) {
                 continue;
             }
             match registry_refusal(entry, &self.map, restored_services, expand) {
@@ -529,6 +622,12 @@ impl<'a> ReviewedPackage<'a> {
 
     fn review_environment(&mut self, manifest: &'a PackageManifest) {
         for variable in &manifest.environment_variables_detected {
+            if self.left_out_for_no_account(
+                variable.scope == EnvironmentScope::User,
+                format!("The environment variable {}", variable.name),
+            ) {
+                continue;
+            }
             match environment_refusal(&variable.name) {
                 None => self.environment.push(variable),
                 Some(reason) => {
@@ -577,20 +676,67 @@ fn real_location(original: &Path) -> Option<(PathBuf, PathBuf)> {
     Some((base.join(&tail), tail))
 }
 
-/// The Desktop and Start Menu folders of whoever is running the installer, and the ones
-/// shared by everyone on the PC.
+/// The Desktop and Start Menu folders of whoever is signed in, whoever this is running as, and the
+/// ones shared by everyone on the PC.
 fn current_known_folders() -> KnownFolders {
-    let profile = std::env::var_os("USERPROFILE").map(PathBuf::from);
-    let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
-    let program_data = user_data_base(crate::file_discovery::UserDataAnchor::ProgramData);
-    let public = user_data_base(crate::file_discovery::UserDataAnchor::PublicProfile);
+    let signed_in = signed_in_user();
+    let shell_folder = |value: &str, default: &str| {
+        signed_in.account().and_then(|account| {
+            match account_shell_folder(account, value, default) {
+                UserFolderPlace::Usable(folder) => Some(folder),
+                _ => None,
+            }
+        })
+    };
+    let program_data = user_data_base(UserDataAnchor::ProgramData);
+    let public = user_data_base(UserDataAnchor::PublicProfile);
     KnownFolders {
-        user_desktop: user_shell_folder(DESKTOP_SHELL_FOLDER)
-            .or_else(|| profile.map(|profile| profile.join(DESKTOP_FOLDER))),
+        user_desktop: shell_folder(DESKTOP_VALUE, DESKTOP_FALLBACK),
         common_desktop: public.map(|public| public.join(DESKTOP_FOLDER)),
-        user_start_menu: app_data.map(|base| base.join(START_MENU_SUBFOLDER)),
+        user_start_menu: shell_folder(START_MENU_VALUE, START_MENU_FALLBACK),
         common_start_menu: program_data.map(|base| base.join(START_MENU_SUBFOLDER)),
+        user_account_known: signed_in.account().is_some(),
+        user_account_note: user_account_note(signed_in, current_user_sid()),
     }
+}
+
+/// What a person ought to know about whose per-user folders and settings these are, when it is not
+/// simply the account they are using.
+fn user_account_note(signed_in: &SignedInUser, running_as: Option<&str>) -> Option<String> {
+    match signed_in {
+        SignedInUser::Desktop(account) if running_as == Some(account.sid.as_str()) => None,
+        SignedInUser::Desktop(account) => Some(format!(
+            "User data and per-user settings go to {}, who is signed in here, and not to the \
+             administrator this is running as.",
+            account.name()
+        )),
+        SignedInUser::NoDesktop(account) => Some(format!(
+            "No one is signed in to this session, so user data and per-user settings go to {}, \
+             the account this is running as.",
+            account.name()
+        )),
+        SignedInUser::Unknown(reason) => Some(format!(
+            "Could not tell who is signed in ({reason}), so per-user settings are left out, and \
+             user data goes under the install location."
+        )),
+    }
+}
+
+/// Whether anything in a package belongs in an account rather than on the PC.
+fn package_has_something_per_user(manifest: &PackageManifest) -> bool {
+    manifest
+        .registry_keys_exported
+        .iter()
+        .chain(&manifest.license_registry_entries)
+        .any(|entry| entry.hive == RegistryHive::CurrentUser)
+        || manifest
+            .environment_variables_detected
+            .iter()
+            .any(|variable| variable.scope == EnvironmentScope::User)
+        || manifest
+            .file_inventory
+            .iter()
+            .any(|file| file.should_copy && file.classification == FileClassification::UserData)
 }
 
 /// What kind of change a package makes beyond its files.
@@ -637,6 +783,8 @@ pub struct SystemChanges {
     pub changes: Vec<SystemChange>,
     /// What the package asked for and will not be given, as sentences.
     pub refused: Vec<String>,
+    /// What to know about whose folders and settings these will be, as sentences.
+    pub notes: Vec<String>,
 }
 
 /// Describe what a package would do, for showing before anything is installed. Whether an
@@ -839,6 +987,14 @@ fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
             .iter()
             .map(|warning| warning.message.clone())
             .collect(),
+        notes: review
+            .warnings
+            .iter()
+            .filter(|warning| {
+                warning.code == USER_ACCOUNT_NOTE_CODE || warning.code == USER_FOLDER_ELSEWHERE_CODE
+            })
+            .map(|warning| warning.message.clone())
+            .collect(),
     }
 }
 
@@ -886,6 +1042,7 @@ mod tests {
             included_program_data: false,
             included_license_data: true,
             ui_theme: None,
+            user_data_profile: None,
         }
     }
 
@@ -901,6 +1058,7 @@ mod tests {
             classification: FileClassification::AppOwned,
             should_copy: true,
             reason: String::new(),
+            user_folder: None,
         }
     }
 
@@ -976,6 +1134,150 @@ mod tests {
         manifest
     }
 
+    #[test]
+    fn with_no_account_to_go_by_per_user_settings_are_left_out_and_said_to_be() -> Result<()> {
+        let mut manifest = empty_manifest();
+        manifest.registry_keys_exported = vec![
+            value(RegistryHive::CurrentUser, r"Software\Acme", "Theme", "dark"),
+            value(
+                RegistryHive::LocalMachine,
+                r"Software\Acme",
+                "Theme",
+                "dark",
+            ),
+        ];
+        manifest.environment_variables_detected = vec![EnvironmentVariableEntry {
+            scope: EnvironmentScope::User,
+            name: "ACME_HOME".to_owned(),
+            value: "x".to_owned(),
+            value_kind: crate::models::RegistryValueKind::String,
+            requires_admin: false,
+            confidence: crate::models::MatchConfidence::High,
+        }];
+        let unknown = KnownFolders {
+            user_account_known: false,
+            user_account_note: Some("Could not tell who is signed in.".to_owned()),
+            ..folders()
+        };
+        let reviewed = ReviewedPackage::with_folders(
+            &manifest,
+            Path::new(TARGET),
+            true,
+            true,
+            &unknown,
+            &|text| text.to_owned(),
+            &|_| Ok(None),
+        )?;
+        assert_eq!(reviewed.registry.len(), 1);
+        assert_eq!(reviewed.registry[0].hive, RegistryHive::LocalMachine);
+        assert!(reviewed.environment.is_empty());
+        assert_eq!(reviewed.refused.len(), 2, "{:?}", reviewed.refused);
+        assert!(
+            reviewed
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("Could not tell who is signed in"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_note_about_whose_folders_these_are_is_only_for_a_package_with_something_per_user()
+    -> Result<()> {
+        let told = KnownFolders {
+            user_account_note: Some("It goes to alice.".to_owned()),
+            ..folders()
+        };
+        let review = |manifest: &PackageManifest| -> Result<Vec<String>> {
+            Ok(ReviewedPackage::with_folders(
+                manifest,
+                Path::new(TARGET),
+                true,
+                true,
+                &told,
+                &|text| text.to_owned(),
+                &|_| Ok(None),
+            )?
+            .warnings
+            .iter()
+            .map(|warning| warning.message.clone())
+            .collect())
+        };
+        assert!(review(&empty_manifest())?.is_empty());
+        let mut with_a_setting = empty_manifest();
+        with_a_setting.registry_keys_exported = vec![value(
+            RegistryHive::CurrentUser,
+            r"Software\Acme",
+            "Theme",
+            "dark",
+        )];
+        assert_eq!(review(&with_a_setting)?, ["It goes to alice."]);
+        Ok(())
+    }
+
+    #[test]
+    fn what_goes_to_a_folder_this_will_not_write_to_is_said_to_go_elsewhere() -> Result<()> {
+        let mut manifest = empty_manifest();
+        manifest.file_inventory = vec![external_data(r"C:\Users\alice\Documents\Acme\a.txt")];
+        let mut review = ReviewedPackage::with_folders(
+            &manifest,
+            Path::new(TARGET),
+            true,
+            true,
+            &folders(),
+            &|text| text.to_owned(),
+            &|_| Ok(None),
+        )?;
+        review.warnings.clear();
+        review.review_user_folders(Path::new(TARGET), &|anchor| {
+            assert!(matches!(
+                anchor,
+                UserDataAnchor::Documents | UserDataAnchor::SavedGames
+            ));
+            UserFolderPlace::Elsewhere(PathBuf::from(r"D:\Docs"))
+        });
+        assert_eq!(review.warnings.len(), 1, "only Documents has anything");
+        let message = &review.warnings[0].message;
+        assert!(message.contains(r"D:\Docs"), "{message}");
+        assert!(message.contains(TARGET), "{message}");
+        assert!(message.contains("1 files from Documents"), "{message}");
+        review.warnings.clear();
+        review.review_user_folders(Path::new(TARGET), &|_| {
+            UserFolderPlace::Usable(PathBuf::from(r"C:\Users\alice\Documents"))
+        });
+        assert!(review.warnings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn who_gets_the_data_is_said_when_it_is_not_who_is_running_this() {
+        let account = crate::path_utils::UserAccount {
+            sid: "S-1-5-21-1".to_owned(),
+            profile: PathBuf::from(r"C:\Users\alice"),
+        };
+        assert_eq!(
+            user_account_note(&SignedInUser::Desktop(account.clone()), Some("S-1-5-21-1")),
+            None
+        );
+        let Some(other_admin) =
+            user_account_note(&SignedInUser::Desktop(account.clone()), Some("S-1-5-21-2"))
+        else {
+            panic!("it should say");
+        };
+        assert!(other_admin.contains("alice"), "{other_admin}");
+        let Some(no_desktop) =
+            user_account_note(&SignedInUser::NoDesktop(account), Some("S-1-5-21-1"))
+        else {
+            panic!("it should say");
+        };
+        assert!(no_desktop.contains("alice"), "{no_desktop}");
+        let Some(unknown) = user_account_note(&SignedInUser::Unknown("no reason".to_owned()), None)
+        else {
+            panic!("it should say");
+        };
+        assert!(unknown.contains("no reason"), "{unknown}");
+    }
+
     fn folders() -> KnownFolders {
         KnownFolders {
             user_desktop: Some(PathBuf::from(r"C:\Users\bob\Desktop")),
@@ -986,6 +1288,8 @@ mod tests {
             common_start_menu: Some(PathBuf::from(
                 r"C:\ProgramData\Microsoft\Windows\Start Menu",
             )),
+            user_account_known: true,
+            user_account_note: None,
         }
     }
 
@@ -1641,6 +1945,7 @@ mod tests {
             classification: FileClassification::UserData,
             should_copy: true,
             reason: String::new(),
+            user_folder: None,
         }
     }
 

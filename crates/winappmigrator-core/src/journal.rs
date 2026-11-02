@@ -32,7 +32,8 @@ use crate::file_discovery::{first_link_to, hold_root, link_refusal};
 use crate::hashing::hex_lower;
 use crate::models::{EnvironmentScope, RegistryHive};
 use crate::path_utils::{
-    current_user_sid, program_data_dir, strip_prefix_ignore_case, without_verbatim_prefix,
+    current_user_sid, program_data_dir, signed_in_user, strip_prefix_ignore_case,
+    without_verbatim_prefix,
 };
 use crate::privilege::{
     ProtectedFolder, allow_users_to_start, confirm_protected_folder, ensure_protected_folder,
@@ -285,7 +286,7 @@ pub struct JournalHeader {
     pub id: String,
     pub app_name: String,
     pub target_root: PathBuf,
-    /// Whose `HKEY_CURRENT_USER` this install wrote to.
+    /// The account whose per-user hive this install wrote to, who was signed in at the time.
     pub user_sid: Option<String>,
     pub started_at_utc: String,
     /// Left behind if the installer is killed. Only ever a folder it made.
@@ -435,7 +436,11 @@ impl Journal {
                 id,
                 app_name: app_name.to_owned(),
                 target_root: target_root.to_path_buf(),
-                user_sid: current_user_sid().map(str::to_owned),
+                user_sid: signed_in_user()
+                    .account()
+                    .map(|account| account.sid.as_str())
+                    .or_else(current_user_sid)
+                    .map(str::to_owned),
                 started_at_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,
                 staging: staging.map(Path::to_path_buf),
                 ui_theme: ui_theme.map(str::to_owned),
@@ -646,7 +651,8 @@ impl Journal {
         key: &str,
         item: ItemKind,
     ) -> Result<()> {
-        let root = registry_root(hive);
+        let root = registry_root(hive)
+            .map_err(|error| WinAppMigratorError::Registry(error.to_string()))?;
         let mut current = String::new();
         for part in key.split('\\').filter(|part| !part.is_empty()) {
             if !current.is_empty() {

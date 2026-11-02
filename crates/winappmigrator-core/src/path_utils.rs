@@ -15,6 +15,16 @@ const SYSTEM_DRIVE_MARKER: &str = "%SystemDrive%";
 const DEFAULT_SYSTEM_ROOT: &str = r"C:\Windows";
 const POWERSHELL_EXE: &str = "powershell.exe";
 const POWERSHELL_HOME: &str = r"WindowsPowerShell\v1.0";
+/// The start of a person's SID: a local or domain account, and an Entra ID one.
+const PERSON_SID_PREFIXES: [&str; 2] = ["S-1-5-21-", "S-1-12-1-"];
+const SHELL_FILE: &str = "explorer.exe";
+/// Each `explorer.exe` in this session, with who it runs as. Its path and SID, not names, which
+/// read differently on other languages of Windows.
+const SESSION_SHELL_SCRIPT: &str = "$ErrorActionPreference = 'Stop'; \
+     $session = [Diagnostics.Process]::GetCurrentProcess().SessionId; \
+     Get-CimInstance Win32_Process -Filter \"Name='explorer.exe' AND SessionId=$session\" | \
+     ForEach-Object { '{0}|{1}' -f $_.ExecutablePath, \
+     (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid).Sid }";
 /// What PowerShell and the modules it uses read from the environment, none of which can
 /// load code. Paths to the Windows folder are set separately, from the registry.
 const POWERSHELL_ENVIRONMENT: &[&str] = &[
@@ -58,6 +68,7 @@ pub const POWERSHELL_IMPORT_UTILITY: &str = "Import-Module Microsoft.PowerShell.
 pub const POWERSHELL_IMPORT_MANAGEMENT: &str = "Import-Module Microsoft.PowerShell.Management; ";
 pub const POWERSHELL_IMPORT_TASKS: &str = "Import-Module ScheduledTasks; ";
 pub const POWERSHELL_IMPORT_APPX: &str = "Import-Module Appx; ";
+pub const POWERSHELL_IMPORT_CIM: &str = "Import-Module CimCmdlets; ";
 
 /// Build a `Command` that does not pop up a console window for the child
 /// process. Every external tool WinAppMigrator runs (sc.exe, PowerShell, winget,
@@ -177,12 +188,173 @@ pub fn current_user_sid() -> Option<&'static str> {
 }
 
 fn query_user_profile() -> Option<PathBuf> {
-    let sid = current_user_sid()?;
+    profile_of_sid(current_user_sid()?)
+}
+
+/// An account's profile folder, from the admin-only registry.
+pub fn profile_of_sid(sid: &str) -> Option<PathBuf> {
     let recorded = RegKey::predef(HKEY_LOCAL_MACHINE)
         .open_subkey(format!(r"{PROFILE_LIST_KEY}\{sid}"))
         .and_then(|key| key.get_value::<String, _>("ProfileImagePath"))
         .ok()?;
     Some(expand_system_drive(&recorded, system_root()))
+}
+
+/// True for a person's account, local or from Entra ID, and not one Windows runs things as.
+pub fn is_person_sid(sid: &str) -> bool {
+    PERSON_SID_PREFIXES
+        .iter()
+        .any(|prefix| sid.starts_with(prefix))
+}
+
+/// An account on this PC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAccount {
+    pub sid: String,
+    pub profile: PathBuf,
+}
+
+impl UserAccount {
+    /// What to call it: the name of its profile folder, which is the same for every language.
+    pub fn name(&self) -> String {
+        file_name_string(&self.profile)
+    }
+}
+
+/// Whose per-user folders and settings to use. An elevated process can be run by another
+/// administrator, when the person at the PC typed that account's password at the UAC prompt, and
+/// its `%APPDATA%` and `HKEY_CURRENT_USER` are then that administrator's and not theirs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignedInUser {
+    /// The account whose desktop this process runs on.
+    Desktop(UserAccount),
+    /// This session has no desktop, as under a scheduled task, SSH, or a build agent. So there is
+    /// no one else it could be meant for, and it is the account running this.
+    NoDesktop(UserAccount),
+    /// It could not be told, and this says why. Nothing is to be guessed from that.
+    Unknown(String),
+}
+
+impl SignedInUser {
+    pub fn account(&self) -> Option<&UserAccount> {
+        match self {
+            Self::Desktop(account) | Self::NoDesktop(account) => Some(account),
+            Self::Unknown(_) => None,
+        }
+    }
+}
+
+/// Who is signed in here, asked once, since that does not change during a run. Asking runs
+/// PowerShell, so the first call takes about a second, and is not for a window's thread.
+pub fn signed_in_user() -> &'static SignedInUser {
+    SIGNED_IN_USER.get_or_init(query_signed_in_user)
+}
+
+/// [`signed_in_user`], if something has asked already, without waiting for it.
+pub fn signed_in_user_if_known() -> Option<&'static SignedInUser> {
+    SIGNED_IN_USER.get()
+}
+
+static SIGNED_IN_USER: OnceLock<SignedInUser> = OnceLock::new();
+
+fn query_signed_in_user() -> SignedInUser {
+    let script = format!("{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_CIM}{SESSION_SHELL_SCRIPT}");
+    let output = hidden_command(POWERSHELL_EXE)
+        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
+        .output();
+    let shown = match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+        Ok(output) => {
+            return SignedInUser::Unknown(format!(
+                "Windows would not say whose desktop this is: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Err(error) => {
+            return SignedInUser::Unknown(format!(
+                "Windows could not be asked whose desktop this is: {error}"
+            ));
+        }
+    };
+    signed_in_user_from(
+        desktop_owners(&shown, system_root()),
+        current_user_sid(),
+        &profile_of_sid,
+    )
+}
+
+/// Who owns the desktop of this session, going by what asking Windows printed: a line of the
+/// program's path and its owner for each `explorer.exe` in it. Only the real one counts, since a
+/// program of that name can be started from anywhere, by whoever is signed in or by anyone else
+/// with a password.
+fn desktop_owners(shown: &str, windows_dir: &Path) -> Vec<String> {
+    let shell = windows_dir.join(SHELL_FILE);
+    let mut owners: Vec<String> = Vec::new();
+    for line in shown.lines() {
+        let Some((path, sid)) = line.trim().split_once('|') else {
+            continue;
+        };
+        if paths_are_the_same(Path::new(path), &shell)
+            && !owners.iter().any(|known| known.eq_ignore_ascii_case(sid))
+        {
+            owners.push(sid.to_owned());
+        }
+    }
+    owners
+}
+
+fn paths_are_the_same(left: &Path, right: &Path) -> bool {
+    path_is_within(left, right) && path_is_within(right, left)
+}
+
+fn signed_in_user_from(
+    desktop_owners: Vec<String>,
+    running_as: Option<&str>,
+    profile_of: &dyn Fn(&str) -> Option<PathBuf>,
+) -> SignedInUser {
+    let account = |sid: &str| {
+        profile_of(sid).map(|profile| UserAccount {
+            sid: sid.to_owned(),
+            profile,
+        })
+    };
+    match desktop_owners.as_slice() {
+        [owner] if is_person_sid(owner) => account(owner).map_or_else(
+            || {
+                SignedInUser::Unknown(format!(
+                    "the account signed in here, {owner}, has no profile on record"
+                ))
+            },
+            SignedInUser::Desktop,
+        ),
+        [owner] => SignedInUser::Unknown(format!(
+            "the desktop here belongs to {owner}, which is not a person's account"
+        )),
+        [] => match running_as {
+            Some(sid) if is_person_sid(sid) => account(sid).map_or_else(
+                || {
+                    SignedInUser::Unknown(format!(
+                        "no one is signed in here, and the account running this, {sid}, has no \
+                         profile on record"
+                    ))
+                },
+                SignedInUser::NoDesktop,
+            ),
+            Some(sid) => SignedInUser::Unknown(format!(
+                "no one is signed in here, and {sid}, which is running this, is not a person's \
+                 account"
+            )),
+            None => SignedInUser::Unknown(
+                "no one is signed in here, and this account has no SID".into(),
+            ),
+        },
+        _ => SignedInUser::Unknown(format!(
+            "more than one account has a desktop in this session: {}",
+            desktop_owners.join(", ")
+        )),
+    }
 }
 
 /// `"domain\user","S-1-5-21-..."` is one line, and a name can hold a comma, so the SID is
@@ -540,6 +712,86 @@ mod tests {
         );
         assert_eq!(sid_from_whoami_line("ERROR"), None);
         assert_eq!(sid_from_whoami_line(""), None);
+    }
+
+    #[test]
+    fn only_the_real_shell_says_whose_desktop_it_is() {
+        let windows = Path::new(r"C:\Windows");
+        assert_eq!(
+            desktop_owners(
+                "C:\\WINDOWS\\Explorer.EXE|S-1-5-21-1-1-1-1001\r\n\
+                 C:\\Windows\\explorer.exe|s-1-5-21-1-1-1-1001\r\n\
+                 C:\\Users\\Public\\explorer.exe|S-1-5-21-9-9-9-1002\r\n\
+                 |S-1-5-21-9-9-9-1003\r\n\
+                 nonsense\r\n",
+                windows
+            ),
+            vec!["S-1-5-21-1-1-1-1001".to_owned()]
+        );
+        assert!(desktop_owners("", windows).is_empty());
+    }
+
+    #[test]
+    fn who_is_signed_in_is_said_and_not_guessed() {
+        let alice = "S-1-5-21-1-1-1-1001";
+        let admin = "S-1-5-21-1-1-1-500";
+        let profile = |sid: &str| {
+            (sid != "S-1-5-21-0-0-0-0").then(|| PathBuf::from(format!(r"C:\Users\{sid}")))
+        };
+        let known = |sid: &str| UserAccount {
+            sid: sid.to_owned(),
+            profile: PathBuf::from(format!(r"C:\Users\{sid}")),
+        };
+
+        // Another administrator at the UAC prompt: it is still her desktop.
+        assert_eq!(
+            signed_in_user_from(vec![alice.to_owned()], Some(admin), &profile),
+            SignedInUser::Desktop(known(alice))
+        );
+        // No desktop in this session: the account running this is all there is.
+        assert_eq!(
+            signed_in_user_from(Vec::new(), Some(admin), &profile),
+            SignedInUser::NoDesktop(known(admin))
+        );
+        for unknown in [
+            signed_in_user_from(
+                vec![alice.to_owned(), admin.to_owned()],
+                Some(admin),
+                &profile,
+            ),
+            signed_in_user_from(Vec::new(), Some("S-1-5-18"), &profile),
+            signed_in_user_from(Vec::new(), None, &profile),
+            signed_in_user_from(vec!["S-1-5-18".to_owned()], Some(admin), &profile),
+            signed_in_user_from(vec!["S-1-5-21-0-0-0-0".to_owned()], Some(admin), &profile),
+        ] {
+            assert!(matches!(unknown, SignedInUser::Unknown(_)), "{unknown:?}");
+        }
+    }
+
+    #[test]
+    fn a_person_is_told_from_what_windows_runs_things_as() {
+        assert!(is_person_sid("S-1-5-21-1-2-3-1001"));
+        assert!(is_person_sid("S-1-12-1-1-2-3-4"));
+        for sid in [
+            "S-1-5-18",
+            "S-1-5-19",
+            "S-1-5-20",
+            "S-1-5-80-1-2",
+            "nonsense",
+        ] {
+            assert!(!is_person_sid(sid), "{sid}");
+        }
+    }
+
+    #[test]
+    fn someone_is_signed_in_on_any_pc_these_tests_run_on() {
+        assert!(
+            signed_in_user()
+                .account()
+                .is_some_and(|account| account.profile.is_dir()),
+            "{:?}",
+            signed_in_user()
+        );
     }
 
     #[test]

@@ -95,8 +95,13 @@ pub fn resolve_imports(
             continue;
         }
 
-        let dependency =
-            resolve_one_import(&import, &search_dirs, context.include_hashes, &mut warnings);
+        let dependency = resolve_one_import(
+            &import,
+            &search_dirs,
+            context.include_hashes,
+            system,
+            &mut warnings,
+        );
 
         if context.recursive
             && dependency.should_copy
@@ -156,6 +161,7 @@ pub fn find_app_local_dlls(executable_path: &Path) -> Result<Vec<FileEntry>> {
             classification: FileClassification::AppOwned,
             should_copy: true,
             reason: "DLL located beside selected executable".to_owned(),
+            user_folder: None,
         });
     }
 
@@ -179,6 +185,7 @@ fn resolve_one_import(
     import: &ImportedDll,
     search_dirs: &[SearchDirectory],
     include_hashes: bool,
+    system: &SystemContext,
     warnings: &mut Vec<Warning>,
 ) -> DependencyEntry {
     let lower_name = import.name.to_ascii_lowercase();
@@ -205,8 +212,12 @@ fn resolve_one_import(
         );
     }
 
-    if is_known {
-        let resolved = find_in_system_directories(&import.name, search_dirs);
+    // A name in a program's import table is a file's name and no more. A path there comes from
+    // whoever made the program, and it could lead anywhere.
+    let is_plain_name = !import.name.contains(['\\', '/', ':']);
+    if is_known && is_plain_name {
+        let resolved = find_in_system_directories(&import.name, search_dirs)
+            .filter(|path| system.may_read(path));
         let architecture = resolved
             .as_deref()
             .and_then(|path| read_architecture_with_warning(path, warnings));
@@ -228,9 +239,9 @@ fn resolve_one_import(
         );
     }
 
-    for search_dir in search_dirs {
+    for search_dir in search_dirs.iter().filter(|_| is_plain_name) {
         let candidate = search_dir.path.join(&import.name);
-        if candidate.is_file() {
+        if system.may_read(&candidate) && candidate.is_file() {
             let architecture = read_architecture_with_warning(&candidate, warnings)
                 .unwrap_or(AppArchitecture::Unknown);
             let system_provided = matches!(
@@ -368,7 +379,12 @@ fn build_search_directories(
         ));
     }
 
-    if let Some(current_directory) = context.current_directory.as_ref() {
+    // The folder this process is in is on this machine and not the scanned disk, as with `PATH`.
+    if let Some(current_directory) = context
+        .current_directory
+        .as_ref()
+        .filter(|_| !system.is_offline())
+    {
         push_unique(
             &mut directories,
             &mut seen,

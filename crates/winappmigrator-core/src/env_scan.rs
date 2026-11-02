@@ -14,6 +14,7 @@ use crate::system_context::SystemContext;
 const HKCU_ENVIRONMENT: &str = r"Environment";
 const HKLM_ENVIRONMENT: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
 
+/// The app's paths are as its own PC calls them, since that is what the variables hold.
 #[derive(Debug, Clone)]
 pub struct EnvironmentScanContext {
     pub executable_path: PathBuf,
@@ -37,7 +38,7 @@ pub fn scan_environment(
         )),
     }
 
-    // Per-user environment: live yields the current user; offline every profile.
+    // Per-user environment: only ever the account this scan is about.
     for user in system.user_hives() {
         if let Ok(key) = user.open(HKCU_ENVIRONMENT, KEY_READ) {
             collect_env_values(context, EnvironmentScope::User, &key, &mut entries);

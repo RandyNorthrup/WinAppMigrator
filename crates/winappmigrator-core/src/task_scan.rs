@@ -1,19 +1,29 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Deserializer};
 use walkdir::WalkDir;
 
 use crate::models::{ScheduledTaskEntry, Warning, WarningSeverity};
 use crate::path_utils::{
-    POWERSHELL_IMPORT_TASKS, POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT,
-    escape_powershell_single, hidden_command, path_is_within,
+    POWERSHELL_IMPORT_TASKS, POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command,
+    path_is_within,
 };
+use crate::restore_policy::{is_system_account, node_text};
 use crate::system_context::SystemContext;
 
-const OFFLINE_TASKS_SUBDIR: &str = r"System32\Tasks";
+/// Where the Task Scheduler keeps each task, as a file named for it, under the Windows folder.
+const TASKS_SUBDIR: &str = r"System32\Tasks";
 const TASK_RESTORE_INSTRUCTIONS: &str =
     "Restore uses Register-ScheduledTask with the archived XML definition.";
+/// The Task Scheduler's own limit on a definition is far below this. Anything larger is not a
+/// task, and on a drive from elsewhere it could be made big enough to run this out of memory.
+const MAX_TASK_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const UTF16_LE_BOM: [u8; 2] = [0xFF, 0xFE];
+const UTF16_BE_BOM: [u8; 2] = [0xFE, 0xFF];
+const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+/// Where a definition names a variable-less Windows folder, as a driver's path can.
+const SYSTEM_ROOT_MARKER: &str = r"\SystemRoot\";
+const SYSTEM_ROOT_VARIABLE: &str = r"%SystemRoot%\";
 
 /// The XML of a scheduled task on this PC, or `None` if there is no such task.
 pub(crate) fn live_task_xml(task_path: &str, task_name: &str) -> std::io::Result<Option<String>> {
@@ -37,168 +47,76 @@ pub(crate) fn live_task_xml(task_path: &str, task_name: &str) -> std::io::Result
     }
 }
 
+/// The app's paths as its own PC calls them, which is what a task's definition holds.
 #[derive(Debug, Clone)]
 pub struct TaskScanContext {
     pub executable_path: PathBuf,
     pub install_location: Option<PathBuf>,
 }
 
+/// One task's file, read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskFile {
+    pub task_name: String,
+    pub task_path: String,
+    /// The program actions, in order.
+    pub actions: Vec<TaskAction>,
+    pub trigger_summary: Option<String>,
+    pub run_level: Option<String>,
+    pub account: Option<String>,
+    pub definition_xml: String,
+}
+
+/// One program a task runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskAction {
+    pub command: String,
+    pub arguments: Option<String>,
+    pub working_directory: Option<String>,
+}
+
+/// The scheduled tasks that run the app. Read from each task's own file, whichever PC it is, with
+/// no copy of Windows asked about it: the Task Scheduler that could be asked only knows this PC.
 pub fn scan_scheduled_tasks(
     context: &TaskScanContext,
     system: &SystemContext,
 ) -> (Vec<ScheduledTaskEntry>, Vec<Warning>) {
-    if system.is_offline() {
-        // The live Task Scheduler cannot enumerate another disk's tasks; read the
-        // authoritative on-disk XML definitions instead.
-        scan_offline_tasks(context, system)
-    } else {
-        scan_live_tasks(context)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct PowerShellTaskAction {
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    task_name: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    task_path: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    execute: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    arguments: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    working_directory: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    trigger_summary: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    run_level: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    account: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    definition_xml: Option<String>,
-}
-
-fn scan_live_tasks(context: &TaskScanContext) -> (Vec<ScheduledTaskEntry>, Vec<Warning>) {
-    let mut warnings = Vec::new();
-    let script = r#"
-$items = foreach ($task in Get-ScheduledTask) {
-  $definitionXml = $null
-  try {
-    $definitionXml = Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath
-  } catch {
-    $definitionXml = $null
-  }
-  $triggerSummary = ($task.Triggers | ForEach-Object { $_.CimClass.CimClassName }) -join '; '
-  foreach ($action in $task.Actions) {
-    [pscustomobject]@{
-      TaskName = [string]$task.TaskName
-      TaskPath = [string]$task.TaskPath
-      Execute = if ($null -ne $action.Execute) { [string]$action.Execute } else { $null }
-      Arguments = if ($null -ne $action.Arguments) { [string]$action.Arguments } else { $null }
-      WorkingDirectory = if ($null -ne $action.WorkingDirectory) { [string]$action.WorkingDirectory } else { $null }
-      TriggerSummary = if ($null -ne $triggerSummary) { [string]$triggerSummary } else { $null }
-      RunLevel = if ($null -ne $task.Principal.RunLevel) { [string]$task.Principal.RunLevel } else { $null }
-      Account = if ($null -ne $task.Principal.UserId) { [string]$task.Principal.UserId } else { $null }
-      DefinitionXml = $definitionXml
-    }
-  }
-}
-$items | ConvertTo-Json -Depth 4
-"#;
-    let output = match run_powershell(script) {
-        Ok(output) => output,
-        Err(error) => {
-            warnings.push(Warning::new(
+    let tasks_root = system.windows_dir().join(TASKS_SUBDIR);
+    if !system.may_read(&tasks_root) {
+        return (
+            Vec::new(),
+            vec![Warning::new(
                 "scheduled_tasks_unreadable",
                 WarningSeverity::Warning,
-                format!("Could not query scheduled tasks: {error}"),
-                None,
-            ));
-            return (Vec::new(), warnings);
-        }
-    };
-    let actions = match parse_json_array::<PowerShellTaskAction>(&output) {
-        Ok(actions) => actions,
-        Err(error) => {
-            warnings.push(Warning::new(
-                "scheduled_tasks_parse_failed",
-                WarningSeverity::Warning,
-                format!("Could not parse scheduled task query output: {error}"),
-                None,
-            ));
-            return (Vec::new(), warnings);
-        }
-    };
-
-    let tasks = actions
+                "The folder of scheduled tasks on this drive goes through a link, so its tasks \
+                 were not read.",
+                Some(tasks_root.display().to_string()),
+            )],
+        );
+    }
+    let (files, warnings) = read_task_files(&tasks_root);
+    let expand = |text: &str| system.expand_source_variables(text);
+    let windows_dir = system.logical_path(&system.windows_dir());
+    let tasks = files
         .into_iter()
-        .filter_map(|action| task_from_action(context, action))
+        .filter_map(|file| task_entry(context, file, &expand, &windows_dir))
         .collect();
     (one_entry_per_task(tasks), warnings)
 }
 
-/// The query gives one row per action, and each row carries the task's whole definition, so
-/// a task with two programs would otherwise be restored twice. The second would find the
-/// first already there.
-fn one_entry_per_task(mut tasks: Vec<ScheduledTaskEntry>) -> Vec<ScheduledTaskEntry> {
-    let mut seen = HashSet::new();
-    tasks.retain(|task| {
-        seen.insert(format!("{}{}", task.task_path, task.task_name).to_ascii_lowercase())
-    });
-    tasks
-}
-
-fn task_from_action(
-    context: &TaskScanContext,
-    action: PowerShellTaskAction,
-) -> Option<ScheduledTaskEntry> {
-    let command = action.execute?;
-    // Installers write the command both with quotes and without, and they mean the same.
-    let command_path = PathBuf::from(expand_env_markers(command.trim().trim_matches('"')));
-    if !path_matches(context, &command_path) {
-        return None;
-    }
-
-    let requires_admin =
-        task_requires_admin(action.run_level.as_deref(), action.account.as_deref());
-
-    Some(ScheduledTaskEntry {
-        task_name: action.task_name.unwrap_or_default(),
-        task_path: action.task_path.unwrap_or_default(),
-        action_command: command_path,
-        arguments: action.arguments,
-        working_directory: action.working_directory.map(PathBuf::from),
-        trigger_summary: action.trigger_summary,
-        run_level: action.run_level,
-        account: action.account,
-        requires_admin,
-        restore_instructions: TASK_RESTORE_INSTRUCTIONS.to_owned(),
-        definition_xml: action.definition_xml,
-    })
-}
-
-/// Offline: read scheduled-task definitions straight from the disk's
-/// `Windows\System32\Tasks` tree (the same XML the live Task Scheduler stores
-/// and that `Export-ScheduledTask` returns), matching those whose action runs
-/// the selected app.
-fn scan_offline_tasks(
-    context: &TaskScanContext,
-    system: &SystemContext,
-) -> (Vec<ScheduledTaskEntry>, Vec<Warning>) {
-    let mut tasks = Vec::new();
+/// Every task under a `Tasks` folder. One that cannot be read gives a warning, and takes no other
+/// with it. Links are not followed, so a folder of tasks stays in itself, whatever is in it.
+pub fn read_task_files(tasks_root: &Path) -> (Vec<TaskFile>, Vec<Warning>) {
+    let mut files = Vec::new();
     let mut warnings = Vec::new();
-    let windows_dir = system.windows_dir();
-    let tasks_root = windows_dir.join(OFFLINE_TASKS_SUBDIR);
-
-    for entry in WalkDir::new(&tasks_root).follow_links(false) {
+    for entry in WalkDir::new(tasks_root).follow_links(false) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
                 warnings.push(Warning::new(
-                    "offline_task_walk_error",
-                    WarningSeverity::Info,
-                    format!("Could not read a scheduled-task entry: {error}"),
+                    "scheduled_task_folder_unreadable",
+                    WarningSeverity::Warning,
+                    format!("Could not read part of the scheduled tasks: {error}"),
                     Some(tasks_root.display().to_string()),
                 ));
                 continue;
@@ -207,70 +125,93 @@ fn scan_offline_tasks(
         if !entry.file_type().is_file() {
             continue;
         }
-        let Some(xml) = read_text_file(entry.path()) else {
-            warnings.push(Warning::new(
-                "offline_task_unreadable",
-                WarningSeverity::Info,
+        match read_task_file(tasks_root, entry.path()) {
+            Ok(file) => files.push(file),
+            Err(reason) => warnings.push(Warning::new(
+                "scheduled_task_unreadable",
+                WarningSeverity::Warning,
                 format!(
-                    "Could not read scheduled-task definition {}; if it launches the app it was not captured.",
+                    "Could not read the scheduled task {}: {reason}. If it runs the app, it was \
+                     not included.",
                     entry.path().display()
                 ),
                 Some(entry.path().display().to_string()),
-            ));
-            continue;
-        };
-        let Some(parsed) = parse_task_xml(&xml) else {
-            warnings.push(Warning::new(
-                "offline_task_parse_failed",
-                WarningSeverity::Info,
-                format!(
-                    "Could not parse scheduled-task definition {}; if it launches the app it was not captured.",
-                    entry.path().display()
-                ),
-                Some(entry.path().display().to_string()),
-            ));
-            continue;
-        };
-        let Some(execute) = parsed.execute.as_deref() else {
-            continue;
-        };
-        let command_path = system.resolve_source_path(&expand_task_path(execute, &windows_dir));
-        if !path_matches(context, &command_path) {
-            continue;
+            )),
         }
+    }
+    files.sort_by(|left, right| {
+        (left.task_path.as_str(), left.task_name.as_str())
+            .cmp(&(right.task_path.as_str(), right.task_name.as_str()))
+    });
+    (files, warnings)
+}
 
-        let (task_name, task_path) = task_name_and_path(&tasks_root, entry.path());
-        let working_directory = parsed
+fn read_task_file(tasks_root: &Path, path: &Path) -> Result<TaskFile, String> {
+    let size = std::fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .len();
+    if size > MAX_TASK_FILE_BYTES {
+        return Err(format!("it is {size} bytes, too large to be a task"));
+    }
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    let definition_xml = decode_task_xml(&bytes)?;
+    let parsed = parse_task_xml(&definition_xml)?;
+    let (task_name, task_path) = task_name_and_path(tasks_root, path);
+    Ok(TaskFile {
+        task_name,
+        task_path,
+        actions: parsed.actions,
+        trigger_summary: parsed.trigger_summary,
+        run_level: parsed.run_level,
+        account: parsed.account,
+        definition_xml,
+    })
+}
+
+/// The first program action that runs the app makes it the app's task. A task can run several, and
+/// it has only the one definition, so it is one task.
+fn task_entry(
+    context: &TaskScanContext,
+    file: TaskFile,
+    expand: &dyn Fn(&str) -> String,
+    windows_dir: &Path,
+) -> Option<ScheduledTaskEntry> {
+    let (action, command_path) = file.actions.iter().find_map(|action| {
+        let command_path = task_path_of(&action.command, expand, windows_dir);
+        path_matches(context, &command_path).then_some((action, command_path))
+    })?;
+    let requires_admin = task_requires_admin(file.run_level.as_deref(), file.account.as_deref());
+    Some(ScheduledTaskEntry {
+        task_name: file.task_name.clone(),
+        task_path: file.task_path.clone(),
+        action_command: command_path,
+        arguments: action.arguments.clone(),
+        working_directory: action
             .working_directory
             .as_deref()
-            .map(|value| system.resolve_source_path(&expand_task_path(value, &windows_dir)));
-        tasks.push(ScheduledTaskEntry {
-            task_name,
-            task_path,
-            action_command: command_path,
-            arguments: parsed.arguments,
-            working_directory,
-            trigger_summary: parsed.trigger_summary,
-            run_level: parsed.run_level.clone(),
-            account: parsed.account.clone(),
-            requires_admin: task_requires_admin(
-                parsed.run_level.as_deref(),
-                parsed.account.as_deref(),
-            ),
-            restore_instructions: TASK_RESTORE_INSTRUCTIONS.to_owned(),
-            definition_xml: Some(xml),
-        });
-    }
+            .map(|folder| task_path_of(folder, expand, windows_dir)),
+        trigger_summary: file.trigger_summary.clone(),
+        run_level: file.run_level.clone(),
+        account: file.account.clone(),
+        requires_admin,
+        restore_instructions: TASK_RESTORE_INSTRUCTIONS.to_owned(),
+        definition_xml: Some(file.definition_xml.clone()),
+    })
+}
 
-    tasks.sort_by(|left, right| left.task_name.cmp(&right.task_name));
-    (tasks, warnings)
+/// Listed twice only if a case-sensitive folder or a stray copy made it so. The Task Scheduler
+/// goes by name without case, and the second would find the first already there.
+fn one_entry_per_task(mut tasks: Vec<ScheduledTaskEntry>) -> Vec<ScheduledTaskEntry> {
+    let mut seen = HashSet::new();
+    tasks.retain(|task| {
+        seen.insert(format!("{}{}", task.task_path, task.task_name).to_ascii_lowercase())
+    });
+    tasks
 }
 
 #[derive(Default)]
 struct ParsedTask {
-    execute: Option<String>,
-    arguments: Option<String>,
-    working_directory: Option<String>,
+    actions: Vec<TaskAction>,
     trigger_summary: Option<String>,
     run_level: Option<String>,
     account: Option<String>,
@@ -279,18 +220,32 @@ struct ParsedTask {
 /// Extract the fields we need from a Task Scheduler XML definition. Namespaces
 /// are ignored (roxmltree exposes local tag names), so both namespaced and bare
 /// documents parse.
-fn parse_task_xml(xml: &str) -> Option<ParsedTask> {
-    let document = roxmltree::Document::parse(xml).ok()?;
+fn parse_task_xml(xml: &str) -> Result<ParsedTask, String> {
+    let document = roxmltree::Document::parse(xml).map_err(|error| error.to_string())?;
     let mut parsed = ParsedTask::default();
-    for node in document.descendants() {
+    for node in document.descendants().filter(roxmltree::Node::is_element) {
         match node.tag_name().name() {
-            "Command" if parsed.execute.is_none() => parsed.execute = node_text(node),
-            "Arguments" if parsed.arguments.is_none() => parsed.arguments = node_text(node),
-            "WorkingDirectory" if parsed.working_directory.is_none() => {
-                parsed.working_directory = node_text(node)
+            "Exec" => {
+                let part = |name: &str| {
+                    node.children()
+                        .find(|child| child.tag_name().name() == name)
+                        .map(node_text)
+                        .filter(|text| !text.is_empty())
+                };
+                if let Some(command) = part("Command") {
+                    parsed.actions.push(TaskAction {
+                        command,
+                        arguments: part("Arguments"),
+                        working_directory: part("WorkingDirectory"),
+                    });
+                }
             }
-            "RunLevel" if parsed.run_level.is_none() => parsed.run_level = node_text(node),
-            "UserId" if parsed.account.is_none() => parsed.account = node_text(node),
+            "RunLevel" if parsed.run_level.is_none() => {
+                parsed.run_level = Some(node_text(node)).filter(|text| !text.is_empty());
+            }
+            "UserId" | "GroupId" if parsed.account.is_none() => {
+                parsed.account = Some(node_text(node)).filter(|text| !text.is_empty());
+            }
             "Triggers" if parsed.trigger_summary.is_none() => {
                 let summary = node
                     .children()
@@ -305,12 +260,7 @@ fn parse_task_xml(xml: &str) -> Option<ParsedTask> {
             _ => {}
         }
     }
-    parsed.execute.is_some().then_some(parsed)
-}
-
-fn node_text(node: roxmltree::Node<'_, '_>) -> Option<String> {
-    let text = node.text().map(str::trim).unwrap_or_default();
-    (!text.is_empty()).then(|| text.to_owned())
+    Ok(parsed)
 }
 
 /// Derive `(TaskName, TaskPath)` from a task file's location under the Tasks
@@ -334,88 +284,58 @@ fn task_name_and_path(tasks_root: &Path, file: &Path) -> (String, String) {
     (task_name, task_path)
 }
 
-/// Expand `%SystemRoot%`/`\SystemRoot\` markers in a task path against the
-/// scanned system's Windows directory; other values pass through unchanged
-/// (drive-letter re-rooting happens afterward via the context).
-fn expand_task_path(value: &str, windows_dir: &Path) -> PathBuf {
+/// A path in a task's definition, as its PC meant it. Installers write a command both with quotes
+/// and without, and they mean the same. Only a comparison: this never goes near the disk.
+fn task_path_of(value: &str, expand: &dyn Fn(&str) -> String, windows_dir: &Path) -> PathBuf {
     let trimmed = value.trim().trim_matches('"');
-    for marker in [r"%SystemRoot%\", r"%windir%\", r"\SystemRoot\"] {
-        if trimmed.len() >= marker.len() && trimmed[..marker.len()].eq_ignore_ascii_case(marker) {
-            return windows_dir.join(&trimmed[marker.len()..]);
+    for marker in [SYSTEM_ROOT_MARKER, SYSTEM_ROOT_VARIABLE] {
+        if let Some(rest) = trimmed
+            .get(..marker.len())
+            .filter(|head| head.eq_ignore_ascii_case(marker))
+            .map(|_| &trimmed[marker.len()..])
+        {
+            return windows_dir.join(rest);
         }
     }
-    PathBuf::from(trimmed)
+    PathBuf::from(expand(trimmed))
 }
 
-/// Read a text file that may be UTF-16 (as Task XML usually is) or UTF-8.
-fn read_text_file(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        let (pairs, _odd_byte) = rest.as_chunks::<2>();
-        let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
-        Some(String::from_utf16_lossy(&units))
-    } else if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        Some(String::from_utf8_lossy(rest).into_owned())
-    } else {
-        Some(String::from_utf8_lossy(&bytes).into_owned())
+/// Turn a task's file into text. The Task Scheduler writes UTF-16 with a byte order mark, and
+/// other programs that make these files do not always, so the first bytes say which it is. Text
+/// that is not what it says it is, is not read as something else: a path in it would not be what
+/// was written, and the definition is restored from this.
+fn decode_task_xml(bytes: &[u8]) -> Result<String, String> {
+    let utf16 = |rest: &[u8], from_bytes: fn([u8; 2]) -> u16| {
+        let (pairs, odd_byte) = rest.as_chunks::<2>();
+        if !odd_byte.is_empty() {
+            return Err("it ends part-way through a character".to_owned());
+        }
+        let units: Vec<u16> = pairs.iter().map(|pair| from_bytes(*pair)).collect();
+        String::from_utf16(&units).map_err(|error| format!("it is not valid UTF-16: {error}"))
+    };
+    if let Some(rest) = bytes.strip_prefix(&UTF16_LE_BOM) {
+        return utf16(rest, u16::from_le_bytes);
     }
+    if let Some(rest) = bytes.strip_prefix(&UTF16_BE_BOM) {
+        return utf16(rest, u16::from_be_bytes);
+    }
+    let rest = bytes.strip_prefix(&UTF8_BOM).unwrap_or(bytes);
+    // No mark, and every other byte empty, as `<` and `?` are in UTF-16.
+    match rest {
+        [b'<', 0, ..] => return utf16(rest, u16::from_le_bytes),
+        [0, b'<', ..] => return utf16(rest, u16::from_be_bytes),
+        _ => {}
+    }
+    std::str::from_utf8(rest)
+        .map(ToOwned::to_owned)
+        .map_err(|error| format!("it is not valid UTF-8 or UTF-16: {error}"))
 }
 
 fn task_requires_admin(run_level: Option<&str>, account: Option<&str>) -> bool {
     run_level.is_some_and(|value| {
         let normalized = value.trim().to_ascii_lowercase();
         normalized == "1" || normalized.contains("highest")
-    }) || account.is_some_and(|value| {
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "system" | "localsystem" | "nt authority\\system"
-        )
-    })
-}
-
-fn deserialize_optional_string<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(match value {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(value)) => Some(value),
-        Some(serde_json::Value::Number(value)) => Some(value.to_string()),
-        Some(serde_json::Value::Bool(value)) => Some(value.to_string()),
-        Some(value) => Some(value.to_string()),
-    })
-}
-
-fn run_powershell(script: &str) -> std::io::Result<String> {
-    let script = format!(
-        "{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_TASKS}{POWERSHELL_IMPORT_UTILITY}{script}"
-    );
-    let output = hidden_command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Ok(String::from_utf8_lossy(&output.stderr).to_string())
-    }
-}
-
-fn parse_json_array<T>(json: &str) -> serde_json::Result<Vec<T>>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    let trimmed = json.trim();
-    if trimmed.is_empty() {
-        return Ok(Vec::new());
-    }
-    if trimmed.starts_with('[') {
-        serde_json::from_str(trimmed)
-    } else {
-        serde_json::from_str(trimmed).map(|item| vec![item])
-    }
+    }) || account.is_some_and(is_system_account)
 }
 
 fn path_matches(context: &TaskScanContext, candidate: &Path) -> bool {
@@ -426,15 +346,6 @@ fn path_matches(context: &TaskScanContext, candidate: &Path) -> bool {
             .install_location
             .as_ref()
             .is_some_and(|root| path_is_within(candidate, root))
-}
-
-fn expand_env_markers(value: &str) -> String {
-    let mut expanded = value.to_owned();
-    for (key, val) in std::env::vars() {
-        let marker = format!("%{key}%");
-        expanded = expanded.replace(&marker, &val);
-    }
-    expanded
 }
 
 #[cfg(test)]
@@ -448,18 +359,35 @@ mod tests {
         }
     }
 
-    fn action(name: &str, execute: &str) -> PowerShellTaskAction {
-        PowerShellTaskAction {
-            task_name: Some(name.to_owned()),
-            task_path: Some(r"\Demo\".to_owned()),
-            execute: Some(execute.to_owned()),
-            arguments: None,
-            working_directory: None,
+    fn windows() -> PathBuf {
+        PathBuf::from(r"C:\Windows")
+    }
+
+    fn no_variables(text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn task_with(name: &str, commands: &[&str]) -> TaskFile {
+        TaskFile {
+            task_name: name.to_owned(),
+            task_path: r"\Demo\".to_owned(),
+            actions: commands
+                .iter()
+                .map(|command| TaskAction {
+                    command: (*command).to_owned(),
+                    arguments: None,
+                    working_directory: None,
+                })
+                .collect(),
             trigger_summary: None,
             run_level: None,
             account: None,
-            definition_xml: None,
+            definition_xml: String::new(),
         }
+    }
+
+    fn entry_for(file: TaskFile) -> Option<ScheduledTaskEntry> {
+        task_entry(&context(), file, &no_variables, &windows())
     }
 
     #[test]
@@ -470,36 +398,37 @@ mod tests {
             r#"  "C:\Program Files\Demo\demo.exe"  "#,
             r"c:\program files\demo\bin\other.exe",
         ] {
-            let task = task_from_action(&context(), action("Update", execute));
+            let task = entry_for(task_with("Update", &[execute]));
             assert!(
                 task.is_some_and(|task| !task.action_command.to_string_lossy().contains('"')),
                 "{execute}"
             );
         }
-        assert!(
-            task_from_action(
-                &context(),
-                action("Other", r#""C:\Program Files\Demos\x.exe""#)
-            )
-            .is_none()
-        );
+        assert!(entry_for(task_with("Other", &[r#""C:\Program Files\Demos\x.exe""#])).is_none());
     }
 
     #[test]
-    fn a_task_with_two_programs_is_one_task() {
-        let tasks = [
-            action("Update", r"C:\Program Files\Demo\demo.exe"),
-            action("UPDATE", r"C:\Program Files\Demo\second.exe"),
-            action("Other", r"C:\Program Files\Demo\demo.exe"),
+    fn a_task_with_two_programs_is_one_task_and_either_can_be_the_apps() {
+        let tasks: Vec<ScheduledTaskEntry> = [
+            task_with(
+                "Update",
+                &[r"C:\Windows\helper.exe", r"C:\Program Files\Demo\demo.exe"],
+            ),
+            task_with("UPDATE", &[r"C:\Program Files\Demo\second.exe"]),
+            task_with("Other", &[r"C:\Program Files\Demo\demo.exe"]),
+            task_with("Neither", &[r"C:\Windows\helper.exe"]),
         ]
         .into_iter()
-        .filter_map(|action| task_from_action(&context(), action))
+        .filter_map(entry_for)
         .collect();
-        let names: Vec<String> = one_entry_per_task(tasks)
-            .into_iter()
-            .map(|task| task.task_name)
-            .collect();
+        let tasks = one_entry_per_task(tasks);
+        let names: Vec<&str> = tasks.iter().map(|task| task.task_name.as_str()).collect();
         assert_eq!(names, ["Update", "Other"]);
+        assert_eq!(
+            tasks[0].action_command,
+            PathBuf::from(r"C:\Program Files\Demo\demo.exe"),
+            "the program that matched is the one it is known by"
+        );
     }
 
     const SAMPLE_TASK_XML: &str = r#"<?xml version="1.0" encoding="UTF-16"?>
@@ -510,30 +439,48 @@ mod tests {
   </Principals>
   <Actions Context="Author">
     <Exec>
+      <Command>C:\Windows\helper.exe</Command>
+    </Exec>
+    <Exec>
       <Command>C:\Program Files\Demo\demo.exe</Command>
       <Arguments>/run</Arguments>
       <WorkingDirectory>C:\Program Files\Demo</WorkingDirectory>
     </Exec>
+    <ComHandler><ClassId>{00000000-0000-0000-0000-000000000000}</ClassId></ComHandler>
   </Actions>
 </Task>"#;
 
     #[test]
-    fn parses_task_xml_fields_ignoring_namespace() {
-        let Some(parsed) = parse_task_xml(SAMPLE_TASK_XML) else {
-            panic!("task XML should parse");
-        };
+    fn parses_task_xml_fields_ignoring_namespace() -> Result<(), String> {
+        let parsed = parse_task_xml(SAMPLE_TASK_XML)?;
         assert_eq!(
-            parsed.execute.as_deref(),
-            Some(r"C:\Program Files\Demo\demo.exe")
-        );
-        assert_eq!(parsed.arguments.as_deref(), Some("/run"));
-        assert_eq!(
-            parsed.working_directory.as_deref(),
-            Some(r"C:\Program Files\Demo")
+            parsed.actions,
+            vec![
+                TaskAction {
+                    command: r"C:\Windows\helper.exe".to_owned(),
+                    arguments: None,
+                    working_directory: None,
+                },
+                TaskAction {
+                    command: r"C:\Program Files\Demo\demo.exe".to_owned(),
+                    arguments: Some("/run".to_owned()),
+                    working_directory: Some(r"C:\Program Files\Demo".to_owned()),
+                },
+            ]
         );
         assert_eq!(parsed.run_level.as_deref(), Some("HighestAvailable"));
         assert_eq!(parsed.account.as_deref(), Some("S-1-5-18"));
         assert_eq!(parsed.trigger_summary.as_deref(), Some("LogonTrigger"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_comment_in_a_command_does_not_hide_what_the_task_scheduler_reads() -> Result<(), String> {
+        let parsed = parse_task_xml(
+            r"<Task><Actions><Exec><Command>C:\Program Files\De<!-- x -->mo\demo.exe</Command></Exec></Actions></Task>",
+        )?;
+        assert_eq!(parsed.actions[0].command, r"C:\Program Files\Demo\demo.exe");
+        Ok(())
     }
 
     #[test]
@@ -550,15 +497,22 @@ mod tests {
     }
 
     #[test]
-    fn expands_systemroot_marker_against_the_scanned_windows_dir() {
-        let windows = Path::new(r"E:\Windows");
+    fn a_path_in_a_definition_is_read_as_its_own_pc_meant_it() {
+        let expand = |text: &str| text.replace("%ProgramFiles%", r"C:\Program Files");
         assert_eq!(
-            expand_task_path(r"%SystemRoot%\System32\svc.exe", windows),
-            PathBuf::from(r"E:\Windows\System32\svc.exe")
+            task_path_of(r"%SystemRoot%\System32\svc.exe", &expand, &windows()),
+            PathBuf::from(r"C:\Windows\System32\svc.exe")
         );
-        // A plain drive path is left for the context to re-root.
         assert_eq!(
-            expand_task_path(r"C:\Program Files\Demo\demo.exe", windows),
+            task_path_of(r"\SystemRoot\System32\svc.exe", &expand, &windows()),
+            PathBuf::from(r"C:\Windows\System32\svc.exe")
+        );
+        assert_eq!(
+            task_path_of(r#""%ProgramFiles%\Demo\demo.exe""#, &expand, &windows()),
+            PathBuf::from(r"C:\Program Files\Demo\demo.exe")
+        );
+        assert_eq!(
+            task_path_of(r"C:\Program Files\Demo\demo.exe", &expand, &windows()),
             PathBuf::from(r"C:\Program Files\Demo\demo.exe")
         );
     }
@@ -569,38 +523,152 @@ mod tests {
         assert!(task_requires_admin(Some("1"), Some("user")));
         assert!(task_requires_admin(Some("HighestAvailable"), Some("user")));
         assert!(task_requires_admin(Some("Limited"), Some("SYSTEM")));
+        assert!(task_requires_admin(
+            Some("LeastPrivilege"),
+            Some("S-1-5-18")
+        ));
         assert!(!task_requires_admin(Some("Limited"), Some("DOMAIN\\user")));
         assert!(!task_requires_admin(None, None));
     }
 
-    #[test]
-    fn parses_numeric_powershell_task_fields() -> std::result::Result<(), Box<dyn std::error::Error>>
-    {
-        let actions = parse_json_array::<PowerShellTaskAction>(
-            r#"[{
-                "TaskName": "Example",
-                "TaskPath": "\\WinAppMigrator\\",
-                "Execute": "C:\\App\\app.exe",
-                "RunLevel": 1,
-                "Account": "SYSTEM"
-            }]"#,
-        )?;
-        let Some(action) = actions.into_iter().next() else {
-            return Err(std::io::Error::other("missing task action").into());
-        };
-        let Some(task) = task_from_action(
-            &TaskScanContext {
-                executable_path: PathBuf::from(r"C:\App\app.exe"),
-                install_location: None,
-            },
-            action,
-        ) else {
-            return Err(std::io::Error::other("task should match executable path").into());
-        };
+    const NON_ASCII_TASK: &str = r"<?xml version='1.0'?><Task><Actions><Exec><Command>C:\Größe 日本\a.exe</Command></Exec></Actions></Task>";
+    const NON_ASCII_COMMAND: &str = r"C:\Größe 日本\a.exe";
 
-        assert_eq!(task.task_name, "Example");
-        assert_eq!(task.run_level.as_deref(), Some("1"));
-        assert!(task.requires_admin);
+    fn with_bom(bom: &[u8], units: impl Iterator<Item = [u8; 2]>) -> Vec<u8> {
+        let mut bytes = bom.to_vec();
+        for unit in units {
+            bytes.extend_from_slice(&unit);
+        }
+        bytes
+    }
+
+    #[test]
+    fn every_encoding_a_task_comes_in_reads_the_same() -> Result<(), String> {
+        let units = || NON_ASCII_TASK.encode_utf16();
+        for (label, bytes) in [
+            (
+                "UTF-16 with a mark, as the Task Scheduler writes",
+                with_bom(&UTF16_LE_BOM, units().map(u16::to_le_bytes)),
+            ),
+            (
+                "UTF-16 big-endian with a mark",
+                with_bom(&UTF16_BE_BOM, units().map(u16::to_be_bytes)),
+            ),
+            (
+                "UTF-16 with no mark",
+                with_bom(&[], units().map(u16::to_le_bytes)),
+            ),
+            (
+                "UTF-16 big-endian with no mark",
+                with_bom(&[], units().map(u16::to_be_bytes)),
+            ),
+            (
+                "UTF-8 with a mark",
+                [&UTF8_BOM[..], NON_ASCII_TASK.as_bytes()].concat(),
+            ),
+            ("UTF-8", NON_ASCII_TASK.as_bytes().to_vec()),
+        ] {
+            let text = decode_task_xml(&bytes)?;
+            assert_eq!(text, NON_ASCII_TASK, "{label}");
+            assert_eq!(
+                parse_task_xml(&text)?.actions[0].command,
+                NON_ASCII_COMMAND,
+                "{label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn text_that_is_not_what_it_says_is_not_read_as_something_else() {
+        let mut odd = with_bom(
+            &UTF16_LE_BOM,
+            "<Task/>".encode_utf16().map(u16::to_le_bytes),
+        );
+        odd.push(0);
+        assert!(decode_task_xml(&odd).is_err());
+        // A surrogate with no other half.
+        let broken = with_bom(&UTF16_LE_BOM, [[0x00, 0xD8], [b'<', 0]].into_iter());
+        assert!(decode_task_xml(&broken).is_err());
+        // Latin-1, which is not UTF-8.
+        assert!(decode_task_xml(b"<Task>Gr\xF6\xDFe</Task>").is_err());
+        assert_eq!(decode_task_xml(b""), Ok(String::new()));
+    }
+
+    /// The whole of it, in a folder that stands in for a PC's: JSON through PowerShell lost every
+    /// task over one that broke it, and no file here can do that.
+    #[test]
+    fn a_task_that_cannot_be_read_takes_no_other_with_it() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let root = work.path().join("Tasks");
+        std::fs::create_dir_all(root.join(r"Vendor\Deep"))?;
+        let write_utf16 = |path: PathBuf, text: &str| {
+            std::fs::write(
+                path,
+                with_bom(&UTF16_LE_BOM, text.encode_utf16().map(u16::to_le_bytes)),
+            )
+        };
+        write_utf16(root.join("Plain"), SAMPLE_TASK_XML)?;
+        write_utf16(root.join(r"Vendor\Größe 日本"), NON_ASCII_TASK)?;
+        write_utf16(
+            root.join(r"Vendor\Deep\Newline in a value"),
+            "<Task><Actions><Exec><Command>C:\\a.exe</Command><Arguments>--x \"y\"\r\n\u{1}?\
+             </Arguments></Exec></Actions></Task>"
+                .replace('\u{1}', "")
+                .as_str(),
+        )?;
+        write_utf16(root.join("Not XML"), "this is not a task <")?;
+        std::fs::write(root.join("Broken encoding"), b"\xFF\xFE\x00\xD8")?;
+        std::fs::write(root.join("Not text"), b"\x80\x81\x82")?;
+        std::fs::write(
+            root.join("Too large"),
+            vec![b' '; MAX_TASK_FILE_BYTES as usize + 1],
+        )?;
+
+        let (files, warnings) = read_task_files(&root);
+        let names: Vec<String> = files
+            .iter()
+            .map(|file| format!("{}{}", file.task_path, file.task_name))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                r"\Plain",
+                r"\Vendor\Größe 日本",
+                r"\Vendor\Deep\Newline in a value"
+            ]
+        );
+        assert_eq!(files[1].actions[0].command, NON_ASCII_COMMAND);
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        for warning in &warnings {
+            assert_eq!(warning.code, "scheduled_task_unreadable");
+            assert_eq!(warning.severity, WarningSeverity::Warning);
+            assert!(warning.source.is_some());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_task_is_not_read_through_a_link() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let root = work.path().join("Tasks");
+        let elsewhere = work.path().join("elsewhere");
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&elsewhere)?;
+        std::fs::write(elsewhere.join("Theirs"), SAMPLE_TASK_XML)?;
+        std::fs::write(root.join("Own"), SAMPLE_TASK_XML)?;
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(root.join("Linked"))
+            .arg(&elsewhere)
+            .output()?;
+        assert!(made.status.success());
+        let (files, warnings) = read_task_files(&root);
+        let names: Vec<&str> = files.iter().map(|file| file.task_name.as_str()).collect();
+        assert_eq!(names, ["Own"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
         Ok(())
     }
 }

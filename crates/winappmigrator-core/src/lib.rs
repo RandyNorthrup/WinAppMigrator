@@ -18,6 +18,7 @@ pub mod pe_scan;
 pub mod prerequisites;
 pub mod privilege;
 mod product_match;
+pub mod profile_survey;
 pub mod progress;
 pub mod registry_scan;
 mod registry_target;
@@ -39,10 +40,11 @@ pub use errors::{Result, WinAppMigratorError};
 pub use models::*;
 pub use package::{create_package, create_package_monitored, read_embedded_manifest};
 pub use path_utils::hidden_command;
+pub use profile_survey::{ProfilePicker, ProfileRow, ProfileSurvey, survey_profiles};
 pub use progress::{BuildMonitor, BuildStep, InstallMonitor, InstallPhase, InstallStep, Monitor};
 pub use restore::{default_install_location, restore_package, restore_package_monitored};
 pub use restore_review::{
     SystemChange, SystemChangeKind, SystemChanges, install_location_problem, system_changes,
 };
-pub use system_context::{ScanSource, SystemContext};
+pub use system_context::{ProfileChoice, ScanSource, SystemContext, sweep_leaked_hive_mounts};
 pub use verify::verify_package;

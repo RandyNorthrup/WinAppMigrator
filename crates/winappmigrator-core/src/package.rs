@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,7 +18,7 @@ use crate::hashing::sha256_file;
 use crate::models::{
     AppArchitecture, DriverEntry, FileEntry, LicenseArtifact, LicenseStoreFile,
     PACKAGE_SCHEMA_VERSION, PackageArchiveFormat, PackageManifest, PackageOptions, PackageResult,
-    RegistryEntry, RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions,
+    RegistryEntry, RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions, ScanReport,
     ScheduledTaskEntry, Warning, WarningSeverity,
 };
 use crate::path_utils::{hidden_command, sanitize_filename};
@@ -25,6 +26,7 @@ use crate::prerequisites::PREREQUISITES_DIR;
 use crate::privilege::ProtectedFolder;
 use crate::progress::{BuildMonitor, BuildStep};
 use crate::scan::scan_and_write_reports;
+use crate::system_context::VolumeMap;
 
 const FILES_DIR: &str = "files";
 const REGISTRY_DIR: &str = "registry";
@@ -77,6 +79,7 @@ pub fn create_package_monitored(
         include_program_data: options.include_program_data,
         include_license_data: options.include_license_data,
         source: options.source.clone(),
+        user_profile: options.user_profile.clone(),
     };
     let report = scan_and_write_reports(&scan_options)?;
     monitor.checkpoint()?;
@@ -86,6 +89,9 @@ pub fn create_package_monitored(
     let mut staged: std::collections::HashMap<PathBuf, (String, u64)> =
         std::collections::HashMap::new();
 
+    // The scan looked before anything was read, and this looks again just before, as anything
+    // read from here on goes in the package.
+    let mut reader = SourceReader::new(&report);
     let total_files = report
         .file_inventory
         .iter()
@@ -116,7 +122,9 @@ pub fn create_package_monitored(
         // AppData installer cache entry, etc.) must not abort the whole package.
         // Record it as a warning, mark it not-copied in the manifest so
         // verification stays consistent, and continue.
-        match copy_file_preserving_basic_metadata(&file.original_path, &destination)
+        match reader
+            .check(&file.path)
+            .and_then(|()| copy_file_preserving_basic_metadata(&file.path, &destination))
             .and_then(|()| staged_fingerprint(&destination))
         {
             Ok(fingerprint) => {
@@ -149,6 +157,8 @@ pub fn create_package_monitored(
                 entry.hash_sha256 = Some(hash.clone());
                 entry.size_bytes = Some(*size);
             }
+            // Where it could be read during this build means nothing to an installer.
+            entry.path = entry.original_path.clone();
             entry
         })
         .collect();
@@ -158,6 +168,7 @@ pub fn create_package_monitored(
     let license_artifacts_detected = package_license_artifacts(
         &options.output_dir,
         &report.license_artifacts,
+        &mut reader,
         &mut warnings,
     );
 
@@ -171,12 +182,17 @@ pub fn create_package_monitored(
         &report.runtime_prerequisites,
         &mut warnings,
     );
-    let drivers_detected = package_drivers(&options.output_dir, &report.drivers, &mut warnings);
+    let drivers_detected = package_drivers(
+        &options.output_dir,
+        &report.drivers,
+        &mut reader,
+        &mut warnings,
+    );
 
     let manifest = PackageManifest {
         schema_version: PACKAGE_SCHEMA_VERSION.to_owned(),
-        source_computer_name: std::env::var("COMPUTERNAME").ok(),
-        source_windows_version: source_windows_version(),
+        source_computer_name: report.source_computer_name.clone(),
+        source_windows_version: report.source_windows_version.clone(),
         scan_timestamp_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,
         main_executable_path: report.main_executable.path.clone(),
         application_metadata: report.source_app.clone(),
@@ -198,6 +214,7 @@ pub fn create_package_monitored(
         included_program_data: options.include_program_data,
         included_license_data: options.include_license_data,
         ui_theme: options.ui_theme.clone(),
+        user_data_profile: report.user_data_profile.clone(),
     };
 
     let manifest_path = options.output_dir.join(MANIFEST_FILE);
@@ -249,6 +266,50 @@ pub fn create_package_monitored(
         archive_path,
         self_extracting_archive_path,
     })
+}
+
+/// Finds, for anything a build copies, where it can be read now and whether it may be. On this PC
+/// that is simply where it is.
+struct SourceReader {
+    volume: Option<VolumeMap>,
+    checked: HashSet<String>,
+}
+
+impl SourceReader {
+    fn new(report: &ScanReport) -> Self {
+        Self {
+            volume: report.source_volume.clone(),
+            checked: HashSet::new(),
+        }
+    }
+
+    /// Fails for a path on a drive that goes off it or through a link.
+    fn check(&mut self, path: &Path) -> Result<()> {
+        match self.volume.as_ref() {
+            Some(volume) if !volume.may_read_noting(path, &mut self.checked) => {
+                Err(WinAppMigratorError::InvalidInput(format!(
+                    "{} goes through a link or is not on the connected drive, so it was not read",
+                    path.display()
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Where something the source PC calls `logical` can be read, if it can.
+    fn locate(&mut self, logical: &Path) -> Result<PathBuf> {
+        let located = match self.volume.as_ref() {
+            Some(volume) => volume.to_volume(logical).ok_or_else(|| {
+                WinAppMigratorError::InvalidInput(format!(
+                    "{} is not on the connected drive, so it was not read",
+                    logical.display()
+                ))
+            })?,
+            None => logical.to_path_buf(),
+        };
+        self.check(&located)?;
+        Ok(located)
+    }
 }
 
 /// Compute the installer's output path. The file name encodes the chosen
@@ -394,12 +455,17 @@ fn plan_one_prerequisite(
 fn package_drivers(
     output_dir: &Path,
     drivers: &[DriverEntry],
+    reader: &mut SourceReader,
     warnings: &mut Vec<Warning>,
 ) -> Vec<DriverEntry> {
     let mut packaged = Vec::with_capacity(drivers.len());
     for driver in drivers {
         let mut driver = driver.clone();
-        if driver.app_owned && driver.image_path.is_file() {
+        let image = reader
+            .locate(&driver.image_path)
+            .ok()
+            .filter(|image| image.is_file());
+        if let Some(image) = image.as_deref().filter(|_| driver.app_owned) {
             let leaf = driver
                 .image_path
                 .file_name()
@@ -410,8 +476,7 @@ fn package_drivers(
             let unique = format!("{}_{}", sanitize_artifact_name(&driver.service_name), leaf);
             let relative = PathBuf::from(DRIVERS_DIR).join(safe_relative_path(Path::new(&unique)));
             match package_destination_path(output_dir, &relative).and_then(|destination| {
-                copy_file_preserving_basic_metadata(&driver.image_path, &destination)
-                    .map(|()| destination)
+                copy_file_preserving_basic_metadata(image, &destination).map(|()| destination)
             }) {
                 Ok(destination) => match sha256_file(&destination) {
                     // Only mark as bundled when we have an integrity hash, so
@@ -458,12 +523,14 @@ fn package_drivers(
 fn package_license_artifacts(
     output_dir: &Path,
     artifacts: &[LicenseArtifact],
+    reader: &mut SourceReader,
     warnings: &mut Vec<Warning>,
 ) -> Vec<LicenseArtifact> {
     let mut packaged = Vec::with_capacity(artifacts.len());
     for artifact in artifacts {
         let mut artifact = artifact.clone();
-        if artifact.should_copy && package_one_license_artifact(output_dir, &mut artifact, warnings)
+        if artifact.should_copy
+            && package_one_license_artifact(output_dir, &mut artifact, reader, warnings)
         {
             packaged.push(artifact);
             continue;
@@ -488,13 +555,17 @@ fn package_license_artifacts(
 fn package_one_license_artifact(
     output_dir: &Path,
     artifact: &mut LicenseArtifact,
+    reader: &mut SourceReader,
     warnings: &mut Vec<Warning>,
 ) -> bool {
-    let Some(source) = artifact.path.clone() else {
+    let Some(logical) = artifact.path.clone() else {
         return false;
     };
-    let relative = PathBuf::from(LICENSE_DIR).join(safe_relative_path(&source));
+    let relative = PathBuf::from(LICENSE_DIR).join(safe_relative_path(&logical));
     let Ok(destination) = package_destination_path(output_dir, &relative) else {
+        return false;
+    };
+    let Ok(source) = reader.locate(&logical) else {
         return false;
     };
     if source.is_file() {
@@ -638,7 +709,7 @@ fn copy_file_preserving_basic_metadata(source: &Path, destination: &Path) -> Res
 /// ACLs or attributes). robocopy copies by directory + file name, so the source
 /// and destination file names must match; the caller passes a destination whose
 /// name equals the source's.
-fn copy_file_backup_mode(source: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn copy_file_backup_mode(source: &Path, destination: &Path) -> Result<()> {
     let (Some(source_dir), Some(file_name)) = (source.parent(), source.file_name()) else {
         return Err(WinAppMigratorError::InvalidInput(format!(
             "cannot backup-copy a file without a parent directory: {}",
@@ -688,16 +759,6 @@ fn copy_file_backup_mode(source: &Path, destination: &Path) -> Result<()> {
 fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
     fs::write(path, bytes).map_err(|source| WinAppMigratorError::io(path, source))
-}
-
-fn source_windows_version() -> Option<String> {
-    hidden_command("cmd")
-        .args(["/C", "ver"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .filter(|value| !value.is_empty())
 }
 
 fn write_integration_artifacts(root: &Path, manifest: &PackageManifest) -> Result<()> {

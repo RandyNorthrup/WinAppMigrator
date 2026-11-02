@@ -84,6 +84,7 @@ fn manifest_for(files: Vec<FileEntry>) -> PackageManifest {
         included_program_data: false,
         included_license_data: true,
         ui_theme: None,
+        user_data_profile: None,
     }
 }
 
@@ -105,6 +106,7 @@ fn package_of(root: &Path, files: &[(&str, &[u8])]) -> TestResult<PathBuf> {
             classification: FileClassification::AppOwned,
             should_copy: true,
             reason: String::new(),
+            user_folder: None,
         });
     }
     fs::write(

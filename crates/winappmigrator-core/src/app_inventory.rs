@@ -121,6 +121,7 @@ fn read_hklm_uninstall(
         location.subkey,
         location.architecture.clone(),
         InstallScope::PerMachine,
+        None,
     ))
 }
 
@@ -142,6 +143,7 @@ fn read_hkcu_uninstall(
         HKCU_UNINSTALL,
         AppArchitecture::Unknown,
         InstallScope::PerUser,
+        Some(&user.id),
     )
 }
 
@@ -155,6 +157,7 @@ fn collect_uninstall_entries(
     subkey: &str,
     architecture: AppArchitecture,
     install_scope: InstallScope,
+    owner_profile: Option<&str>,
 ) -> Vec<InstalledApp> {
     let mut apps = Vec::new();
     for key_name in uninstall_key.enum_keys() {
@@ -182,7 +185,10 @@ fn collect_uninstall_entries(
             architecture.clone(),
             install_scope.clone(),
         ) {
-            apps.push(app);
+            apps.push(InstalledApp {
+                owner_profile: owner_profile.map(ToOwned::to_owned),
+                ..app
+            });
         }
     }
     apps
@@ -228,15 +234,17 @@ pub fn parse_uninstall_entry(
         .install_location
         .as_ref()
         .map(PathBuf::from)
-        .map(|path| system.resolve_source_path(&path))
+        .and_then(|path| system.resolve_source_path(&path))
         .and_then(|path| usable_install_location(path, inventory, system));
+    // A folder can be listed with no look at what is in it, so what is found there may be a link.
     let main_executable = guess_main_executable(
         system,
         inventory,
         raw,
         install_location.as_deref(),
         display_name.as_str(),
-    );
+    )
+    .filter(|path| system.may_read(path));
 
     Some(InstalledApp {
         display_name,
@@ -248,6 +256,7 @@ pub fn parse_uninstall_entry(
         registry_source_path,
         architecture,
         install_scope,
+        owner_profile: None,
     })
 }
 
@@ -298,7 +307,7 @@ fn guess_main_executable(
         value
             .as_deref()
             .and_then(split_command_executable_path)
-            .map(|path| system.resolve_source_path(&path))
+            .and_then(|path| system.resolve_source_path(&path))
             .filter(|path| is_usable_main_executable(path, system))
     };
     resolved(&raw.display_icon)

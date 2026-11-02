@@ -29,7 +29,7 @@ use crate::path_utils::{
 };
 use crate::product_match::{MatchScope, ProductNames};
 use crate::registry_scan::{RecordedRegistryKey, RecordedRegistryRoot, registry_value_text};
-use crate::shortcut_scan::lnk_target_path;
+use crate::shortcut_scan::{lnk_target_path, read_shortcut_file};
 use crate::system_context::SystemContext;
 
 const USERDATA_PATH: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
@@ -158,7 +158,7 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
             // NSIS keeps no manifest by default, but the AdvUninstLog macro
             // writes an `uninstall.log` of installed paths in the install dir.
             if let Some(dir) = primary_install_dir(app)
-                && let Some(log) = find_nsis_log(&dir)
+                && let Some(log) = find_nsis_log(&dir).filter(|log| system.may_read(log))
             {
                 let files = nsis_manifest_files(&log, system);
                 if !files.is_empty() {
@@ -197,6 +197,7 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
             // missed by name-token heuristics. Read the manifest identity to
             // anchor it directly.
             if let Some(dir) = primary_install_dir(app)
+                && system.may_read(&dir.join(APPX_MANIFEST))
                 && let Some(identity) = appx_identity_name(&dir)
             {
                 evidence.push(format!("AppxManifest identity: {identity}"));
@@ -231,18 +232,17 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
     if let Some(uninstall) = app.uninstall_string.as_deref()
         && let Some(executable) = split_command_executable_path(uninstall)
         && let Some(parent) = executable.parent()
+        && let Some(parent) = system.resolve_source_path(parent)
+        && !is_windows_or_installer_cache_path(&parent, system)
     {
-        let parent = system.resolve_source_path(parent);
-        if !is_windows_or_installer_cache_path(&parent, system) {
-            roots.push(parent);
-        }
+        roots.push(parent);
     }
 
     InstallSource {
         method,
         product_code,
         authoritative_file_count,
-        roots: dedup_existing_dirs(roots),
+        roots: dedup_existing_dirs(roots, system),
         loose_files,
         recorded_files,
         registry_keys,
@@ -261,7 +261,7 @@ pub fn add_app_paths_roots(source: &mut InstallSource, executable: &Path, system
         source.evidence.push("App Paths registration".to_owned());
         let mut roots = std::mem::take(&mut source.roots);
         roots.extend(app_paths);
-        source.roots = dedup_existing_dirs(roots);
+        source.roots = dedup_existing_dirs(roots, system);
     }
 }
 
@@ -273,7 +273,8 @@ pub(crate) fn app_product_names(app: &InstalledApp) -> ProductNames {
 /// True when an executable could be the application itself: it exists, is not an
 /// uninstaller or updater, and is neither a Windows host nor an installer's cached copy.
 pub(crate) fn is_usable_main_executable(path: &Path, system: &SystemContext) -> bool {
-    is_executable_path(path)
+    system.may_read(path)
+        && is_executable_path(path)
         && !is_auxiliary_executable(path)
         && !is_windows_or_installer_cache_path(path, system)
 }
@@ -411,7 +412,7 @@ fn read_app_paths_targets(system: &SystemContext) -> Vec<PathBuf> {
                 && !target.contains('%')
                 && seen.insert(target.to_ascii_lowercase())
             {
-                targets.push(system.resolve_source_path(Path::new(target)));
+                targets.extend(system.resolve_source_path(Path::new(target)));
             }
         }
     }
@@ -427,7 +428,7 @@ fn read_start_menu_shortcuts(system: &SystemContext) -> Vec<ShortcutHint> {
         folders.push(profile.join(USER_START_MENU_PROGRAMS));
     }
     let mut shortcuts = Vec::new();
-    for folder in folders {
+    for folder in folders.into_iter().filter(|folder| system.may_read(folder)) {
         for entry in WalkDir::new(&folder)
             .max_depth(MAX_START_MENU_DEPTH)
             .into_iter()
@@ -443,15 +444,18 @@ fn read_start_menu_shortcuts(system: &SystemContext) -> Vec<ShortcutHint> {
             let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            let Some(target) = std::fs::read(path)
-                .ok()
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let Some(target) = read_shortcut_file(path)
                 .and_then(|data| lnk_target_path(&data))
+                .and_then(|target| system.resolve_source_path(&target))
             else {
                 continue;
             };
             shortcuts.push(ShortcutHint {
                 name: name.to_owned(),
-                target: system.resolve_source_path(&target),
+                target,
             });
         }
     }
@@ -543,16 +547,19 @@ fn last_resort_executable(
         .uninstall_string
         .as_deref()
         .and_then(split_command_executable_path)
-        .map(|path| system.resolve_source_path(&path));
+        .and_then(|path| system.resolve_source_path(&path));
     let windows_dir = system.windows_dir();
+    let readable = |path: &&PathBuf| system.may_read(path) && is_executable_path(path);
     candidates
         .iter()
         .chain(uninstaller.iter())
-        .find(|path| is_executable_path(path) && !path_is_within(path, &windows_dir))
+        .filter(readable)
+        .find(|path| !path_is_within(path, &windows_dir))
         .or_else(|| {
             candidates
                 .iter()
-                .find(|path| is_executable_path(path) && source.recorded_files.contains(path))
+                .filter(readable)
+                .find(|path| source.recorded_files.contains(path))
         })
         .cloned()
 }
@@ -759,7 +766,7 @@ fn classify_method(
         return InstallMethod::InnoSetup;
     }
     if let Some(dir) = primary_install_dir(app)
-        && is_nsis_install(&dir, app.uninstall_string.as_deref())
+        && is_nsis_install(&dir, app.uninstall_string.as_deref(), system)
     {
         return InstallMethod::Nsis;
     }
@@ -788,12 +795,13 @@ fn inno_log_for(app: &InstalledApp, system: &SystemContext) -> Option<PathBuf> {
         .and_then(split_command_executable_path)
         .and_then(|path| {
             path.parent()
-                .map(|parent| system.resolve_source_path(parent))
+                .and_then(|parent| system.resolve_source_path(parent))
         });
     beside_uninstaller
         .as_deref()
         .and_then(find_inno_log)
         .or_else(|| primary_install_dir(app).as_deref().and_then(find_inno_log))
+        .filter(|log| system.may_read(log))
 }
 
 fn find_inno_log(dir: &Path) -> Option<PathBuf> {
@@ -1041,7 +1049,9 @@ fn existing_files(candidates: Vec<String>, system: &SystemContext) -> Vec<PathBu
         if !seen.insert(candidate.to_ascii_lowercase()) {
             continue;
         }
-        let path = system.resolve_source_path(&PathBuf::from(&candidate));
+        let Some(path) = system.resolve_source_path(&PathBuf::from(&candidate)) else {
+            continue;
+        };
         if path.is_file() {
             files.push(path);
         }
@@ -1177,10 +1187,13 @@ fn is_user_desktop_path(lower: &str) -> bool {
 
 /// NSIS embeds the "Nullsoft.NSIS" / "Nullsoft Install System" marker in its
 /// (un)installer; detect it from the uninstaller binary.
-fn is_nsis_install(dir: &Path, uninstall_string: Option<&str>) -> bool {
+fn is_nsis_install(dir: &Path, uninstall_string: Option<&str>, system: &SystemContext) -> bool {
     let mut candidates: Vec<PathBuf> = Vec::new();
+    // Read as what the source PC meant by it. Left as it is, on a drive, this could open a file
+    // on this PC or on any server a value cared to name.
     if let Some(uninstall) = uninstall_string
         && let Some(executable) = split_command_executable_path(uninstall)
+        && let Some(executable) = system.resolve_source_path(&executable)
     {
         candidates.push(executable);
     }
@@ -1192,9 +1205,9 @@ fn is_nsis_install(dir: &Path, uninstall_string: Option<&str>) -> bool {
             }
         }
     }
-    candidates
-        .iter()
-        .any(|candidate| file_contains_signature(candidate, b"Nullsoft"))
+    candidates.iter().any(|candidate| {
+        system.may_read(candidate) && file_contains_signature(candidate, b"Nullsoft")
+    })
 }
 
 fn file_contains_signature(path: &Path, signature: &[u8]) -> bool {
@@ -1224,13 +1237,13 @@ fn app_paths_roots(executable_name: &str, system: &SystemContext) -> Vec<PathBuf
         if let Ok(default) = key.get_value::<String, _>("")
             && let Some(parent) = PathBuf::from(default.trim_matches('"')).parent()
         {
-            roots.push(system.resolve_source_path(parent));
+            roots.extend(system.resolve_source_path(parent));
         }
         if let Ok(path_value) = key.get_value::<String, _>("Path") {
             for segment in path_value.split(';') {
                 let trimmed = segment.trim().trim_matches('"');
                 if !trimmed.is_empty() {
-                    roots.push(system.resolve_source_path(&PathBuf::from(trimmed)));
+                    roots.extend(system.resolve_source_path(&PathBuf::from(trimmed)));
                 }
             }
         }
@@ -1238,12 +1251,12 @@ fn app_paths_roots(executable_name: &str, system: &SystemContext) -> Vec<PathBuf
     roots
 }
 
-fn dedup_existing_dirs(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+fn dedup_existing_dirs(roots: Vec<PathBuf>, system: &SystemContext) -> Vec<PathBuf> {
     let mut seen = BTreeSet::new();
     let mut output = Vec::new();
     for root in roots {
         // An uninstaller at `C:\uninst.exe` says nothing about the rest of the drive.
-        if !root.is_dir() || is_drive_root(&root) {
+        if !system.may_read(&root) || !root.is_dir() || is_drive_root(&root) {
             continue;
         }
         if seen.insert(root.to_string_lossy().to_ascii_lowercase()) {
@@ -1313,12 +1326,16 @@ fn appx_identity_name(install_dir: &Path) -> Option<String> {
 
 /// Per-user MSIX package-data directories for an identity name. The folder is
 /// named `<IdentityName>_<publisherHash>`, so a prefix match avoids computing
-/// the publisher hash. Scoped to the current user's `%LOCALAPPDATA%\Packages`.
+/// the publisher hash. Scoped to the `%LOCALAPPDATA%\Packages` of the account being scanned.
 fn msix_package_data_roots(identity_name: &str, system: &SystemContext) -> Vec<PathBuf> {
     let prefix = format!("{}_", identity_name.to_ascii_lowercase());
     let mut roots = Vec::new();
     for local_app_data in local_app_data_dirs(system) {
-        let Ok(entries) = std::fs::read_dir(local_app_data.join(MSIX_PACKAGES_DIR)) else {
+        let packages = local_app_data.join(MSIX_PACKAGES_DIR);
+        if !system.may_read(&packages) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(packages) else {
             continue;
         };
         roots.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
@@ -1332,21 +1349,13 @@ fn msix_package_data_roots(identity_name: &str, system: &SystemContext) -> Vec<P
     roots
 }
 
-/// `%LOCALAPPDATA%` bases to search. Live: the current user; offline: each
-/// profile's `AppData\Local` under the scanned volume.
+/// `%LOCALAPPDATA%` bases to search: the `AppData\Local` of each account being scanned.
 fn local_app_data_dirs(system: &SystemContext) -> Vec<PathBuf> {
-    if system.is_offline() {
-        system
-            .user_profiles()
-            .into_iter()
-            .map(|profile| profile.join(r"AppData\Local"))
-            .collect()
-    } else {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .into_iter()
-            .collect()
-    }
+    system
+        .user_hives()
+        .into_iter()
+        .map(|user| user.profile_dir.join(r"AppData\Local"))
+        .collect()
 }
 
 fn extract_product_code(app: &InstalledApp) -> Option<String> {
@@ -1510,7 +1519,7 @@ fn msi_component_paths(
                 } else if seen.insert(key_path.to_ascii_lowercase()) {
                     // MSI records absolute source-machine paths; re-root onto the
                     // scanned volume so downstream reads hit the right disk.
-                    files.push(system.resolve_source_path(Path::new(&msi_file_path(&key_path))));
+                    files.extend(system.resolve_source_path(Path::new(&msi_file_path(&key_path))));
                 }
             }
         }
@@ -1843,7 +1852,9 @@ mod tests {
 
     #[test]
     fn a_drive_is_never_an_install_root() {
-        assert!(dedup_existing_dirs(vec![PathBuf::from(r"C:\")]).is_empty());
+        assert!(
+            dedup_existing_dirs(vec![PathBuf::from(r"C:\")], &SystemContext::live()).is_empty()
+        );
 
         let mut source = test_source(InstallMethod::Generic);
         source.roots = vec![PathBuf::from(r"C:\")];
@@ -2206,6 +2217,7 @@ mod tests {
             registry_source_path: r"HKLM\Software\Test".to_owned(),
             architecture: crate::models::AppArchitecture::X64,
             install_scope: crate::models::InstallScope::PerMachine,
+            owner_profile: None,
         }
     }
 

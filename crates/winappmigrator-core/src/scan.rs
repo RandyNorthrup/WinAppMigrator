@@ -10,7 +10,7 @@ use crate::dll_resolver::{
 };
 use crate::env_scan::{EnvironmentScanContext, scan_environment};
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{FileDiscoveryContext, discover_files};
+use crate::file_discovery::{FileDiscoveryContext, discover_files, package_relative_path};
 use crate::install_source::{
     InstallSource, add_app_paths_roots, detect_install_source, is_usable_main_executable,
     primary_executable, resolve_install_location, squirrel_current_executable,
@@ -63,8 +63,13 @@ struct ConfidenceInputs<'a> {
 pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     // The single seam every scanner reads through: the live OS, or a mounted
     // offline volume from another PC. Held for the whole scan so offline hive
-    // mounts stay live until every scanner has run.
-    let system = SystemContext::open(&options.source)?;
+    // mounts stay live until every scanner has run. It reads one account, so another's cannot
+    // come along by accident.
+    let owner = match &options.selection {
+        AppSelection::InstalledApp(app) => app.owner_profile.as_deref(),
+        AppSelection::ExecutablePath(_) => None,
+    };
+    let system = SystemContext::open_for_scan(&options.source, &options.user_profile, owner)?;
     let mut source_app = match &options.selection {
         AppSelection::InstalledApp(app) => Some((**app).clone()),
         AppSelection::ExecutablePath(_) => None,
@@ -80,6 +85,13 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         .as_ref()
         .and_then(|source| squirrel_current_executable(&executable_path, source))
         .unwrap_or(executable_path);
+    // Whatever led here, on a drive nothing is read through a link or from off the drive.
+    if !system.may_read(&executable_path) {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "{} goes through a link or is not on the connected drive, so it was not read.",
+            executable_path.display()
+        )));
+    }
     validate_scan_input(&executable_path)?;
     if let (Some(app), Some(source)) = (source_app.as_ref(), install_source.as_mut())
         && app.main_executable.is_none()
@@ -148,11 +160,18 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     let source_registry_path = source_app
         .as_ref()
         .map(|app| app.registry_source_path.clone());
+    // What the PC itself calls these. On a drive they are somewhere else now, and everything on
+    // it that mentions them still means where they were. Disks are read by where they are now,
+    // and what a PC recorded is compared with this.
+    let logical_executable = system.logical_path(&executable_path);
+    let logical_location = install_location
+        .as_deref()
+        .map(|location| system.logical_path(location));
 
     let registry_artifacts = scan_registry_artifacts(
         &RegistryScanContext {
-            executable_path: executable_path.clone(),
-            install_location: install_location.clone(),
+            executable_path: logical_executable.clone(),
+            install_location: logical_location.clone(),
             display_name: app_name.clone(),
             publisher: publisher.clone(),
             source_registry_path,
@@ -165,36 +184,36 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     );
     let (services, service_warnings) = scan_services(
         &ServiceScanContext {
-            executable_path: executable_path.clone(),
-            install_location: install_location.clone(),
+            executable_path: logical_executable.clone(),
+            install_location: logical_location.clone(),
         },
         &system,
     );
     let (drivers, driver_warnings) = scan_drivers(
         &ServiceScanContext {
-            executable_path: executable_path.clone(),
-            install_location: install_location.clone(),
+            executable_path: logical_executable.clone(),
+            install_location: logical_location.clone(),
         },
         &system,
     );
     let (scheduled_tasks, task_warnings) = scan_scheduled_tasks(
         &TaskScanContext {
-            executable_path: executable_path.clone(),
-            install_location: install_location.clone(),
+            executable_path: logical_executable.clone(),
+            install_location: logical_location.clone(),
         },
         &system,
     );
     let (shortcuts, shortcut_warnings) = scan_shortcuts(
         &ShortcutScanContext {
-            executable_path: executable_path.clone(),
-            install_location: install_location.clone(),
+            executable_path: logical_executable.clone(),
+            install_location: logical_location.clone(),
         },
         &system,
     );
     let (environment_variables, environment_warnings) = scan_environment(
         &EnvironmentScanContext {
-            executable_path: executable_path.clone(),
-            install_location: install_location.clone(),
+            executable_path: logical_executable.clone(),
+            install_location: logical_location.clone(),
         },
         &system,
     );
@@ -202,13 +221,16 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     // Fold concrete locations referenced by Windows integrations into the
     // footprint discovery so split installs (Program Files plus a service
     // binary or a ProgramData data tree) are captured automatically.
-    let mut extra_roots = collect_extra_roots(
+    let mut extra_roots: Vec<PathBuf> = collect_extra_roots(
         source_app.as_ref(),
         recorded_location.as_deref(),
         &services,
         &scheduled_tasks,
         &shortcuts,
-    );
+    )
+    .iter()
+    .filter_map(|root| system.resolve_source_path(root))
+    .collect();
     if let Some(source) = install_source.as_ref() {
         extra_roots.extend(source.roots.iter().cloned());
     }
@@ -248,7 +270,8 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         },
         &system,
     );
-    let mut warnings = pe_scan.warnings;
+    let mut warnings = system.warnings();
+    warnings.extend(pe_scan.warnings);
     warnings.extend(resolver_warnings);
     warnings.extend(file_warnings);
     warnings.extend(registry_artifacts.warnings.clone());
@@ -284,9 +307,15 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             .count(),
     });
 
-    let report = ScanReport {
+    let identity = system.source_identity();
+    let user_data_profile = system.user_hives().into_iter().next().map(|user| user.name);
+    let mut report = ScanReport {
         schema_version: SCAN_SCHEMA_VERSION.to_owned(),
         generated_at_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,
+        source_volume: system.volume_map().cloned(),
+        source_computer_name: identity.computer_name,
+        source_windows_version: identity.windows_version,
+        user_data_profile,
         source_app,
         main_executable: pe_scan.metadata,
         architecture: pe_scan.architecture,
@@ -330,8 +359,53 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         generated_artifacts: Some(artifacts),
     };
 
+    use_what_the_source_pc_calls_things(&mut report, &system);
     write_scan_reports(&report, &options.output_dir)?;
     Ok(report)
+}
+
+/// Everything found on a drive so far is where it is now. All that goes on from here is about the
+/// PC it came from, whose paths are in its registry, and what an installer offers and rewrites.
+/// So it goes by what that PC called them, in this one place. Only a file's `path` still says
+/// where it can be read.
+fn use_what_the_source_pc_calls_things(report: &mut ScanReport, system: &SystemContext) {
+    if !system.is_offline() {
+        return;
+    }
+    let logical = |path: &Path| system.logical_path(path);
+    let install_location = report.install_location.as_deref().map(logical);
+    if let Some(app) = report.source_app.as_mut() {
+        app.install_location = app.install_location.as_deref().map(logical);
+        app.main_executable = app.main_executable.as_deref().map(logical);
+    }
+    report.main_executable.path = logical(&report.main_executable.path);
+    report.main_executable.external_manifest = report
+        .main_executable
+        .external_manifest
+        .as_deref()
+        .map(logical);
+    for location in &mut report.footprint_locations {
+        location.path = logical(&location.path);
+    }
+    for dependency in &mut report.dependencies {
+        dependency.resolved_path = dependency.resolved_path.as_deref().map(logical);
+    }
+    for file in &mut report.app_local_dlls {
+        file.original_path = logical(&file.original_path);
+    }
+    for file in &mut report.file_inventory {
+        file.original_path = logical(&file.path);
+        if file.package_relative_path.is_some() {
+            file.package_relative_path = Some(package_relative_path(
+                &file.original_path,
+                install_location.as_deref(),
+            ));
+        }
+    }
+    for artifact in &mut report.license_artifacts {
+        artifact.path = artifact.path.as_deref().map(logical);
+    }
+    report.install_location = install_location;
 }
 
 fn selected_executable_path(
@@ -707,6 +781,7 @@ mod tests {
             registry_source_path: r"HKLM\Example".to_owned(),
             architecture: AppArchitecture::X64,
             install_scope: crate::models::InstallScope::PerMachine,
+            owner_profile: None,
         };
         let roots = collect_extra_roots(
             Some(&app),

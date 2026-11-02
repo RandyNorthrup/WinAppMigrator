@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
-use crate::file_discovery::{restore_destination_for_entry, split_user_data_relative};
+use crate::file_discovery::{data_location_of, restore_destination_for_entry};
 use crate::models::PackageManifest;
 use crate::path_utils::{is_drive_root, path_is_within};
 use crate::restore_policy::data_location_refusal;
@@ -77,8 +77,7 @@ impl RestoreMap {
             let refusal = if path_is_within(&destination, target_root) {
                 None
             } else {
-                split_user_data_relative(&file.original_path)
-                    .and_then(|(_, tail)| data_location_refusal(&tail))
+                data_location_of(file).and_then(|(_, tail)| data_location_refusal(&tail))
             };
             match refusal {
                 Some(reason) => map.refused_files.push((file.original_path.clone(), reason)),
@@ -577,6 +576,7 @@ mod tests {
             included_program_data: false,
             included_license_data: false,
             ui_theme: None,
+            user_data_profile: None,
         };
         for index in 0..count {
             let relative = format!(r"module{}\sub{}\file{index}.dll", index % 400, index % 7);
@@ -591,6 +591,7 @@ mod tests {
                 classification: FileClassification::AppOwned,
                 should_copy: true,
                 reason: String::new(),
+                user_folder: None,
             });
         }
         manifest

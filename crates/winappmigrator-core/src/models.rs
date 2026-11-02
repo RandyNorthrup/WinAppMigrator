@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::system_context::ScanSource;
+use crate::file_discovery::UserDataAnchor;
+use crate::system_context::{ProfileChoice, ScanSource, VolumeMap};
 
 pub const SCAN_SCHEMA_VERSION: &str = "winappmigrator.scan.v1";
 pub const PACKAGE_SCHEMA_VERSION: &str = "winappmigrator.package.v1";
@@ -86,6 +87,10 @@ pub struct InstalledApp {
     pub registry_source_path: String,
     pub architecture: AppArchitecture,
     pub install_scope: InstallScope,
+    /// Whose it is, for an app installed for one account: what
+    /// [`crate::system_context::UserHive::id`] says of that account.
+    #[serde(default)]
+    pub owner_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +124,9 @@ pub struct ScanOptions {
     /// offline volume (a disk from another PC).
     #[serde(default)]
     pub source: ScanSource,
+    /// Whose per-user data and settings to read. One account's, whoever else is on the PC.
+    #[serde(default)]
+    pub user_profile: ProfileChoice,
 }
 
 fn default_true() -> bool {
@@ -140,6 +148,7 @@ impl ScanOptions {
             include_program_data: true,
             include_license_data: false,
             source: ScanSource::Live,
+            user_profile: ProfileChoice::Default,
         }
     }
 }
@@ -148,6 +157,19 @@ impl ScanOptions {
 pub struct ScanReport {
     pub schema_version: String,
     pub generated_at_utc: String,
+    /// Set for a connected drive, whose paths here are as they were on its PC. It says where each
+    /// of them is now, for reading it.
+    #[serde(default)]
+    pub source_volume: Option<VolumeMap>,
+    /// The name of the PC the app was on, as that PC recorded it.
+    #[serde(default)]
+    pub source_computer_name: Option<String>,
+    /// The version of Windows the app was on.
+    #[serde(default)]
+    pub source_windows_version: Option<String>,
+    /// The account whose per-user data and settings were read, if any.
+    #[serde(default)]
+    pub user_data_profile: Option<String>,
     pub source_app: Option<InstalledApp>,
     pub main_executable: ExecutableMetadata,
     pub architecture: AppArchitecture,
@@ -293,6 +315,9 @@ pub struct PackageManifest {
     /// older packages, which the installer treats as the default (dark).
     #[serde(default)]
     pub ui_theme: Option<String>,
+    /// The account on the source PC whose per-user data and settings are in the package.
+    #[serde(default)]
+    pub user_data_profile: Option<String>,
 }
 
 /// The installer stub an installer is built from.
@@ -335,6 +360,9 @@ pub struct PackageOptions {
     /// offline volume (a disk from another PC).
     #[serde(default)]
     pub source: ScanSource,
+    /// Whose per-user data and settings to package. One account's, whoever else is on the PC.
+    #[serde(default)]
+    pub user_profile: ProfileChoice,
     /// UI theme tag ("light"/"dark") to record in the package so the produced
     /// installer presents in the theme the app used when building it.
     #[serde(default)]
@@ -359,6 +387,7 @@ impl PackageOptions {
             include_license_data: false,
             bundle_prerequisites: false,
             source: ScanSource::Live,
+            user_profile: ProfileChoice::Default,
             ui_theme: None,
         }
     }
@@ -381,9 +410,20 @@ pub struct PackageResult {
     pub self_extracting_archive_path: Option<PathBuf>,
 }
 
+/// Where a file was under a user's folder that can be somewhere else on each PC, such as
+/// Documents. Its path says nothing about that when the folder was redirected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserFolderPath {
+    pub anchor: UserDataAnchor,
+    /// Below that folder.
+    pub relative: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
+    /// Where to read it during a build. On a connected drive, that is where the drive is now.
     pub path: PathBuf,
+    /// Where it is on the PC it belongs to, which is what everything else on that PC calls it.
     pub original_path: PathBuf,
     pub package_relative_path: Option<PathBuf>,
     pub suggested_destination_path: Option<PathBuf>,
@@ -392,6 +432,9 @@ pub struct FileEntry {
     pub classification: FileClassification,
     pub should_copy: bool,
     pub reason: String,
+    /// Set for a file in Documents or Saved Games.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_folder: Option<UserFolderPath>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

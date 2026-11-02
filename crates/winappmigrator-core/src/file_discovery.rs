@@ -2,25 +2,27 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
+use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 use winreg::RegKey;
-use winreg::enums::HKEY_CURRENT_USER;
+use winreg::enums::{HKEY_USERS, KEY_READ};
 
 use crate::errors::{Result, WinAppMigratorError};
 use crate::hashing::sha256_file;
 use crate::models::{
-    FileClassification, FileEntry, FootprintKind, FootprintLocation, InstallScope, Warning,
-    WarningSeverity,
+    FileClassification, FileEntry, FootprintKind, FootprintLocation, InstallScope, UserFolderPath,
+    Warning, WarningSeverity,
 };
 use crate::path_utils::{
-    file_name_string, is_auxiliary_executable, is_drive_root, path_has_extension, path_is_within,
-    program_data_dir, public_profile_dir, strip_prefix_ignore_case, user_profile_dir,
-    windows_build,
+    UserAccount, file_name_string, is_auxiliary_executable, is_drive_root, path_has_extension,
+    path_is_strictly_inside, path_is_within, program_data_dir, public_profile_dir, signed_in_user,
+    strip_prefix_ignore_case, windows_build,
 };
 use crate::privilege::{hold_folder, hold_real_folder, pin_held_folder};
 use crate::product_match::{MatchScope, ProductNames};
-use crate::system_context::SystemContext;
+use crate::system_context::{SystemContext, UserHive, VolumeMap};
 
 const MAX_WALK_DEPTH: usize = 24;
 /// The first build of Windows 11. From here on, a device's name with an extension, such as
@@ -33,8 +35,17 @@ const USER_SHELL_FOLDERS_KEY: &str =
 const DOCUMENTS_VALUE: &str = "Personal";
 /// `User Shell Folders` value name (a known-folder GUID) for Saved Games.
 const SAVED_GAMES_VALUE: &str = "{4C5C32FF-BB9D-43b0-B5B4-2D72E54EAAA4}";
+const ROAMING_VALUE: &str = "AppData";
+const LOCAL_VALUE: &str = "Local AppData";
+/// `User Shell Folders` value name (a known-folder GUID) for LocalLow.
+const LOCAL_LOW_VALUE: &str = "{A520A1A4-1780-4FF6-BD18-167343C5AF16}";
+pub(crate) const DESKTOP_VALUE: &str = "Desktop";
+pub(crate) const START_MENU_VALUE: &str = "Start Menu";
+const USER_ENVIRONMENT_KEY: &str = "Environment";
 const DOCUMENTS_FALLBACK: &str = "Documents";
 const SAVED_GAMES_FALLBACK: &str = "Saved Games";
+pub(crate) const DESKTOP_FALLBACK: &str = "Desktop";
+pub(crate) const START_MENU_FALLBACK: &str = r"AppData\Roaming\Microsoft\Windows\Start Menu";
 /// File data is not locally present (cloud online-only). Copying would trigger
 /// hydration or fail, so such placeholders are reported but not copied.
 const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
@@ -84,10 +95,13 @@ pub struct FileDiscoveryContext {
 }
 
 #[derive(Debug, Clone)]
-struct DiscoveryRoot {
-    path: PathBuf,
+pub(crate) struct DiscoveryRoot {
+    pub(crate) path: PathBuf,
     kind: FootprintKind,
     scope: InstallScope,
+    /// The user's folder it is under, with where that is, when that has a place of its own on
+    /// each PC.
+    user_folder: Option<(UserDataAnchor, PathBuf)>,
 }
 
 pub fn discover_files(
@@ -113,10 +127,16 @@ pub fn discover_files(
         context.include_user_data,
         context.include_program_data,
         "Selected main executable",
+        None,
+        system,
         &mut warnings,
     );
 
     for extra in &context.extra_files {
+        if !may_take_from(extra, install_root, system) {
+            warnings.push(left_out_warning(extra));
+            continue;
+        }
         add_file(
             &mut files,
             &mut seen,
@@ -127,6 +147,8 @@ pub fn discover_files(
             context.include_user_data,
             context.include_program_data,
             "File named by the install record",
+            None,
+            system,
             &mut warnings,
         );
     }
@@ -140,6 +162,7 @@ pub fn discover_files(
             context.include_hashes,
             context.include_user_data,
             context.include_program_data,
+            system,
             &mut files,
             &mut seen,
             &mut warnings,
@@ -574,7 +597,8 @@ pub(crate) fn reject_unsafe_components(relative: &Path) -> Result<()> {
 /// The per-user/per-machine data root an archived file originally lived under.
 /// Used to route restored user data back to the equivalent base on the target
 /// machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UserDataAnchor {
     RoamingAppData,
     LocalAppData,
@@ -583,6 +607,10 @@ pub enum UserDataAnchor {
     /// The shared Public profile (`C:\Users\Public`). Machine-wide and fixed
     /// across machines, so it re-anchors to the same absolute location.
     PublicProfile,
+    /// A user's Documents, wherever that is on each PC. The registry says where.
+    Documents,
+    /// A user's Saved Games, wherever that is on each PC. The registry says where.
+    SavedGames,
 }
 
 /// Anchor markers, longest/most-specific first so `AppData\LocalLow` is matched
@@ -594,6 +622,10 @@ const USER_DATA_ANCHORS: &[(UserDataAnchor, &str)] = &[
     (UserDataAnchor::LocalAppData, r"\appdata\local\"),
     (UserDataAnchor::ProgramData, r"\programdata\"),
     (UserDataAnchor::PublicProfile, r"\users\public\"),
+    // Common words, so only directly in a profile, which [`split_user_data_relative`] checks. A
+    // redirected one is told by [`FileEntry::user_folder`].
+    (UserDataAnchor::Documents, r"\documents\"),
+    (UserDataAnchor::SavedGames, r"\saved games\"),
 ];
 
 /// Sandbox restore destination: strip the package `files` root and join the
@@ -632,11 +664,23 @@ pub fn restore_destination_for_entry(
     })?;
     if restore_user_data
         && is_external_package_path(relative)
-        && let Some(destination) = user_data_real_destination(&entry.original_path)?
+        && let Some((anchor, tail)) = data_location_of(entry)
+        && let Some(base) = user_data_base(anchor)
     {
-        return Ok(destination);
+        reject_reserved_device_names(&tail)?;
+        return Ok(base.join(tail));
     }
     restore_destination(target_root, relative)
+}
+
+/// Which of a user's or the PC's data folders a file came from, and where in it. A file from a
+/// redirected Documents says so itself, since its path cannot. The relative part of that comes
+/// from a package, which is not trusted, so it gets the same cleaning as any other.
+pub fn data_location_of(entry: &FileEntry) -> Option<(UserDataAnchor, PathBuf)> {
+    match entry.user_folder.as_ref() {
+        Some(folder) => Some((folder.anchor, safe_relative_path(&folder.relative))),
+        None => split_user_data_relative(&entry.original_path),
+    }
 }
 
 /// True when a package-relative path was staged under `files\_external\…`
@@ -678,6 +722,13 @@ pub fn split_user_data_relative(original_path: &Path) -> Option<(UserDataAnchor,
     let lower = display.to_ascii_lowercase();
     for (anchor, marker) in USER_DATA_ANCHORS {
         if let Some(position) = lower.find(marker) {
+            if matches!(
+                anchor,
+                UserDataAnchor::Documents | UserDataAnchor::SavedGames
+            ) && !is_directly_in_a_profile(&lower[..position])
+            {
+                continue;
+            }
             let tail_start = position + marker.len();
             let tail = display[tail_start..].trim();
             if tail.is_empty() {
@@ -689,19 +740,39 @@ pub fn split_user_data_relative(original_path: &Path) -> Option<(UserDataAnchor,
     None
 }
 
-/// Resolve the target-machine base directory for a user-data anchor from the
-/// current process environment. LocalLow has no dedicated variable, so it is
-/// derived from the user profile.
+/// True for `C:\Users\alice`, which is what can have a Documents that is a user's. Not
+/// `C:\Apps\Documents`, or `C:\Users\alice\Projects\Documents`.
+fn is_directly_in_a_profile(lower_text_before: &str) -> bool {
+    let mut parts = lower_text_before.split('\\');
+    let (Some(drive), Some(users), Some(name), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    drive.ends_with(':') && users == "users" && !name.is_empty()
+}
+
+/// Resolve the target-machine base directory for a user-data anchor. The per-user ones are those
+/// of whoever is signed in, which may not be the account this process is running as, and `None`
+/// if that cannot be told or if Documents or Saved Games are somewhere this will not write. See
+/// [`user_folder_place`]. Everything that would have gone there then goes under the install
+/// location, and the review of the package says so.
 pub(crate) fn user_data_base(anchor: UserDataAnchor) -> Option<PathBuf> {
     match anchor {
-        UserDataAnchor::RoamingAppData => user_profile_folder("APPDATA", APPDATA_ROAMING_SEGMENT),
-        UserDataAnchor::LocalAppData => user_profile_folder("LOCALAPPDATA", APPDATA_LOCAL_SEGMENT),
-        UserDataAnchor::LocalLowAppData => user_profile_dir()
-            .map(|profile| profile.join(APPDATA_LOCAL_LOW_SEGMENT))
-            .or_else(|| {
-                std::env::var_os("USERPROFILE")
-                    .map(|profile| PathBuf::from(profile).join(APPDATA_LOCAL_LOW_SEGMENT))
-            }),
+        UserDataAnchor::RoamingAppData
+        | UserDataAnchor::LocalAppData
+        | UserDataAnchor::LocalLowAppData => {
+            let account = signed_in_user().account()?;
+            let recorded = match user_folder_place(anchor) {
+                UserFolderPlace::Usable(folder) => Some(folder),
+                _ => None,
+            };
+            checked_user_folder(recorded, &account.profile, default_of_anchor(anchor))
+        }
+        UserDataAnchor::Documents | UserDataAnchor::SavedGames => match user_folder_place(anchor) {
+            UserFolderPlace::Usable(folder) => Some(folder),
+            _ => None,
+        },
         // The machine-wide folders come from the admin-only registry, because the
         // environment of an elevated process is partly the user's to set. The marker
         // for the Public profile includes the trailing "public\", so the tail excludes it.
@@ -714,40 +785,203 @@ pub(crate) fn user_data_base(anchor: UserDataAnchor) -> Option<PathBuf> {
     }
 }
 
-/// A per-user folder, from its variable as long as that is inside this account's profile,
-/// which the admin-only registry says where to find. The variable can be set by any
-/// program, and an elevated process writes wherever it points. With no profile on record,
-/// as for a system account, the variable is all there is.
-fn user_profile_folder(variable: &str, default: &str) -> Option<PathBuf> {
-    let recorded = std::env::var_os(variable).map(PathBuf::from);
-    checked_user_folder(recorded, user_profile_dir(), default)
+fn default_of_anchor(anchor: UserDataAnchor) -> &'static str {
+    match anchor {
+        UserDataAnchor::RoamingAppData => APPDATA_ROAMING_SEGMENT,
+        UserDataAnchor::LocalAppData => APPDATA_LOCAL_SEGMENT,
+        UserDataAnchor::LocalLowAppData => APPDATA_LOCAL_LOW_SEGMENT,
+        UserDataAnchor::Documents => DOCUMENTS_FALLBACK,
+        UserDataAnchor::SavedGames => SAVED_GAMES_FALLBACK,
+        UserDataAnchor::ProgramData | UserDataAnchor::PublicProfile => "",
+    }
 }
 
+/// A per-user folder, from where the registry says it is as long as that is inside this
+/// account's profile, which the admin-only registry says where to find. The user can set the
+/// first with no rights at all, and an elevated process writes wherever it points.
 fn checked_user_folder(
     recorded: Option<PathBuf>,
-    profile: Option<&Path>,
+    profile: &Path,
     default: &str,
 ) -> Option<PathBuf> {
-    let Some(profile) = profile else {
-        return recorded;
-    };
     recorded
-        .filter(|folder| path_is_within(folder, profile))
+        .filter(|folder| path_is_strictly_inside(folder, profile))
         .or_else(|| Some(profile.join(default)))
+}
+
+/// Where one of this PC's per-user folders is, for whoever is signed in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserFolderPlace {
+    Usable(PathBuf),
+    /// It has been moved somewhere this will not write: outside the profile, or under
+    /// `AppData`, where a file can run by itself. Whoever is signed in can choose that with no
+    /// rights at all, and an elevated process writes wherever it is, so the rule is that it stays
+    /// in the profile, which the admin-only registry says where to find.
+    Elsewhere(PathBuf),
+    /// No one to go by, or a value that cannot be read as a path.
+    Unknown,
+}
+
+/// Where a per-user folder is, read once, since that does not change during a run.
+pub fn user_folder_place(anchor: UserDataAnchor) -> UserFolderPlace {
+    static PLACES: OnceLock<Vec<(UserDataAnchor, UserFolderPlace)>> = OnceLock::new();
+    PLACES
+        .get_or_init(read_user_folder_places)
+        .iter()
+        .find(|(known, _)| *known == anchor)
+        .map_or(UserFolderPlace::Unknown, |(_, place)| place.clone())
+}
+
+fn read_user_folder_places() -> Vec<(UserDataAnchor, UserFolderPlace)> {
+    let Some(account) = signed_in_user().account() else {
+        return Vec::new();
+    };
+    [
+        (UserDataAnchor::RoamingAppData, ROAMING_VALUE),
+        (UserDataAnchor::LocalAppData, LOCAL_VALUE),
+        (UserDataAnchor::LocalLowAppData, LOCAL_LOW_VALUE),
+        (UserDataAnchor::Documents, DOCUMENTS_VALUE),
+        (UserDataAnchor::SavedGames, SAVED_GAMES_VALUE),
+    ]
+    .into_iter()
+    .map(|(anchor, value)| {
+        let place = account_shell_folder(account, value, default_of_anchor(anchor));
+        (anchor, place)
+    })
+    .collect()
+}
+
+/// Where the registry says a shell folder is for an account that is signed in, by its hive under
+/// `HKEY_USERS` rather than `HKEY_CURRENT_USER`, which belongs to whoever is running this.
+pub(crate) fn account_shell_folder(
+    account: &UserAccount,
+    value_name: &str,
+    default: &str,
+) -> UserFolderPlace {
+    let users = RegKey::predef(HKEY_USERS);
+    let recorded = users
+        .open_subkey_with_flags(
+            format!(r"{}\{USER_SHELL_FOLDERS_KEY}", account.sid),
+            KEY_READ,
+        )
+        .and_then(|key| key.get_value::<String, _>(value_name))
+        .ok();
+    let environment = users
+        .open_subkey_with_flags(format!(r"{}\{USER_ENVIRONMENT_KEY}", account.sid), KEY_READ)
+        .ok();
+    let lookup = |name: &str| {
+        environment
+            .as_ref()
+            .and_then(|key| key.get_value::<String, _>(name).ok())
+    };
+    place_of_user_folder(recorded.as_deref(), &account.profile, default, &lookup)
+}
+
+/// See [`UserFolderPlace`]. With nothing recorded, the folder is where Windows puts it.
+fn place_of_user_folder(
+    recorded: Option<&str>,
+    profile: &Path,
+    default: &str,
+    environment: &dyn Fn(&str) -> Option<String>,
+) -> UserFolderPlace {
+    let Some(recorded) = recorded else {
+        return UserFolderPlace::Usable(profile.join(default));
+    };
+    let Some(folder) = expand_user_folder(recorded, profile, environment) else {
+        return UserFolderPlace::Unknown;
+    };
+    let belongs_in_app_data = default.starts_with(APPDATA_SEGMENT);
+    let is_in_app_data = strip_prefix_ignore_case(&folder, profile).is_some_and(|relative| {
+        relative
+            .components()
+            .next()
+            .is_some_and(|first| first.as_os_str().eq_ignore_ascii_case(APPDATA_SEGMENT))
+    });
+    if path_is_strictly_inside(&folder, profile) && (belongs_in_app_data || !is_in_app_data) {
+        UserFolderPlace::Usable(folder)
+    } else {
+        UserFolderPlace::Elsewhere(folder)
+    }
+}
+
+/// Expand a value in `User Shell Folders`, which is written `%USERPROFILE%\Documents` or in full.
+/// Not with this process's environment, which may be another account's and can be set by anyone.
+/// What a variable means comes from the account's profile, and failing that from the account's
+/// own registry. `None` if a variable has no known meaning, since a path made with one left in it
+/// would be somewhere else.
+fn expand_user_folder(
+    recorded: &str,
+    profile: &Path,
+    environment: &dyn Fn(&str) -> Option<String>,
+) -> Option<PathBuf> {
+    let profile_text = profile.display().to_string();
+    let (drive, rest_of_profile) = match profile_text.split_once(':') {
+        Some((letter, rest)) => (format!("{letter}:"), rest.to_owned()),
+        None => (String::new(), profile_text.clone()),
+    };
+    let expanded = expand_vars_with(recorded.trim(), &|name| {
+        let lower = name.to_ascii_lowercase();
+        match lower.as_str() {
+            "userprofile" => Some(profile_text.clone()),
+            "homedrive" | "systemdrive" => Some(drive.clone()),
+            "homepath" => Some(rest_of_profile.clone()),
+            "appdata" => Some(format!(r"{profile_text}\{APPDATA_ROAMING_SEGMENT}")),
+            "localappdata" => Some(format!(r"{profile_text}\{APPDATA_LOCAL_SEGMENT}")),
+            _ => environment(name),
+        }
+    });
+    (!expanded.is_empty() && !expanded.contains('%')).then(|| PathBuf::from(expanded))
+}
+
+/// A file that is not to be read for this scan, which only says what was left out: what would be
+/// followed on a drive, or what belongs to someone else, at most by a value's say-so.
+fn left_out_warning(path: &Path) -> Warning {
+    Warning::new(
+        "file_discovery_left_out",
+        WarningSeverity::Warning,
+        format!(
+            "{} was left out: it goes through a link on a connected drive, or it belongs to \
+             another account than the one whose data is being included.",
+            path.display()
+        ),
+        Some(path.display().to_string()),
+    )
+}
+
+/// Whether what a scan found may be read for it: on a drive, it has to be on the drive with no
+/// link on the way. And another account's folder is its own, unless it is where this app is.
+fn may_take_from(path: &Path, install_root: Option<&Path>, system: &SystemContext) -> bool {
+    system.may_read(path)
+        && (install_root.is_some_and(|root| path_is_within(path, root))
+            || !system.is_in_another_profile(path))
 }
 
 /// The names this app's own folders can go by. The install folder's parent only ever
 /// qualifies a nested match as a vendor folder: selecting on it is how an app in
 /// `AppData\Local\Programs` used to take everything else installed there.
 fn product_names(context: &FileDiscoveryContext) -> ProductNames {
+    names_of_app(
+        Some(&context.executable_path),
+        context.install_location.as_deref(),
+        context.app_name.as_deref(),
+        context.publisher.as_deref(),
+    )
+}
+
+pub(crate) fn names_of_app(
+    executable: Option<&Path>,
+    install_location: Option<&Path>,
+    app_name: Option<&str>,
+    publisher: Option<&str>,
+) -> ProductNames {
     let mut aliases = Vec::new();
-    if !is_auxiliary_executable(&context.executable_path)
-        && let Some(stem) = context.executable_path.file_stem().and_then(|s| s.to_str())
+    if let Some(executable) = executable.filter(|path| !is_auxiliary_executable(path))
+        && let Some(stem) = executable.file_stem().and_then(|s| s.to_str())
     {
         aliases.push(stem);
     }
     let mut vendor_folders = Vec::new();
-    if let Some(install) = context.install_location.as_ref() {
+    if let Some(install) = install_location {
         if let Some(leaf) = install.file_name().and_then(|s| s.to_str()) {
             aliases.push(leaf);
         }
@@ -759,12 +993,7 @@ fn product_names(context: &FileDiscoveryContext) -> ProductNames {
             vendor_folders.push(parent);
         }
     }
-    ProductNames::new(
-        context.app_name.as_deref(),
-        context.publisher.as_deref(),
-        &aliases,
-        &vendor_folders,
-    )
+    ProductNames::new(app_name, publisher, &aliases, &vendor_folders)
 }
 
 fn collect_roots(
@@ -807,6 +1036,12 @@ fn collect_roots(
     let mut seen_paths = BTreeSet::new();
     let mut roots: Vec<DiscoveryRoot> = Vec::new();
     for root in raw {
+        let is_for_this_scan = !root.path.exists()
+            || may_take_from(&root.path, context.install_location.as_deref(), system);
+        if !system.may_read(&root.path) || !is_for_this_scan {
+            warnings.push(left_out_warning(&root.path));
+            continue;
+        }
         if !is_walkable_app_dir(&root.path, &known_base_dirs, &windows_dir) {
             continue;
         }
@@ -827,7 +1062,12 @@ fn collect_roots(
 
 fn push_root(roots: &mut Vec<DiscoveryRoot>, path: PathBuf, kind: FootprintKind) {
     let scope = scope_for_path(&path);
-    roots.push(DiscoveryRoot { path, kind, scope });
+    roots.push(DiscoveryRoot {
+        path,
+        kind,
+        scope,
+        user_folder: None,
+    });
 }
 
 fn collect_program_files_roots(
@@ -842,6 +1082,7 @@ fn collect_program_files_roots(
             FootprintKind::InstallDirectory,
             names,
             MatchScope::ProgramFolders,
+            system.volume_map(),
             roots,
             warnings,
         );
@@ -860,6 +1101,7 @@ fn collect_program_data_roots(
             FootprintKind::ProgramData,
             names,
             MatchScope::ProgramFolders,
+            system.volume_map(),
             roots,
             warnings,
         );
@@ -872,19 +1114,22 @@ fn collect_appdata_roots(
     system: &SystemContext,
     warnings: &mut Vec<Warning>,
 ) {
-    for (base, kind) in appdata_bases(system) {
-        collect_matching_dirs(
-            &base,
-            kind,
-            names,
-            MatchScope::ProgramFolders,
-            roots,
-            warnings,
-        );
+    for user in system.user_hives() {
+        for (base, kind) in appdata_bases_of(&user.profile_dir) {
+            collect_matching_dirs(
+                &base,
+                kind,
+                names,
+                MatchScope::ProgramFolders,
+                system.volume_map(),
+                roots,
+                warnings,
+            );
+        }
     }
 }
 
-/// Match user-authored data folders the current user keeps outside AppData:
+/// Match user-authored data folders the account being scanned keeps outside AppData:
 /// `Documents` (including nested `My Games\<App>`) and `Saved Games`, resolving
 /// any folder redirection (OneDrive, roaming profiles) recorded in the
 /// `User Shell Folders` registry key before falling back to the profile path.
@@ -894,47 +1139,36 @@ fn collect_known_user_folder_roots(
     system: &SystemContext,
     warnings: &mut Vec<Warning>,
 ) {
-    if system.is_offline() {
-        // Redirection lives in each user's NTUSER hive; the common case is
-        // unredirected, so use the profile-relative folders for every user.
-        for profile in system.user_profiles() {
-            collect_matching_dirs(
-                &profile.join(DOCUMENTS_FALLBACK),
+    for user in system.user_hives() {
+        let folders = user_folders_of(&user, system, warnings);
+        for (anchor, base, kind) in [
+            (
+                UserDataAnchor::Documents,
+                folders.documents,
                 FootprintKind::Documents,
-                names,
-                MatchScope::UserFolders,
-                roots,
-                warnings,
-            );
-            collect_matching_dirs(
-                &profile.join(SAVED_GAMES_FALLBACK),
+            ),
+            (
+                UserDataAnchor::SavedGames,
+                folders.saved_games,
                 FootprintKind::SavedGames,
-                names,
-                MatchScope::UserFolders,
-                roots,
-                warnings,
-            );
-        }
-    } else {
-        if let Some(documents) = documents_dir() {
+            ),
+        ] {
+            let Some(base) = base else {
+                continue;
+            };
+            let first_new = roots.len();
             collect_matching_dirs(
-                &documents,
-                FootprintKind::Documents,
+                &base,
+                kind,
                 names,
                 MatchScope::UserFolders,
+                system.volume_map(),
                 roots,
                 warnings,
             );
-        }
-        if let Some(saved_games) = saved_games_dir() {
-            collect_matching_dirs(
-                &saved_games,
-                FootprintKind::SavedGames,
-                names,
-                MatchScope::UserFolders,
-                roots,
-                warnings,
-            );
+            for root in &mut roots[first_new..] {
+                root.user_folder = Some((anchor, base.clone()));
+            }
         }
     }
     // Shared Public Documents: some apps keep machine-wide data here rather than
@@ -946,18 +1180,81 @@ fn collect_known_user_folder_roots(
             FootprintKind::PublicDocuments,
             names,
             MatchScope::UserFolders,
+            system.volume_map(),
             roots,
             warnings,
         );
     }
 }
 
-fn documents_dir() -> Option<PathBuf> {
-    user_shell_folder(DOCUMENTS_VALUE).or_else(|| user_profile_join(DOCUMENTS_FALLBACK))
+/// Where an account's own folders are, where they can be read. `None` for one that is not there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct UserFolders {
+    pub documents: Option<PathBuf>,
+    pub saved_games: Option<PathBuf>,
 }
 
-fn saved_games_dir() -> Option<PathBuf> {
-    user_shell_folder(SAVED_GAMES_VALUE).or_else(|| user_profile_join(SAVED_GAMES_FALLBACK))
+/// Read an account's `User Shell Folders`. What they say is a path like any other a PC records,
+/// so on a drive one can only be on the drive, and one that was on another of that PC's disks is
+/// said to be out of reach rather than quietly missed.
+pub(crate) fn user_folders_of(
+    user: &UserHive,
+    system: &SystemContext,
+    warnings: &mut Vec<Warning>,
+) -> UserFolders {
+    UserFolders {
+        documents: user_folder_of(user, DOCUMENTS_VALUE, DOCUMENTS_FALLBACK, system, warnings),
+        saved_games: user_folder_of(
+            user,
+            SAVED_GAMES_VALUE,
+            SAVED_GAMES_FALLBACK,
+            system,
+            warnings,
+        ),
+    }
+}
+
+pub(crate) fn user_folder_of(
+    user: &UserHive,
+    value_name: &str,
+    default: &str,
+    system: &SystemContext,
+    warnings: &mut Vec<Warning>,
+) -> Option<PathBuf> {
+    let default_folder = user.profile_dir.join(default);
+    let key = user.open(USER_SHELL_FOLDERS_KEY, KEY_READ).ok();
+    let Some(recorded) = key
+        .as_ref()
+        .and_then(|key| key.get_value::<String, _>(value_name).ok())
+    else {
+        return Some(default_folder).filter(|folder| folder.is_dir());
+    };
+    let environment = user.open(USER_ENVIRONMENT_KEY, KEY_READ).ok();
+    let lookup = |name: &str| {
+        environment
+            .as_ref()
+            .and_then(|key| key.get_value::<String, _>(name).ok())
+    };
+    let logical_profile = system.logical_path(&user.profile_dir);
+    let folder = expand_user_folder(&recorded, &logical_profile, &lookup)
+        .and_then(|logical| system.resolve_source_path(&logical));
+    match folder {
+        Some(folder) if folder.is_dir() => Some(folder),
+        _ if system.is_offline() => {
+            warnings.push(Warning::new(
+                "user_folder_out_of_reach",
+                WarningSeverity::Warning,
+                format!(
+                    "{}'s {default} folder was at {recorded}, which is not on this drive, so what \
+                     is there was not included.",
+                    user.name
+                ),
+                None,
+            ));
+            None
+        }
+        _ => Some(default_folder).filter(|folder| folder.is_dir()),
+    }
 }
 
 /// The shared Public Documents directory (`%PUBLIC%\Documents`, i.e.
@@ -969,26 +1266,16 @@ fn public_documents_dir(system: &SystemContext) -> Option<PathBuf> {
         .filter(|path| path.is_dir())
 }
 
-fn user_profile_join(leaf: &str) -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .map(|profile| PathBuf::from(profile).join(leaf))
-        .filter(|path| path.is_dir())
-}
-
-/// Read a (possibly redirected) known-folder path from `User Shell Folders`,
-/// expanding the `%USERPROFILE%`-style `REG_EXPAND_SZ` value.
-pub(crate) fn user_shell_folder(value_name: &str) -> Option<PathBuf> {
-    let key = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey(USER_SHELL_FOLDERS_KEY)
-        .ok()?;
-    let raw: String = key.get_value(value_name).ok()?;
-    let path = PathBuf::from(expand_env_vars(&raw));
-    path.is_dir().then_some(path)
-}
-
 /// Expand `%VAR%` references using the current process environment. Unknown
 /// variables are left intact.
 pub(crate) fn expand_env_vars(value: &str) -> String {
+    expand_vars_with(value, &|name| {
+        std::env::var_os(name).and_then(|value| value.into_string().ok())
+    })
+}
+
+/// Expand `%VAR%` references using what `lookup` says of each. Unknown variables are left intact.
+pub(crate) fn expand_vars_with(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
     let mut output = String::new();
     let mut rest = value;
     while let Some(start) = rest.find('%') {
@@ -1000,7 +1287,7 @@ pub(crate) fn expand_env_vars(value: &str) -> String {
             return output;
         };
         let name = &after[..end];
-        match std::env::var_os(name).and_then(|value| value.into_string().ok()) {
+        match lookup(name) {
             Some(resolved) => output.push_str(&resolved),
             None => {
                 output.push('%');
@@ -1017,15 +1304,25 @@ pub(crate) fn expand_env_vars(value: &str) -> String {
 /// Find directories under `base` named for the application, at either the top level
 /// (`base\App`) or one level deep (`base\Vendor\App`). Many installers nest per-vendor,
 /// so checking the second level is essential to capture data folders like
-/// `ProgramData\Apple Computer\iTunes`. A vendor's folder itself is never selected.
-fn collect_matching_dirs(
+/// `ProgramData\Apple Computer\iTunes`. A vendor's folder itself is never selected. On a drive
+/// (`drive`), no link there is followed, since it would lead to this PC. On this PC, a link that
+/// will not let itself be listed is what Windows keeps for old programs that use the old names of
+/// folders (`Application Data`, `My Music`), and has nothing to report.
+pub(crate) fn collect_matching_dirs(
     base: &Path,
     kind: FootprintKind,
     names: &ProductNames,
     scope: MatchScope,
+    drive: Option<&VolumeMap>,
     roots: &mut Vec<DiscoveryRoot>,
     warnings: &mut Vec<Warning>,
 ) {
+    if drive.is_some_and(|drive| !drive.may_read(base)) {
+        return;
+    }
+    let is_link = |path: &Path| {
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    };
     let entries = match fs::read_dir(base) {
         Ok(entries) => entries,
         Err(error) => {
@@ -1050,20 +1347,27 @@ fn collect_matching_dirs(
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() || is_volatile_dir(&path, true) {
+        let link = is_link(&path);
+        let not_to_follow = link && drive.is_some();
+        if (!not_to_follow && !path.is_dir()) || is_volatile_dir(&path, true) {
             continue;
         }
         let folder_name = file_name_string(&path);
         if names.matches_top_level(&folder_name, scope) {
             // Matched at the top level; the whole directory is walked later, so
-            // there is no need to descend into it here.
+            // there is no need to descend into it here. One that must not be followed is
+            // refused there, and said to have been.
             push_root(roots, path, kind.clone());
+            continue;
+        }
+        if not_to_follow {
             continue;
         }
         let children = match fs::read_dir(&path) {
             Ok(children) => children,
             Err(error) => {
-                if error.kind() != std::io::ErrorKind::NotFound {
+                let is_legacy_name = link && error.kind() == std::io::ErrorKind::PermissionDenied;
+                if error.kind() != std::io::ErrorKind::NotFound && !is_legacy_name {
                     warnings.push(Warning::new(
                         "file_discovery_dir_unreadable",
                         WarningSeverity::Info,
@@ -1079,7 +1383,8 @@ fn collect_matching_dirs(
         };
         for child in children.flatten() {
             let child_path = child.path();
-            if child_path.is_dir()
+            let not_to_follow = drive.is_some() && is_link(&child_path);
+            if (not_to_follow || child_path.is_dir())
                 && !is_volatile_dir(&child_path, true)
                 && names.matches_nested(&folder_name, &file_name_string(&child_path), scope)
             {
@@ -1089,23 +1394,31 @@ fn collect_matching_dirs(
     }
 }
 
+/// Each profile's data folders, which are shared by what is in them. They are only for telling
+/// what must not be taken for an app's own. Reading them goes by [`appdata_bases_of`].
 fn appdata_bases(system: &SystemContext) -> Vec<(PathBuf, FootprintKind)> {
-    let mut bases = Vec::new();
-    for profile in system.user_profiles() {
-        bases.push((
+    system
+        .user_profiles()
+        .iter()
+        .flat_map(|profile| appdata_bases_of(profile))
+        .collect()
+}
+
+pub(crate) fn appdata_bases_of(profile: &Path) -> [(PathBuf, FootprintKind); 3] {
+    [
+        (
             profile.join(APPDATA_ROAMING_SEGMENT),
             FootprintKind::RoamingAppData,
-        ));
-        bases.push((
+        ),
+        (
             profile.join(APPDATA_LOCAL_SEGMENT),
             FootprintKind::LocalAppData,
-        ));
-        bases.push((
+        ),
+        (
             profile.join(APPDATA_LOCAL_LOW_SEGMENT),
             FootprintKind::LocalLowAppData,
-        ));
-    }
-    bases
+        ),
+    ]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1115,6 +1428,7 @@ fn discover_tree(
     include_hashes: bool,
     include_user_data: bool,
     include_program_data: bool,
+    system: &SystemContext,
     files: &mut Vec<FileEntry>,
     seen: &mut BTreeSet<String>,
     warnings: &mut Vec<Warning>,
@@ -1152,6 +1466,8 @@ fn discover_tree(
                 include_user_data,
                 include_program_data,
                 discovery_reason(&root.kind),
+                root.user_folder.as_ref(),
+                system,
                 warnings,
             );
         }
@@ -1195,6 +1511,8 @@ fn add_file(
     include_user_data: bool,
     include_program_data: bool,
     reason: &str,
+    user_folder: Option<&(UserDataAnchor, PathBuf)>,
+    system: &SystemContext,
     warnings: &mut Vec<Warning>,
 ) {
     let key = path.to_string_lossy().to_ascii_lowercase();
@@ -1218,7 +1536,14 @@ fn add_file(
         return;
     }
 
-    let classification = classify_file(path, install_root, &root_kind);
+    // By what the PC itself called it: a drive can be mounted on a folder with any name.
+    let classification = classify_file(
+        &system.logical_path(path),
+        install_root
+            .map(|root| system.logical_path(root))
+            .as_deref(),
+        &root_kind,
+    );
     let online_only = is_online_only(metadata.file_attributes());
     let base_should_copy = match classification {
         FileClassification::AppOwned => true,
@@ -1309,6 +1634,12 @@ fn add_file(
         classification,
         should_copy,
         reason: reason.to_owned(),
+        user_folder: user_folder.and_then(|(anchor, base)| {
+            strip_prefix_ignore_case(path, base).map(|relative| UserFolderPath {
+                anchor: *anchor,
+                relative,
+            })
+        }),
     });
 }
 
@@ -1833,7 +2164,7 @@ mod tests {
         let check = |recorded: &str| {
             checked_user_folder(
                 Some(PathBuf::from(recorded)),
-                Some(profile),
+                profile,
                 APPDATA_ROAMING_SEGMENT,
             )
         };
@@ -1845,18 +2176,290 @@ mod tests {
         );
         assert_eq!(check(r"C:\Windows\System32"), usual);
         assert_eq!(check(r"C:\Users\bobby\AppData"), usual);
+        assert_eq!(check(r"C:\Users\bob\..\..\Windows\System32"), usual);
         assert_eq!(
-            checked_user_folder(None, Some(profile), APPDATA_ROAMING_SEGMENT),
+            checked_user_folder(None, profile, APPDATA_ROAMING_SEGMENT),
             usual
         );
+    }
+
+    fn no_environment(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn a_user_folder_is_read_for_that_account_and_not_with_this_processs_variables() {
+        let profile = Path::new(r"C:\Users\bob");
+        let expand = |recorded: &str| expand_user_folder(recorded, profile, &no_environment);
         assert_eq!(
-            checked_user_folder(
-                Some(PathBuf::from(r"D:\Anywhere")),
-                None,
-                APPDATA_ROAMING_SEGMENT
-            ),
-            Some(PathBuf::from(r"D:\Anywhere"))
+            expand(r"%USERPROFILE%\Documents"),
+            Some(PathBuf::from(r"C:\Users\bob\Documents"))
         );
+        assert_eq!(
+            expand(r"%HOMEDRIVE%%HOMEPATH%\Saved Games"),
+            Some(PathBuf::from(r"C:\Users\bob\Saved Games"))
+        );
+        assert_eq!(
+            expand(r"C:\Users\bob\OneDrive\Documents"),
+            Some(PathBuf::from(r"C:\Users\bob\OneDrive\Documents"))
+        );
+        // A variable that only means something in this process, and could be anyone's.
+        assert_eq!(expand(r"%TEMP%\Documents"), None);
+        assert_eq!(
+            expand_user_folder(r"%OneDrive%\Documents", profile, &|name| {
+                (name == "OneDrive").then(|| r"C:\Users\bob\OneDrive".to_owned())
+            }),
+            Some(PathBuf::from(r"C:\Users\bob\OneDrive\Documents"))
+        );
+    }
+
+    #[test]
+    fn a_user_folder_is_used_inside_its_profile_and_said_to_be_elsewhere_otherwise() {
+        let profile = Path::new(r"C:\Users\bob");
+        let place = |recorded: Option<&str>| {
+            place_of_user_folder(recorded, profile, DOCUMENTS_FALLBACK, &no_environment)
+        };
+        assert_eq!(
+            place(None),
+            UserFolderPlace::Usable(PathBuf::from(r"C:\Users\bob\Documents"))
+        );
+        assert_eq!(
+            place(Some(r"%USERPROFILE%\OneDrive\Documents")),
+            UserFolderPlace::Usable(PathBuf::from(r"C:\Users\bob\OneDrive\Documents"))
+        );
+        for elsewhere in [
+            r"D:\Docs",
+            r"\\server\home\bob\Documents",
+            r"C:\Users\bobby\Documents",
+            r"%USERPROFILE%\..\..\Windows\System32",
+            // Inside it, and where what lands in it can run.
+            r"%USERPROFILE%\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup",
+        ] {
+            assert!(
+                matches!(place(Some(elsewhere)), UserFolderPlace::Elsewhere(_)),
+                "{elsewhere}: {:?}",
+                place(Some(elsewhere))
+            );
+        }
+        assert_eq!(
+            place(Some(r"%NotKnown%\Documents")),
+            UserFolderPlace::Unknown
+        );
+        // A folder that is in AppData by nature is not moved out of it for that.
+        assert_eq!(
+            place_of_user_folder(
+                Some(r"%USERPROFILE%\AppData\Roaming"),
+                profile,
+                APPDATA_ROAMING_SEGMENT,
+                &no_environment
+            ),
+            UserFolderPlace::Usable(PathBuf::from(r"C:\Users\bob\AppData\Roaming"))
+        );
+    }
+
+    #[test]
+    fn documents_and_saved_games_are_a_users_only_directly_in_a_profile() {
+        assert_eq!(
+            split_user_data_relative(Path::new(r"C:\Users\alice\Documents\App\a.txt")),
+            Some((UserDataAnchor::Documents, PathBuf::from(r"App\a.txt")))
+        );
+        assert_eq!(
+            split_user_data_relative(Path::new(r"C:\Users\alice\Saved Games\App\slot.sav")),
+            Some((UserDataAnchor::SavedGames, PathBuf::from(r"App\slot.sav")))
+        );
+        for not_theirs in [
+            r"C:\Apps\Documents\a.txt",
+            r"C:\Program Files\App\Documents\a.txt",
+            r"C:\Users\alice\Projects\Documents\a.txt",
+            r"D:\Saved Games\a.txt",
+        ] {
+            assert_eq!(
+                split_user_data_relative(Path::new(not_theirs)),
+                None,
+                "{not_theirs}"
+            );
+        }
+        // What other anchors claim stays theirs, even with these words further on.
+        assert_eq!(
+            split_user_data_relative(Path::new(r"C:\Users\Public\Documents\App\a.txt")),
+            Some((
+                UserDataAnchor::PublicProfile,
+                PathBuf::from(r"Documents\App\a.txt")
+            ))
+        );
+        assert_eq!(
+            split_user_data_relative(Path::new(r"C:\Users\a\AppData\Local\App\Documents\b.txt")),
+            Some((
+                UserDataAnchor::LocalAppData,
+                PathBuf::from(r"App\Documents\b.txt")
+            ))
+        );
+    }
+
+    #[test]
+    fn a_file_from_a_redirected_folder_says_where_it_goes_itself() {
+        let mut entry = external_entry(r"D:\Docs\App\a.txt");
+        assert_eq!(data_location_of(&entry), None, "its path says nothing");
+        entry.user_folder = Some(UserFolderPath {
+            anchor: UserDataAnchor::Documents,
+            relative: PathBuf::from(r"App\a.txt"),
+        });
+        assert_eq!(
+            data_location_of(&entry),
+            Some((UserDataAnchor::Documents, PathBuf::from(r"App\a.txt")))
+        );
+        // A package is not trusted to stay in the folder.
+        entry.user_folder = Some(UserFolderPath {
+            anchor: UserDataAnchor::Documents,
+            relative: PathBuf::from(r"..\..\..\Windows\x.dll"),
+        });
+        let Some((_, tail)) = data_location_of(&entry) else {
+            panic!("it has a location");
+        };
+        assert!(
+            !tail
+                .components()
+                .any(|component| matches!(component, Component::ParentDir)),
+            "{}",
+            tail.display()
+        );
+    }
+
+    #[test]
+    fn the_folders_windows_keeps_for_old_programs_are_not_reported_and_others_are() -> Result<()> {
+        // `My Music` in Documents and `Application Data` in AppData\Local are junctions that
+        // refuse to be listed. They are not an app's, and every elevated scan used to warn of 14.
+        let base = temp_base()?;
+        let folder = base.path().join("Vendor");
+        fs::create_dir_all(&folder).map_err(|error| WinAppMigratorError::io(&folder, error))?;
+        let target = base.path().join("target");
+        fs::create_dir_all(target.join("Demo"))
+            .map_err(|error| WinAppMigratorError::io(&target, error))?;
+        let link = base.path().join("Linked Vendor");
+        assert!(make_junction(&link, &target));
+        // Denied to everyone, as Windows does for these.
+        let denied = crate::path_utils::hidden_command("icacls")
+            .arg(&link)
+            .args(["/deny", "*S-1-1-0:(RD)"])
+            .output()
+            .map_err(|error| WinAppMigratorError::io(&link, error))?;
+        assert!(denied.status.success());
+
+        let names = ProductNames::new(Some("Other Product"), None, &[], &[]);
+        let mut roots = Vec::new();
+        let mut warnings = Vec::new();
+        collect_matching_dirs(
+            base.path(),
+            FootprintKind::ProgramData,
+            &names,
+            MatchScope::ProgramFolders,
+            None,
+            &mut roots,
+            &mut warnings,
+        );
+        let undone = crate::path_utils::hidden_command("icacls")
+            .arg(&link)
+            .args(["/remove:d", "*S-1-1-0"])
+            .output()
+            .map_err(|error| WinAppMigratorError::io(&link, error))?;
+        assert!(undone.status.success());
+        assert!(roots.is_empty());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_folder_that_refuses_to_be_listed_is_still_reported() -> Result<()> {
+        let base = temp_base()?;
+        let folder = base.path().join("Vendor");
+        fs::create_dir_all(&folder).map_err(|error| WinAppMigratorError::io(&folder, error))?;
+        let denied = crate::path_utils::hidden_command("icacls")
+            .arg(&folder)
+            .args(["/deny", "*S-1-1-0:(RD)"])
+            .output()
+            .map_err(|error| WinAppMigratorError::io(&folder, error))?;
+        assert!(denied.status.success());
+        let names = ProductNames::new(Some("Other Product"), None, &[], &[]);
+        let mut roots = Vec::new();
+        let mut warnings = Vec::new();
+        collect_matching_dirs(
+            base.path(),
+            FootprintKind::ProgramData,
+            &names,
+            MatchScope::ProgramFolders,
+            None,
+            &mut roots,
+            &mut warnings,
+        );
+        let undone = crate::path_utils::hidden_command("icacls")
+            .arg(&folder)
+            .args(["/remove:d", "*S-1-1-0"])
+            .output()
+            .map_err(|error| WinAppMigratorError::io(&folder, error))?;
+        assert!(undone.status.success());
+        assert_eq!(
+            warnings
+                .iter()
+                .map(|warning| warning.code.as_str())
+                .collect::<Vec<_>>(),
+            ["file_discovery_dir_unreadable"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nothing_past_a_link_on_a_drive_is_looked_at() -> Result<()> {
+        let base = temp_base()?;
+        let volume = base.path().join("volume");
+        let data = volume.join("ProgramData");
+        fs::create_dir_all(data.join(r"Vendor\Demo"))
+            .map_err(|error| WinAppMigratorError::io(&data, error))?;
+        let host = base.path().join("this PC");
+        fs::create_dir_all(host.join("Demo"))
+            .map_err(|error| WinAppMigratorError::io(&host, error))?;
+        assert!(make_junction(&data.join("Linked Vendor"), &host));
+        assert!(make_junction(&data.join("Demo Link"), &host));
+
+        let names = ProductNames::new(Some("Demo"), Some("Vendor"), &[], &[]);
+        let drive = VolumeMap {
+            volume_root: volume.clone(),
+            system_drive: 'C',
+        };
+        let mut roots = Vec::new();
+        let mut warnings = Vec::new();
+        collect_matching_dirs(
+            &data,
+            FootprintKind::ProgramData,
+            &names,
+            MatchScope::ProgramFolders,
+            Some(&drive),
+            &mut roots,
+            &mut warnings,
+        );
+        let found: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
+        assert!(found.contains(&data.join(r"Vendor\Demo")), "{found:?}");
+        assert!(
+            !found.contains(&data.join(r"Linked Vendor\Demo")),
+            "that is on this PC: {found:?}"
+        );
+        for root in &roots {
+            if root.path != data.join(r"Vendor\Demo") {
+                assert!(!drive.may_read(&root.path), "{}", root.path.display());
+            }
+        }
+
+        // And the walk of what is real does not leave by a link inside it.
+        let real = data.join(r"Vendor\Demo");
+        fs::write(real.join("own.txt"), b"x")
+            .map_err(|error| WinAppMigratorError::io(&real, error))?;
+        fs::write(host.join("secret.txt"), b"x")
+            .map_err(|error| WinAppMigratorError::io(&host, error))?;
+        assert!(make_junction(&real.join("linked"), &host));
+        assert_eq!(
+            walk_tree(&real, FootprintKind::ProgramData),
+            vec!["own.txt"]
+        );
+        Ok(())
     }
 
     #[test]
@@ -2016,6 +2619,7 @@ mod tests {
             FootprintKind::ProgramData,
             names,
             scope,
+            None,
             &mut roots,
             &mut warnings,
         );
@@ -2121,11 +2725,13 @@ mod tests {
                 path: root.to_path_buf(),
                 kind,
                 scope: InstallScope::PerUser,
+                user_folder: None,
             },
             None,
             false,
             true,
             true,
+            &SystemContext::live(),
             &mut files,
             &mut seen,
             &mut warnings,
@@ -2312,6 +2918,7 @@ mod tests {
             classification: FileClassification::UserData,
             should_copy: true,
             reason: String::new(),
+            user_folder: None,
         }
     }
 
@@ -2392,6 +2999,7 @@ mod tests {
             classification: FileClassification::AppOwned,
             should_copy: true,
             reason: String::new(),
+            user_folder: None,
         };
         let target = std::env::temp_dir();
         let destination = restore_destination_for_entry(&entry, &target, true)?;

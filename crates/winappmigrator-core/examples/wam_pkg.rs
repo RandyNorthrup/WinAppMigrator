@@ -54,6 +54,7 @@ fn main() {
         include_license_data: false,
         bundle_prerequisites: false,
         source: ScanSource::Live,
+        user_profile: winappmigrator_core::ProfileChoice::Default,
         ui_theme: None,
     };
 

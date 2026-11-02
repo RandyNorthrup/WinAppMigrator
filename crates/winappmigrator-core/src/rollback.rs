@@ -33,7 +33,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
-use winreg::enums::{HKEY_USERS, KEY_READ, KEY_SET_VALUE};
+use winreg::enums::{
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_SET_VALUE, KEY_WRITE,
+};
 use winreg::{RegKey, RegValue};
 
 use crate::errors::{Result, WinAppMigratorError};
@@ -54,8 +56,7 @@ use crate::path_utils::{
 use crate::privilege::{confirm_protected_folder, hold_folder, hold_real_folder, is_pin_file_name};
 use crate::progress::{InstallMonitor, InstallPhase, InstallStep};
 use crate::registry_target::{
-    environment_location, registry_hive_name, registry_root, remove_path_entries,
-    service_image_path,
+    environment_location, registry_hive_name, remove_path_entries, service_image_path,
 };
 use crate::restore::{
     SC_EXE, encode_utf16_nul, make_replaceable, register_task_script, run_checked,
@@ -770,22 +771,25 @@ impl Undoer<'_> {
         drop(holds);
     }
 
-    /// Open a hive for a change made during the install. An install writes to the
-    /// `HKEY_CURRENT_USER` of whoever ran it, which is not this one if someone else is
-    /// undoing it. Theirs is only there while they are signed in, and if they are not, what is
-    /// in it stays, and this says so once `None` comes back.
+    /// Open a hive for a change made during the install. An install writes to the hive of
+    /// whoever was signed in, which is not this one if someone else is undoing it, or if it was
+    /// run as another administrator. Theirs is only there while they are signed in, and if they
+    /// are not, what is in it stays, and this says so once `None` comes back. A record with no
+    /// account on it is from whoever is running this.
     fn hive_root(&self, hive: &RegistryHive) -> io::Result<Option<RegKey>> {
         match (hive, self.user_sid) {
-            (RegistryHive::CurrentUser, Some(sid)) if current_user_sid() != Some(sid) => {
-                match RegKey::predef(HKEY_USERS)
-                    .open_subkey_with_flags(sid, KEY_READ | KEY_SET_VALUE)
-                {
+            (RegistryHive::LocalMachine, _) => Ok(Some(RegKey::predef(HKEY_LOCAL_MACHINE))),
+            (RegistryHive::CurrentUser, None) => Ok(Some(RegKey::predef(HKEY_CURRENT_USER))),
+            (RegistryHive::CurrentUser, Some(sid)) => {
+                match RegKey::predef(HKEY_USERS).open_subkey_with_flags(sid, KEY_READ | KEY_WRITE) {
                     Ok(root) => Ok(Some(root)),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        Ok((current_user_sid() == Some(sid))
+                            .then(|| RegKey::predef(HKEY_CURRENT_USER)))
+                    }
                     Err(error) => Err(error),
                 }
             }
-            _ => Ok(Some(registry_root(hive))),
         }
     }
 

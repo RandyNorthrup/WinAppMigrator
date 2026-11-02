@@ -37,9 +37,9 @@ use winappmigrator_core::privilege::{ProtectedFolder, is_elevated};
 use winappmigrator_core::{
     AppArchitecture, AppSelection, BuildMonitor, DriverEntry, DriverKind, EmbeddedPackage,
     EnvironmentScope, EnvironmentVariableEntry, FileClassification, FileEntry, InstallerStub,
-    MatchConfidence, PackageManifest, PackageOptions, PrerequisiteBundle, RegistryEntry,
-    RegistryHive, RegistryValueKind, RuntimePrerequisite, RuntimePrerequisiteKind, ScanSource,
-    ScheduledTaskEntry, ServiceEntry, ShortcutEntry, SystemContext, create_package,
+    MatchConfidence, PackageManifest, PackageOptions, PrerequisiteBundle, ProfileChoice,
+    RegistryEntry, RegistryHive, RegistryValueKind, RuntimePrerequisite, RuntimePrerequisiteKind,
+    ScanSource, ScheduledTaskEntry, ServiceEntry, ShortcutEntry, SystemContext, create_package,
     create_self_extracting_archive, list_installed_apps_from, read_embedded_manifest,
 };
 use winappmigrator_installer::cleanup::create_staging_dir;
@@ -2247,6 +2247,7 @@ fn round_trip_of_a_real_app() -> TestResult {
         include_license_data: false,
         bundle_prerequisites: true,
         source: ScanSource::Live,
+        user_profile: ProfileChoice::Default,
         ui_theme: None,
     })?;
     for warning in &package.warnings {
@@ -3294,6 +3295,7 @@ fn ask_for_refused_items(package: &mut HandBuilt) -> TestResult<Vec<&'static str
             classification: FileClassification::UserData,
             should_copy: true,
             reason: String::new(),
+            user_folder: None,
         });
     }
     Ok(vec![
@@ -3653,6 +3655,7 @@ fn installed_with_a_subfolder(name: &str, target: &str) -> TestResult<String> {
         classification: FileClassification::AppOwned,
         should_copy: true,
         reason: String::new(),
+        user_folder: None,
     });
     let installer = package.build(name)?;
     let run = run_installer(&installer, &["--target-root", target, "--apply", "--force"])?;

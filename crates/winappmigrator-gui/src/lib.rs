@@ -500,6 +500,7 @@ fn run_build(
         bundle_prerequisites: true,
         // Read the app from the live OS or the connected offline drive.
         source: job.source,
+        user_profile: winappmigrator_core::ProfileChoice::Default,
         ui_theme: Some(job.ui_theme),
     };
 

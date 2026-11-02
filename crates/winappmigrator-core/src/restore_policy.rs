@@ -506,6 +506,9 @@ const UNC_PREFIX: &str = r"\\";
 /// Windows' own scheduled tasks, which run with high rights and are expected to be there.
 const WINDOWS_TASK_FOLDER: &str = r"\microsoft\windows\";
 const SYSTEM_ACCOUNTS: &[&str] = &["s-1-5-18", "system", "localsystem"];
+/// In a user's Documents. PowerShell runs what is in these whenever it starts, as a Startup folder
+/// is run at sign-in, and they mean nothing anywhere else.
+const REFUSED_DOCUMENTS_FOLDERS: &[&str] = &[r"windowspowershell\", r"powershell\"];
 
 /// A key path to compare against the rules: lowercase, single separators, and no
 /// `WOW6432Node`, which is the same key seen by a 32-bit program.
@@ -903,7 +906,7 @@ pub struct TaskDefinition {
 
 /// All of an element's text. A comment splits it, and the Task Scheduler reads straight
 /// across, so stopping at the first piece would read something else.
-fn node_text(node: roxmltree::Node<'_, '_>) -> String {
+pub(crate) fn node_text(node: roxmltree::Node<'_, '_>) -> String {
     node.children()
         .filter(roxmltree::Node::is_text)
         .filter_map(|child| child.text())
@@ -914,7 +917,7 @@ fn node_text(node: roxmltree::Node<'_, '_>) -> String {
 
 /// True for the names SYSTEM can be given in a task: by SID, or by name, alone or after any
 /// authority (`NT AUTHORITY\\SYSTEM`, `.\\SYSTEM`, `PCNAME\\SYSTEM`).
-fn is_system_account(account: &str) -> bool {
+pub(crate) fn is_system_account(account: &str) -> bool {
     let lower = account.to_ascii_lowercase();
     let name = lower.rsplit('\\').next().unwrap_or_default();
     SYSTEM_ACCOUNTS.contains(&name)
@@ -1018,13 +1021,18 @@ pub fn existing_task_refusal(existing_xml: &str, target_root: &Path) -> Option<S
     })
 }
 
-/// The folders shortcuts may be put in, on this PC.
+/// What restoring needs to know about the account it restores to, and the folders shortcuts may
+/// be put in, on this PC.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KnownFolders {
     pub user_desktop: Option<PathBuf>,
     pub common_desktop: Option<PathBuf>,
     pub user_start_menu: Option<PathBuf>,
     pub common_start_menu: Option<PathBuf>,
+    /// Whether there is an account to put per-user settings in.
+    pub user_account_known: bool,
+    /// What to say about whose it is, when that is not simply whoever is running this.
+    pub user_account_note: Option<String>,
 }
 
 /// Where a shortcut goes on this PC.
@@ -1122,6 +1130,12 @@ pub fn data_location_refusal(tail: &Path) -> Option<String> {
     );
     if lower.contains(STARTUP_FOLDER) {
         return Some("it would go in a Startup folder, and run at every sign-in".to_owned());
+    }
+    if REFUSED_DOCUMENTS_FOLDERS
+        .iter()
+        .any(|folder| lower.starts_with(folder))
+    {
+        return Some("it would go where PowerShell runs what it finds when it starts".to_owned());
     }
     REFUSED_DATA_FOLDERS
         .iter()
@@ -2319,12 +2333,31 @@ mod tests {
         assert!(existing_task_refusal(&com_handler, target).is_some());
     }
 
+    #[test]
+    fn what_powershell_runs_by_itself_is_refused_in_a_users_documents() {
+        for tail in [
+            r"WindowsPowerShell\Microsoft.PowerShell_profile.ps1",
+            r"PowerShell\profile.ps1",
+            r"powershell\Modules\Evil\Evil.psm1",
+        ] {
+            assert!(data_location_refusal(Path::new(tail)).is_some(), "{tail}");
+        }
+        for tail in [
+            r"Acme\settings.json",
+            r"My Games\Acme\save.dat",
+            r"Acme\PowerShell\x",
+        ] {
+            assert_eq!(data_location_refusal(Path::new(tail)), None, "{tail}");
+        }
+    }
+
     fn shortcut_folders() -> KnownFolders {
         KnownFolders {
             user_desktop: Some(PathBuf::from(r"C:\Users\bob\Desktop")),
             common_desktop: Some(PathBuf::from(r"C:\Users\Public\Desktop")),
             user_start_menu: Some(PathBuf::from(r"C:\Users\bob\Start")),
             common_start_menu: Some(PathBuf::from(r"C:\ProgramData\Start")),
+            ..KnownFolders::default()
         }
     }
 

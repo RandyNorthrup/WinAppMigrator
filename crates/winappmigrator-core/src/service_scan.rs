@@ -36,6 +36,7 @@ const WINDOWS_DIR_PREFIXES: [&str; 4] = [
     r"SystemRoot\",
 ];
 
+/// The app's paths as its own PC calls them, which is what a service's `ImagePath` holds.
 #[derive(Debug, Clone)]
 pub struct ServiceScanContext {
     pub executable_path: PathBuf,
@@ -48,7 +49,8 @@ pub fn scan_services(
 ) -> (Vec<ServiceEntry>, Vec<Warning>) {
     let mut services = Vec::new();
     let mut warnings = Vec::new();
-    let windows_dir = system.windows_dir();
+    let windows_dir = logical_windows_dir(system);
+    let expand = |text: &str| system.expand_source_variables(text);
     let services_key = match system.open_hklm(SERVICES_KEY, KEY_READ) {
         Ok(key) => key,
         Err(error) => {
@@ -75,8 +77,8 @@ pub fn scan_services(
         let Ok(image_path) = service_key.get_value::<String, _>("ImagePath") else {
             continue;
         };
-        let image_path = parse_image_path(&image_path, &windows_dir);
-        let binary_path = system.resolve_source_path(&image_path.path);
+        let image_path = parse_image_path_with(&image_path, &windows_dir, &expand);
+        let binary_path = image_path.path;
         if !path_matches(context, &binary_path) {
             continue;
         }
@@ -130,7 +132,8 @@ pub fn scan_drivers(
 ) -> (Vec<DriverEntry>, Vec<Warning>) {
     let mut drivers = Vec::new();
     let mut warnings = Vec::new();
-    let windows_dir = system.windows_dir();
+    let windows_dir = logical_windows_dir(system);
+    let expand = |text: &str| system.expand_source_variables(text);
     let services_key = match system.open_hklm(SERVICES_KEY, KEY_READ) {
         Ok(key) => key,
         Err(error) => {
@@ -156,15 +159,18 @@ pub fn scan_drivers(
         let Ok(image_path) = service_key.get_value::<String, _>("ImagePath") else {
             continue;
         };
-        let binary_path =
-            system.resolve_source_path(&parse_image_path(&image_path, &windows_dir).path);
+        let binary_path = parse_image_path_with(&image_path, &windows_dir, &expand).path;
         if !path_matches(context, &binary_path) {
             continue;
         }
 
         let kind = driver_kind(service_type);
-        let app_owned = is_app_owned_driver(context, &binary_path);
-        let signer = driver_signer(&binary_path);
+        // The file itself is wherever it can be read. The rest goes by what its PC called it.
+        let readable = system.resolve_source_path(&binary_path);
+        let app_owned = readable
+            .as_deref()
+            .is_some_and(|file| is_app_owned_driver(context, &binary_path, file));
+        let signer = readable.as_deref().and_then(driver_signer);
         let restore_instructions =
             driver_restore_instructions(&service_name, &binary_path, &kind, app_owned, &signer);
 
@@ -192,6 +198,12 @@ pub fn scan_drivers(
     (drivers, warnings)
 }
 
+/// The Windows folder as the scanned PC calls it, which is what a path relative to it is
+/// relative to in that PC's registry.
+fn logical_windows_dir(system: &SystemContext) -> PathBuf {
+    system.logical_path(&system.windows_dir())
+}
+
 fn path_matches(context: &ServiceScanContext, candidate: &Path) -> bool {
     path_eq(candidate, &context.executable_path)
         || context
@@ -204,7 +216,7 @@ fn path_matches(context: &ServiceScanContext, candidate: &Path) -> bool {
 /// footprint, exists on disk, and is not a Windows inbox/System32 driver. Only
 /// these are bundled and re-registered automatically; inbox/vendor drivers are
 /// not redistributed.
-fn is_app_owned_driver(context: &ServiceScanContext, image_path: &Path) -> bool {
+fn is_app_owned_driver(context: &ServiceScanContext, image_path: &Path, file: &Path) -> bool {
     let lower = image_path.to_string_lossy().to_ascii_lowercase();
     if lower.contains(r"\windows\") {
         return false;
@@ -213,7 +225,7 @@ fn is_app_owned_driver(context: &ServiceScanContext, image_path: &Path) -> bool 
         .install_location
         .as_ref()
         .is_some_and(|root| path_is_within(image_path, root));
-    under_install && image_path.is_file()
+    under_install && file.is_file()
 }
 
 /// Best-effort Authenticode signer subject for a driver image. Spawns PowerShell
@@ -331,6 +343,15 @@ pub(crate) struct ImagePath {
 /// or for a driver an NT path, and can be relative to the Windows folder. The Windows
 /// folder is `windows_dir`, the scanned system's, which is the mounted volume's offline.
 pub(crate) fn parse_image_path(raw: &str, windows_dir: &Path) -> ImagePath {
+    parse_image_path_with(raw, windows_dir, &expand_env_vars)
+}
+
+/// [`parse_image_path`], with `expand` saying what a `%Variable%` means on the PC it came from.
+pub(crate) fn parse_image_path_with(
+    raw: &str,
+    windows_dir: &Path,
+    expand: &dyn Fn(&str) -> String,
+) -> ImagePath {
     let trimmed = raw.trim();
     let (path, arguments) = match trimmed.strip_prefix('"') {
         Some(rest) => match rest.split_once('"') {
@@ -341,7 +362,7 @@ pub(crate) fn parse_image_path(raw: &str, windows_dir: &Path) -> ImagePath {
     };
     let arguments = arguments.trim();
     ImagePath {
-        path: expand_image_file(path.trim(), windows_dir),
+        path: expand_image_file(path.trim(), windows_dir, expand),
         arguments: (!arguments.is_empty()).then(|| arguments.to_owned()),
     }
 }
@@ -372,7 +393,7 @@ fn split_unquoted_image_path(value: &str) -> (&str, &str) {
 }
 
 /// Turn the path part of an `ImagePath` into a file path.
-fn expand_image_file(path: &str, windows_dir: &Path) -> PathBuf {
+fn expand_image_file(path: &str, windows_dir: &Path, expand: &dyn Fn(&str) -> String) -> PathBuf {
     let mut path = path;
     for prefix in NT_PATH_PREFIXES {
         if let Some(rest) = strip_prefix_ci(path, prefix) {
@@ -385,9 +406,7 @@ fn expand_image_file(path: &str, windows_dir: &Path) -> PathBuf {
             return windows_dir.join(rest);
         }
     }
-    // Other `%VAR%` markers expand from the live environment, which does nothing offline,
-    // where those variables are absent.
-    let expanded = PathBuf::from(expand_env_vars(path));
+    let expanded = PathBuf::from(expand(path));
     // Windows resolves a driver's relative path, usually `system32\drivers\x.sys`, against
     // its own folder.
     if expanded.is_relative() && !expanded.as_os_str().is_empty() {

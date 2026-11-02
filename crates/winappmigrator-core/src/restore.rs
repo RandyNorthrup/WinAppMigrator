@@ -1772,7 +1772,7 @@ fn set_journaled_value(
         .note_new_keys(hive, key_path, item)
         .map_err(|error| failed("journal_write_failed", error.to_string()))?;
     let (key, _) = registry_root(hive)
-        .create_subkey(key_path)
+        .and_then(|root| root.create_subkey(key_path))
         .map_err(|error| {
             failed(
                 "registry_key_create_failed",
@@ -1831,15 +1831,16 @@ fn apply_registry_entry(
                 Some(key_source()),
             )
         })?;
-    let root = registry_root(&entry.hive);
-    let (key, _) = root.create_subkey(&entry.key_path).map_err(|error| {
-        Warning::new(
-            "registry_key_create_failed",
-            WarningSeverity::Error,
-            format!("Could not create registry key: {error}"),
-            Some(key_source()),
-        )
-    })?;
+    let (key, _) = registry_root(&entry.hive)
+        .and_then(|root| root.create_subkey(&entry.key_path))
+        .map_err(|error| {
+            Warning::new(
+                "registry_key_create_failed",
+                WarningSeverity::Error,
+                format!("Could not create registry key: {error}"),
+                Some(key_source()),
+            )
+        })?;
 
     if entry.value_name.is_none() && entry.value_kind == Some(RegistryValueKind::None) {
         return Ok(format!(
@@ -1926,7 +1927,7 @@ fn com_classes_to_leave_alone(
         let refusal = hives.into_iter().find_map(|hive| {
             COM_SERVER_KEYS.iter().find_map(|server| {
                 let existing = registry_root(hive)
-                    .open_subkey(format!(r"{class}\{server}"))
+                    .and_then(|root| root.open_subkey(format!(r"{class}\{server}")))
                     .and_then(|key| key.get_value::<String, _>(""))
                     .ok()?;
                 com_server_refusal(
@@ -1962,13 +1963,14 @@ fn apply_environment_variable(
             Some(format!("{:?}\\{}", variable.scope, variable.name)),
         )
     };
-    let (root, key_path) = environment_registry_target(&variable.scope);
-    let (key, _) = root.create_subkey(key_path).map_err(|error| {
-        failed(
-            "environment_key_create_failed",
-            format!("Could not create environment registry key: {error}"),
-        )
-    })?;
+    let (key, _) = environment_registry_target(&variable.scope)
+        .and_then(|(root, key_path)| root.create_subkey(key_path))
+        .map_err(|error| {
+            failed(
+                "environment_key_create_failed",
+                format!("Could not create environment registry key: {error}"),
+            )
+        })?;
     let existing = key.get_raw_value(&variable.name).ok();
     let is_path = is_path_variable(&variable.name);
     if existing.is_some() && !is_path && !force {
@@ -3031,6 +3033,7 @@ mod tests {
             classification: FileClassification::AppOwned,
             should_copy: true,
             reason: String::new(),
+            user_folder: None,
         }
     }
 
@@ -3060,6 +3063,7 @@ mod tests {
             included_program_data: false,
             included_license_data: false,
             ui_theme: None,
+            user_data_profile: None,
         }
     }
 

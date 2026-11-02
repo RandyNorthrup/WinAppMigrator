@@ -1318,6 +1318,7 @@ mod tests {
                 },
             ],
             refused: Vec::new(),
+            notes: Vec::new(),
         };
         app
     }

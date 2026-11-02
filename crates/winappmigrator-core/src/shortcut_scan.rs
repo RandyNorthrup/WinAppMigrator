@@ -1,18 +1,29 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use walkdir::WalkDir;
 
+use crate::file_discovery::{
+    DESKTOP_FALLBACK, DESKTOP_VALUE, START_MENU_FALLBACK, START_MENU_VALUE, user_folder_of,
+};
 use crate::models::{ShortcutEntry, Warning, WarningSeverity};
 use crate::path_utils::{
     POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT,
-    hidden_command, path_is_within,
+    escape_powershell_single, hidden_command, path_has_extension, path_is_within,
 };
 use crate::system_context::SystemContext;
 
 const LNK_HEADER_SIZE: u32 = 0x4C;
 const LNK_FLAGS_OFFSET: usize = 0x14;
+const LNK_ICON_INDEX_OFFSET: usize = 0x38;
 const LNK_HAS_TARGET_ID_LIST: u32 = 0x1;
 const LNK_HAS_LINK_INFO: u32 = 0x2;
+const LNK_HAS_NAME: u32 = 0x4;
+const LNK_HAS_RELATIVE_PATH: u32 = 0x8;
+const LNK_HAS_WORKING_DIR: u32 = 0x10;
+const LNK_HAS_ARGUMENTS: u32 = 0x20;
+const LNK_HAS_ICON_LOCATION: u32 = 0x40;
+const LNK_IS_UNICODE: u32 = 0x80;
 const LNK_ID_LIST_SIZE_FIELD: usize = 2;
 const LNK_INFO_HEADER_SIZE_OFFSET: usize = 0x04;
 const LNK_INFO_FLAGS_OFFSET: usize = 0x08;
@@ -22,7 +33,13 @@ const LNK_INFO_UNICODE_BASE_OFFSET: usize = 0x1C;
 const LNK_INFO_UNICODE_SUFFIX_OFFSET: usize = 0x20;
 const LNK_INFO_UNICODE_HEADER_SIZE: u32 = 0x24;
 const LNK_INFO_HAS_LOCAL_PATH: u32 = 0x1;
+/// Far more than any shortcut. On a drive from elsewhere, one could be made big enough to run this
+/// out of memory.
+const MAX_SHORTCUT_BYTES: u64 = 1024 * 1024;
+const SHORTCUT_EXTENSION: &str = "lnk";
+const COMMON_START_MENU: &str = r"Microsoft\Windows\Start Menu";
 
+/// The app's paths as its own PC calls them, which is what a shortcut holds.
 #[derive(Debug, Clone)]
 pub struct ShortcutScanContext {
     pub executable_path: PathBuf,
@@ -43,47 +60,141 @@ pub fn scan_shortcuts(
     context: &ShortcutScanContext,
     system: &SystemContext,
 ) -> (Vec<ShortcutEntry>, Vec<Warning>) {
-    if system.is_offline() {
-        // The live shell folders and WScript.Shell COM only see this PC, and a
-        // foreign disk's .lnk files are not parsed, so an installer built from a
-        // connected drive restores no shortcuts. The warning says so.
-        let warning = Warning::new(
-            "shortcuts_offline_skipped",
-            WarningSeverity::Info,
-            "Start Menu and Desktop shortcuts are not read from a connected drive, so this \
-             installer will not recreate them.",
-            None,
-        );
-        return (Vec::new(), vec![warning]);
-    }
-    scan_live_shortcuts(context)
+    let mut warnings = Vec::new();
+    let folders = shortcut_folders(system, &mut warnings);
+    let (entries, more_warnings) = if system.is_offline() {
+        read_shortcuts_on_a_drive(context, &folders, system)
+    } else {
+        scan_live_shortcuts(context, &folders)
+    };
+    warnings.extend(more_warnings);
+    (entries, warnings)
 }
 
-fn scan_live_shortcuts(context: &ShortcutScanContext) -> (Vec<ShortcutEntry>, Vec<Warning>) {
+/// Where the account being scanned, and everyone on the PC, keep shortcuts.
+fn shortcut_folders(system: &SystemContext, warnings: &mut Vec<Warning>) -> Vec<PathBuf> {
+    let mut folders = Vec::new();
+    for user in system.user_hives() {
+        folders.extend(user_folder_of(
+            &user,
+            DESKTOP_VALUE,
+            DESKTOP_FALLBACK,
+            system,
+            warnings,
+        ));
+        folders.extend(user_folder_of(
+            &user,
+            START_MENU_VALUE,
+            START_MENU_FALLBACK,
+            system,
+            warnings,
+        ));
+    }
+    if let Some(public) = system.public_dir() {
+        folders.push(public.join(DESKTOP_FALLBACK));
+    }
+    if let Some(program_data) = system.program_data() {
+        folders.push(program_data.join(COMMON_START_MENU));
+    }
+    folders.retain(|folder| system.may_read(folder));
+    folders
+}
+
+/// Read each `.lnk` file on a drive directly. COM would resolve what it found against this PC.
+fn read_shortcuts_on_a_drive(
+    context: &ShortcutScanContext,
+    folders: &[PathBuf],
+    system: &SystemContext,
+) -> (Vec<ShortcutEntry>, Vec<Warning>) {
+    let mut entries = Vec::new();
+    let mut unreadable = Vec::new();
+    for folder in folders {
+        for entry in WalkDir::new(folder)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+        {
+            let path = entry.path();
+            if !entry.file_type().is_file() || !path_has_extension(path, SHORTCUT_EXTENSION) {
+                continue;
+            }
+            let Some(link) = read_shortcut_file(path).and_then(|data| read_lnk(&data)) else {
+                unreadable.push(path.display().to_string());
+                continue;
+            };
+            if path_matches(context, &link.target) {
+                entries.push(ShortcutEntry {
+                    original_lnk_path: system.logical_path(path),
+                    target_path: link.target,
+                    arguments: link.arguments,
+                    working_directory: link.working_directory,
+                    icon_path: link.icon_location,
+                    target_is_selected_app: true,
+                });
+            }
+        }
+    }
+    let warnings = if unreadable.is_empty() {
+        Vec::new()
+    } else {
+        // An MSI's "advertised" shortcut names no path, and so says nothing about whose it is.
+        vec![Warning::new(
+            "shortcuts_unreadable",
+            WarningSeverity::Info,
+            format!(
+                "{} shortcuts on this drive name no file, so whether they open this app could not \
+                 be told.",
+                unreadable.len()
+            ),
+            None,
+        )]
+    };
+    (entries, warnings)
+}
+
+/// A shortcut's file, if it is small enough to be one.
+pub(crate) fn read_shortcut_file(path: &Path) -> Option<Vec<u8>> {
+    let size = std::fs::metadata(path).ok()?.len();
+    (size <= MAX_SHORTCUT_BYTES)
+        .then(|| std::fs::read(path).ok())
+        .flatten()
+}
+
+fn scan_live_shortcuts(
+    context: &ShortcutScanContext,
+    folders: &[PathBuf],
+) -> (Vec<ShortcutEntry>, Vec<Warning>) {
     let mut warnings = Vec::new();
-    let script = r#"
-$roots = @(
-  [Environment]::GetFolderPath('Desktop'),
-  [Environment]::GetFolderPath('CommonDesktopDirectory'),
-  [Environment]::GetFolderPath('StartMenu'),
-  [Environment]::GetFolderPath('CommonStartMenu')
-) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+    let roots = folders
+        .iter()
+        .map(|folder| {
+            format!(
+                "'{}'",
+                escape_powershell_single(&folder.display().to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let script = format!(
+        r#"
+$roots = @({roots}) | Where-Object {{ $_ -and (Test-Path -LiteralPath $_) }} | Select-Object -Unique
 $shell = New-Object -ComObject WScript.Shell
-$items = foreach ($root in $roots) {
-  Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+$items = foreach ($root in $roots) {{
+  Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {{
     $shortcut = $shell.CreateShortcut($_.FullName)
-    [pscustomobject]@{
+    [pscustomobject]@{{
       Path = $_.FullName
       TargetPath = $shortcut.TargetPath
       Arguments = $shortcut.Arguments
       WorkingDirectory = $shortcut.WorkingDirectory
       IconLocation = $shortcut.IconLocation
-    }
-  }
-}
+    }}
+  }}
+}}
 $items | ConvertTo-Json -Depth 4
-"#;
-    let output = match run_powershell(script) {
+"#
+    );
+    let output = match run_powershell(&script) {
         Ok(output) => output,
         Err(error) => {
             warnings.push(Warning::new(
@@ -179,11 +290,26 @@ fn path_matches(context: &ShortcutScanContext, candidate: &Path) -> bool {
             .is_some_and(|root| path_is_within(candidate, root))
 }
 
-/// Read the target of a `.lnk` file from its `LinkInfo` section, without the COM object
+/// The target of a `.lnk` file. See [`read_lnk`].
+pub(crate) fn lnk_target_path(data: &[u8]) -> Option<PathBuf> {
+    read_lnk(data).map(|link| link.target)
+}
+
+/// What a `.lnk` file says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LnkFile {
+    pub target: PathBuf,
+    pub arguments: Option<String>,
+    pub working_directory: Option<PathBuf>,
+    /// `path,index`, as it reads through COM.
+    pub icon_location: Option<PathBuf>,
+}
+
+/// Read a `.lnk` file from its `LinkInfo` section and the strings after it, without the COM object
 /// `scan_live_shortcuts` uses, so it also works on a shortcut from another PC. A shortcut
 /// that only stores a shell item list has no such path, and neither does an MSI
 /// "advertised" one: both give `None`. The format is documented in MS-SHLLINK.
-pub(crate) fn lnk_target_path(data: &[u8]) -> Option<PathBuf> {
+pub(crate) fn read_lnk(data: &[u8]) -> Option<LnkFile> {
     if read_u32(data, 0)? != LNK_HEADER_SIZE {
         return None;
     }
@@ -197,6 +323,58 @@ pub(crate) fn lnk_target_path(data: &[u8]) -> Option<PathBuf> {
         return None;
     }
     let info = data.get(offset..)?;
+    let target = local_path_in_link_info(info)?;
+    let info_size = read_u32(info, 0)? as usize;
+    let strings = read_lnk_strings(info.get(info_size..).unwrap_or_default(), flags);
+    Some(LnkFile {
+        target,
+        arguments: strings.arguments,
+        working_directory: strings.working_directory.map(PathBuf::from),
+        icon_location: strings.icon_location.map(|path| {
+            let index = read_u32(data, LNK_ICON_INDEX_OFFSET).unwrap_or_default() as i32;
+            PathBuf::from(format!("{path},{index}"))
+        }),
+    })
+}
+
+#[derive(Default)]
+struct LnkStrings {
+    working_directory: Option<String>,
+    arguments: Option<String>,
+    icon_location: Option<String>,
+}
+
+/// The strings after `LinkInfo`, each with its length first, those a shortcut has in a fixed order.
+/// Whatever does not fit in the file is simply not there.
+fn read_lnk_strings(mut data: &[u8], flags: u32) -> LnkStrings {
+    let mut strings = LnkStrings::default();
+    let unicode = flags & LNK_IS_UNICODE != 0;
+    let mut next = |wanted: bool| -> Option<String> {
+        if !wanted {
+            return None;
+        }
+        let characters = usize::from(read_u16(data, 0)?);
+        let bytes = if unicode { characters * 2 } else { characters };
+        let text = data.get(2..2 + bytes)?;
+        let value = if unicode {
+            let (pairs, _) = text.as_chunks::<2>();
+            let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+            String::from_utf16_lossy(&units)
+        } else {
+            text.iter().map(|&byte| char::from(byte)).collect()
+        };
+        data = &data[2 + bytes..];
+        Some(value).filter(|value| !value.trim().is_empty())
+    };
+    next(flags & LNK_HAS_NAME != 0);
+    next(flags & LNK_HAS_RELATIVE_PATH != 0);
+    strings.working_directory = next(flags & LNK_HAS_WORKING_DIR != 0);
+    strings.arguments = next(flags & LNK_HAS_ARGUMENTS != 0);
+    strings.icon_location = next(flags & LNK_HAS_ICON_LOCATION != 0);
+    strings
+}
+
+fn local_path_in_link_info(info: &[u8]) -> Option<PathBuf> {
     if read_u32(info, LNK_INFO_FLAGS_OFFSET)? & LNK_INFO_HAS_LOCAL_PATH == 0 {
         return None;
     }
@@ -274,6 +452,12 @@ mod tests {
         let mut put = |at: usize, value: u32| {
             info[at..at + 4].copy_from_slice(&value.to_le_bytes());
         };
+        let total = if unicode {
+            unicode_suffix_at + (suffix.encode_utf16().count() as u32 + 1) * 2
+        } else {
+            unicode_base_at
+        };
+        put(0, total);
         put(LNK_INFO_HEADER_SIZE_OFFSET, header_size);
         put(LNK_INFO_FLAGS_OFFSET, LNK_INFO_HAS_LOCAL_PATH);
         put(LNK_INFO_BASE_OFFSET, base_at);
@@ -312,6 +496,113 @@ mod tests {
             lnk_target_path(&lnk_bytes(r"C:\Program Files\", "App\\app.exe", false, &[])),
             Some(PathBuf::from(r"C:\Program Files\App\app.exe")),
             "the path can be split into a base and a suffix"
+        );
+    }
+
+    #[test]
+    fn a_shortcuts_strings_are_read_from_after_where_its_target_is() {
+        fn with_strings(strings: &[(u32, &str)], unicode: bool) -> Vec<u8> {
+            let mut data = lnk_bytes(r"C:\App\app.exe", "", true, &[1, 2]);
+            let mut flags = read_u32(&data, LNK_FLAGS_OFFSET).unwrap_or_default();
+            if unicode {
+                flags |= LNK_IS_UNICODE;
+            }
+            for (flag, text) in strings {
+                flags |= flag;
+                let length = text.encode_utf16().count() as u16;
+                data.extend_from_slice(&length.to_le_bytes());
+                if unicode {
+                    data.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+                } else {
+                    data.extend_from_slice(text.as_bytes());
+                }
+            }
+            data[LNK_FLAGS_OFFSET..LNK_FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
+            data[LNK_ICON_INDEX_OFFSET..LNK_ICON_INDEX_OFFSET + 4]
+                .copy_from_slice(&3_i32.to_le_bytes());
+            data
+        }
+        for unicode in [true, false] {
+            let data = with_strings(
+                &[
+                    (LNK_HAS_NAME, "A description"),
+                    (LNK_HAS_RELATIVE_PATH, r"..\app.exe"),
+                    (LNK_HAS_WORKING_DIR, r"C:\App"),
+                    (LNK_HAS_ARGUMENTS, "--run"),
+                    (LNK_HAS_ICON_LOCATION, r"C:\App\icon.ico"),
+                ],
+                unicode,
+            );
+            assert_eq!(
+                read_lnk(&data),
+                Some(LnkFile {
+                    target: PathBuf::from(r"C:\App\app.exe"),
+                    arguments: Some("--run".to_owned()),
+                    working_directory: Some(PathBuf::from(r"C:\App")),
+                    icon_location: Some(PathBuf::from(r"C:\App\icon.ico,3")),
+                }),
+                "unicode: {unicode}"
+            );
+            // Cut anywhere: what is whole is kept, and nothing panics.
+            for cut in 0..data.len() {
+                let _ = read_lnk(&data[..cut]);
+            }
+        }
+        // None of the optional ones.
+        assert_eq!(
+            read_lnk(&with_strings(&[], true)),
+            Some(LnkFile {
+                target: PathBuf::from(r"C:\App\app.exe"),
+                arguments: None,
+                working_directory: None,
+                icon_location: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_shortcut_on_a_drive_is_kept_for_what_it_opens_and_not_read_through_a_link() {
+        let Ok(work) = tempfile::tempdir() else {
+            panic!("no temp folder");
+        };
+        let context = ShortcutScanContext {
+            executable_path: PathBuf::from(r"C:\App\app.exe"),
+            install_location: Some(PathBuf::from(r"C:\App")),
+        };
+        let desktop = work.path().join("Desktop");
+        let elsewhere = work.path().join("elsewhere");
+        for folder in [&desktop, &elsewhere] {
+            assert!(std::fs::create_dir_all(folder).is_ok());
+        }
+        let own = lnk_bytes(r"C:\App\app.exe", "", true, &[]);
+        let other = lnk_bytes(r"C:\Other\other.exe", "", true, &[]);
+        assert!(std::fs::write(desktop.join("App.lnk"), &own).is_ok());
+        assert!(std::fs::write(desktop.join("Other.lnk"), &other).is_ok());
+        assert!(std::fs::write(desktop.join("Damaged.lnk"), b"not one").is_ok());
+        assert!(std::fs::write(elsewhere.join("Theirs.lnk"), &own).is_ok());
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(desktop.join("Linked"))
+            .arg(&elsewhere)
+            .output();
+        assert!(made.is_ok_and(|output| output.status.success()));
+
+        let (entries, warnings) = read_shortcuts_on_a_drive(
+            &context,
+            std::slice::from_ref(&desktop),
+            &SystemContext::live(),
+        );
+        let found: Vec<PathBuf> = entries
+            .iter()
+            .map(|entry| entry.original_lnk_path.clone())
+            .collect();
+        assert_eq!(found, vec![desktop.join("App.lnk")]);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the damaged one is said to be: {warnings:?}"
         );
     }
 

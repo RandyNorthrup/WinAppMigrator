@@ -15,24 +15,36 @@ use std::path::Path;
 
 use winreg::RegKey;
 use winreg::enums::{
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN,
-    REG_EXPAND_SZ, REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD,
-    REG_RESOURCE_LIST, REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, RegType,
+    HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WRITE, REG_BINARY, REG_DWORD,
+    REG_DWORD_BIG_ENDIAN, REG_EXPAND_SZ, REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ,
+    REG_NONE, REG_QWORD, REG_RESOURCE_LIST, REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, RegType,
 };
 
 use crate::journal::ServiceConfig;
 use crate::models::{EnvironmentScope, RegistryHive, RegistryValueKind};
-use crate::path_utils::path_is_strictly_inside;
+use crate::path_utils::{SignedInUser, path_is_strictly_inside, signed_in_user};
 
 const USER_ENVIRONMENT_KEY: &str = "Environment";
 const MACHINE_ENVIRONMENT_KEY: &str =
     r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
 
-/// The live `winreg` predefined root for a captured hive.
-pub(crate) fn registry_root(hive: &RegistryHive) -> RegKey {
+/// The live root for a captured hive. A per-user one is whoever is signed in, by their hive under
+/// `HKEY_USERS`. `HKEY_CURRENT_USER` is that of the account running this, which is another
+/// administrator's when one was named at the UAC prompt, and what was installed for the person at
+/// the PC would never be seen by them. An error means there is no telling who that is, and nothing
+/// is to be written for anyone.
+pub(crate) fn registry_root(hive: &RegistryHive) -> std::io::Result<RegKey> {
     match hive {
-        RegistryHive::LocalMachine => RegKey::predef(HKEY_LOCAL_MACHINE),
-        RegistryHive::CurrentUser => RegKey::predef(HKEY_CURRENT_USER),
+        RegistryHive::LocalMachine => Ok(RegKey::predef(HKEY_LOCAL_MACHINE)),
+        RegistryHive::CurrentUser => match signed_in_user() {
+            SignedInUser::Desktop(account) | SignedInUser::NoDesktop(account) => {
+                RegKey::predef(HKEY_USERS)
+                    .open_subkey_with_flags(&account.sid, KEY_READ | KEY_WRITE)
+            }
+            SignedInUser::Unknown(reason) => Err(std::io::Error::other(format!(
+                "could not tell who is signed in: {reason}"
+            ))),
+        },
     }
 }
 
@@ -40,9 +52,11 @@ pub(crate) fn registry_root(hive: &RegistryHive) -> RegKey {
 /// machine path (`SYSTEM\CurrentControlSet\...\Session Manager\Environment`) is a
 /// load-bearing magic string that must be identical on the write and verify
 /// sides — hence its single definition here.
-pub(crate) fn environment_registry_target(scope: &EnvironmentScope) -> (RegKey, &'static str) {
+pub(crate) fn environment_registry_target(
+    scope: &EnvironmentScope,
+) -> std::io::Result<(RegKey, &'static str)> {
     let (hive, key) = environment_location(scope);
-    (registry_root(&hive), key)
+    Ok((registry_root(&hive)?, key))
 }
 
 /// Where the environment variables for a scope are kept, as the hive and key that restoring

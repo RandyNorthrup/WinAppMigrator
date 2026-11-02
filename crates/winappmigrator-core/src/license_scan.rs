@@ -130,7 +130,7 @@ fn detect_license_files(context: &LicenseScanContext<'_>, artifacts: &mut Vec<Li
         let requires_admin = is_protected_path(&file.original_path);
         let should_copy = context.include_license_data;
         let hash_sha256 = if should_copy && context.include_hashes {
-            sha256_file(&file.original_path).ok()
+            sha256_file(&file.path).ok()
         } else {
             file.hash_sha256.clone()
         };
@@ -223,7 +223,7 @@ fn detect_framework_stores(
     ];
     for (relative, framework, machine_bound) in stores {
         let path = program_data.join(relative);
-        if path.is_dir() {
+        if system.may_read(&path) && path.is_dir() {
             let machine_bound = *machine_bound;
             artifacts.push(LicenseArtifact {
                 kind: LicenseArtifactKind::FrameworkStore,

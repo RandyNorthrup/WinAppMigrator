@@ -33,6 +33,7 @@ fn sample_app(name: &str, publisher: &str, version: &str, scope: InstallScope) -
         registry_source_path: String::new(),
         architecture: AppArchitecture::X64,
         install_scope: scope,
+        owner_profile: None,
     }
 }
 

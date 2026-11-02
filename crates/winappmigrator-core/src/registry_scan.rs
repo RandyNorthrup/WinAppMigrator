@@ -126,6 +126,8 @@ const RUN_KEYS: &[&str] = &[
     r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
 ];
 
+/// The app's paths are as its own PC calls them, since that is what the values they are
+/// compared with hold, wherever the drive is now.
 #[derive(Debug, Clone)]
 pub struct RegistryScanContext {
     pub executable_path: PathBuf,
@@ -799,7 +801,7 @@ fn scan_software_children(
 
 /// The keys in one `Software` view named for the product. `children_of` lists a key's
 /// children, which keeps these rules free of the live registry.
-fn product_keys_in_view(
+pub(crate) fn product_keys_in_view(
     names: &ProductNames,
     software_path: &str,
     children_of: &impl Fn(&str) -> Vec<String>,
