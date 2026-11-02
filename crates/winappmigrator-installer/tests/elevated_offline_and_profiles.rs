@@ -58,6 +58,9 @@ const OTHER_SECRET: &str = "wam-other-account-private";
 /// In this machine's registry, where a link in the drive's registry leads.
 const HOST_REGISTRY_KEY: &str = r"HKLM\SOFTWARE\WAM Host Registry Secret";
 const HOST_REGISTRY_TARGET: &str = r"\REGISTRY\MACHINE\SOFTWARE\WAM Host Registry Secret";
+const HOST_USER_KEY: &str = r"Software\WAM Host User Secret";
+/// Where this machine's own marker is, by a share of its own, which is enough to see a connection.
+const HOST_SHARE: &str = r"\\127.0.0.1\C$\WAM Host Secret";
 
 const UNINSTALL_KEY: &str =
     r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\WAM Offline App";
@@ -324,6 +327,18 @@ fn tree_state(root: &str) -> TestResult<BTreeMap<String, String>> {
         .collect())
 }
 
+/// How many sessions this machine's own file server has taken since it started. It is the server
+/// that counts them, so it is nothing the client or this app has a say in.
+fn sessions_accepted() -> TestResult<u64> {
+    let shown = must("net.exe", &["statistics", "server"])?;
+    let line = shown
+        .lines()
+        .find(|line| line.trim_start().starts_with("Sessions accepted"))
+        .ok_or_else(|| format!("no count of sessions in: {shown}"))?;
+    let count = line.split_whitespace().last().unwrap_or_default();
+    Ok(count.parse()?)
+}
+
 /// What is different between two looks at a folder.
 fn tree_differences(
     before: &BTreeMap<String, String>,
@@ -366,9 +381,14 @@ struct InstallerRun {
 
 fn run_installer(installer: &Path, args: &[&str]) -> TestResult<InstallerRun> {
     println!("\n--- {} {}", installer.display(), args.join(" "));
+    let started = Instant::now();
     let output = Command::new(installer).args(args).output()?;
     let shown = format!("{}{}", text(&output.stdout), text(&output.stderr));
-    println!("{shown}--- exit: {}", output.status);
+    println!(
+        "{shown}--- exit: {}, after {:?}",
+        output.status,
+        started.elapsed()
+    );
     Ok(InstallerRun {
         success: output.status.success(),
         output: shown,
@@ -1030,6 +1050,12 @@ fn edit_the_drives_registry(paths: &Paths) -> TestResult {
             reg_add(&service, Some("Type"), "REG_DWORD", "16")?;
             reg_add(&service, Some("Start"), "REG_DWORD", "3")?;
         }
+        // What is captured with the app's own service, that is this machine's registry.
+        registry_link(
+            &format!(r"{control_set}\Services\{SERVICE}\Parameters"),
+            "HostLink",
+            HOST_REGISTRY_TARGET,
+        )?;
         Ok(())
     })?;
     edit_hive(&format!(r"{config}\SOFTWARE"), |key| {
@@ -1104,8 +1130,52 @@ fn edit_the_drives_registry(paths: &Paths) -> TestResult {
             "REG_SZ",
             &format!(r"C:\Windows\..{host_data}\host.exe,0"),
         )?;
+        // Apps whose files are links to a share, where only looking at one would connect to it.
+        for (name, location, icon) in [
+            (
+                "WAM Share App",
+                r"C:\Program Files\WAM Share App".to_owned(),
+                r"C:\Program Files\WAM Share App\share.exe,0".to_owned(),
+            ),
+            (
+                "WAM Share Squirrel App",
+                format!(r"{}\AppData\Local\WAM Share Squirrel App", paths.profile),
+                format!(
+                    r"{}\AppData\Local\WAM Share Squirrel App\Update.exe,0",
+                    paths.profile
+                ),
+            ),
+        ] {
+            let entry = format!(r"{key}\Microsoft\Windows\CurrentVersion\Uninstall\{name}");
+            reg_add(&entry, Some("DisplayName"), "REG_SZ", name)?;
+            reg_add(&entry, Some("InstallLocation"), "REG_SZ", &location)?;
+            reg_add(&entry, Some("DisplayIcon"), "REG_SZ", &icon)?;
+        }
         Ok(())
     })?;
+    // The same in an account's own hive, that is this machine's account.
+    edit_hive(
+        &format!(r"{DRIVE_FOLDER}\Users\{}\NTUSER.DAT", paths.profile_name),
+        |key| {
+            registry_link(
+                &format!(r"{key}\Software\{VENDOR}\{APP}"),
+                "HostUserLink",
+                &format!(r"\REGISTRY\USER\{}\{HOST_USER_KEY}", paths.sid),
+            )
+        },
+    )?;
+    // A known folder that is a link to a share.
+    edit_hive(
+        &format!(r"{DRIVE_FOLDER}\Users\{OTHER_ON_DRIVE}\NTUSER.DAT"),
+        |key| {
+            reg_add(
+                &format!(r"{key}\{USER_SHELL_FOLDERS}"),
+                Some(SAVED_GAMES_VALUE),
+                "REG_EXPAND_SZ",
+                &format!(r"C:\Users\{OTHER_ON_DRIVE}\ShareGames"),
+            )
+        },
+    )?;
     Ok(())
 }
 
@@ -1144,6 +1214,32 @@ fn plant_the_links(paths: &Paths, program: &Path) -> TestResult {
             &format!(r"{host_data}\host-secret.txt"),
         ],
     )?;
+    // The same to a share, each named for what looks for that name. Looking through one at all
+    // connects to it, which the end of the test can see.
+    for link in [
+        format!(r"{DRIVE_FOLDER}\Users\shareprofile"),
+        format!(r"{DRIVE_FOLDER}\Users\{OTHER_ON_DRIVE}\ShareGames"),
+        format!(r"{DRIVE_FOLDER}\Program Files\{APP}\share-linked"),
+        format!(r"{DRIVE_FOLDER}\Program Files\{APP}\Application"),
+        format!(r"{DRIVE_FOLDER}\Program Files\WAM Share App\bin"),
+        format!(r"{DRIVE_FOLDER}\ProgramData\WAM Share App"),
+        format!(r"{profile}\AppData\Local\Programs"),
+        format!(r"{profile}\AppData\Local\WAM Share Squirrel App\app-1.0.0"),
+    ] {
+        if let Some(parent) = Path::new(&link).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        must("cmd", &["/C", "mklink", "/D", &link, HOST_SHARE])?;
+    }
+    let on_the_share = format!(r"{HOST_SHARE}\{APP}\host.exe");
+    for link in [
+        format!(r"{DRIVE_FOLDER}\Program Files\{APP}\share.dll"),
+        format!(r"{DRIVE_FOLDER}\Program Files\{APP}\share.exe.manifest"),
+        format!(r"{DRIVE_FOLDER}\Program Files\WAM Share App\share.exe"),
+        format!(r"{profile}\AppData\Local\WAM Share Squirrel App\Update.exe"),
+    ] {
+        must("cmd", &["/C", "mklink", &link, &on_the_share])?;
+    }
     // A task of this machine's that runs the app, which is not on the drive.
     must(
         "schtasks.exe",
@@ -1801,24 +1897,39 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
 
     section("What Windows itself does with a registry link in a hive it has just loaded");
     reg_add(HOST_REGISTRY_KEY, Some("Token"), "REG_SZ", HOST_SECRET)?;
-    edit_hive(
-        &format!(r"{DRIVE_FOLDER}\Windows\System32\config\SOFTWARE"),
-        |key| {
-            let link = format!(r"{key}\{VENDOR}\{APP}\HostLink");
-            let output = tool("reg.exe", &["query", &link, "/s"])?;
+    reg_add(
+        &format!(r"HKCU\{HOST_USER_KEY}"),
+        Some("Token"),
+        "REG_SZ",
+        HOST_SECRET,
+    )?;
+    for (hive, link) in [
+        (
+            format!(r"{DRIVE_FOLDER}\Windows\System32\config\SOFTWARE"),
+            format!(r"{VENDOR}\{APP}\HostLink"),
+        ),
+        (
+            format!(r"{DRIVE_FOLDER}\Users\{}\NTUSER.DAT", paths.profile_name),
+            format!(r"Software\{VENDOR}\{APP}\HostUserLink"),
+        ),
+    ] {
+        edit_hive(&hive, |key| {
+            let output = tool("reg.exe", &["query", &format!(r"{key}\{link}"), "/s"])?;
             println!(
-                "reg query of the link: {}\n{}{}",
+                "reg query of {link}: {}\n{}{}",
                 output.status,
                 text(&output.stdout),
                 text(&output.stderr)
             );
             Ok(())
-        },
-    )?;
+        })?;
+    }
 
     let source = ScanSource::offline(DRIVE);
     let before = tree_state(DRIVE_FOLDER)?;
     println!("{} entries on the drive", before.len());
+    let sessions_before = sessions_accepted()?;
+    println!("this machine's server has accepted {sessions_before} sessions");
 
     section("List what is on the drive, through the real code");
     let system = SystemContext::open(&source)?;
@@ -1939,6 +2050,31 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
         "it was built",
     );
 
+    section("Apps whose files are links to a share get none of it, and connect to nothing");
+    for name in ["WAM Share App", "WAM Share Squirrel App"] {
+        let linked = find_app(&apps, name)?;
+        println!("{name} reads as {linked:?}");
+        checks.that(
+            &format!("{name} has no program, since its program is a link"),
+            linked.main_executable.is_none(),
+            format!("{linked:?}"),
+        );
+        let attempt = create_package(&package_options(
+            &linked,
+            &work.path().join(name),
+            source.clone(),
+            ProfileChoice::Default,
+        ));
+        println!(
+            "building it: {:?}",
+            attempt.as_ref().map(|result| result.files_copied)
+        );
+        if let Ok(result) = attempt.as_ref() {
+            let holding = files_holding(&result.package_root, HOST_SECRET)?;
+            checks.same("the marker is not in that either", holding.trim(), "");
+        }
+    }
+
     section("Another account on the drive, on request");
     let other = create_package(&package_options(
         &app,
@@ -2016,25 +2152,47 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
         "nothing changed",
     );
 
-    section("No SMB connection was made to where a value pointed");
-    let connections = powershell(
-        "Import-Module SmbShare; Get-SmbConnection -ServerName 127.0.0.1 \
-         -ErrorAction SilentlyContinue | Measure-Object | ForEach-Object Count",
+    section("No SMB connection was made to where a value or a link pointed");
+    let count_connections = "Import-Module SmbShare; \
+         Get-SmbConnection -ServerName 127.0.0.1 -ErrorAction SilentlyContinue | \
+         Measure-Object | ForEach-Object Count; exit 0";
+    let connections = powershell(count_connections)?;
+    println!("SMB connections to 127.0.0.1: {connections}");
+    checks.same(
+        "this machine has no connection to its own share",
+        connections.trim(),
+        "0",
     );
-    println!("SMB connections to 127.0.0.1: {connections:?}");
-    if let Ok(count) = connections.as_ref() {
-        checks.same("reading a value connected to no server", count.trim(), "0");
-        // The same look finds one that really was made, so it means something.
-        let _ = tool("cmd", &["/C", "dir", r"\\127.0.0.1\C$\Windows\win.ini"]);
-        let after_control = powershell(
-            "Import-Module SmbShare; Get-SmbConnection -ServerName 127.0.0.1 \
-             -ErrorAction SilentlyContinue | Measure-Object | ForEach-Object Count",
-        )?;
-        println!(
-            "after connecting on purpose, so that a look can find one when there is one: \
-             {after_control}"
-        );
-    }
+    let sessions_after = sessions_accepted()?;
+    println!("this machine's server has accepted {sessions_after} sessions");
+    checks.same(
+        "its server accepted none in all that was read from the drive",
+        sessions_after,
+        sessions_before,
+    );
+    // The same looks find one that really is made, through a link that was left there.
+    let looked = tool(
+        "cmd",
+        &[
+            "/C",
+            "dir",
+            &format!(r"{DRIVE_FOLDER}\Users\shareprofile\{APP}\host.exe"),
+        ],
+    )?;
+    println!(
+        "looking through a link on purpose: {}\n{}{}",
+        looked.status,
+        text(&looked.stdout),
+        text(&looked.stderr)
+    );
+    let connections = powershell(count_connections)?;
+    let sessions_control = sessions_accepted()?;
+    println!("then, {connections} connections and {sessions_control} sessions accepted");
+    checks.that(
+        "going through a link on purpose does show, so the two above mean something",
+        looked.status.success() && sessions_control > sessions_after,
+        format!("{sessions_control} after {sessions_after}"),
+    );
 
     let target = default_install_location(&manifest)
         .ok_or("no install location")?
@@ -2522,7 +2680,13 @@ fn accounts_are_kept_apart() -> TestResult {
     let target = r"C:\Program Files\WAM Profiles Restored";
     let run = run_installer(
         &theirs_installer,
-        &["--target-root", target, "--apply", "--restore-user-data"],
+        &[
+            "--target-root",
+            target,
+            "--apply",
+            "--force",
+            "--restore-user-data",
+        ],
     )?;
     checks.that("the install succeeded", run.success, &run.output);
     for (relative, content) in account_data("theirs") {
@@ -2572,7 +2736,13 @@ fn accounts_are_kept_apart() -> TestResult {
     )?;
     let run = run_installer(
         &theirs_installer,
-        &["--target-root", target, "--apply", "--restore-user-data"],
+        &[
+            "--target-root",
+            target,
+            "--apply",
+            "--force",
+            "--restore-user-data",
+        ],
     )?;
     checks.that("the install succeeded", run.success, &run.output);
     let moved_document =
@@ -2690,7 +2860,7 @@ fn another_administrator_at_the_uac_prompt(checks: &mut Checks, password: &str) 
         password,
         "install",
         &format!(
-            "@echo off\r\n\"{}\" --target-root \"{target}\" --apply --restore-user-data\r\n",
+            "@echo off\r\n\"{}\" --target-root \"{target}\" --apply --force --restore-user-data\r\n",
             installer.display()
         ),
     )?;
@@ -2810,28 +2980,34 @@ fn tasks_by_schtasks() -> TestResult<BTreeMap<String, Vec<String>>> {
         "$bytes = & cmd.exe /c 'chcp 65001 >nul & schtasks.exe /query /xml'; \
          [string]::Join(\"`n\", $bytes)",
     )?;
-    let start = shown.find("<Tasks").ok_or("schtasks wrote no list")?;
-    let document = roxmltree::Document::parse(&shown[start..])?;
-    let root = document.root_element();
+    // Each task is a comment with its name and then a document of its own, however they are
+    // wrapped, which is why this does not parse the whole of it as one.
     let mut tasks = BTreeMap::new();
-    let mut name = None;
-    for node in root.children() {
-        if node.is_comment() {
-            name = node.text().map(|text| text.trim().to_owned());
-        } else if node.is_element() {
-            let commands = node
-                .descendants()
-                .filter(|child| child.tag_name().name() == "Exec")
-                .filter_map(|exec| {
-                    exec.children()
-                        .find(|child| child.tag_name().name() == "Command")
-                })
-                .filter_map(|command| command.text().map(|text| text.trim().to_owned()))
-                .collect();
-            if let Some(name) = name.take() {
-                tasks.insert(name, commands);
-            }
-        }
+    let mut rest = shown.as_str();
+    while let Some(start) = rest.find("<!--") {
+        let after = &rest[start + "<!--".len()..];
+        let (name, after) = after
+            .split_once("-->")
+            .ok_or("a comment that does not end")?;
+        let (Some(open), Some(close)) = (after.find("<Task "), after.find("</Task>")) else {
+            break;
+        };
+        let end = close + "</Task>".len();
+        let document = roxmltree::Document::parse(&after[open..end])?;
+        let commands = document
+            .descendants()
+            .filter(|node| node.tag_name().name() == "Exec")
+            .filter_map(|exec| {
+                exec.children()
+                    .find(|child| child.tag_name().name() == "Command")
+            })
+            .filter_map(|command| command.text().map(|text| text.trim().to_owned()))
+            .collect();
+        tasks.insert(name.trim().to_owned(), commands);
+        rest = &after[end..];
+    }
+    if tasks.is_empty() {
+        return Err(format!("schtasks wrote no tasks: {shown}").into());
     }
     Ok(tasks)
 }
