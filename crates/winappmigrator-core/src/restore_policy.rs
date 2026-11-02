@@ -20,6 +20,7 @@ use crate::path_utils::{
     is_drive_root, path_has_extension, path_is_strictly_inside, path_is_within, sanitize_filename,
     trim_icon_suffix,
 };
+use crate::registry_target::hex_decode;
 use crate::service_scan::parse_image_path;
 
 /// The longest service name the Service Control Manager accepts.
@@ -623,6 +624,22 @@ pub fn restored_value_text(entry: &RegistryEntry, map: &RestoreMap) -> String {
     } else {
         rewritten
     }
+}
+
+/// What a registry value's raw data will be on the target, for what is not plain text. A
+/// `REG_MULTI_SZ` is text too, and often a list of paths.
+pub fn restored_value_bytes(
+    entry: &RegistryEntry,
+    map: &RestoreMap,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    let bytes = hex_decode(entry.value_bytes_hex.as_deref().unwrap_or_default())?;
+    Ok(
+        if entry.value_kind == Some(RegistryValueKind::MultiString) {
+            map.rewrite_multi_string(&bytes)
+        } else {
+            bytes
+        },
+    )
 }
 
 /// Quote the path of an unquoted command that runs a restored file, when the path has a
@@ -1636,6 +1653,34 @@ mod tests {
             restored_value_text(&run(r"C:\App\a.exe --x"), &no_space),
             r"D:\Apps\a.exe --x"
         );
+    }
+
+    #[test]
+    fn only_a_multi_string_value_has_paths_in_its_raw_data_rewritten() {
+        let mut map = RestoreMap::for_tests(r"D:\Apps");
+        map.add_test_root(r"C:\App", r"D:\Apps");
+        let hex = |text: &str| {
+            text.encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let source = hex("C:\\App\\a\0\0");
+        let mut value = entry(
+            RegistryHive::CurrentUser,
+            r"Software\Acme",
+            Some("Dirs"),
+            "",
+        );
+        value.value_bytes_hex = Some(source.clone());
+
+        value.value_kind = Some(RegistryValueKind::MultiString);
+        assert_eq!(
+            restored_value_bytes(&value, &map),
+            hex_decode(&hex("D:\\Apps\\a\0\0"))
+        );
+        value.value_kind = Some(RegistryValueKind::Binary);
+        assert_eq!(restored_value_bytes(&value, &map), hex_decode(&source));
     }
 
     #[test]

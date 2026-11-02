@@ -178,6 +178,23 @@ impl RestoreMap {
         output
     }
 
+    /// Rewrite the raw data of a `REG_MULTI_SZ` value: UTF-16 strings, each ended by a NUL.
+    /// Data that is not that shape comes back as it was.
+    pub fn rewrite_multi_string(&self, bytes: &[u8]) -> Vec<u8> {
+        let (pairs, odd_byte) = bytes.as_chunks::<2>();
+        let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+        let (true, Ok(text)) = (odd_byte.is_empty(), String::from_utf16(&units)) else {
+            return bytes.to_vec();
+        };
+        text.split('\0')
+            .map(|part| self.rewrite(part))
+            .collect::<Vec<_>>()
+            .join("\0")
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+
     /// Rewrite the text of an XML document. Paths in XML are escaped, so `C:\A&B` appears
     /// as `C:\A&amp;B`, and a target holding `&` would otherwise break the document.
     /// Fails on anything that does not parse, and on CDATA, whose text would not map back
@@ -321,6 +338,41 @@ mod tests {
 
     use super::*;
     use crate::models::{FileClassification, FileEntry};
+
+    fn multi_string(text: &str) -> Vec<u8> {
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    #[test]
+    fn each_string_in_a_multi_string_value_is_rewritten() {
+        let map = map_with_root(r"C:\Program Files\App", r"D:\Restored Here");
+        assert_eq!(
+            map.rewrite_multi_string(&multi_string(
+                "C:\\Program Files\\App\\a\0other\0C:\\Program Files\\App\\b\0\0"
+            )),
+            multi_string("D:\\Restored Here\\a\0other\0D:\\Restored Here\\b\0\0")
+        );
+        for unchanged in ["", "\0", "other\0\0", "C:\\Program Files\\Apple\0\0"] {
+            assert_eq!(
+                map.rewrite_multi_string(&multi_string(unchanged)),
+                multi_string(unchanged),
+                "{unchanged:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn data_that_is_not_a_multi_string_comes_back_as_it_was() {
+        let map = map_with_root(r"C:\App", r"D:\Restored");
+        for bytes in [
+            // An odd length.
+            vec![b'C', 0, b':'],
+            // A surrogate with no other half.
+            vec![0x00, 0xD8, b'C', 0],
+        ] {
+            assert_eq!(map.rewrite_multi_string(&bytes), bytes);
+        }
+    }
 
     fn map_with_root(source: &str, target: &str) -> RestoreMap {
         let mut map = RestoreMap {

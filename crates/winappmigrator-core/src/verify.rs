@@ -20,12 +20,13 @@ use crate::path_utils::{
 };
 use crate::prerequisites::{is_present, spec_for_bundle};
 use crate::registry_target::{
-    app_path_entries, environment_registry_target, hex_decode, is_path_variable,
-    path_contains_entry, registry_hive_name, registry_raw_type, registry_root, registry_value_name,
-    service_image_path, service_object_name,
+    app_path_entries, environment_registry_target, is_path_variable, path_contains_entry,
+    registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
+    service_object_name,
 };
 use crate::restore_policy::{
-    ServiceAccount, image_path_matches, paths_equal, read_task_definition, restored_value_text,
+    ServiceAccount, image_path_matches, paths_equal, read_task_definition, restored_value_bytes,
+    restored_value_text,
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedLicense, ReviewedPackage, ReviewedService, ReviewedShortcut,
@@ -1149,10 +1150,9 @@ fn registry_value_matches(
         }
         RegistryValueKind::None => Ok(actual.bytes.is_empty()),
         _ => {
-            let expected = hex_decode(entry.value_bytes_hex.as_deref().unwrap_or_default())
-                .map_err(|message| {
-                    registry_warning("verification_registry_hex_failed", entry, message)
-                })?;
+            let expected = restored_value_bytes(entry, map).map_err(|message| {
+                registry_warning("verification_registry_hex_failed", entry, message)
+            })?;
             Ok(actual.bytes.as_ref() == expected.as_slice())
         }
     }

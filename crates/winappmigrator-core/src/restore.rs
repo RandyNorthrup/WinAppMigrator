@@ -29,14 +29,13 @@ use crate::prerequisites::{
 };
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
 use crate::registry_target::{
-    app_path_entries, environment_registry_target, hex_decode, is_path_variable,
-    merge_path_entries, registry_hive_name, registry_raw_type, registry_root, registry_value_name,
-    service_image_path,
+    app_path_entries, environment_registry_target, is_path_variable, merge_path_entries,
+    registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
 };
 use crate::restore_policy::{
     COM_SERVER_KEYS, ServiceAccount, com_server_refusal, existing_service_refusal,
     existing_task_refusal, is_autostart_entry, is_com_server_entry, paths_equal,
-    restored_value_text, service_image_path_value,
+    restored_value_bytes, restored_value_text, service_image_path_value,
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
@@ -1227,9 +1226,9 @@ fn registry_value_from_entry(
             vtype: REG_NONE,
         }),
         _ => {
-            let bytes = hex_decode(entry.value_bytes_hex.as_deref().unwrap_or_default()).map_err(
-                |message| registry_warning("registry_value_decode_failed", entry, message),
-            )?;
+            let bytes = restored_value_bytes(entry, map).map_err(|message| {
+                registry_warning("registry_value_decode_failed", entry, message)
+            })?;
             Ok(RegValue {
                 bytes: Cow::Owned(bytes),
                 vtype: registry_raw_type(kind),
