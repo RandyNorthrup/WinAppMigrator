@@ -36,7 +36,8 @@ use crate::registry_scan::{
 use crate::reporting::{artifact_paths, write_scan_reports};
 use crate::runtime_detection::{AppRuntimes, ArchitectureKey, DotNetNeed, inspect_app_runtimes};
 use crate::secret_rules::{
-    LeftOut, is_license_registry_entry, take_secret_files, take_secrets_from_settings,
+    LeftOut, ScannedSettings, is_license_registry_entry, take_licenses_from_settings,
+    take_secret_files, take_secrets_from_license_values, take_secrets_from_settings,
 };
 use crate::service_scan::{ServiceScanContext, scan_drivers, scan_services};
 use crate::shortcut_scan::{ShortcutScanContext, scan_shortcuts};
@@ -350,8 +351,10 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             .filter(|file| file.should_copy)
             .map(|file| system.logical_path(&file.path)),
     );
+    // One account cannot put a font in the Windows folder, whatever its own records say.
     let recorded_files: Vec<PathBuf> = install_source
         .as_ref()
+        .filter(|_| !installed_for_one_account)
         .map(|source| source.recorded_files.clone())
         .unwrap_or_default()
         .iter()
@@ -393,20 +396,23 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         system.is_offline(),
     );
     let mut left_out = LeftOut::default();
-    let (license_artifacts, license_registry_entries, license_warnings) = scan_license_artifacts(
-        &LicenseScanContext {
-            publisher: source_app.as_ref().and_then(|app| app.publisher.as_deref()),
-            discovered_files: &file_inventory,
-            registry_entries: &registry_artifacts.entries,
-            names: &names,
-            executable: &logical_executable,
-            install_location: logical_location.as_deref(),
-            include_license_data: options.include_license_data,
-            include_hashes: options.include_hashes,
-        },
-        &system,
-        &mut left_out,
-    );
+    // First, so that nothing else counts one as a license, or anything else that would be copied.
+    take_secret_files(&mut file_inventory, &system, &mut left_out);
+    let (license_artifacts, mut license_registry_entries, license_warnings) =
+        scan_license_artifacts(
+            &LicenseScanContext {
+                publisher: source_app.as_ref().and_then(|app| app.publisher.as_deref()),
+                discovered_files: &file_inventory,
+                registry_entries: &registry_artifacts.entries,
+                names: &names,
+                executable: &logical_executable,
+                install_location: logical_location.as_deref(),
+                include_license_data: options.include_license_data,
+                include_hashes: options.include_hashes,
+            },
+            &system,
+            &mut left_out,
+        );
     // What is license data goes by the License option, and nowhere else: a value, a file, or a
     // variable that was captured to be restored as anything else would not.
     registry_artifacts
@@ -422,20 +428,23 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             !is_a_license
         });
     }
+    let mut settings = ScannedSettings {
+        registry: &mut registry_artifacts.entries,
+        services: &mut services,
+        tasks: &mut scheduled_tasks,
+        shortcuts: &mut shortcuts,
+        environment: &mut environment_variables,
+        file_associations: &mut registry_artifacts.file_associations,
+        com_registrations: &mut registry_artifacts.com_registrations,
+        firewall_rules: &mut registry_artifacts.firewall_rules,
+        source_app: source_app.as_mut(),
+    };
+    if !options.include_license_data {
+        take_licenses_from_settings(&mut settings, &names, &mut left_out);
+    }
     // And what looks like a credential goes nowhere at all, whatever else was asked for.
-    take_secrets_from_settings(
-        &mut registry_artifacts.entries,
-        &mut services,
-        &mut scheduled_tasks,
-        &mut shortcuts,
-        &mut environment_variables,
-        &mut left_out,
-    );
-    take_secret_files(&mut file_inventory, &system, &mut left_out);
-    let license_registry_entries: Vec<_> = license_registry_entries
-        .into_iter()
-        .filter(|entry| !crate::secret_rules::is_secret_registry_value(entry))
-        .collect();
+    take_secrets_from_settings(&mut settings, &mut left_out);
+    take_secrets_from_license_values(&mut license_registry_entries, &mut left_out);
     let mut warnings = system.warnings();
     warnings.extend(pe_scan.warnings);
     warnings.extend(resolver_warnings);

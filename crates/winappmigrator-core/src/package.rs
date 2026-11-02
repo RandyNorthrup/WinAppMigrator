@@ -654,6 +654,16 @@ fn copy_license_store(
         if has_reserved_device_name(relative) || relative.to_str().is_none() {
             continue;
         }
+        // A store is copied whole, and what looks like a credential goes no more than anywhere else.
+        if crate::secret_rules::is_secret_file(&entry.path, || read_small_file(&entry.path)) {
+            warnings.push(Warning::new(
+                "license_store_file_left_out",
+                WarningSeverity::Info,
+                "A file in a license store looks like a credential, and was left out.",
+                Some(entry.path.display().to_string()),
+            ));
+            continue;
+        }
         let target = destination.join(safe_relative_path(relative));
         match copy_file_preserving_basic_metadata(&entry.path, &target)
             .and_then(|()| reader.check_after_copying(&entry.path))
@@ -676,6 +686,14 @@ fn copy_license_store(
         }
     }
     copied
+}
+
+/// What is in a file no bigger than a key file is, to tell whether it holds a private key.
+fn read_small_file(path: &Path) -> Option<Vec<u8>> {
+    fs::metadata(path)
+        .ok()
+        .filter(|metadata| metadata.len() <= crate::secret_rules::MAX_KEY_FILE_BYTES)
+        .and_then(|_| fs::read(path).ok())
 }
 
 /// The SHA-256 and size of a file as it now sits in the package.
