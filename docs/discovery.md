@@ -676,8 +676,10 @@ apps entry. A verb the package only adds to a type goes by that verb alone. They
 itself, so what is on this PC does not count as the package's for naming it. Services, drivers, and tasks go by the same, and an
 app's row in Settings, which is left alone if it is there at all, and the install gets its own. In the install location, files
 do not go by this when `--force` is asked for on a command line, but the installer's window will not use a folder with files in
-it without such a record. Outside the install location a program already there is left alone without one, and a data file
-is replaced.
+it without such a record. Outside the install location, without one, no program goes in a folder of a data location that was
+there before the install began, new or replacing, and each file of a license store goes by that too. A data file is replaced.
+What is left out goes in `RestoreResult.refused` by where it would have gone. A service or anything else that names such a file
+is still set up, and runs what was already there.
 
 An install record that names a key is not taken at its word for a file type's lists and verbs, which have other apps' lines in
 them, so `integration_scan.rs` goes through those. A verb that runs another app's program does not come along with its type, and

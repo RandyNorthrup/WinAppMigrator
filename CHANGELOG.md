@@ -16,8 +16,9 @@ All notable project changes are tracked here.
   machine-wide install record names them, and otherwise reported.
 - **Being told a folder is the app's does not make it so.** A package suggests its install location, so what names that
   folder only counts as an earlier install if a record on this PC says one was there. The installer's window no longer
-  uses a folder with files in it without such a record, a command line still can with `--force`, and a program outside
-  the install location is not replaced without one. An app's row in Settings stays that app's, and the install gets its own.
+  uses a folder with files in it without such a record, a command line still can with `--force`, and outside the install
+  location no program goes in a folder that was already there without one. An app's row in Settings stays that app's, and
+  the install gets its own.
 - **Certificates are reported, and never installed.** A package cannot add to a trust store. The ones an app seems to rely on are
   named for you to decide about.
 - **Credentials are left out of a package, and named.** Values, service settings, variables, command-line options, and files that

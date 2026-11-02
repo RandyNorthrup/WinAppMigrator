@@ -545,9 +545,13 @@ const WINDOWS_FILE_HOSTS: &[&str] = &[
 const COM_LOCAL_SERVER_KEY: &str = "localserver32";
 /// Files that run, or that what runs loads.
 const RUNNABLE_EXTENSIONS: &[&str] = &[
-    "bat", "cmd", "com", "cpl", "dll", "drv", "exe", "hta", "jar", "js", "jse", "lnk", "msc",
-    "msi", "ocx", "pif", "ps1", "py", "reg", "scr", "sys", "vbe", "vbs", "wsf", "wsh",
+    "asar", "ax", "bat", "bpl", "cmd", "com", "cpl", "dll", "drv", "exe", "hta", "jar", "js",
+    "jse", "lnk", "manifest", "msc", "msi", "node", "ocx", "pif", "ps1", "psd1", "psm1", "py",
+    "pyc", "pyd", "pyw", "reg", "scr", "sys", "vbe", "vbs", "wll", "wsf", "wsh", "xll",
 ];
+/// What says how the program of that name starts, which can name what it loads. A `user.config` is
+/// only someone's settings.
+const RUNNABLE_NAME_ENDS: &[&str] = &[".exe.config", ".dll.config"];
 const COM_INPROC_SERVER_KEY: &str = "inprocserver32";
 /// What is run or loaded for a class besides what its server's default value says.
 const COM_SERVER_PROGRAM_VALUE: &str = "ServerExecutable";
@@ -2450,25 +2454,41 @@ pub fn is_com_server_entry(entry: &RegistryEntry) -> bool {
         && is_default_value(entry.value_name.as_deref())
 }
 
-/// Why a file already on this PC must not be replaced, if so. Outside the install location a
-/// package says where a file goes, and there is nothing on the list a person agrees to for that. So
-/// a program of another app's cannot be replaced by the package's, which would run in its place, as
-/// that app's service perhaps. A person's data is what is meant to go in those folders, and it can
-/// be replaced, and comes back on uninstall. Nor does this go for a place on record as this app's.
-pub fn replacing_refusal(
+/// Whether a file runs, or decides what runs in a program beside it.
+fn is_runnable_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    RUNNABLE_NAME_ENDS.iter().any(|end| name.ends_with(end))
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                RUNNABLE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+            })
+}
+
+/// Why a program must not go where it would, if so. Outside the install location a package says
+/// where a file goes, and nothing on the list a person agrees to says so. A program there would run in
+/// place of the one it replaced, or be loaded by one beside it, as another app's service might. So
+/// none goes in a folder that was already there, unless a record says an install was at this
+/// location. `was_there` says whether the folder it goes under, first below the data folder, was
+/// there before this install began. A fresh PC has none of them. A person's data is what goes
+/// in those folders, and it can be replaced, and comes back on uninstall.
+pub fn program_placement_refusal(
     destination: &Path,
     target_root: &Path,
     earlier_install_here: bool,
+    was_there: bool,
 ) -> Option<String> {
-    let runs = destination
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            RUNNABLE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
-        });
-    (runs && !earlier_install_here && !path_is_strictly_inside(destination, target_root)).then(|| {
-        "a program of that name is already there, outside the install location, and nothing says \
-         it is this app's"
+    (was_there
+        && !earlier_install_here
+        && is_runnable_file(destination)
+        && !path_is_strictly_inside(destination, target_root))
+    .then(|| {
+        "that folder was already there, outside the install location, and nothing says it is this \
+         app's, so no program goes in it"
             .to_owned()
     })
 }
@@ -4355,32 +4375,42 @@ mod tests {
     }
 
     #[test]
-    fn a_program_of_someone_elses_is_not_replaced_from_outside_the_install_location() {
+    fn no_program_goes_in_a_data_folder_that_was_already_there() {
         let target = Path::new(r"C:\Program Files\Acme");
-        let elsewhere = Path::new(r"C:\ProgramData\Other\svc.exe");
-        assert!(replacing_refusal(elsewhere, target, false).is_some());
-        assert!(
-            replacing_refusal(Path::new(r"C:\ProgramData\Other\A.DLL"), target, false).is_some()
-        );
+        let refusal = |path: &str, earlier: bool, was_there: bool| {
+            program_placement_refusal(Path::new(path), target, earlier, was_there)
+        };
+        for program in [
+            r"C:\ProgramData\Other\svc.exe",
+            r"C:\ProgramData\Other\VERSION.DLL",
+            r"C:\ProgramData\Other\svc.exe.config",
+            r"C:\Users\me\AppData\Local\Programs\Other\resources\app.asar",
+            r"C:\ProgramData\Other\native.node",
+            r"C:\ProgramData\Other\mod.pyd",
+        ] {
+            assert!(refusal(program, false, true).is_some(), "{program}");
+            assert_eq!(
+                refusal(program, false, false),
+                None,
+                "a folder that was not there has no program in it to load this: {program}"
+            );
+            assert_eq!(
+                refusal(program, true, true),
+                None,
+                "a record says what is there is an install's: {program}"
+            );
+        }
         assert_eq!(
-            replacing_refusal(elsewhere, target, true),
-            None,
-            "a record says it is what an install here put there"
-        );
-        assert_eq!(
-            replacing_refusal(Path::new(r"C:\Program Files\Acme\a.exe"), target, false),
+            refusal(r"C:\Program Files\Acme\a.exe", false, true),
             None,
             "the install location is asked about by itself"
         );
-        assert_eq!(
-            replacing_refusal(
-                Path::new(r"C:\ProgramData\Other\settings.ini"),
-                target,
-                false
-            ),
-            None,
-            "that is a person's data, which is what goes there"
-        );
+        for data in [
+            r"C:\ProgramData\Other\settings.ini",
+            r"C:\Users\me\AppData\Local\Other\user.config",
+        ] {
+            assert_eq!(refusal(data, false, true), None, "{data}");
+        }
     }
 
     #[test]

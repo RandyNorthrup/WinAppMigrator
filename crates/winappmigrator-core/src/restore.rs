@@ -35,7 +35,7 @@ use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_TASKS, POWERSHELL_IMPORT_UTILITY,
     POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, path_is_strictly_inside,
-    path_is_within, system_root,
+    path_is_within, strip_prefix_ignore_case, system_root,
 };
 use crate::prerequisites::{
     PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
@@ -52,7 +52,7 @@ use crate::restore_policy::{
     COM_SERVER_KEYS, EVENT_LOG_PREFIX, Registration, SERVICES_PREFIX, ServiceAccount,
     com_class_key, com_server_refusal, existing_service_refusal, existing_task_refusal,
     firewall_fingerprint, firewall_identity, is_autostart_entry, is_uninstall_entry_key,
-    netsh_add_rule_arguments, registration_of, registration_unit_of, replacing_refusal,
+    netsh_add_rule_arguments, program_placement_refusal, registration_of, registration_unit_of,
     restored_value_bytes, restored_value_name, restored_value_text, service_image_path_value,
     stored_firewall_rule_matches,
 };
@@ -385,6 +385,7 @@ pub fn restore_package_monitored(
         com_classes_left_alone: Vec::new(),
         registrations_left_alone: Vec::new(),
         earlier_install_here,
+        data_folders_already_here: Vec::new(),
         cancelled: false,
         app_name: &app_name,
         manifest: &manifest,
@@ -677,6 +678,9 @@ struct Run<'a, 'p> {
     registrations_left_alone: Vec<LeftAlone>,
     /// Whether a record says an install was at this location before this one.
     earlier_install_here: bool,
+    /// The folders below a data folder that something here would go under, which were there before
+    /// this install put anything in them.
+    data_folders_already_here: Vec<PathBuf>,
     cancelled: bool,
 }
 
@@ -684,6 +688,7 @@ impl Run<'_, '_> {
     /// Every step, in order. Each one stops at the first thing that fails, and none starts
     /// after that: anything that fails means the install failed, and it is all put back.
     fn apply_steps(&mut self) {
+        self.note_data_folders();
         // Runtimes first, so the app's own services and drivers have them available.
         self.restore_prerequisites();
         self.restore_files();
@@ -698,6 +703,34 @@ impl Run<'_, '_> {
         self.restore_shortcuts();
         self.restore_environment();
         self.write_uninstall_entry();
+    }
+
+    /// Before anything is put in them, so that what this install makes does not count.
+    fn note_data_folders(&mut self) {
+        let review = self.review;
+        let target_root = &self.options.target_root;
+        let files = review
+            .files
+            .iter()
+            .filter_map(|file| review.map.destination_of(&file.original_path))
+            .map(Path::to_path_buf);
+        let licenses = review.license.iter().flat_map(|license| {
+            std::iter::once(license.destination.clone()).chain(
+                license
+                    .artifact
+                    .store_files
+                    .iter()
+                    .map(|file| license.destination.join(&file.relative_path)),
+            )
+        });
+        let mut folders: Vec<PathBuf> = files
+            .chain(licenses)
+            .filter_map(|destination| data_folder_of(&destination, target_root))
+            .filter(|folder| folder.exists())
+            .collect();
+        folders.sort();
+        folders.dedup();
+        self.data_folders_already_here = folders;
     }
 
     /// Whether to go no further. A preview changes nothing, so problems it finds only stop
@@ -812,17 +845,12 @@ impl Run<'_, '_> {
                 }
             };
 
-            if let Some(refusal) = destination
-                .exists()
-                .then(|| {
-                    replacing_refusal(
-                        destination,
-                        &self.options.target_root,
-                        self.earlier_install_here,
-                    )
-                })
-                .flatten()
-            {
+            if let Some(refusal) = program_left_alone(
+                destination,
+                &self.options.target_root,
+                self.earlier_install_here,
+                &self.data_folders_already_here,
+            ) {
                 self.record_failure(Warning::new(
                     FILE_EXISTS_ELSEWHERE_CODE,
                     WarningSeverity::Warning,
@@ -1365,17 +1393,12 @@ impl Run<'_, '_> {
                 ));
                 continue;
             }
-            if let Some(refusal) = destination
-                .exists()
-                .then(|| {
-                    replacing_refusal(
-                        destination,
-                        &self.options.target_root,
-                        self.earlier_install_here,
-                    )
-                })
-                .flatten()
-            {
+            if let Some(refusal) = program_left_alone(
+                destination,
+                &self.options.target_root,
+                self.earlier_install_here,
+                &self.data_folders_already_here,
+            ) {
                 self.record_failure(Warning::new(
                     FILE_EXISTS_ELSEWHERE_CODE,
                     WarningSeverity::Warning,
@@ -1395,6 +1418,26 @@ impl Run<'_, '_> {
                 ));
                 continue;
             }
+            // A store is copied file by file, and each goes by the same rule as any other.
+            let programs_left_alone: Vec<(PathBuf, String)> = license
+                .artifact
+                .store_files
+                .iter()
+                .filter_map(|file| {
+                    let to = package_destination_path(
+                        destination,
+                        &safe_relative_path(&file.relative_path),
+                    )
+                    .ok()?;
+                    let refusal = program_left_alone(
+                        &to,
+                        &self.options.target_root,
+                        self.earlier_install_here,
+                        &self.data_folders_already_here,
+                    )?;
+                    Some((to, refusal))
+                })
+                .collect();
             let result = if license.artifact.store_files.is_empty() {
                 copy_restore_file(
                     journal,
@@ -1411,8 +1454,17 @@ impl Run<'_, '_> {
                     &source,
                     destination,
                     &self.options.target_root,
+                    &programs_left_alone,
                 )
             };
+            for (to, refusal) in programs_left_alone {
+                self.record_failure(Warning::new(
+                    FILE_EXISTS_ELSEWHERE_CODE,
+                    WarningSeverity::Warning,
+                    refusal,
+                    Some(to.display().to_string()),
+                ));
+            }
             match result {
                 Ok(()) => self.changes.license.push(format!(
                     "restored license {} -> {}",
@@ -1832,19 +1884,54 @@ fn copy_license_store(
     source: &Path,
     destination: &Path,
     target_root: &Path,
+    left_alone: &[(PathBuf, String)],
 ) -> Result<()> {
     for file in &artifact.store_files {
         let relative = safe_relative_path(&file.relative_path);
+        let to = package_destination_path(destination, &relative)?;
+        if left_alone.iter().any(|(path, _)| *path == to) {
+            continue;
+        }
         copy_restore_file(
             journal,
             &package_destination_path(source, &relative)?,
-            &package_destination_path(destination, &relative)?,
+            &to,
             target_root,
             ItemKind::License,
             Some(&file.hash_sha256),
         )?;
     }
     Ok(())
+}
+
+/// The folder a file outside the install location would go under, first below the data folder it
+/// is in, or that data folder if the file would go straight in it.
+fn data_folder_of(destination: &Path, target_root: &Path) -> Option<PathBuf> {
+    if path_is_strictly_inside(destination, target_root) {
+        return None;
+    }
+    let root = write_root_for(destination, target_root)?;
+    let relative = strip_prefix_ignore_case(destination, &root)?;
+    let mut parts = relative.components();
+    let first = parts.next()?;
+    Some(if parts.next().is_some() {
+        root.join(first)
+    } else {
+        root
+    })
+}
+
+/// [`program_placement_refusal`], for a folder of those that were there before.
+fn program_left_alone(
+    destination: &Path,
+    target_root: &Path,
+    earlier_install_here: bool,
+    folders_already_here: &[PathBuf],
+) -> Option<String> {
+    let was_there = folders_already_here
+        .iter()
+        .any(|folder| path_is_within(destination, folder));
+    program_placement_refusal(destination, target_root, earlier_install_here, was_there)
 }
 
 /// Decide whether a driver can be restored before touching anything, then put its image

@@ -31,6 +31,9 @@ use std::time::{Duration, Instant};
 
 use winappmigrator_core::archive::{create_zip_archive, has_certificate_table};
 use winappmigrator_core::hashing::sha256_file;
+use winappmigrator_core::models::{
+    LicenseArtifact, LicenseArtifactKind, LicenseFramework, LicenseStoreFile, TransferableHint,
+};
 use winappmigrator_core::path_utils::POWERSHELL_UTF8_OUTPUT;
 use winappmigrator_core::prerequisites::{compiled_specs, download};
 use winappmigrator_core::privilege::{ProtectedFolder, is_elevated};
@@ -5996,6 +5999,7 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
     // A program of another app's, in a folder a package's data can go to.
     fs::create_dir_all(HOSTILE_THEIR_FOLDER)?;
     fs::write(format!(r"{HOSTILE_THEIR_FOLDER}\svc.exe"), b"theirs")?;
+    fs::write(format!(r"{HOSTILE_THEIR_FOLDER}\store.exe"), b"theirs")?;
     must(
         "sc.exe",
         &[
@@ -6038,6 +6042,47 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         reason: String::new(),
         user_folder: None,
     });
+    // One added beside it, to be loaded by it, which replaces nothing.
+    let beside_relative = r"files\_external\theirs\version.dll";
+    let (hash, size) = package.add_file(beside_relative, &fake_app_program()?)?;
+    let beside_their_program = PathBuf::from(format!(r"{HOSTILE_THEIR_FOLDER}\version.dll"));
+    package.manifest.file_inventory.push(FileEntry {
+        path: beside_their_program.clone(),
+        original_path: beside_their_program.clone(),
+        package_relative_path: Some(PathBuf::from(beside_relative)),
+        suggested_destination_path: None,
+        size_bytes: Some(size),
+        hash_sha256: Some(hash),
+        classification: FileClassification::UserData,
+        should_copy: true,
+        reason: String::new(),
+        user_folder: None,
+    });
+    // And a license store said to be that folder, with a program in it.
+    let (hash, size) = package.add_file(r"license\theirs\store.exe", &fake_app_program()?)?;
+    package.manifest.included_license_data = true;
+    package
+        .manifest
+        .license_artifacts_detected
+        .push(LicenseArtifact {
+            kind: LicenseArtifactKind::FrameworkStore,
+            framework: LicenseFramework::FlexLm,
+            path: Some(PathBuf::from(HOSTILE_THEIR_FOLDER)),
+            registry_location: None,
+            detail: String::new(),
+            machine_bound: false,
+            requires_admin: true,
+            transferable: TransferableHint::Unknown,
+            should_copy: true,
+            package_relative_path: Some(PathBuf::from(r"license\theirs")),
+            size_bytes: None,
+            hash_sha256: None,
+            store_files: vec![LicenseStoreFile {
+                relative_path: PathBuf::from("store.exe"),
+                size_bytes: size,
+                hash_sha256: hash,
+            }],
+        });
     // A service of another's in that folder, and a setting of it, as it came in by the way.
     package
         .manifest
@@ -6236,6 +6281,16 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         fs::read(&their_program)?,
         b"theirs".to_vec(),
     );
+    checks.same(
+        "on disk: and the one a license store said to replace",
+        fs::read(format!(r"{HOSTILE_THEIR_FOLDER}\store.exe"))?,
+        b"theirs".to_vec(),
+    );
+    checks.that(
+        "on disk: nothing was added beside it to be loaded by it",
+        !beside_their_program.exists(),
+        "it is there",
+    );
     checks.that(
         "refusing those does not fail the install",
         run.success,
@@ -6261,6 +6316,7 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         HOSTILE_OTHER_APP,
         HOSTILE_SAME_ROW,
         r"WAM Hostile Other\svc.exe",
+        r"WAM Hostile Other\version.dll",
     ] {
         checks.that(
             &format!("reported as left out: {wanted}"),

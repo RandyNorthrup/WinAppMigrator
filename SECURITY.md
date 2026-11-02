@@ -75,10 +75,12 @@ installer is about to trust, and an honest package reaching too far:
     line replaces a file of the same name, and an uninstall puts it back. If that file is a program another app's service
     runs, the next start of that service runs the package's, which no rule above sees. So only use `--force` for a folder
     you know is this app's. The installer's window will not use a folder with files in it unless a record says an install
-    was there. Outside the install location a program already there is never replaced without such a record, with
-    `--force` or not. A data file there is replaced, by the window as well, since restoring a person's data is what that
-    is for, and it comes back on uninstall. A package could use that to change another app's settings, and that is not
-    on the list.
+    was there. Outside the install location, without such a record, no program goes in a folder of a data location that
+    was already there, new or replacing, with `--force` or not, and that goes for a license store's files too. That is by
+    kind of file, with what a program is told to load by, such as `.exe.config`, among them. A data file there is replaced,
+    by the window as well, since restoring a person's data is what that is for, and it comes back on uninstall. A
+    setting can decide what an app runs, so a package could use that to change what another app does, and that is not on
+    the list.
 - **The rules do not make a package safe.** A package may still run its own files, as a service
   with full rights if it asks to. That is what installing an app is. Before anything happens, the
   installer's window lists the services, drivers, scheduled tasks, autostart entries, shortcuts,
