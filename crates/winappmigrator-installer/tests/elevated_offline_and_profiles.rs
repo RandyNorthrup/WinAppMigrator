@@ -84,8 +84,6 @@ const DRIVE_CANARY: &str = "wam-offline-canary";
 const MACHINE_FONTS: &str = r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\Fonts";
 const EVENT_LOG_APPLICATION: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application";
 const MACHINE_RUN_32: &str = r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run";
-const APP_PATHS_32: &str =
-    r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\WAM Offline App.exe";
 const LAYERS: &str = r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
 const MACHINE_KEY: &str = r"HKLM\Software\WAM Offline Vendor\WAM Offline App";
 const USER_KEY: &str = r"HKCU\Software\WAM Offline Vendor\WAM Offline App";
@@ -763,7 +761,7 @@ fn drive_integrations(root: &str) -> Vec<(String, Option<String>, String)> {
             Some(APP),
             &format!("\"{exe}\" --tray"),
         ),
-        of(APP_PATHS_32.to_owned(), None, &exe),
+        of(APP_PATHS_KEY.to_owned(), None, &exe),
         of(LAYERS.to_owned(), Some(&exe), "~ WINXPSP3"),
     ]
 }
@@ -774,7 +772,7 @@ fn firewall_rule_says(name: &str) -> TestResult<String> {
            $app = $_ | Get-NetFirewallApplicationFilter; \
            $port = $_ | Get-NetFirewallPortFilter; \
            '{{0}}|{{1}}|{{2}}|{{3}}' -f $_.Direction, $_.Action, $app.Program, ($port.LocalPort -join ',') \
-         }}",
+         }}; exit 0",
         quoted(name)
     ))?;
     Ok(shown.trim().to_owned())

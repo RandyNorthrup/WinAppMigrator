@@ -4360,8 +4360,12 @@ const INT_CERTIFICATE_SUBJECT: &str = "WAM Int Vendor";
 const LAYERS: &str = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
 const FONTS_KEY: &str = r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\Fonts";
 const INT_RUN_32: &str = r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run";
+const INT_APP_PATHS: &str =
+    r"HKLM\Software\Microsoft\Windows\CurrentVersion\App Paths\WAM Int App.exe";
+/// On Windows 10 and 11 this is the same key as that one, which is checked below.
 const INT_APP_PATHS_32: &str =
     r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\WAM Int App.exe";
+const INT_UDP_PORT: &str = "8766";
 const CANARY_API_KEY: &str = "wam-canary-api-key";
 const CANARY_PASSWORD: &str = "wam-canary-password";
 const CANARY_CONNECTION: &str = "wam-canary-connection";
@@ -4659,7 +4663,7 @@ fn int_values(root: &str) -> Vec<IntValue> {
             INT_DRIVER,
         ),
         int_value(INT_RUN_32, Some(INT_APP), sz, &format!("\"{exe}\" --tray")),
-        int_value(INT_APP_PATHS_32, None, sz, &exe),
+        int_value(INT_APP_PATHS, None, sz, &exe),
         int_value(
             &format!(r"HKLM\{LAYERS}"),
             Some(exe.as_str()),
@@ -4813,7 +4817,7 @@ fn firewall_rules_named(name: &str) -> TestResult<Vec<String>> {
            $port = $_ | Get-NetFirewallPortFilter; \
            '{{0}}|{{1}}|{{2}}|{{3}}|{{4}}|{{5}}' -f $_.Direction, $_.Action, $_.Enabled, \
              $app.Program, $port.Protocol, ($port.LocalPort -join ',') \
-         }}",
+         }}; exit 0",
         quoted(name)
     ))?;
     let mut lines: Vec<String> = shown
@@ -4827,6 +4831,10 @@ fn firewall_rules_named(name: &str) -> TestResult<Vec<String>> {
 }
 
 fn netsh_add_rule(name: &str, program: &str, port: &str) -> TestResult {
+    netsh_add_rule_for(name, program, "tcp", port)
+}
+
+fn netsh_add_rule_for(name: &str, program: &str, protocol: &str, port: &str) -> TestResult {
     must(
         "netsh.exe",
         &[
@@ -4838,7 +4846,7 @@ fn netsh_add_rule(name: &str, program: &str, port: &str) -> TestResult {
             "dir=in",
             "action=allow",
             &format!("program={program}"),
-            "protocol=tcp",
+            &format!("protocol={protocol}"),
             &format!("localport={port}"),
         ],
     )
@@ -4973,6 +4981,8 @@ fn create_integrated_app(program: &Path, folders: &ShellFolders) -> TestResult {
         add_value(value)?;
     }
     netsh_add_rule(INT_FIREWALL_RULE, &int_exe(root), "8765")?;
+    // An app often has one for each, by one name.
+    netsh_add_rule_for(INT_FIREWALL_RULE, &int_exe(root), "udp", INT_UDP_PORT)?;
     must(
         "sc.exe",
         &[
@@ -5023,7 +5033,7 @@ fn int_registered_keys() -> Vec<String> {
         format!(r"{EVENT_LOG_APPLICATION}\{INT_EVENT_SOURCE}"),
         format!(r"HKLM\Software\ODBC\ODBCINST.INI\{INT_DRIVER}"),
         format!(r"HKLM\Software\ODBC\ODBC.INI\{INT_SOURCE_NAME}"),
-        INT_APP_PATHS_32.to_owned(),
+        INT_APP_PATHS.to_owned(),
         INT_UNINSTALL.to_owned(),
     ]
 }
@@ -5282,7 +5292,10 @@ fn check_scan_of_integrations(checks: &mut Checks, manifest: &PackageManifest) {
     checks.same(
         "scan: its firewall rule, and not the other of that name",
         rules,
-        vec![(INT_FIREWALL_RULE, Path::new(&exe))],
+        vec![
+            (INT_FIREWALL_RULE, Path::new(&exe)),
+            (INT_FIREWALL_RULE, Path::new(&exe)),
+        ],
     );
     checks.that(
         "scan: the certificate it relies on is reported",
@@ -5349,11 +5362,17 @@ fn check_integrations_restored(checks: &mut Checks, root: &str, thumbprint: &str
         {
             let mut wanted = vec![
                 format!(r"Inbound|Allow|True|{exe}|TCP|8765"),
+                format!(r"Inbound|Allow|True|{exe}|UDP|{INT_UDP_PORT}"),
                 format!(r"Inbound|Allow|True|{INT_OTHER_ROOT}\other.exe|TCP|9999"),
             ];
             wanted.sort();
             wanted
         },
+    );
+    checks.same(
+        "reg.exe: a 32-bit program sees that program's name by the same key",
+        reg_value(INT_APP_PATHS_32, None)?,
+        reg_value(INT_APP_PATHS, None)?,
     );
     let netsh = netsh_show_rule(INT_FIREWALL_RULE)?;
     checks.that(
@@ -5413,6 +5432,7 @@ fn ask_for_hostile_integrations(package: &mut HandBuilt) -> TestResult<Vec<&'sta
     let own = package.program.clone();
     let (machine, sz) = (RegistryHive::LocalMachine, RegistryValueKind::String);
     let outside_class = "{5A7E6E0C-E2E0-4000-8000-0000000B0001}";
+    let other_server_class = "{5A7E6E0C-E2E0-4000-8000-0000000B0005}";
     let manifest = &mut package.manifest;
     let rule = |name: &str, program: &str, action: &str, not_carried: &[&str]| FirewallRuleEntry {
         name: name.to_owned(),
@@ -5569,6 +5589,68 @@ fn ask_for_hostile_integrations(package: &mut HandBuilt) -> TestResult<Vec<&'sta
             "WAM Hostile",
             sz.clone(),
         ),
+        // A name that would be written as another: the registry ends one at a NUL.
+        registry_entry(
+            machine.clone(),
+            r"Software\WamHostileNul",
+            Some("Theme\0Hidden"),
+            "x",
+            sz.clone(),
+        ),
+        // What traces every program's calls to a database, which loads what it says.
+        registry_entry(
+            machine.clone(),
+            r"Software\ODBC\ODBC.INI\ODBC",
+            Some("TraceDll"),
+            r"\\wam-hostile-server\share\evil.dll",
+            sz.clone(),
+        ),
+        // An icon that hands a server the name of whoever looks, and a command with the file only
+        // coming along.
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\WamHostile.Icon\DefaultIcon",
+            None,
+            r"\\wam-hostile-server\share\i.ico",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\WamHostile.Cmd\shell\open\command",
+            None,
+            &format!("{CMD} /c calc \"{own}\""),
+            sz.clone(),
+        ),
+        // What opening any folder does.
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\Directory\shell\open\command",
+            None,
+            &format!("\"{own}\" \"%1\""),
+            sz.clone(),
+        ),
+        // A class that only says it is the package's, with another server beside the one it has.
+        registry_entry(
+            machine.clone(),
+            &format!(r"Software\Classes\CLSID\{other_server_class}\InprocServer32"),
+            None,
+            &own,
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            &format!(r"Software\Classes\CLSID\{other_server_class}\LocalServer32"),
+            None,
+            &format!("{CMD} /c calc"),
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\*\shellex\ContextMenuHandlers\WamHostileSecond",
+            None,
+            other_server_class,
+            sz.clone(),
+        ),
     ]);
     Ok(vec![
         "The firewall rule WAM Hostile Not Installed",
@@ -5591,6 +5673,12 @@ fn ask_for_hostile_integrations(package: &mut HandBuilt) -> TestResult<Vec<&'sta
         "WAM Hostile Driver",
         r"AppCompatFlags\Layers",
         r"Clients\StartMenuInternet",
+        r"WamHostileNul",
+        r"ODBC.INI\ODBC",
+        r"WamHostile.Icon\DefaultIcon",
+        r"WamHostile.Cmd\shell\open\command",
+        r"Directory\shell\open\command",
+        r"ContextMenuHandlers\WamHostileSecond",
     ])
 }
 
@@ -5651,10 +5739,50 @@ fn hostile_integration_state() -> TestResult<BTreeMap<String, String>> {
             FONTS_KEY.to_owned(),
             Some("Arial (TrueType)"),
         ),
+        (
+            "what traces every call to a database",
+            r"HKLM\Software\ODBC\ODBC.INI\ODBC".to_owned(),
+            Some("TraceDll"),
+        ),
+        (
+            "what opening any folder runs",
+            format!(r"{classes}\Directory\shell\open\command"),
+            None,
+        ),
+        (
+            "which verb the existing type opens with",
+            format!(r"{classes}\WamHostileExisting\shell"),
+            None,
+        ),
+        (
+            "the existing class's server",
+            format!(r"{classes}\CLSID\{HOSTILE_EXISTING_CLASS}\InprocServer32"),
+            None,
+        ),
+        (
+            "what the existing class is treated as",
+            format!(r"{classes}\CLSID\{HOSTILE_EXISTING_CLASS}\TreatAs"),
+            None,
+        ),
+        (
+            "what hosts the existing AppID",
+            format!(r"{classes}\AppID\{HOSTILE_EXISTING_APP_ID}"),
+            Some("DllSurrogate"),
+        ),
+        (
+            "the second existing source's other messages",
+            format!(r"{EVENT_LOG_APPLICATION}\{HOSTILE_SECOND_SOURCE}"),
+            Some("CategoryMessageFile"),
+        ),
     ] {
         state.insert(format!("reg.exe: {label}"), reg_state(&key, name)?);
     }
     for key in [
+        r"HKLM\Software\WamHostileNul".to_owned(),
+        format!(r"{classes}\WamHostile.Icon"),
+        format!(r"{classes}\WamHostile.Cmd"),
+        format!(r"{classes}\CLSID\{{5A7E6E0C-E2E0-4000-8000-0000000B0005}}"),
+        format!(r"{classes}\*\shellex\ContextMenuHandlers\WamHostileSecond"),
         format!(r"{classes}\wamhostile"),
         format!(r"{classes}\*\shellex\ContextMenuHandlers\WamHostile"),
         format!(r"{EVENT_LOG_APPLICATION}\WamHostileSource"),
@@ -5686,6 +5814,10 @@ fn hostile_integration_state() -> TestResult<BTreeMap<String, String>> {
 }
 
 const HOSTILE_EXISTING_SOURCE: &str = "WamHostileExisting";
+const HOSTILE_SECOND_SOURCE: &str = "WamHostileExistingToo";
+const HOSTILE_EXISTING_CLASS: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0002}";
+const HOSTILE_EXISTING_APP_ID: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0003}";
+const HOSTILE_OWN_CLASS: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0004}";
 
 /// What can only be refused at the moment it would be done, since it depends on what is here.
 fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResult {
@@ -5716,6 +5848,26 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         None,
         "REG_SZ",
         &format!("\"{other}\" \"%1\""),
+    )?;
+    let second_source = format!(r"{EVENT_LOG_APPLICATION}\{HOSTILE_SECOND_SOURCE}");
+    reg_add(
+        &second_source,
+        Some("EventMessageFile"),
+        "REG_SZ",
+        &format!(r"{INT_OTHER_ROOT}\messages.dll"),
+    )?;
+    // A class of Windows' host, which a package could say it has too, and an AppID.
+    reg_add(
+        &format!(r"{classes}\CLSID\{HOSTILE_EXISTING_CLASS}\InprocServer32"),
+        None,
+        "REG_SZ",
+        "shell32.dll",
+    )?;
+    reg_add(
+        &format!(r"{classes}\AppID\{HOSTILE_EXISTING_APP_ID}"),
+        None,
+        "REG_SZ",
+        "Someone's",
     )?;
     let before = hostile_integration_state()?;
     let rule_before = firewall_rules_named(INT_FIREWALL_RULE)?;
@@ -5795,6 +5947,60 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
             &own,
             sz.clone(),
         ),
+        // What opening a type does, by no more than which verb it starts with.
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\WamHostileExisting\shell",
+            None,
+            "taken",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\WamHostileExisting\shell\taken\command",
+            None,
+            &command,
+            sz.clone(),
+        ),
+        // A class's server copied from this PC, for what comes beside it to be let in.
+        registry_entry(
+            machine.clone(),
+            &format!(r"Software\Classes\CLSID\{HOSTILE_OWN_CLASS}\InprocServer32"),
+            None,
+            &own,
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            &format!(r"Software\Classes\CLSID\{HOSTILE_EXISTING_CLASS}\InprocServer32"),
+            None,
+            "shell32.dll",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            &format!(r"Software\Classes\CLSID\{HOSTILE_EXISTING_CLASS}\TreatAs"),
+            None,
+            HOSTILE_OWN_CLASS,
+            sz.clone(),
+        ),
+        // A value only added to what is someone's changes what it does just as well.
+        registry_entry(
+            machine.clone(),
+            &format!(r"Software\Classes\AppID\{HOSTILE_EXISTING_APP_ID}"),
+            Some("DllSurrogate"),
+            &own,
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            &format!(
+                r"SYSTEM\CurrentControlSet\Services\EventLog\Application\{HOSTILE_SECOND_SOURCE}"
+            ),
+            Some("CategoryMessageFile"),
+            &own,
+            sz.clone(),
+        ),
     ]);
     // A rule of the same name, way, and program as one already there, saying something else.
     let installer = package.build("taking")?;
@@ -5817,6 +6023,10 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         r"Application\WamHostileExisting",
         r"System\WamHostileExisting",
         "Arial (TrueType)",
+        r"Classes\WamHostileExisting\shell\taken\command",
+        HOSTILE_EXISTING_CLASS,
+        HOSTILE_EXISTING_APP_ID,
+        HOSTILE_SECOND_SOURCE,
     ] {
         checks.that(
             &format!("reported as left out: {wanted}"),
@@ -5862,6 +6072,9 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         );
     }
     reg_delete_key(&existing_source);
+    reg_delete_key(&second_source);
+    reg_delete_key(&format!(r"{classes}\CLSID\{HOSTILE_EXISTING_CLASS}"));
+    reg_delete_key(&format!(r"{classes}\AppID\{HOSTILE_EXISTING_APP_ID}"));
     reg_delete_key(&format!(r"{classes}\.wamhostiletype"));
     reg_delete_key(&format!(r"{classes}\WamHostileExisting"));
     reg_delete_key(&format!(r"{classes}\wamhostileexisting"));
