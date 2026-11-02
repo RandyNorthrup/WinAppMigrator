@@ -11,6 +11,9 @@
 //!   progress. It always requests administrator elevation on launch.
 //! - **Headless** (any arguments): the classic `--target-root … --apply` flow,
 //!   for automation, CI, and the end-to-end test.
+//!
+//! An install keeps a bare copy of this stub, for the app's entry in Settings to run. With
+//! `--uninstall <id>`, it undoes that install instead.
 
 // Always a windowed app — never flash a console window when double-clicked, in
 // any build. Headless mode still writes to a redirected stdout handle (as the
@@ -19,21 +22,34 @@
 
 use std::process::ExitCode;
 
-use winappmigrator_installer::{gui, headless};
+use winappmigrator_core::logging;
+use winappmigrator_installer::{gui, headless, uninstall};
 
 fn main() -> ExitCode {
     // First, before anything else can load a DLL.
     winappmigrator_ui::hardening::restrict_dll_search();
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if uninstall::is_requested(&args) {
+        return uninstall::run(args);
+    }
+    logging::install("install");
     // Arguments beyond the program name mean a scripted/headless restore; a bare
     // double-click (argv == [exe]) opens the GUI. Deciding on argument count also
     // keeps the GUI path from ever touching CLI parsing.
-    if std::env::args_os().count() > 1 {
+    if args.len() > 1 {
         return headless::run();
     }
     match gui::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
+            // A windowed program has nowhere to print this, and its window is what failed.
+            logging::open_machine_log();
+            tracing::error!(%error, "the installer's window could not open");
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("WinAppMigrator Installer")
+                .set_description(format!("The installer's window could not open: {error}"))
+                .show();
             ExitCode::FAILURE
         }
     }

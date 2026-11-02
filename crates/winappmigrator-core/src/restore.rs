@@ -7,53 +7,91 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use filetime::{FileTime, set_file_times};
+use tracing::{info, warn};
 use winreg::RegValue;
-use winreg::enums::REG_NONE;
+use winreg::enums::{REG_DWORD, REG_NONE, REG_SZ};
 
+use crate::archive::EmbeddedPackage;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
     ensure_target_root, ensure_within_root, package_destination_path, safe_relative_path,
     split_user_data_relative, write_root_for,
 };
 use crate::hashing::sha256_file;
+use crate::journal::{
+    Change, ItemKind, Journal, QUIET_FLAG, STAGING_PREFIX, StoredValue, UNINSTALL_FLAG, find_backup,
+};
 use crate::models::{
-    DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry, LicenseArtifact,
-    PackageManifest, RegistryEntry, RegistryHive, RegistryValueKind, RestoreOptions, RestoreResult,
-    RuntimePrerequisite, ServiceEntry, VerificationOptions, Warning, WarningSeverity,
+    DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry, FileClassification,
+    FileEntry, LicenseArtifact, PackageManifest, RegistryEntry, RegistryHive, RegistryValueKind,
+    RestoreOptions, RestoreResult, RuntimePrerequisite, ServiceEntry, VerificationOptions, Warning,
+    WarningSeverity,
 };
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_TASKS, POWERSHELL_IMPORT_UTILITY,
-    escape_powershell_single, hidden_command, system_root,
+    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, system_root,
 };
 use crate::prerequisites::{
     PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
 };
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
+use crate::progress::{InstallMonitor, InstallPhase, InstallStep};
 use crate::registry_target::{
     app_path_entries, environment_registry_target, is_path_variable, merge_path_entries,
-    registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
+    path_contains_entry, read_service_config, registry_hive_name, registry_raw_type, registry_root,
+    registry_value_name, service_image_path,
 };
 use crate::restore_policy::{
     COM_SERVER_KEYS, ServiceAccount, com_server_refusal, existing_service_refusal,
-    existing_task_refusal, is_autostart_entry, is_com_server_entry, paths_equal,
-    restored_value_bytes, restored_value_text, service_image_path_value,
+    existing_task_refusal, is_autostart_entry, is_com_server_entry, is_uninstall_entry_key,
+    paths_equal, restored_value_bytes, restored_value_text, service_image_path_value,
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
     install_location_problem,
 };
+use crate::rollback::{
+    interrupted_installs, put_back_backup, recover_interrupted_installs, roll_back,
+};
+use crate::service_scan::DELAYED_AUTOMATIC_START_LABEL;
 use crate::task_scan::live_task_xml;
 use crate::verify::verify_prepared_package;
 
-const RESTORE_LOG_JSON: &str = "restore_log.json";
-const RESTORE_LOG_MARKDOWN: &str = "restore_log.md";
-const POWERSHELL_EXE: &str = "powershell.exe";
-const SC_EXE: &str = "sc.exe";
-const REFUSED_LOG_HEADING: &str = "\n## Refused\n";
+pub(crate) const POWERSHELL_EXE: &str = "powershell.exe";
+pub(crate) const SC_EXE: &str = "sc.exe";
 /// Buffer for copying a file out of the package. Large files are the slow ones.
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
+const UNINSTALL_KEY_FOR_NEW_ENTRIES: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+const UNINSTALL_STRING_VALUE: &str = "UninstallString";
+const QUIET_UNINSTALL_STRING_VALUE: &str = "QuietUninstallString";
+const NO_MODIFY_VALUE: &str = "NoModify";
+const NO_REPAIR_VALUE: &str = "NoRepair";
+/// What an entry always gets from the install, in place of what the source's said.
+const UNINSTALL_COMMAND_VALUES: [&str; 4] = [
+    UNINSTALL_STRING_VALUE,
+    QUIET_UNINSTALL_STRING_VALUE,
+    NO_MODIFY_VALUE,
+    NO_REPAIR_VALUE,
+];
+const DISPLAY_NAME_VALUE: &str = "DisplayName";
+const DISPLAY_VERSION_VALUE: &str = "DisplayVersion";
+const PUBLISHER_VALUE: &str = "Publisher";
+const INSTALL_LOCATION_VALUE: &str = "InstallLocation";
+/// What PowerShell's error text starts going on about where in the script it happened, after
+/// which it quotes the script, which can hold what a shortcut's arguments were.
+const POWERSHELL_ERROR_POSITION: &str = "At line:";
+/// Failures found at the moment of installing that are the rules refusing something, and so
+/// are left out like any other refusal rather than failing the install. They depend on what
+/// is on this PC at that moment, so the review before the install could not see them.
+const REFUSALS_FOUND_WHEN_INSTALLING: [&str; 4] = [
+    "registry_com_class_exists",
+    "scheduled_task_exists_elsewhere",
+    "service_exists_elsewhere",
+    "driver_exists_elsewhere",
+];
+const CANCELLED_CODE: &str = "install_cancelled";
 
 /// What a restore did or would do, kept apart so what reaches beyond files can be listed
 /// first. A preview of a large app is otherwise thousands of files before anything else.
@@ -90,6 +128,21 @@ impl Changes {
 }
 
 pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
+    restore_package_monitored(options, &InstallMonitor::default(), None)
+}
+
+/// Restore a package, reporting progress to `monitor` and stopping if it is cancelled.
+///
+/// A preview changes nothing at all. An install keeps a journal, and if any step the package
+/// asked for fails, or it is cancelled, or the result does not pass its checks, it puts back
+/// everything it did and says so in the result. An `Err` means it stopped before changing
+/// anything. `installer` is where a copy of the stub to uninstall with is taken from, if
+/// the app is to get an uninstaller and an entry in Settings.
+pub fn restore_package_monitored(
+    options: &RestoreOptions,
+    monitor: &InstallMonitor,
+    installer: Option<&EmbeddedPackage>,
+) -> Result<RestoreResult> {
     if options.apply && options.dry_run {
         return Err(WinAppMigratorError::InvalidInput(
             "--apply and --dry-run cannot both be supplied".to_owned(),
@@ -115,8 +168,44 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     // Read once. Everything below works from this copy, so nothing can change between
     // the hash check and the install, even if the file on disk does.
     let manifest = read_manifest(&effective_options.package_root)?;
+    let mut recovered_warnings = Vec::new();
     if options.apply {
+        monitor.report(InstallStep::new(InstallPhase::CheckingPackage, 0, 0));
         refuse_damaged_package(&effective_options, &manifest)?;
+        // Before anything looks at what is on this PC, since what an install that never
+        // finished left there is not to be taken for anything.
+        for earlier in recover_interrupted_installs(&options.state_root, monitor)? {
+            recovered_warnings.push(Warning::new(
+                "earlier_install_undone",
+                WarningSeverity::Warning,
+                format!(
+                    "An earlier install of {} never finished, so it was undone first. {} changes \
+                     were put back.",
+                    earlier.app_name,
+                    earlier.report.undone.len()
+                ),
+                None,
+            ));
+            recovered_warnings.extend(earlier.report.kept.iter().map(|kept| {
+                Warning::new(
+                    "earlier_install_left",
+                    WarningSeverity::Warning,
+                    kept.clone(),
+                    None,
+                )
+            }));
+        }
+    } else {
+        for app_name in interrupted_installs(&options.state_root) {
+            recovered_warnings.push(Warning::new(
+                "earlier_install_never_finished",
+                WarningSeverity::Warning,
+                format!(
+                    "An earlier install of {app_name} never finished. Installing undoes it first."
+                ),
+                None,
+            ));
+        }
     }
 
     let review = ReviewedPackage::new(
@@ -150,23 +239,37 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     if options.apply && !options.force {
         refuse_replacing_anything(&review)?;
     }
-    // Held until the install has finished and been checked.
-    let _target_hold = if options.apply {
-        Some(ensure_target_root(&options.target_root)?)
+
+    let app_name = app_display_name(&manifest);
+    let mut target_hold = None;
+    let journal = if options.apply {
+        let mut journal = start_journal(&effective_options, &manifest, &app_name, installer)?;
+        match prepare_target(&mut journal, &options.target_root) {
+            Ok(hold) => target_hold = Some(hold),
+            Err(error) => {
+                let _ = roll_back(journal, monitor);
+                return Err(error);
+            }
+        }
+        info!(
+            id = journal.id(),
+            app = %app_name,
+            target = %options.target_root.display(),
+            "install started"
+        );
+        Some(journal)
     } else {
         None
     };
 
-    let output_dir = restore_output_dir(&options.package_root, &effective_options.package_root);
-    let mut changes = Changes::default();
-    let mut warnings = manifest.warnings.clone();
+    let mut warnings = recovered_warnings;
+    warnings.extend(manifest.warnings.iter().cloned());
     warnings.extend(review.warnings.iter().cloned());
     if options.apply
         && let Some(warning) = install_location_link_warning(&options.target_root)
     {
         warnings.push(warning);
     }
-    let mut errors = Vec::new();
     if options.restore_user_data
         && review
             .files
@@ -181,129 +284,183 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         ));
     }
 
-    // Install runtime prerequisites first so the app's own services/drivers and
-    // launch have their runtimes available.
-    restore_prerequisites(
-        &effective_options,
-        &manifest,
-        &mut changes.prerequisites,
-        &mut warnings,
-        &mut errors,
-    );
-    restore_files(
-        &effective_options,
-        &review,
-        &mut changes.files,
-        &mut warnings,
-        &mut errors,
-    )?;
-    // Services first, so a registry key under one can never make it look like it already
-    // existed.
-    restore_services(
-        &effective_options,
-        &review,
-        &mut changes.services,
-        &mut warnings,
-        &mut errors,
-    );
-    restore_drivers(
-        &effective_options,
-        &review,
-        &mut changes.drivers,
-        &mut warnings,
-        &mut errors,
-    );
-    restore_registry(
-        &effective_options,
-        &review,
-        &mut changes,
-        &mut warnings,
-        &mut errors,
-    );
-    restore_license(
-        &effective_options,
-        &review,
-        &mut changes.license,
-        &mut errors,
-    );
-    restore_scheduled_tasks(
-        &effective_options,
-        &review,
-        &mut changes.tasks,
-        &mut warnings,
-        &mut errors,
-    );
-    restore_shortcuts(
-        &effective_options,
-        &review,
-        &mut changes,
-        &mut warnings,
-        &mut errors,
-    );
-    restore_environment(
-        &effective_options,
-        &review,
-        &mut changes.environment,
-        &mut warnings,
-        &mut errors,
-    );
-    let mut changes_logged = changes.in_order();
-
-    let verification = if options.apply {
-        match verify_prepared_package(
-            &effective_options.package_root,
-            &manifest,
-            &VerificationOptions {
-                package_root: effective_options.package_root.clone(),
-                target_root: Some(options.target_root.clone()),
-                output_dir: Some(output_dir.clone()),
-                restore_user_data: options.restore_user_data,
-                restore_license: options.restore_license,
-            },
-        ) {
-            Ok(report) => {
-                if !report.package_valid || report.restore_valid == Some(false) {
-                    errors.extend(report.errors.clone());
-                }
-                warnings.extend(report.warnings.clone());
-                changes_logged.push(format!(
-                    "post-restore verification package_valid={} restore_valid={}",
-                    report.package_valid,
-                    report
-                        .restore_valid
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "not_run".to_owned())
-                ));
-                Some(report)
-            }
-            Err(error) => {
-                errors.push(Warning::new(
-                    "post_restore_verification_failed",
-                    WarningSeverity::Error,
-                    format!("Post-restore verification could not run: {error}"),
-                    None,
-                ));
-                None
-            }
-        }
-    } else {
-        None
+    let mut run = Run {
+        options: &effective_options,
+        review: &review,
+        monitor,
+        journal,
+        changes: Changes::default(),
+        warnings,
+        errors: Vec::new(),
+        refused: review.refused.clone(),
+        cancelled: false,
+        app_name: &app_name,
+        manifest: &manifest,
     };
+    run.apply_steps();
+    let verification = run.verify_result();
 
-    let restore_log_json = output_dir.join(RESTORE_LOG_JSON);
-    let restore_log_markdown = output_dir.join(RESTORE_LOG_MARKDOWN);
+    let mut install_id = None;
+    let mut rollback = None;
+    let Run {
+        journal,
+        changes,
+        mut warnings,
+        mut errors,
+        refused,
+        ..
+    } = run;
+    let mut changes_logged = changes.in_order();
+    if let Some(report) = verification.as_ref() {
+        changes_logged.push(format!(
+            "post-restore verification package_valid={} restore_valid={}",
+            report.package_valid,
+            report
+                .restore_valid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "not_run".to_owned())
+        ));
+        warnings.extend(report.warnings.iter().cloned());
+    }
+    if let Some(mut journal) = journal {
+        let committed = if errors.is_empty() {
+            journal.commit()
+        } else {
+            Ok(())
+        };
+        // The install location has to be let go of before it can be taken back.
+        drop(target_hold);
+        if let Err(error) = committed {
+            errors.push(Warning::new(
+                "journal_commit_failed",
+                WarningSeverity::Error,
+                format!("The record of this install could not be finished: {error}"),
+                None,
+            ));
+        }
+        if errors.is_empty() {
+            info!(id = journal.id(), "install finished");
+            install_id = Some(journal.id().to_owned());
+        } else {
+            warn!(
+                id = journal.id(),
+                "install failed, putting back what it changed"
+            );
+            rollback = Some(roll_back(journal, monitor));
+        }
+    }
+
     let result = RestoreResult {
         applied: options.apply,
         changes_logged,
         warnings,
         errors,
-        refused: review.refused,
+        refused,
         verification,
-        restore_log_json: Some(restore_log_json.clone()),
-        restore_log_markdown: Some(restore_log_markdown.clone()),
+        install_id,
+        rollback,
     };
-    write_restore_logs(&restore_log_json, &restore_log_markdown, &result)?;
+    log_result(&result);
     Ok(result)
+}
+
+/// Start the record of this install, with what it needs to be undone later. A failure here
+/// means nothing has changed, and it should not go ahead, since it could not be undone.
+fn start_journal(
+    options: &RestoreOptions,
+    manifest: &PackageManifest,
+    app_name: &str,
+    installer: Option<&EmbeddedPackage>,
+) -> Result<Journal> {
+    // Only ever a folder an installer made, since undoing an install removes this.
+    let staging = options
+        .package_root
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with(STAGING_PREFIX))
+        .then_some(options.package_root.as_path());
+    let unprotected = |error: WinAppMigratorError| {
+        WinAppMigratorError::InvalidInput(format!(
+            "there is nowhere safe to keep the record that would let this install be undone, so \
+             nothing was installed: {error}"
+        ))
+    };
+    let mut journal = Journal::begin(
+        &options.state_root,
+        app_name,
+        &options.target_root,
+        staging,
+        manifest.ui_theme.as_deref(),
+    )
+    .map_err(unprotected)?;
+    if let Some(installer) = installer
+        && let Err(error) = journal.write_uninstaller(installer)
+    {
+        let folder = journal.folder().to_path_buf();
+        journal.close();
+        let _ = fs::remove_dir_all(folder);
+        return Err(unprotected(error));
+    }
+    Ok(journal)
+}
+
+/// Record what it takes to make the install location, make it, and hold it.
+fn prepare_target(journal: &mut Journal, target_root: &Path) -> Result<File> {
+    journal.note_new_folders_to(target_root, ItemKind::Program)?;
+    ensure_target_root(target_root)
+}
+
+fn app_display_name(manifest: &PackageManifest) -> String {
+    manifest
+        .application_metadata
+        .as_ref()
+        .map(|app| app.display_name.clone())
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            manifest
+                .main_executable_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "Application".to_owned())
+}
+
+/// Where a package suggests installing, which is where its app was. Whether that can be used
+/// here is for [`install_location_problem`] to say.
+pub fn default_install_location(manifest: &PackageManifest) -> Option<PathBuf> {
+    manifest
+        .application_metadata
+        .as_ref()
+        .and_then(|app| app.install_location.clone())
+        .or_else(|| {
+            manifest
+                .main_executable_path
+                .parent()
+                .map(Path::to_path_buf)
+        })
+}
+
+/// Write what happened to the log. Paths and key names only: what a registry value, license,
+/// or environment variable holds never goes in. A refusal's reason or a warning's message can
+/// quote a value, so only what it is about is written. An error's message is why something
+/// failed, built here from a path and what the system said.
+fn log_result(result: &RestoreResult) {
+    for change in &result.changes_logged {
+        info!(change = %change);
+    }
+    for warning in &result.warnings {
+        warn!(code = %warning.code, source = warning.source.as_deref().unwrap_or_default());
+    }
+    for refused in &result.refused {
+        warn!(code = %refused.code, source = refused.source.as_deref().unwrap_or_default(), "refused");
+    }
+    for error in &result.errors {
+        warn!(code = %error.code, source = error.source.as_deref().unwrap_or_default(), message = %error.message);
+    }
+    if let Some(report) = result.rollback.as_ref() {
+        for line in crate::rollback::report_lines(report) {
+            info!(rollback = %line);
+        }
+    }
 }
 
 /// Without `--force`, nothing already there gets replaced, so if anything is there the
@@ -342,127 +499,829 @@ fn install_location_link_warning(target_root: &Path) -> Option<Warning> {
     })
 }
 
-fn restore_files(
-    options: &RestoreOptions,
-    review: &ReviewedPackage<'_>,
-    changes_logged: &mut Vec<String>,
-    warnings: &mut Vec<Warning>,
-    errors: &mut Vec<Warning>,
-) -> Result<()> {
-    for file in &review.files {
-        let (Some(relative), Some(destination)) = (
-            file.package_relative_path.as_ref(),
-            review.map.destination_of(&file.original_path),
-        ) else {
-            continue;
-        };
-        let source = package_destination_path(&options.package_root, relative)?;
+/// How a file should be treated when the app is uninstalled.
+fn file_item_kind(file: &FileEntry) -> ItemKind {
+    match file.classification {
+        FileClassification::UserData | FileClassification::MachineAppData => ItemKind::UserData,
+        _ => ItemKind::Program,
+    }
+}
 
-        if destination.exists() && !options.force {
-            let warning = Warning::new(
-                "restore_destination_exists",
-                WarningSeverity::Warning,
-                "Destination exists; use --force to overwrite.",
-                Some(destination.display().to_string()),
-            );
-            if options.apply {
-                errors.push(warning);
-            } else {
-                warnings.push(warning);
+/// One restore on its way, and everything it has found out so far.
+struct Run<'a, 'p> {
+    options: &'a RestoreOptions,
+    review: &'a ReviewedPackage<'p>,
+    manifest: &'a PackageManifest,
+    monitor: &'a InstallMonitor,
+    app_name: &'a str,
+    /// What was done, for undoing it. Only an install has one, so this is also what says
+    /// whether anything is really being changed.
+    journal: Option<Journal>,
+    changes: Changes,
+    warnings: Vec<Warning>,
+    errors: Vec<Warning>,
+    refused: Vec<Warning>,
+    cancelled: bool,
+}
+
+impl Run<'_, '_> {
+    /// Every step, in order. Each one stops at the first thing that fails, and none starts
+    /// after that: anything that fails means the install failed, and it is all put back.
+    fn apply_steps(&mut self) {
+        // Runtimes first, so the app's own services and drivers have them available.
+        self.restore_prerequisites();
+        self.restore_files();
+        // Services first, so a registry key under one can never make it look like it
+        // already existed.
+        self.restore_services();
+        self.restore_drivers();
+        self.restore_registry();
+        self.restore_license();
+        self.restore_scheduled_tasks();
+        self.restore_shortcuts();
+        self.restore_environment();
+        self.write_uninstall_entry();
+    }
+
+    /// Whether to go no further. A preview changes nothing, so problems it finds only stop
+    /// it if it is cancelled.
+    fn stopped(&mut self) -> bool {
+        if self.monitor.is_cancelled() {
+            if !self.cancelled {
+                self.cancelled = true;
+                let what = if self.journal.is_some() {
+                    "The install was cancelled."
+                } else {
+                    "The preview was cancelled."
+                };
+                self.errors.push(Warning::new(
+                    CANCELLED_CODE,
+                    WarningSeverity::Warning,
+                    what,
+                    None,
+                ));
             }
-            continue;
+            return true;
         }
+        self.journal.is_some() && !self.errors.is_empty()
+    }
 
-        if options.apply {
-            copy_restore_file(&source, destination, &options.target_root)?;
-            changes_logged.push(format!(
-                "copied {} -> {}",
-                source.display(),
-                destination.display()
+    fn progress(&self, phase: InstallPhase, done: usize, total: usize) {
+        self.monitor.report(InstallStep::new(phase, done, total));
+    }
+
+    /// Something a step tried did not work, which fails the install, unless it is the rules
+    /// refusing something, which is left out like anything else they refuse.
+    fn record_failure(&mut self, failure: Warning) {
+        if REFUSALS_FOUND_WHEN_INSTALLING.contains(&failure.code.as_str()) {
+            let item = failure.source.clone().unwrap_or_default();
+            self.refused.push(Warning::new(
+                failure.code,
+                WarningSeverity::Warning,
+                format!("{item} was left out: {}.", failure.message),
+                Some(item),
             ));
         } else {
-            changes_logged.push(format!(
-                "would copy {} -> {}",
-                source.display(),
-                destination.display()
-            ));
+            self.errors.push(failure);
         }
     }
-    Ok(())
-}
 
-fn restore_registry(
-    options: &RestoreOptions,
-    review: &ReviewedPackage<'_>,
-    changes: &mut Changes,
-    warnings: &mut Vec<Warning>,
-    errors: &mut Vec<Warning>,
-) {
-    for entry in &review.registry {
-        let log = if is_autostart_entry(entry) {
-            &mut changes.autostart
-        } else {
-            &mut changes.registry
-        };
-        if !options.apply {
-            log.push(format!(
-                "would restore registry {}\\{} {}",
-                registry_hive_name(&entry.hive),
-                entry.key_path,
-                entry.value_name.as_deref().unwrap_or("(key)")
-            ));
-            continue;
+    fn verify_result(&mut self) -> Option<crate::models::VerificationReport> {
+        if self.journal.is_none() || self.stopped() {
+            return None;
         }
-
-        match apply_registry_entry(entry, options.force, &review.map) {
-            Ok(message) => log.push(message),
-            Err(warning) => errors.push(warning),
+        self.progress(InstallPhase::Verifying, 0, 0);
+        let options = self.options;
+        match verify_prepared_package(
+            &options.package_root,
+            self.manifest,
+            &VerificationOptions {
+                package_root: options.package_root.clone(),
+                target_root: Some(options.target_root.clone()),
+                output_dir: Some(options.package_root.clone()),
+                restore_user_data: options.restore_user_data,
+                restore_license: options.restore_license,
+            },
+        ) {
+            Ok(report) => {
+                if !report.package_valid || report.restore_valid == Some(false) {
+                    self.errors.extend(report.errors.clone());
+                }
+                Some(report)
+            }
+            Err(error) => {
+                self.errors.push(Warning::new(
+                    "post_restore_verification_failed",
+                    WarningSeverity::Error,
+                    format!("Post-restore verification could not run: {error}"),
+                    None,
+                ));
+                None
+            }
         }
     }
-    if !review.registry.is_empty() {
-        warnings.push(Warning::new(
-            "registry_restore_review_required",
-            WarningSeverity::Info,
-            "Registry values were restored from the archived structured data with known app paths rewritten to the target root.",
-            None,
-        ));
-    }
-}
 
-fn restore_services(
-    options: &RestoreOptions,
-    review: &ReviewedPackage<'_>,
-    changes_logged: &mut Vec<String>,
-    warnings: &mut Vec<Warning>,
-    errors: &mut Vec<Warning>,
-) {
-    for service in &review.services {
-        if let ServiceAccount::Custom(original) = &service.account {
-            warnings.push(custom_account_warning(service.entry, original));
-        }
-        if !options.apply {
-            changes_logged.push(format!(
-                "would restore service {} -> {} (runs as {})",
-                service.entry.service_name,
-                service_image_path_value(&service.binary, service.arguments.as_deref()),
-                service.account.label()
-            ));
-            continue;
-        }
-        match apply_service(service, &options.target_root, options.force) {
-            Ok(messages) => changes_logged.extend(messages),
-            Err(warning) => {
-                errors.push(warning);
+    fn restore_files(&mut self) {
+        let review = self.review;
+        let total = review.files.len();
+        for (done, file) in review.files.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
+            self.progress(InstallPhase::Files, done, total);
+            let (Some(relative), Some(destination)) = (
+                file.package_relative_path.as_ref(),
+                review.map.destination_of(&file.original_path),
+            ) else {
+                continue;
+            };
+            let source = match package_destination_path(&self.options.package_root, relative) {
+                Ok(source) => source,
+                Err(error) => {
+                    self.errors.push(Warning::new(
+                        "restore_file_failed",
+                        WarningSeverity::Error,
+                        format!("{error}"),
+                        Some(destination.display().to_string()),
+                    ));
+                    return;
+                }
+            };
+
+            if destination.exists() && !self.options.force {
+                let warning = Warning::new(
+                    "restore_destination_exists",
+                    WarningSeverity::Warning,
+                    "Destination exists; use --force to overwrite.",
+                    Some(destination.display().to_string()),
+                );
+                if self.journal.is_some() {
+                    self.errors.push(warning);
+                    return;
+                }
+                self.warnings.push(warning);
                 continue;
             }
-        }
-        for entry in &service.entry.parameters {
-            match apply_registry_entry(entry, true, &review.map) {
-                Ok(message) => changes_logged.push(message),
-                Err(warning) => errors.push(warning),
+
+            let Some(journal) = self.journal.as_mut() else {
+                self.changes.files.push(format!(
+                    "would copy {} -> {}",
+                    source.display(),
+                    destination.display()
+                ));
+                continue;
+            };
+            let copied = copy_restore_file(
+                journal,
+                &source,
+                destination,
+                &self.options.target_root,
+                file_item_kind(file),
+                file.hash_sha256.as_deref(),
+            );
+            match copied {
+                Ok(()) => self.changes.files.push(format!(
+                    "copied {} -> {}",
+                    source.display(),
+                    destination.display()
+                )),
+                Err(error) => {
+                    self.errors.push(Warning::new(
+                        "restore_file_failed",
+                        WarningSeverity::Error,
+                        format!("Could not write {}: {error}", destination.display()),
+                        Some(destination.display().to_string()),
+                    ));
+                    return;
+                }
             }
         }
     }
+
+    fn restore_registry(&mut self) {
+        let review = self.review;
+        let total = review.registry.len();
+        for (done, entry) in review.registry.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
+            self.progress(InstallPhase::Registry, done, total);
+            let autostart = is_autostart_entry(entry);
+            let Some(journal) = self.journal.as_mut() else {
+                let message = format!(
+                    "would restore registry {}\\{} {}",
+                    registry_hive_name(&entry.hive),
+                    entry.key_path,
+                    entry.value_name.as_deref().unwrap_or("(key)")
+                );
+                if autostart {
+                    self.changes.autostart.push(message);
+                } else {
+                    self.changes.registry.push(message);
+                }
+                continue;
+            };
+            let item = if is_uninstall_entry_key(&entry.key_path) {
+                ItemKind::UninstallEntry
+            } else {
+                ItemKind::Program
+            };
+            match apply_registry_entry(journal, entry, self.options.force, &review.map, item) {
+                Ok(message) if autostart => self.changes.autostart.push(message),
+                Ok(message) => self.changes.registry.push(message),
+                Err(warning) => self.record_failure(warning),
+            }
+        }
+        if !review.registry.is_empty() {
+            self.warnings.push(Warning::new(
+                "registry_restore_review_required",
+                WarningSeverity::Info,
+                "Registry values were restored from the archived structured data with known app paths rewritten to the target root.",
+                None,
+            ));
+        }
+    }
+
+    fn restore_services(&mut self) {
+        let review = self.review;
+        let total = review.services.len();
+        for (done, service) in review.services.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
+            self.progress(InstallPhase::Services, done, total);
+            if let ServiceAccount::Custom(original) = &service.account {
+                self.warnings
+                    .push(custom_account_warning(service.entry, original));
+            }
+            let Some(journal) = self.journal.as_mut() else {
+                self.changes.services.push(format!(
+                    "would restore service {} -> {} (runs as {})",
+                    service.entry.service_name,
+                    service_image_path_value(&service.binary, service.arguments.as_deref()),
+                    service.account.label()
+                ));
+                continue;
+            };
+            match apply_service(
+                journal,
+                service,
+                &self.options.target_root,
+                self.options.force,
+                &mut self.warnings,
+            ) {
+                Ok(messages) => self.changes.services.extend(messages),
+                Err(warning) => {
+                    self.record_failure(warning);
+                    continue;
+                }
+            }
+            for entry in &service.entry.parameters {
+                match apply_registry_entry(journal, entry, true, &review.map, ItemKind::Program) {
+                    Ok(message) => self.changes.services.push(message),
+                    Err(warning) => {
+                        self.errors.push(warning);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Install runtime prerequisites recorded in the manifest. Each prerequisite is probed
+    /// first and skipped if already present; otherwise the bundled installer (or winget
+    /// fallback) runs, and the result is re-probed. One that gets installed cannot be taken
+    /// back out, since anything may be using it, so it is reported if the install fails.
+    fn restore_prerequisites(&mut self) {
+        let manifest = self.manifest;
+        let total = manifest.runtime_prerequisites.len();
+        for (done, prerequisite) in manifest.runtime_prerequisites.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
+            self.progress(InstallPhase::Prerequisites, done, total);
+            let Some(bundle) = prerequisite.bundle.as_ref() else {
+                continue;
+            };
+            // Everything about how this installs comes from the compiled spec, not the
+            // manifest. A kind with no spec has nothing that could run.
+            let Some(spec) = spec_for_bundle(&prerequisite.kind, bundle) else {
+                self.warnings.push(Warning::new(
+                    "prerequisite_skipped",
+                    WarningSeverity::Info,
+                    format!(
+                        "{}: there is no known installer for this runtime.",
+                        prerequisite.name
+                    ),
+                    None,
+                ));
+                continue;
+            };
+            if spec.probe.as_ref().is_some_and(is_present) {
+                self.changes.prerequisites.push(format!(
+                    "prerequisite already present: {}",
+                    prerequisite.name
+                ));
+                continue;
+            }
+            if self.journal.is_none() {
+                let via = if spec.windows_feature.is_some() {
+                    "Windows feature"
+                } else if spec.bundleable && bundle.package_relative_path.is_some() {
+                    "bundled installer"
+                } else {
+                    "winget"
+                };
+                self.changes.prerequisites.push(format!(
+                    "would install prerequisite {} ({via})",
+                    prerequisite.name
+                ));
+                continue;
+            }
+            if spec.requires_admin && !is_elevated() {
+                self.errors.push(Warning::new(
+                    "prerequisite_requires_admin",
+                    WarningSeverity::Error,
+                    format!(
+                        "Installing {} requires elevation; re-run the installer as administrator.",
+                        prerequisite.name
+                    ),
+                    None,
+                ));
+                return;
+            }
+            match install_bundle(&prerequisite.kind, bundle, &self.options.package_root) {
+                PrerequisiteInstallOutcome::Installed => {
+                    self.note_prerequisite(prerequisite);
+                    self.changes
+                        .prerequisites
+                        .push(format!("installed prerequisite {}", prerequisite.name));
+                    confirm_prerequisite(
+                        prerequisite,
+                        &spec,
+                        false,
+                        &mut self.warnings,
+                        &mut self.errors,
+                    );
+                }
+                PrerequisiteInstallOutcome::InstalledNeedsReboot => {
+                    self.note_prerequisite(prerequisite);
+                    self.changes.prerequisites.push(format!(
+                        "installed prerequisite {} (reboot required)",
+                        prerequisite.name
+                    ));
+                    self.warnings.push(Warning::new(
+                        "prerequisite_reboot_required",
+                        WarningSeverity::Warning,
+                        format!(
+                            "{} was installed but a reboot is required to complete it.",
+                            prerequisite.name
+                        ),
+                        None,
+                    ));
+                    confirm_prerequisite(
+                        prerequisite,
+                        &spec,
+                        true,
+                        &mut self.warnings,
+                        &mut self.errors,
+                    );
+                }
+                PrerequisiteInstallOutcome::Skipped(reason) => {
+                    self.warnings.push(Warning::new(
+                        "prerequisite_skipped",
+                        WarningSeverity::Info,
+                        format!("{}: {reason}", prerequisite.name),
+                        None,
+                    ));
+                }
+                PrerequisiteInstallOutcome::Failed(reason) => {
+                    self.errors.push(Warning::new(
+                        "prerequisite_install_failed",
+                        WarningSeverity::Error,
+                        format!(
+                            "Could not install {}: {reason}. Acquire it from {}.",
+                            prerequisite.name, spec.download_url
+                        ),
+                        None,
+                    ));
+                }
+            }
+        }
+    }
+
+    fn note_prerequisite(&mut self, prerequisite: &RuntimePrerequisite) {
+        let noted = self.journal.as_mut().map(|journal| {
+            journal.note(Change::Prerequisite {
+                name: prerequisite.name.clone(),
+            })
+        });
+        if let Some(Err(error)) = noted {
+            self.errors.push(Warning::new(
+                "journal_write_failed",
+                WarningSeverity::Error,
+                format!("Could not record an installed runtime: {error}"),
+                None,
+            ));
+        }
+    }
+
+    /// Restore captured license data: files and framework-store directories back to
+    /// their original (or re-anchored) locations, plus transferable registry values.
+    fn restore_license(&mut self) {
+        let review = self.review;
+        let total = review.license.len() + review.license_registry.len();
+        for (done, license) in review.license.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
+            self.progress(InstallPhase::License, done, total);
+            let destination = &license.destination;
+            let source = match package_destination_path(
+                &self.options.package_root,
+                license.package_relative_path,
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    self.errors.push(Warning::new(
+                        "license_source_invalid",
+                        WarningSeverity::Error,
+                        format!("Packaged license path is invalid: {error}"),
+                        Some(license.package_relative_path.display().to_string()),
+                    ));
+                    continue;
+                }
+            };
+
+            let Some(journal) = self.journal.as_mut() else {
+                self.changes.license.push(format!(
+                    "would restore license {} -> {}",
+                    source.display(),
+                    destination.display()
+                ));
+                continue;
+            };
+            if destination_requires_admin(destination) && !is_elevated() {
+                self.errors.push(Warning::new(
+                    "license_requires_admin",
+                    WarningSeverity::Error,
+                    "Restoring license data to a protected location requires elevation.",
+                    Some(destination.display().to_string()),
+                ));
+                continue;
+            }
+            // Honor --force for both files and framework-store directories: never
+            // overwrite an existing license/store on the target without it.
+            if destination.exists() && !self.options.force {
+                self.errors.push(Warning::new(
+                    "license_destination_exists",
+                    WarningSeverity::Warning,
+                    "License destination exists; use --force to overwrite.",
+                    Some(destination.display().to_string()),
+                ));
+                continue;
+            }
+            let result = if license.artifact.store_files.is_empty() {
+                copy_restore_file(
+                    journal,
+                    &source,
+                    destination,
+                    &self.options.target_root,
+                    ItemKind::License,
+                    license.artifact.hash_sha256.as_deref(),
+                )
+            } else {
+                copy_license_store(
+                    journal,
+                    license.artifact,
+                    &source,
+                    destination,
+                    &self.options.target_root,
+                )
+            };
+            match result {
+                Ok(()) => self.changes.license.push(format!(
+                    "restored license {} -> {}",
+                    source.display(),
+                    destination.display()
+                )),
+                Err(error) => self.errors.push(Warning::new(
+                    "license_restore_failed",
+                    WarningSeverity::Error,
+                    format!("Could not restore license data: {error}"),
+                    Some(destination.display().to_string()),
+                )),
+            }
+        }
+
+        for (index, entry) in review.license_registry.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
+            self.progress(InstallPhase::License, review.license.len() + index, total);
+            let Some(journal) = self.journal.as_mut() else {
+                self.changes.license.push(format!(
+                    "would restore license registry {}\\{}",
+                    registry_hive_name(&entry.hive),
+                    entry.key_path
+                ));
+                continue;
+            };
+            match apply_registry_entry(
+                journal,
+                entry,
+                self.options.force,
+                &review.map,
+                ItemKind::License,
+            ) {
+                Ok(message) => self.changes.license.push(message),
+                Err(warning) => self.record_failure(warning),
+            }
+        }
+    }
+
+    /// Restore application-owned drivers by placing the bundled `.sys` and re-registering
+    /// the driver service. Inbox/vendor drivers cannot be redistributed and are reported
+    /// with precise reinstall guidance.
+    fn restore_drivers(&mut self) {
+        let review = self.review;
+        for driver in &review.manual_drivers {
+            // Not bundled (inbox/vendor driver): precise, actionable guidance.
+            self.changes
+                .drivers
+                .push(format!("driver not auto-restored: {}", driver.service_name));
+            self.warnings.push(Warning::new(
+                "driver_manual_reinstall",
+                WarningSeverity::Warning,
+                driver.restore_instructions.clone(),
+                Some(driver.service_name.clone()),
+            ));
+        }
+        let total = review.drivers.len();
+        for (done, driver) in review.drivers.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
+            self.progress(InstallPhase::Drivers, done, total);
+            let name = &driver.entry.service_name;
+            let Some(journal) = self.journal.as_mut() else {
+                self.changes.drivers.push(format!(
+                    "would install driver {name} -> {}",
+                    driver.destination.display()
+                ));
+                continue;
+            };
+            if !is_elevated() {
+                self.errors.push(Warning::new(
+                    "driver_requires_admin",
+                    WarningSeverity::Error,
+                    "Driver registration requires elevation; re-run the installer as administrator.",
+                    Some(name.clone()),
+                ));
+                continue;
+            }
+            match place_and_register_driver(journal, driver, self.options) {
+                Ok(messages) => self.changes.drivers.extend(messages),
+                Err(warning) => self.record_failure(warning),
+            }
+        }
+    }
+
+    fn restore_scheduled_tasks(&mut self) {
+        let review = self.review;
+        let total = review.tasks.len();
+        for (done, task) in review.tasks.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
+            self.progress(InstallPhase::ScheduledTasks, done, total);
+            let name = format!("{}{}", task.entry.task_path, task.entry.task_name);
+            if task.runs_as_system {
+                self.warnings.push(Warning::new(
+                    "scheduled_task_runs_as_system",
+                    WarningSeverity::Warning,
+                    format!(
+                        "The scheduled task {name} runs as SYSTEM, with full rights over this PC."
+                    ),
+                    Some(name.clone()),
+                ));
+            }
+            let Some(journal) = self.journal.as_mut() else {
+                self.changes
+                    .tasks
+                    .push(format!("would restore scheduled task {name}"));
+                continue;
+            };
+            match apply_scheduled_task(journal, task, self.options) {
+                Ok(message) => self.changes.tasks.push(message),
+                Err(warning) => self.record_failure(warning),
+            }
+        }
+    }
+
+    fn restore_shortcuts(&mut self) {
+        let review = self.review;
+        let total = review.shortcuts.len();
+        for (done, shortcut) in review.shortcuts.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
+            self.progress(InstallPhase::Shortcuts, done, total);
+            let destination = &shortcut.placement.destination;
+            let autostart = shortcut.placement.autostart;
+            let kind = if autostart {
+                "startup shortcut"
+            } else {
+                "shortcut"
+            };
+            let Some(journal) = self.journal.as_mut() else {
+                let message = format!(
+                    "would restore {kind} {} -> {}",
+                    destination.display(),
+                    shortcut.target.display()
+                );
+                if autostart {
+                    self.changes.autostart.push(message);
+                } else {
+                    self.changes.shortcuts.push(message);
+                }
+                continue;
+            };
+            let outcome = if destination.exists() && !self.options.force {
+                Err(Warning::new(
+                    "shortcut_destination_exists",
+                    WarningSeverity::Warning,
+                    "Shortcut exists; use --force to overwrite.",
+                    Some(destination.display().to_string()),
+                ))
+            } else {
+                apply_shortcut(journal, shortcut)
+            };
+            match outcome {
+                Ok(message) if autostart => self.changes.autostart.push(message),
+                Ok(message) => self.changes.shortcuts.push(message),
+                // A Desktop or Start Menu shortcut is only a way in to an app that works
+                // without it, so losing one is not worth undoing the install. One in a
+                // Startup folder makes something run, so that is a part of what it does.
+                Err(warning) if !autostart => self.warnings.push(warning),
+                Err(warning) => self.errors.push(warning),
+            }
+        }
+        if review
+            .shortcuts
+            .iter()
+            .any(|shortcut| shortcut.placement.for_all_users)
+        {
+            self.warnings.push(Warning::new(
+                "shortcut_admin_scope",
+                WarningSeverity::Info,
+                "One or more restored shortcuts target a public desktop or common Start Menu location.",
+                None,
+            ));
+        }
+    }
+
+    fn restore_environment(&mut self) {
+        let review = self.review;
+        let total = review.environment.len();
+        for (done, variable) in review.environment.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
+            self.progress(InstallPhase::Environment, done, total);
+            let Some(journal) = self.journal.as_mut() else {
+                self.changes.environment.push(format!(
+                    "would restore {:?} environment variable {}",
+                    variable.scope, variable.name
+                ));
+                continue;
+            };
+            match apply_environment_variable(
+                journal,
+                variable,
+                self.options.force,
+                &self.options.target_root,
+                &review.map,
+            ) {
+                Ok(message) => self.changes.environment.push(message),
+                Err(warning) => self.errors.push(warning),
+            }
+        }
+        if !review.environment.is_empty() {
+            self.warnings.push(Warning::new(
+                "environment_restore_session_refresh_required",
+                WarningSeverity::Info,
+                "Environment variable changes may require a new process, shell, or sign-in session to be observed.",
+                None,
+            ));
+        }
+    }
+
+    /// Give the app an entry in Settings that runs the uninstaller. If the package had an
+    /// entry, it keeps what it said about the app, with these in place of what it said about
+    /// how to remove it from the PC it came from. The rules have already left those out.
+    fn write_uninstall_entry(&mut self) {
+        if self.stopped() {
+            return;
+        }
+        let review = self.review;
+        let Some(journal) = self.journal.as_mut() else {
+            return;
+        };
+        let Some(uninstaller) = journal.uninstaller_path().map(Path::to_path_buf) else {
+            return;
+        };
+        self.monitor
+            .report(InstallStep::new(InstallPhase::UninstallEntry, 0, 0));
+        let id = journal.id().to_owned();
+        let mut keys = review.uninstall_keys.clone();
+        if keys.is_empty() {
+            keys.push(crate::restore_review::UninstallKey {
+                hive: RegistryHive::LocalMachine,
+                key_path: format!("{UNINSTALL_KEY_FOR_NEW_ENTRIES}\\WinAppMigrator {id}"),
+                has_display_name: false,
+            });
+        }
+        let values = uninstall_entry_values(
+            &uninstaller,
+            &id,
+            self.app_name,
+            self.manifest,
+            &self.options.target_root,
+        );
+        let captured = !review.uninstall_keys.is_empty();
+        for key in &keys {
+            for (name, value) in &values {
+                // What a captured entry already says about the app stays as it said.
+                let wanted = UNINSTALL_COMMAND_VALUES.contains(name)
+                    || !captured
+                    || (*name == DISPLAY_NAME_VALUE && !key.has_display_name);
+                if !wanted {
+                    continue;
+                }
+                if let Err(warning) = set_journaled_value(
+                    journal,
+                    &key.hive,
+                    &key.key_path,
+                    name,
+                    value,
+                    ItemKind::UninstallEntry,
+                ) {
+                    self.errors.push(warning);
+                    return;
+                }
+            }
+            self.changes.registry.push(format!(
+                "set the uninstaller for {}\\{}",
+                registry_hive_name(&key.hive),
+                key.key_path
+            ));
+        }
+    }
+}
+
+/// The command that uninstalls an install, with the program's path quoted.
+pub(crate) fn uninstall_command(uninstaller: &Path, id: &str) -> String {
+    format!("\"{}\" {UNINSTALL_FLAG} {id}", uninstaller.display())
+}
+
+/// The values of an app's entry in Settings.
+fn uninstall_entry_values(
+    uninstaller: &Path,
+    id: &str,
+    app_name: &str,
+    manifest: &PackageManifest,
+    target_root: &Path,
+) -> Vec<(&'static str, RegValue<'static>)> {
+    let text = |value: &str| RegValue {
+        bytes: Cow::Owned(encode_utf16_nul(value)),
+        vtype: REG_SZ,
+    };
+    let flag = || RegValue {
+        bytes: Cow::Owned(1_u32.to_le_bytes().to_vec()),
+        vtype: REG_DWORD,
+    };
+    let command = uninstall_command(uninstaller, id);
+    let mut values = vec![
+        (UNINSTALL_STRING_VALUE, text(&command)),
+        (
+            QUIET_UNINSTALL_STRING_VALUE,
+            text(&format!("{command} {QUIET_FLAG}")),
+        ),
+        // There is nothing that could change or repair it, only remove it.
+        (NO_MODIFY_VALUE, flag()),
+        (NO_REPAIR_VALUE, flag()),
+        (DISPLAY_NAME_VALUE, text(app_name)),
+        (INSTALL_LOCATION_VALUE, text(&target_root.to_string_lossy())),
+    ];
+    let app = manifest.application_metadata.as_ref();
+    if let Some(version) = app.and_then(|app| app.version.as_deref()) {
+        values.push((DISPLAY_VERSION_VALUE, text(version)));
+    }
+    if let Some(publisher) = app.and_then(|app| app.publisher.as_deref()) {
+        values.push((PUBLISHER_VALUE, text(publisher)));
+    }
+    values
 }
 
 fn custom_account_warning(service: &ServiceEntry, account: &str) -> Warning {
@@ -477,111 +1336,6 @@ fn custom_account_warning(service: &ServiceEntry, account: &str) -> Warning {
         ),
         Some(service.service_name.clone()),
     )
-}
-
-/// Install runtime prerequisites recorded in the manifest. Each prerequisite is
-/// probed first and skipped if already present; otherwise the bundled installer
-/// (or winget fallback) runs, and the result is re-probed.
-fn restore_prerequisites(
-    options: &RestoreOptions,
-    manifest: &PackageManifest,
-    changes_logged: &mut Vec<String>,
-    warnings: &mut Vec<Warning>,
-    errors: &mut Vec<Warning>,
-) {
-    for prerequisite in &manifest.runtime_prerequisites {
-        let Some(bundle) = prerequisite.bundle.as_ref() else {
-            continue;
-        };
-        // Everything about how this installs comes from the compiled spec, not the
-        // manifest. A kind with no spec has nothing that could run.
-        let Some(spec) = spec_for_bundle(&prerequisite.kind, bundle) else {
-            warnings.push(Warning::new(
-                "prerequisite_skipped",
-                WarningSeverity::Info,
-                format!(
-                    "{}: there is no known installer for this runtime.",
-                    prerequisite.name
-                ),
-                None,
-            ));
-            continue;
-        };
-        if spec.probe.as_ref().is_some_and(is_present) {
-            changes_logged.push(format!(
-                "prerequisite already present: {}",
-                prerequisite.name
-            ));
-            continue;
-        }
-        if !options.apply {
-            let via = if spec.windows_feature.is_some() {
-                "Windows feature"
-            } else if spec.bundleable && bundle.package_relative_path.is_some() {
-                "bundled installer"
-            } else {
-                "winget"
-            };
-            changes_logged.push(format!(
-                "would install prerequisite {} ({via})",
-                prerequisite.name
-            ));
-            continue;
-        }
-        if spec.requires_admin && !is_elevated() {
-            errors.push(Warning::new(
-                "prerequisite_requires_admin",
-                WarningSeverity::Error,
-                format!(
-                    "Installing {} requires elevation; re-run the installer as administrator.",
-                    prerequisite.name
-                ),
-                None,
-            ));
-            continue;
-        }
-        match install_bundle(&prerequisite.kind, bundle, &options.package_root) {
-            PrerequisiteInstallOutcome::Installed => {
-                changes_logged.push(format!("installed prerequisite {}", prerequisite.name));
-                confirm_prerequisite(prerequisite, &spec, false, warnings, errors);
-            }
-            PrerequisiteInstallOutcome::InstalledNeedsReboot => {
-                changes_logged.push(format!(
-                    "installed prerequisite {} (reboot required)",
-                    prerequisite.name
-                ));
-                warnings.push(Warning::new(
-                    "prerequisite_reboot_required",
-                    WarningSeverity::Warning,
-                    format!(
-                        "{} was installed but a reboot is required to complete it.",
-                        prerequisite.name
-                    ),
-                    None,
-                ));
-                confirm_prerequisite(prerequisite, &spec, true, warnings, errors);
-            }
-            PrerequisiteInstallOutcome::Skipped(reason) => {
-                warnings.push(Warning::new(
-                    "prerequisite_skipped",
-                    WarningSeverity::Info,
-                    format!("{}: {reason}", prerequisite.name),
-                    None,
-                ));
-            }
-            PrerequisiteInstallOutcome::Failed(reason) => {
-                errors.push(Warning::new(
-                    "prerequisite_install_failed",
-                    WarningSeverity::Error,
-                    format!(
-                        "Could not install {}: {reason}. Acquire it from {}.",
-                        prerequisite.name, spec.download_url
-                    ),
-                    None,
-                ));
-            }
-        }
-    }
 }
 
 /// Re-probe a prerequisite after installing it. A failure to register is an
@@ -622,97 +1376,10 @@ fn confirm_prerequisite(
     }
 }
 
-/// Restore captured license data: files and framework-store directories back to
-/// their original (or re-anchored) locations, plus transferable registry values.
-fn restore_license(
-    options: &RestoreOptions,
-    review: &ReviewedPackage<'_>,
-    changes_logged: &mut Vec<String>,
-    errors: &mut Vec<Warning>,
-) {
-    for license in &review.license {
-        let destination = &license.destination;
-        let source =
-            match package_destination_path(&options.package_root, license.package_relative_path) {
-                Ok(path) => path,
-                Err(error) => {
-                    errors.push(Warning::new(
-                        "license_source_invalid",
-                        WarningSeverity::Error,
-                        format!("Packaged license path is invalid: {error}"),
-                        Some(license.package_relative_path.display().to_string()),
-                    ));
-                    continue;
-                }
-            };
-
-        if !options.apply {
-            changes_logged.push(format!(
-                "would restore license {} -> {}",
-                source.display(),
-                destination.display()
-            ));
-            continue;
-        }
-        if destination_requires_admin(destination) && !is_elevated() {
-            errors.push(Warning::new(
-                "license_requires_admin",
-                WarningSeverity::Error,
-                "Restoring license data to a protected location requires elevation.",
-                Some(destination.display().to_string()),
-            ));
-            continue;
-        }
-        // Honor --force for both files and framework-store directories: never
-        // overwrite an existing license/store on the target without it.
-        if destination.exists() && !options.force {
-            errors.push(Warning::new(
-                "license_destination_exists",
-                WarningSeverity::Warning,
-                "License destination exists; use --force to overwrite.",
-                Some(destination.display().to_string()),
-            ));
-            continue;
-        }
-        let result = if license.artifact.store_files.is_empty() {
-            copy_restore_file(&source, destination, &options.target_root)
-        } else {
-            copy_license_store(license.artifact, &source, destination, &options.target_root)
-        };
-        match result {
-            Ok(()) => changes_logged.push(format!(
-                "restored license {} -> {}",
-                source.display(),
-                destination.display()
-            )),
-            Err(error) => errors.push(Warning::new(
-                "license_restore_failed",
-                WarningSeverity::Error,
-                format!("Could not restore license data: {error}"),
-                Some(destination.display().to_string()),
-            )),
-        }
-    }
-
-    for entry in &review.license_registry {
-        if !options.apply {
-            changes_logged.push(format!(
-                "would restore license registry {}\\{}",
-                registry_hive_name(&entry.hive),
-                entry.key_path
-            ));
-            continue;
-        }
-        match apply_registry_entry(entry, options.force, &review.map) {
-            Ok(message) => changes_logged.push(message),
-            Err(warning) => errors.push(warning),
-        }
-    }
-}
-
 /// Copy the files the manifest lists for a license store. They were all hash-checked in
 /// the package before anything was written.
 fn copy_license_store(
+    journal: &mut Journal,
     artifact: &LicenseArtifact,
     source: &Path,
     destination: &Path,
@@ -721,57 +1388,15 @@ fn copy_license_store(
     for file in &artifact.store_files {
         let relative = safe_relative_path(&file.relative_path);
         copy_restore_file(
+            journal,
             &package_destination_path(source, &relative)?,
             &package_destination_path(destination, &relative)?,
             target_root,
+            ItemKind::License,
+            Some(&file.hash_sha256),
         )?;
     }
     Ok(())
-}
-
-/// Restore application-owned drivers by placing the bundled `.sys` and
-/// re-registering the driver service. Inbox/vendor drivers cannot be
-/// redistributed and are reported with precise reinstall guidance.
-fn restore_drivers(
-    options: &RestoreOptions,
-    review: &ReviewedPackage<'_>,
-    changes_logged: &mut Vec<String>,
-    warnings: &mut Vec<Warning>,
-    errors: &mut Vec<Warning>,
-) {
-    for driver in &review.manual_drivers {
-        // Not bundled (inbox/vendor driver): precise, actionable guidance.
-        changes_logged.push(format!("driver not auto-restored: {}", driver.service_name));
-        warnings.push(Warning::new(
-            "driver_manual_reinstall",
-            WarningSeverity::Warning,
-            driver.restore_instructions.clone(),
-            Some(driver.service_name.clone()),
-        ));
-    }
-    for driver in &review.drivers {
-        let name = &driver.entry.service_name;
-        if !options.apply {
-            changes_logged.push(format!(
-                "would install driver {name} -> {}",
-                driver.destination.display()
-            ));
-            continue;
-        }
-        if !is_elevated() {
-            errors.push(Warning::new(
-                "driver_requires_admin",
-                WarningSeverity::Error,
-                "Driver registration requires elevation; re-run the installer as administrator.",
-                Some(name.clone()),
-            ));
-            continue;
-        }
-        match place_and_register_driver(driver, options) {
-            Ok(messages) => changes_logged.extend(messages),
-            Err(warning) => errors.push(warning),
-        }
-    }
 }
 
 /// Decide whether a driver can be restored before touching anything, then put its image
@@ -779,6 +1404,7 @@ fn restore_drivers(
 /// given, and an image whose hash is wrong is never registered: a driver loads into the
 /// kernel and is the last thing to take on trust.
 fn place_and_register_driver(
+    journal: &mut Journal,
     reviewed: &ReviewedDriver<'_>,
     options: &RestoreOptions,
 ) -> std::result::Result<Vec<String>, Warning> {
@@ -838,7 +1464,15 @@ fn place_and_register_driver(
                 .to_owned(),
         ));
     }
-    copy_restore_file(source, destination, &options.target_root).map_err(|error| {
+    copy_restore_file(
+        journal,
+        source,
+        destination,
+        &options.target_root,
+        ItemKind::Program,
+        driver.hash_sha256.as_deref(),
+    )
+    .map_err(|error| {
         problem(
             "driver_copy_failed",
             format!("Could not place driver image: {error}"),
@@ -855,6 +1489,21 @@ fn place_and_register_driver(
         source.display(),
         destination.display()
     )];
+    let prior = read_service_config(name).map_err(|error| {
+        problem(
+            "driver_query_failed",
+            format!("Could not read the driver's current settings: {error}"),
+        )
+    })?;
+    journal
+        .note(Change::Service {
+            name: name.to_owned(),
+            driver: true,
+            binary: destination.to_path_buf(),
+            arguments: None,
+            prior,
+        })
+        .map_err(|error| problem("journal_write_failed", error.to_string()))?;
     messages.push(apply_driver(driver, destination, current.is_some())?);
     Ok(messages)
 }
@@ -900,89 +1549,6 @@ fn driver_sc_type(kind: &DriverKind) -> &'static str {
     }
 }
 
-fn restore_scheduled_tasks(
-    options: &RestoreOptions,
-    review: &ReviewedPackage<'_>,
-    changes_logged: &mut Vec<String>,
-    warnings: &mut Vec<Warning>,
-    errors: &mut Vec<Warning>,
-) {
-    for task in &review.tasks {
-        let name = format!("{}{}", task.entry.task_path, task.entry.task_name);
-        if task.runs_as_system {
-            warnings.push(Warning::new(
-                "scheduled_task_runs_as_system",
-                WarningSeverity::Warning,
-                format!("The scheduled task {name} runs as SYSTEM, with full rights over this PC."),
-                Some(name.clone()),
-            ));
-        }
-        if !options.apply {
-            changes_logged.push(format!("would restore scheduled task {name}"));
-            continue;
-        }
-        match apply_scheduled_task(task, options) {
-            Ok(message) => changes_logged.push(message),
-            Err(warning) => errors.push(warning),
-        }
-    }
-}
-
-fn restore_shortcuts(
-    options: &RestoreOptions,
-    review: &ReviewedPackage<'_>,
-    changes: &mut Changes,
-    warnings: &mut Vec<Warning>,
-    errors: &mut Vec<Warning>,
-) {
-    for shortcut in &review.shortcuts {
-        let destination = &shortcut.placement.destination;
-        let log = if shortcut.placement.autostart {
-            &mut changes.autostart
-        } else {
-            &mut changes.shortcuts
-        };
-        let kind = if shortcut.placement.autostart {
-            "startup shortcut"
-        } else {
-            "shortcut"
-        };
-        if !options.apply {
-            log.push(format!(
-                "would restore {kind} {} -> {}",
-                destination.display(),
-                shortcut.target.display()
-            ));
-            continue;
-        }
-        if destination.exists() && !options.force {
-            errors.push(Warning::new(
-                "shortcut_destination_exists",
-                WarningSeverity::Warning,
-                "Shortcut exists; use --force to overwrite.",
-                Some(destination.display().to_string()),
-            ));
-            continue;
-        }
-        match apply_shortcut(shortcut) {
-            Ok(message) => log.push(message),
-            Err(warning) => errors.push(warning),
-        }
-    }
-    if review
-        .shortcuts
-        .iter()
-        .any(|shortcut| shortcut.placement.for_all_users)
-    {
-        warnings.push(Warning::new(
-            "shortcut_admin_scope",
-            WarningSeverity::Info,
-            "One or more restored shortcuts target a public desktop or common Start Menu location.",
-            None,
-        ));
-    }
-}
-
 /// Hash-check the package before anything is written, so a truncated or damaged
 /// copy is refused instead of running prerequisites and overwriting the app first.
 fn refuse_damaged_package(options: &RestoreOptions, manifest: &PackageManifest) -> Result<()> {
@@ -1009,57 +1575,99 @@ fn refuse_damaged_package(options: &RestoreOptions, manifest: &PackageManifest) 
     )))
 }
 
-fn restore_environment(
-    options: &RestoreOptions,
-    review: &ReviewedPackage<'_>,
-    changes_logged: &mut Vec<String>,
-    warnings: &mut Vec<Warning>,
-    errors: &mut Vec<Warning>,
-) {
-    for variable in &review.environment {
-        if !options.apply {
-            changes_logged.push(format!(
-                "would restore {:?} environment variable {}",
-                variable.scope, variable.name
-            ));
-            continue;
-        }
-        match apply_environment_variable(variable, options.force, &options.target_root, &review.map)
-        {
-            Ok(message) => changes_logged.push(message),
-            Err(warning) => errors.push(warning),
-        }
-    }
-    if !review.environment.is_empty() {
-        warnings.push(Warning::new(
-            "environment_restore_session_refresh_required",
-            WarningSeverity::Info,
-            "Environment variable changes may require a new process, shell, or sign-in session to be observed.",
-            None,
-        ));
+/// Write a registry value through the journal, keeping what it replaces.
+fn set_journaled_value(
+    journal: &mut Journal,
+    hive: &RegistryHive,
+    key_path: &str,
+    name: &str,
+    value: &RegValue<'_>,
+    item: ItemKind,
+) -> std::result::Result<(), Warning> {
+    let source = || {
+        format!(
+            "{}\\{key_path}\\{}",
+            registry_hive_name(hive),
+            if name.is_empty() { "(Default)" } else { name }
+        )
+    };
+    let failed = |code: &'static str, message: String| {
+        Warning::new(code, WarningSeverity::Error, message, Some(source()))
+    };
+    journal
+        .note_new_keys(hive, key_path, item)
+        .map_err(|error| failed("journal_write_failed", error.to_string()))?;
+    let (key, _) = registry_root(hive)
+        .create_subkey(key_path)
+        .map_err(|error| {
+            failed(
+                "registry_key_create_failed",
+                format!("Could not create registry key: {error}"),
+            )
+        })?;
+    let prior = read_prior_value(&key, name).map_err(|error| {
+        failed(
+            "registry_value_read_failed",
+            format!("Could not read the value this would replace: {error}"),
+        )
+    })?;
+    journal
+        .note_value(
+            hive,
+            key_path,
+            name,
+            prior,
+            StoredValue::from_reg(value),
+            item,
+        )
+        .map_err(|error| failed("journal_write_failed", error.to_string()))?;
+    key.set_raw_value(name, value).map_err(|error| {
+        failed(
+            "registry_value_write_failed",
+            format!("Could not write registry value: {error}"),
+        )
+    })
+}
+
+/// What a value is now, if it is there. Not being able to tell is not the same as it not being
+/// there: writing over it could then not be undone.
+fn read_prior_value(key: &winreg::RegKey, name: &str) -> io::Result<Option<StoredValue>> {
+    match key.get_raw_value(name) {
+        Ok(value) => Ok(Some(StoredValue::from_reg(&value))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
 fn apply_registry_entry(
+    journal: &mut Journal,
     entry: &RegistryEntry,
     force: bool,
     map: &RestoreMap,
+    item: ItemKind,
 ) -> std::result::Result<String, Warning> {
     // Before the key is created: a new empty key can take over a class by itself.
     if is_com_server_entry(entry) {
         refuse_taking_over_com_class(entry, map)?;
     }
+    let key_source = || format!("{}\\{}", registry_hive_name(&entry.hive), entry.key_path);
+    journal
+        .note_new_keys(&entry.hive, &entry.key_path, item)
+        .map_err(|error| {
+            Warning::new(
+                "journal_write_failed",
+                WarningSeverity::Error,
+                error.to_string(),
+                Some(key_source()),
+            )
+        })?;
     let root = registry_root(&entry.hive);
     let (key, _) = root.create_subkey(&entry.key_path).map_err(|error| {
         Warning::new(
             "registry_key_create_failed",
             WarningSeverity::Error,
             format!("Could not create registry key: {error}"),
-            Some(format!(
-                "{}\\{}",
-                registry_hive_name(&entry.hive),
-                entry.key_path
-            )),
+            Some(key_source()),
         )
     })?;
 
@@ -1072,7 +1680,7 @@ fn apply_registry_entry(
     }
 
     let value_name = registry_value_name(entry.value_name.as_deref());
-    if key.get_raw_value(value_name).is_ok() && !force {
+    if !force && key.get_raw_value(value_name).is_ok() {
         return Err(Warning::new(
             "registry_value_exists",
             WarningSeverity::Warning,
@@ -1087,19 +1695,14 @@ fn apply_registry_entry(
     }
 
     let value = registry_value_from_entry(entry, map)?;
-    key.set_raw_value(value_name, &value).map_err(|error| {
-        Warning::new(
-            "registry_value_write_failed",
-            WarningSeverity::Error,
-            format!("Could not write registry value: {error}"),
-            Some(format!(
-                "{}\\{}\\{}",
-                registry_hive_name(&entry.hive),
-                entry.key_path,
-                entry.value_name.as_deref().unwrap_or("(Default)")
-            )),
-        )
-    })?;
+    set_journaled_value(
+        journal,
+        &entry.hive,
+        &entry.key_path,
+        value_name,
+        &value,
+        item,
+    )?;
     Ok(format!(
         "restored registry {}\\{} {}",
         registry_hive_name(&entry.hive),
@@ -1145,18 +1748,25 @@ fn refuse_taking_over_com_class(
 }
 
 fn apply_environment_variable(
+    journal: &mut Journal,
     variable: &EnvironmentVariableEntry,
     force: bool,
     target_root: &Path,
     map: &RestoreMap,
 ) -> std::result::Result<String, Warning> {
+    let failed = |code: &'static str, message: String| {
+        Warning::new(
+            code,
+            WarningSeverity::Error,
+            message,
+            Some(format!("{:?}\\{}", variable.scope, variable.name)),
+        )
+    };
     let (root, key_path) = environment_registry_target(&variable.scope);
     let (key, _) = root.create_subkey(key_path).map_err(|error| {
-        Warning::new(
+        failed(
             "environment_key_create_failed",
-            WarningSeverity::Error,
             format!("Could not create environment registry key: {error}"),
-            Some(format!("{:?}\\{}", variable.scope, variable.name)),
         )
     })?;
     let existing = key.get_raw_value(&variable.name).ok();
@@ -1169,9 +1779,15 @@ fn apply_environment_variable(
             Some(format!("{:?}\\{}", variable.scope, variable.name)),
         ));
     }
+    let prior = read_prior_value(&key, &variable.name).map_err(|error| {
+        failed(
+            "environment_value_read_failed",
+            format!("Could not read the value this would replace: {error}"),
+        )
+    })?;
 
     let rewritten = map.rewrite(&variable.value);
-    let (data, vtype) = if is_path {
+    let (change, value) = if is_path {
         let current = key
             .get_value::<String, _>(&variable.name)
             .unwrap_or_default();
@@ -1186,20 +1802,47 @@ fn apply_environment_variable(
             || registry_raw_type(&variable.value_kind),
             |value| value.vtype,
         );
-        (merge_path_entries(&current, &entries), vtype)
+        let added: Vec<String> = entries
+            .iter()
+            .filter(|entry| !path_contains_entry(&current, entry))
+            .cloned()
+            .collect();
+        let value = RegValue {
+            bytes: Cow::Owned(encode_utf16_nul(&merge_path_entries(&current, &entries))),
+            vtype,
+        };
+        (
+            Change::PathEntries {
+                scope: variable.scope.clone(),
+                name: variable.name.clone(),
+                added,
+                prior,
+                written: StoredValue::from_reg(&value),
+            },
+            value,
+        )
     } else {
-        (rewritten, registry_raw_type(&variable.value_kind))
+        let value = RegValue {
+            bytes: Cow::Owned(encode_utf16_nul(&rewritten)),
+            vtype: registry_raw_type(&variable.value_kind),
+        };
+        (
+            Change::EnvironmentValue {
+                scope: variable.scope.clone(),
+                name: variable.name.clone(),
+                prior,
+                written: StoredValue::from_reg(&value),
+            },
+            value,
+        )
     };
-    let value = RegValue {
-        bytes: Cow::Owned(encode_utf16_nul(&data)),
-        vtype,
-    };
+    journal
+        .note(change)
+        .map_err(|error| failed("journal_write_failed", error.to_string()))?;
     key.set_raw_value(&variable.name, &value).map_err(|error| {
-        Warning::new(
+        failed(
             "environment_value_write_failed",
-            WarningSeverity::Error,
             format!("Could not write environment variable: {error}"),
-            Some(format!("{:?}\\{}", variable.scope, variable.name)),
         )
     })?;
     Ok(format!(
@@ -1270,9 +1913,11 @@ fn sc_service_arguments(
 }
 
 fn apply_service(
+    journal: &mut Journal,
     reviewed: &ReviewedService<'_>,
     target_root: &Path,
     force: bool,
+    warnings: &mut Vec<Warning>,
 ) -> std::result::Result<Vec<String>, Warning> {
     let service = reviewed.entry;
     let name = service.service_name.as_str();
@@ -1303,6 +1948,24 @@ fn apply_service(
             Some(name.to_owned()),
         ));
     }
+    let problem = |code: &'static str, message: String| {
+        Warning::new(code, WarningSeverity::Error, message, Some(name.to_owned()))
+    };
+    let prior = read_service_config(name).map_err(|error| {
+        problem(
+            "service_query_failed",
+            format!("Could not read the service's current settings: {error}"),
+        )
+    })?;
+    journal
+        .note(Change::Service {
+            name: name.to_owned(),
+            driver: false,
+            binary: reviewed.binary.clone(),
+            arguments: reviewed.arguments.clone(),
+            prior,
+        })
+        .map_err(|error| problem("journal_write_failed", error.to_string()))?;
 
     let (verb, error_code, done) = if current.is_some() {
         ("config", "service_config_failed", "configured")
@@ -1329,11 +1992,14 @@ fn apply_service(
             .arg("description")
             .arg(&service.service_name)
             .arg(description);
-        run_checked(
+        // Only what Services shows about it, so not worth undoing the install for.
+        if let Err(warning) = run_checked(
             &mut command,
             "service_description_failed",
             &service.service_name,
-        )?;
+        ) {
+            warnings.push(warning);
+        }
     }
     if !service.dependencies.is_empty() {
         let dependencies = service.dependencies.join("/");
@@ -1353,9 +2019,54 @@ fn apply_service(
     Ok(messages)
 }
 
+/// The folders of a task's path, outermost first, as the Task Scheduler names them.
+fn task_folder_levels(task_path: &str) -> Vec<String> {
+    let mut levels = Vec::new();
+    let mut current = String::new();
+    for part in task_path.split('\\').filter(|part| !part.is_empty()) {
+        current.push('\\');
+        current.push_str(part);
+        levels.push(current.clone());
+    }
+    levels
+}
+
+/// The task folders on this list that are not there. Windows makes them when a task is
+/// registered and does not take them away, so an undo has to know which were new.
+fn missing_task_folders(levels: &[String]) -> io::Result<Vec<String>> {
+    if levels.is_empty() {
+        return Ok(Vec::new());
+    }
+    let names = levels
+        .iter()
+        .map(|level| format!("'{}'", escape_powershell_single(level)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = format!(
+        "{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_UTILITY}\
+         $s = New-Object -ComObject Schedule.Service; $s.Connect(); \
+         foreach ($path in @({names})) {{ try {{ $null = $s.GetFolder($path) }} catch {{ $path }} }}"
+    );
+    let output = hidden_command(POWERSHELL_EXE)
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 /// Register a task. Its definition is passed through a file in the staging folder, which
 /// other processes cannot write to. A fixed name in `%TEMP%` could be planted as a link.
 fn apply_scheduled_task(
+    journal: &mut Journal,
     task: &ReviewedTask<'_>,
     options: &RestoreOptions,
 ) -> std::result::Result<String, Warning> {
@@ -1387,6 +2098,37 @@ fn apply_scheduled_task(
             ));
         }
     }
+    let problem = |code: &'static str, message: String| {
+        Warning::new(
+            code,
+            WarningSeverity::Error,
+            message,
+            Some(format!("{}{}", task.entry.task_path, task.entry.task_name)),
+        )
+    };
+
+    if journal.first_look_at_task_folder(&task.entry.task_path) {
+        let missing =
+            missing_task_folders(&task_folder_levels(&task.entry.task_path)).map_err(|error| {
+                problem(
+                    "scheduled_task_query_failed",
+                    format!("Could not look at the task's folder: {error}"),
+                )
+            })?;
+        for path in missing {
+            journal
+                .note(Change::TaskFolderCreated { path })
+                .map_err(|error| problem("journal_write_failed", error.to_string()))?;
+        }
+    }
+    journal
+        .note(Change::Task {
+            task_path: task.entry.task_path.clone(),
+            task_name: task.entry.task_name.clone(),
+            prior_xml: existing,
+            written_xml: None,
+        })
+        .map_err(|error| problem("journal_write_failed", error.to_string()))?;
 
     let xml_path = write_task_definition(&options.package_root, &task.xml).map_err(|error| {
         warning_io(
@@ -1401,14 +2143,25 @@ fn apply_scheduled_task(
         &task.entry.task_name,
         options.force,
     );
-    let result = run_powershell_script(&script).map(|()| format!("restored scheduled task {name}"));
+    let registered = run_powershell_script(&script);
     let _ = fs::remove_file(&xml_path);
-    result
+    registered?;
+    // How Windows wrote it back is what an uninstall compares against later.
+    if let Ok(Some(xml)) = live_task_xml(&task.entry.task_path, &task.entry.task_name) {
+        journal
+            .note(Change::TaskWritten {
+                task_path: task.entry.task_path.clone(),
+                task_name: task.entry.task_name.clone(),
+                xml,
+            })
+            .map_err(|error| problem("journal_write_failed", error.to_string()))?;
+    }
+    Ok(format!("restored scheduled task {name}"))
 }
 
 /// Write a task's definition into `folder` under a new name, failing rather than opening
 /// anything already there.
-fn write_task_definition(folder: &Path, xml: &str) -> io::Result<PathBuf> {
+pub(crate) fn write_task_definition(folder: &Path, xml: &str) -> io::Result<PathBuf> {
     let path = folder.join(format!("task-{}.xml", partial_file_name()));
     let mut file = OpenOptions::new()
         .write(true)
@@ -1418,7 +2171,12 @@ fn write_task_definition(folder: &Path, xml: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-fn register_task_script(xml_path: &Path, task_path: &str, task_name: &str, force: bool) -> String {
+pub(crate) fn register_task_script(
+    xml_path: &Path,
+    task_path: &str,
+    task_name: &str,
+    force: bool,
+) -> String {
     let force_flag = if force { "$true" } else { "$false" };
     format!(
         "{POWERSHELL_IMPORT_MANAGEMENT}{POWERSHELL_IMPORT_TASKS}$xml = Get-Content -Raw -Encoding UTF8 -LiteralPath '{}'; Register-ScheduledTask -TaskName '{}' -TaskPath '{}' -Xml $xml -Force:{force_flag} | Out-Null",
@@ -1428,9 +2186,25 @@ fn register_task_script(xml_path: &Path, task_path: &str, task_name: &str, force
     )
 }
 
-fn apply_shortcut(shortcut: &ReviewedShortcut) -> std::result::Result<String, Warning> {
+/// Make a shortcut, keeping one already there. It is not this install's to lose, and if this
+/// one cannot be made it goes back, since a shortcut is not worth failing an install for.
+fn apply_shortcut(
+    journal: &mut Journal,
+    shortcut: &ReviewedShortcut,
+) -> std::result::Result<String, Warning> {
     let placement = &shortcut.placement;
     let destination = &placement.destination;
+    let journal_failed = |error: WinAppMigratorError| {
+        Warning::new(
+            "journal_write_failed",
+            WarningSeverity::Error,
+            error.to_string(),
+            Some(destination.display().to_string()),
+        )
+    };
+    journal
+        .note_new_folders_to(&placement.root, ItemKind::Program)
+        .map_err(journal_failed)?;
     fs::create_dir_all(&placement.root)
         .map_err(|error| warning_io("shortcut_parent_create_failed", &placement.root, error))?;
     ensure_within_root(&placement.root, destination).map_err(|error| {
@@ -1442,11 +2216,57 @@ fn apply_shortcut(shortcut: &ReviewedShortcut) -> std::result::Result<String, Wa
         )
     })?;
     if let Some(parent) = destination.parent() {
+        journal
+            .note_new_folders(&placement.root, parent, ItemKind::Program)
+            .map_err(journal_failed)?;
         fs::create_dir_all(parent)
             .map_err(|error| warning_io("shortcut_parent_create_failed", parent, error))?;
     }
-    run_powershell_script(&shortcut_script(shortcut))
-        .map(|()| format!("restored shortcut {}", destination.display()))
+    let replaces = fs::symlink_metadata(destination).is_ok();
+    let backup = journal
+        .note_file(
+            destination,
+            &placement.root,
+            ItemKind::Program,
+            replaces,
+            None,
+            None,
+        )
+        .map_err(journal_failed)?;
+    if let Some(number) = backup {
+        journal
+            .back_up(destination, number)
+            .map_err(journal_failed)?;
+    }
+    if let Err(warning) = run_powershell_script(&shortcut_script(shortcut)) {
+        if let Some(found) = backup.and_then(|number| find_backup(journal.folder(), number))
+            && let Err(error) = put_back_backup(&found, destination)
+        {
+            return Err(Warning::new(
+                "shortcut_put_back_failed",
+                WarningSeverity::Error,
+                format!(
+                    "The shortcut could not be made, and the one it replaced could not be put \
+                     back: {error}"
+                ),
+                Some(destination.display().to_string()),
+            ));
+        }
+        journal
+            .note(Change::FileUndone {
+                path: destination.clone(),
+            })
+            .map_err(journal_failed)?;
+        return Err(warning);
+    }
+    let sha256 = sha256_file(destination).map_err(journal_failed)?;
+    journal
+        .note(Change::FileWritten {
+            path: destination.clone(),
+            sha256,
+        })
+        .map_err(journal_failed)?;
+    Ok(format!("restored shortcut {}", destination.display()))
 }
 
 fn shortcut_script(shortcut: &ReviewedShortcut) -> String {
@@ -1477,12 +2297,20 @@ fn shortcut_script(shortcut: &ReviewedShortcut) -> String {
     script
 }
 
-/// Put a file from the package at its destination. It is written beside the destination
-/// under a new name, then renamed over it. A rename replaces the name at the destination
-/// and cannot be carried through it, unlike opening it for writing, which follows a link
-/// and also writes through a hard link. A failure part-way through a file also leaves the
-/// old one in place.
-fn copy_restore_file(source: &Path, destination: &Path, target_root: &Path) -> Result<()> {
+/// Put a file from the package at its destination, recording it first and keeping what it
+/// replaces. It is written beside the destination under a new name, then renamed over it. A
+/// rename replaces the name at the destination and cannot be carried through it, unlike
+/// opening it for writing, which follows a link and also writes through a hard link. A failure
+/// part-way through a file also leaves the old one in place, and if the process is killed,
+/// the journal knows the new name and can remove it.
+fn copy_restore_file(
+    journal: &mut Journal,
+    source: &Path,
+    destination: &Path,
+    target_root: &Path,
+    item: ItemKind,
+    sha256: Option<&str>,
+) -> Result<()> {
     let root = write_root_for(destination, target_root).ok_or_else(|| {
         WinAppMigratorError::InvalidInput(format!(
             "refusing to write outside the install location and the known data folders: {}",
@@ -1496,11 +2324,26 @@ fn copy_restore_file(source: &Path, destination: &Path, target_root: &Path) -> R
             destination.display()
         ))
     })?;
+    journal.note_new_folders(&root, parent, item)?;
     fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
 
+    let replaces = match fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.is_dir() => {
+            return Err(WinAppMigratorError::InvalidInput(format!(
+                "a folder is where this file has to go: {}",
+                destination.display()
+            )));
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(WinAppMigratorError::io(destination, error)),
+    };
     let partial = parent.join(partial_file_name());
-    let copied = write_partial_copy(source, &partial).and_then(|()| {
-        make_replaceable(destination)?;
+    let backup = journal.note_file(destination, &root, item, replaces, sha256, Some(&partial))?;
+    let copied = write_partial_copy(source, &partial, false).and_then(|()| {
+        if let Some(number) = backup {
+            journal.back_up(destination, number)?;
+        }
         fs::rename(&partial, destination)
             .map_err(|error| WinAppMigratorError::io(destination, error))
     });
@@ -1514,7 +2357,7 @@ fn copy_restore_file(source: &Path, destination: &Path, target_root: &Path) -> R
 /// have left one, since a copy keeps the read-only attribute. Whether to replace it has
 /// been decided by this point. On Windows this clears that one attribute, and nothing else.
 #[allow(clippy::permissions_set_readonly_false)]
-fn make_replaceable(destination: &Path) -> Result<()> {
+pub(crate) fn make_replaceable(destination: &Path) -> Result<()> {
     let Ok(metadata) = fs::symlink_metadata(destination) else {
         return Ok(());
     };
@@ -1529,7 +2372,7 @@ fn make_replaceable(destination: &Path) -> Result<()> {
 
 /// A name no other copy in this run is using. It is opened with `create_new`, which
 /// fails on anything already there, so the name does not need to be secret.
-fn partial_file_name() -> String {
+pub(crate) fn partial_file_name() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     format!(
         ".wam-{}-{}.partial",
@@ -1538,7 +2381,9 @@ fn partial_file_name() -> String {
     )
 }
 
-fn write_partial_copy(source: &Path, partial: &Path) -> Result<()> {
+/// Copy a file under a new name, with its times and read-only attribute. With `durable`, its
+/// contents are on disk before this returns, for a copy that may be all that is left.
+pub(crate) fn write_partial_copy(source: &Path, partial: &Path, durable: bool) -> Result<()> {
     let mut input = File::open(source).map_err(|error| WinAppMigratorError::io(source, error))?;
     let output = OpenOptions::new()
         .write(true)
@@ -1547,11 +2392,15 @@ fn write_partial_copy(source: &Path, partial: &Path) -> Result<()> {
         .map_err(|error| WinAppMigratorError::io(partial, error))?;
     let mut output = BufWriter::with_capacity(COPY_BUFFER_BYTES, output);
     io::copy(&mut input, &mut output).map_err(|error| WinAppMigratorError::io(partial, error))?;
-    drop(
+    let output = output
+        .into_inner()
+        .map_err(|error| WinAppMigratorError::io(partial, error.into_error()))?;
+    if durable {
         output
-            .into_inner()
-            .map_err(|error| WinAppMigratorError::io(partial, error.into_error()))?,
-    );
+            .sync_all()
+            .map_err(|error| WinAppMigratorError::io(partial, error))?;
+    }
+    drop(output);
     let metadata = input
         .metadata()
         .map_err(|error| WinAppMigratorError::io(source, error))?;
@@ -1562,72 +2411,6 @@ fn write_partial_copy(source: &Path, partial: &Path) -> Result<()> {
     fs::set_permissions(partial, metadata.permissions())
         .map_err(|error| WinAppMigratorError::io(partial, error))?;
     Ok(())
-}
-
-fn write_restore_logs(
-    json_path: &Path,
-    markdown_path: &Path,
-    result: &RestoreResult,
-) -> Result<()> {
-    if let Some(parent) = json_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
-    }
-    let json = serde_json::to_vec_pretty(result)?;
-    fs::write(json_path, json).map_err(|error| WinAppMigratorError::io(json_path, error))?;
-
-    let mut markdown = String::new();
-    markdown.push_str("# WinAppMigrator Restore Log\n\n");
-    markdown.push_str(&format!("- Applied: {}\n", result.applied));
-    markdown.push_str("\n## Changes\n");
-    for change in &result.changes_logged {
-        markdown.push_str(&format!("- {change}\n"));
-    }
-    markdown.push_str(REFUSED_LOG_HEADING);
-    for refused in &result.refused {
-        markdown.push_str(&format!("- {}\n", refused.message));
-    }
-    markdown.push_str("\n## Warnings\n");
-    for warning in &result.warnings {
-        markdown.push_str(&format!(
-            "- {:?} {}: {}\n",
-            warning.severity, warning.code, warning.message
-        ));
-    }
-    if let Some(verification) = result.verification.as_ref() {
-        markdown.push_str("\n## Verification\n");
-        markdown.push_str(&format!(
-            "- Package valid: {}\n",
-            verification.package_valid
-        ));
-        markdown.push_str(&format!(
-            "- Restore valid: {}\n",
-            verification
-                .restore_valid
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "not run".to_owned())
-        ));
-        markdown.push_str(&format!("- Items checked: {}\n", verification.items.len()));
-    }
-    markdown.push_str("\n## Errors\n");
-    for error in &result.errors {
-        markdown.push_str(&format!(
-            "- {:?} {}: {}\n",
-            error.severity, error.code, error.message
-        ));
-    }
-    fs::write(markdown_path, markdown)
-        .map_err(|error| WinAppMigratorError::io(markdown_path, error))
-}
-
-fn restore_output_dir(original_package_root: &Path, effective_package_root: &Path) -> PathBuf {
-    if original_package_root.is_file() {
-        original_package_root
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| effective_package_root.to_path_buf())
-    } else {
-        effective_package_root.to_path_buf()
-    }
 }
 
 /// Worked out from what the restore will do, not from what the manifest says about it.
@@ -1661,7 +2444,7 @@ fn user_data_restore_requires_admin(review: &ReviewedPackage<'_>) -> bool {
     })
 }
 
-fn encode_utf16_nul(value: &str) -> Vec<u8> {
+pub(crate) fn encode_utf16_nul(value: &str) -> Vec<u8> {
     value
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -1696,9 +2479,10 @@ fn warning_io(code: &'static str, path: &Path, error: std::io::Error) -> Warning
     )
 }
 
-fn sc_start_type(value: &str) -> Option<&'static str> {
+pub(crate) fn sc_start_type(value: &str) -> Option<&'static str> {
     match value {
         "automatic" => Some("auto"),
+        DELAYED_AUTOMATIC_START_LABEL => Some("delayed-auto"),
         "manual" => Some("demand"),
         "disabled" => Some("disabled"),
         "boot" => Some("boot"),
@@ -1707,7 +2491,7 @@ fn sc_start_type(value: &str) -> Option<&'static str> {
     }
 }
 
-fn run_checked(
+pub(crate) fn run_checked(
     command: &mut Command,
     code: &'static str,
     source: &str,
@@ -1733,7 +2517,17 @@ fn run_checked(
     ))
 }
 
-fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
+/// What PowerShell said went wrong, without the part after it where it quotes the script. A
+/// script can hold what is not to be logged, such as a shortcut's arguments.
+fn powershell_error_summary(text: &str) -> String {
+    text.split(POWERSHELL_ERROR_POSITION)
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
+}
+
+pub(crate) fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
     let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
@@ -1753,8 +2547,8 @@ fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
         WarningSeverity::Error,
         format!(
             "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            powershell_error_summary(&String::from_utf8_lossy(&output.stdout)),
+            powershell_error_summary(&String::from_utf8_lossy(&output.stderr))
         ),
         None,
     ))
@@ -1763,8 +2557,12 @@ fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{FileClassification, FileEntry};
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::sync::{Arc, Mutex};
+
+    use crate::journal::{install_folders, read_journal};
     use crate::restore_policy::driver_destination;
+    use crate::rollback::{UndoMode, open_install, undo_journal};
 
     #[test]
     fn rejects_apply_and_dry_run_together() {
@@ -1776,6 +2574,7 @@ mod tests {
             force: false,
             restore_user_data: false,
             restore_license: true,
+            state_root: PathBuf::from("state"),
         };
 
         assert!(restore_package(&options).is_err());
@@ -1883,6 +2682,7 @@ mod tests {
             force,
             restore_user_data: false,
             restore_license: true,
+            state_root: work.join("state"),
         }
     }
 
@@ -1917,7 +2717,8 @@ mod tests {
         for hash in [None, Some("00".repeat(32))] {
             let driver = unregistered_driver(hash);
             let reviewed = reviewed_driver(&driver, &options);
-            let refused = place_and_register_driver(&reviewed, &options);
+            let mut journal = journal_for_test(&options)?;
+            let refused = place_and_register_driver(&mut journal, &reviewed, &options);
             assert_eq!(
                 refused.err().map(|warning| warning.code).as_deref(),
                 Some("driver_hash_failed")
@@ -1937,7 +2738,8 @@ mod tests {
         let reviewed = reviewed_driver(&driver, &options);
         write_file(&reviewed.destination, b"existing")?;
 
-        let refused = place_and_register_driver(&reviewed, &options);
+        let mut journal = journal_for_test(&options)?;
+        let refused = place_and_register_driver(&mut journal, &reviewed, &options);
 
         assert_eq!(
             refused.err().map(|warning| warning.code).as_deref(),
@@ -1980,6 +2782,16 @@ mod tests {
         assert!(script.contains("-TaskName 'Sync''s'"));
         assert!(script.contains(r"-TaskPath '\Acme''s\'"));
         assert!(script.contains("-Force:$true"));
+    }
+
+    fn journal_for_test(options: &RestoreOptions) -> Result<Journal> {
+        Journal::begin(
+            &options.state_root,
+            "Acme",
+            &options.target_root,
+            None,
+            None,
+        )
     }
 
     fn file_entry(relative: &str, hash: Option<String>, size: u64) -> FileEntry {
@@ -2060,6 +2872,7 @@ mod tests {
             force: false,
             restore_user_data: false,
             restore_license: true,
+            state_root: root.join("state"),
         }
     }
 
@@ -2277,6 +3090,8 @@ mod tests {
                 .any(|item| item.message.contains("Image File Execution Options"))
         );
         assert!(!options.target_root.exists(), "a preview creates nothing");
+        assert!(!options.state_root.exists(), "not even a journal's folder");
+        assert_eq!(result.install_id, None);
         Ok(())
     }
 
@@ -2369,6 +3184,19 @@ mod tests {
         tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp folder", error))
     }
 
+    /// Copy through a journal of its own, for what only cares about the copying.
+    fn copy_file(source: &Path, destination: &Path, root: &Path, state: &Path) -> Result<()> {
+        let mut journal = Journal::begin(state, "Acme", root, None, None)?;
+        copy_restore_file(
+            &mut journal,
+            source,
+            destination,
+            root,
+            ItemKind::Program,
+            None,
+        )
+    }
+
     #[test]
     fn copying_creates_the_file_and_leaves_nothing_else_behind() -> Result<()> {
         let work = temp_folder()?;
@@ -2378,9 +3206,9 @@ mod tests {
         fs::create_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
         let destination = root.join(r"bin\app.exe");
 
-        copy_restore_file(&source, &destination, &root)?;
+        copy_file(&source, &destination, &root, &work.path().join("state"))?;
         write_file(&source, b"newer")?;
-        copy_restore_file(&source, &destination, &root)?;
+        copy_file(&source, &destination, &root, &work.path().join("state"))?;
 
         assert_eq!(
             fs::read(&destination).map_err(|error| WinAppMigratorError::io(&destination, error))?,
@@ -2410,7 +3238,7 @@ mod tests {
         fs::set_permissions(&destination, permissions)
             .map_err(|error| WinAppMigratorError::io(&destination, error))?;
 
-        copy_restore_file(&source, &destination, &root)?;
+        copy_file(&source, &destination, &root, &work.path().join("state"))?;
 
         assert_eq!(
             fs::read(&destination).map_err(|error| WinAppMigratorError::io(&destination, error))?,
@@ -2429,7 +3257,7 @@ mod tests {
         // Not a temp path: temp folders sit inside %LOCALAPPDATA%, which is a known folder.
         let outside = Path::new(r"Z:\wam-not-a-known-folder\outside.bin");
 
-        let refused = copy_restore_file(&source, outside, &root);
+        let refused = copy_file(&source, outside, &root, &work.path().join("state"));
         assert!(
             matches!(&refused, Err(WinAppMigratorError::InvalidInput(message)) if message.contains("refusing")),
             "{refused:?}"
@@ -2450,7 +3278,7 @@ mod tests {
         fs::hard_link(&victim, &destination)
             .map_err(|error| WinAppMigratorError::io(&destination, error))?;
 
-        copy_restore_file(&source, &destination, &root)?;
+        copy_file(&source, &destination, &root, &work.path().join("state"))?;
 
         assert_eq!(
             fs::read(&victim).map_err(|error| WinAppMigratorError::io(&victim, error))?,
@@ -2484,12 +3312,776 @@ mod tests {
             return Ok(());
         }
 
-        assert!(copy_restore_file(&source, &destination, &root).is_err());
+        assert!(copy_file(&source, &destination, &root, &work.path().join("state")).is_err());
         assert_eq!(
             fs::read(&victim).map_err(|error| WinAppMigratorError::io(&victim, error))?,
             b"keep"
         );
         Ok(())
+    }
+
+    /// Hold a file open the way another program might, so it cannot be moved or replaced.
+    fn hold_exclusively(path: &Path) -> Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .map_err(|error| WinAppMigratorError::io(path, error))
+    }
+
+    fn read_text(path: &Path) -> Result<String> {
+        fs::read_to_string(path).map_err(|error| WinAppMigratorError::io(path, error))
+    }
+
+    fn is_read_only(path: &Path) -> Result<bool> {
+        Ok(fs::metadata(path)
+            .map_err(|error| WinAppMigratorError::io(path, error))?
+            .permissions()
+            .readonly())
+    }
+
+    fn set_read_only(path: &Path) -> Result<()> {
+        let mut permissions = fs::metadata(path)
+            .map_err(|error| WinAppMigratorError::io(path, error))?
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions).map_err(|error| WinAppMigratorError::io(path, error))
+    }
+
+    fn names_in(folder: &Path) -> Result<Vec<String>> {
+        let mut names: Vec<String> = fs::read_dir(folder)
+            .map_err(|error| WinAppMigratorError::io(folder, error))?
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
+    fn junction(link: &Path, target: &Path) -> Result<()> {
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .map_err(|error| WinAppMigratorError::io(link, error))?;
+        assert!(made.status.success());
+        Ok(())
+    }
+
+    /// Install a package of plain files into a new target, and return how, with its id.
+    fn installed(
+        work: &Path,
+        files: &[(&str, &[u8])],
+        edit: impl FnOnce(&mut PackageManifest),
+    ) -> Result<(RestoreOptions, String)> {
+        let package = package_of(work, files, edit)?;
+        let mut options = restore_options(work, package, true);
+        options.force = true;
+        let result = restore_package(&options)?;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let id = result.install_id.ok_or_else(|| {
+            WinAppMigratorError::InvalidInput("a finished install has an id".to_owned())
+        })?;
+        Ok((options, id))
+    }
+
+    fn uninstall(
+        options: &RestoreOptions,
+        id: &str,
+        remove_user_data: bool,
+    ) -> Result<crate::rollback::UninstallOutcome> {
+        Ok(open_install(&options.state_root, id)?
+            .uninstall(remove_user_data, &InstallMonitor::default()))
+    }
+
+    #[test]
+    fn a_failure_part_way_puts_back_everything_it_did() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(
+            work.path(),
+            &[
+                ("kept.dat", b"new kept"),
+                (r"sub\deep\new.dat", b"new"),
+                ("held.dat", b"new held"),
+                ("never.dat", b"never reached"),
+            ],
+            |_| {},
+        )?;
+        let mut options = restore_options(work.path(), package, true);
+        options.force = true;
+        let target = options.target_root.clone();
+        write_file(&target.join("kept.dat"), b"old kept")?;
+        set_read_only(&target.join("kept.dat"))?;
+        write_file(&target.join("held.dat"), b"old held")?;
+        write_file(&target.join("unrelated.txt"), b"mine")?;
+        let held = hold_exclusively(&target.join("held.dat"))?;
+
+        let result = restore_package(&options)?;
+        drop(held);
+
+        assert!(!result.errors.is_empty(), "the held file should fail it");
+        assert_eq!(result.install_id, None);
+        let report = result.rollback.ok_or_else(|| {
+            WinAppMigratorError::InvalidInput("a failed install is rolled back".to_owned())
+        })?;
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(read_text(&target.join("kept.dat"))?, "old kept");
+        assert!(is_read_only(&target.join("kept.dat"))?, "kept as it was");
+        assert_eq!(read_text(&target.join("held.dat"))?, "old held");
+        assert_eq!(
+            names_in(&target)?,
+            ["held.dat", "kept.dat", "unrelated.txt"],
+            "nothing new is left, including partial files and folders"
+        );
+        assert!(
+            install_folders(&options.state_root)?.is_empty(),
+            "the backups and the record go with it"
+        );
+        Ok(())
+    }
+
+    /// Change what was installed the moment the install moves on to checking it.
+    fn monitor_that_changes_a_file_before_it_is_checked(file: PathBuf) -> InstallMonitor {
+        InstallMonitor::new(move |step: InstallStep| {
+            if step.phase == InstallPhase::Verifying {
+                let _ = fs::write(&file, b"changed");
+            }
+        })
+    }
+
+    #[test]
+    fn a_failure_takes_back_the_folders_it_made_for_the_install_location() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("a.dat", b"a")], |_| {})?;
+        let mut options = restore_options(work.path(), package, true);
+        options.target_root = work.path().join(r"new\deep\target");
+        let monitor =
+            monitor_that_changes_a_file_before_it_is_checked(options.target_root.join("a.dat"));
+
+        let result = restore_package_monitored(&options, &monitor, None)?;
+
+        assert!(!result.errors.is_empty());
+        assert!(!work.path().join("new").exists(), "{:?}", result.rollback);
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_that_fails_its_check_after_being_written_rolls_the_install_back() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("a.dat", b"a"), ("b.dat", b"b")], |_| {})?;
+        let mut options = restore_options(work.path(), package, true);
+        options.force = true;
+        let target = options.target_root.clone();
+        let monitor = monitor_that_changes_a_file_before_it_is_checked(target.join("a.dat"));
+
+        let result = restore_package_monitored(&options, &monitor, None)?;
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.code == "verification_restored_file_failed"),
+            "{:?}",
+            result.errors
+        );
+        assert_eq!(result.install_id, None);
+        let report = result.rollback.ok_or_else(|| {
+            WinAppMigratorError::InvalidInput("it should be rolled back".to_owned())
+        })?;
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(!target.exists(), "what it changed goes too, as a rollback");
+        Ok(())
+    }
+
+    #[test]
+    fn cancelling_part_way_puts_everything_back() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(
+            work.path(),
+            &[("a.dat", b"a"), ("b.dat", b"b"), ("c.dat", b"c")],
+            |_| {},
+        )?;
+        let mut options = restore_options(work.path(), package, true);
+        options.force = true;
+        write_file(&options.target_root.join("a.dat"), b"old a")?;
+        let holder: Arc<Mutex<Option<InstallMonitor>>> = Arc::new(Mutex::new(None));
+        let observer_holder = Arc::clone(&holder);
+        let monitor = InstallMonitor::new(move |step: InstallStep| {
+            if step.phase == InstallPhase::Files
+                && step.done == 2
+                && let Ok(held) = observer_holder.lock()
+                && let Some(monitor) = held.as_ref()
+            {
+                monitor.cancel();
+            }
+        });
+        if let Ok(mut held) = holder.lock() {
+            *held = Some(monitor.clone());
+        }
+
+        let result = restore_package_monitored(&options, &monitor, None)?;
+
+        assert_eq!(
+            result.errors.first().map(|error| error.code.as_str()),
+            Some(CANCELLED_CODE)
+        );
+        assert_eq!(result.install_id, None);
+        assert!(result.rollback.is_some());
+        assert_eq!(read_text(&options.target_root.join("a.dat"))?, "old a");
+        assert!(!options.target_root.join("b.dat").exists());
+        assert!(install_folders(&options.state_root)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_preview_reports_progress_and_cancelling_it_changes_nothing() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("a.dat", b"a")], |_| {})?;
+        let options = restore_options(work.path(), package, false);
+        let monitor = InstallMonitor::default();
+        monitor.cancel();
+
+        let result = restore_package_monitored(&options, &monitor, None)?;
+
+        assert!(result.rollback.is_none());
+        assert_eq!(
+            result.errors.first().map(|error| error.code.as_str()),
+            Some(CANCELLED_CODE)
+        );
+        assert!(!options.state_root.exists());
+        assert!(!options.target_root.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn progress_is_reported_for_every_file_and_for_checking() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("a.dat", b"a"), ("b.dat", b"b")], |_| {})?;
+        let options = restore_options(work.path(), package, true);
+        let seen: Arc<Mutex<Vec<InstallStep>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let monitor = InstallMonitor::new(move |step| {
+            if let Ok(mut steps) = sink.lock() {
+                steps.push(step);
+            }
+        });
+
+        restore_package_monitored(&options, &monitor, None)?;
+
+        let steps = seen
+            .lock()
+            .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))?;
+        let phases: Vec<InstallPhase> = steps.iter().map(|step| step.phase).collect();
+        assert_eq!(
+            phases,
+            [
+                InstallPhase::CheckingPackage,
+                InstallPhase::Files,
+                InstallPhase::Files,
+                InstallPhase::Verifying,
+            ]
+        );
+        assert_eq!(steps[2].fraction(), Some(0.5));
+        Ok(())
+    }
+
+    /// As a killed process leaves things: some of it done, and a journal not marked finished.
+    fn interrupted_install(work: &Path) -> Result<RestoreOptions> {
+        let package = package_of(
+            work,
+            &[("a.dat", b"new a"), (r"sub\b.dat", b"new b")],
+            |_| {},
+        )?;
+        let mut options = restore_options(work, package.clone(), true);
+        options.force = true;
+        write_file(&options.target_root.join("a.dat"), b"old a")?;
+        let mut journal = journal_for_test(&options)?;
+        journal.note_new_folders_to(&options.target_root, ItemKind::Program)?;
+        for relative in ["a.dat", r"sub\b.dat"] {
+            copy_restore_file(
+                &mut journal,
+                &package.join("files").join(relative),
+                &options.target_root.join(relative),
+                &options.target_root,
+                ItemKind::Program,
+                None,
+            )?;
+        }
+        // A journal is only ever closed like this when a process dies.
+        drop(journal);
+        assert_eq!(read_text(&options.target_root.join("a.dat"))?, "new a");
+        Ok(options)
+    }
+
+    #[test]
+    fn an_install_that_never_finished_is_seen_by_a_preview_and_undone_by_the_next_install()
+    -> Result<()> {
+        let work = temp_folder()?;
+        let interrupted = interrupted_install(work.path())?;
+        let other = work.path().join("other");
+        let other_package = package_of(&other, &[("other.dat", b"other")], |_| {})?;
+        let mut next = restore_options(&other, other_package, false);
+        next.state_root = interrupted.state_root.clone();
+
+        // A preview says so and changes nothing.
+        let preview = restore_package(&next)?;
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "earlier_install_never_finished")
+        );
+        assert_eq!(
+            read_text(&interrupted.target_root.join("a.dat"))?,
+            "new a",
+            "a preview leaves it alone"
+        );
+        assert_eq!(install_folders(&next.state_root)?.len(), 1);
+
+        next.apply = true;
+        next.dry_run = false;
+        let result = restore_package(&next)?;
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "earlier_install_undone")
+        );
+        assert_eq!(read_text(&interrupted.target_root.join("a.dat"))?, "old a");
+        assert!(!interrupted.target_root.join("sub").exists());
+        assert!(next.target_root.join("other.dat").is_file());
+        assert_eq!(
+            install_folders(&next.state_root)?.len(),
+            1,
+            "only the new one"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_install_still_running_is_left_alone_by_another() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("a.dat", b"a")], |_| {})?;
+        let options = restore_options(work.path(), package.clone(), true);
+        let mut running = journal_for_test(&options)?;
+        running.note_new_folders_to(&options.target_root, ItemKind::Program)?;
+        fs::create_dir_all(&options.target_root)
+            .map_err(|error| WinAppMigratorError::io(&options.target_root, error))?;
+        copy_restore_file(
+            &mut running,
+            &package.join(r"files\a.dat"),
+            &options.target_root.join("a.dat"),
+            &options.target_root,
+            ItemKind::Program,
+            None,
+        )?;
+        let other = work.path().join("other");
+        let other_package = package_of(&other, &[("other.dat", b"other")], |_| {})?;
+        let mut next = restore_options(&other, other_package, true);
+        next.state_root = options.state_root.clone();
+
+        let result = restore_package(&next)?;
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(options.target_root.join("a.dat").is_file());
+        assert_eq!(install_folders(&next.state_root)?.len(), 2);
+        drop(running);
+        Ok(())
+    }
+
+    #[test]
+    fn what_cannot_be_undone_stops_the_next_install_until_it_can_be() -> Result<()> {
+        let work = temp_folder()?;
+        let interrupted = interrupted_install(work.path())?;
+        let other = work.path().join("other");
+        let other_package = package_of(&other, &[("other.dat", b"other")], |_| {})?;
+        let mut next = restore_options(&other, other_package, true);
+        next.state_root = interrupted.state_root.clone();
+        let held = hold_exclusively(&interrupted.target_root.join(r"sub\b.dat"))?;
+
+        let refused = restore_package(&next);
+
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::InvalidInput(message))
+                if message.contains("could not be fully undone") && message.contains("b.dat")),
+            "{:?}",
+            refused.as_ref().err()
+        );
+        assert!(!next.target_root.join("other.dat").exists());
+        assert_eq!(install_folders(&next.state_root)?.len(), 1);
+
+        drop(held);
+        let result = restore_package(&next)?;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(!interrupted.target_root.join("sub").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_rollback_cut_off_part_way_can_be_run_again_and_again() -> Result<()> {
+        let work = temp_folder()?;
+        let interrupted = interrupted_install(work.path())?;
+        let folder = install_folders(&interrupted.state_root)?
+            .pop()
+            .ok_or_else(|| WinAppMigratorError::InvalidInput("no journal".to_owned()))?;
+        let journal = read_journal(&folder)?;
+        let monitor = InstallMonitor::default();
+
+        // Undo only what came last, as a rollback does before it is killed.
+        let mut part = journal.clone();
+        let roots: Vec<Change> = part
+            .changes
+            .iter()
+            .filter(|change| matches!(change, Change::Root { .. }))
+            .cloned()
+            .collect();
+        let tail = part.changes.split_off(part.changes.len() - 2);
+        part.changes = roots;
+        part.changes.extend(tail);
+        let first = undo_journal(
+            &part,
+            UndoMode::Rollback,
+            &monitor,
+            InstallPhase::RollingBack,
+        );
+        assert!(first.failed.is_empty(), "{:?}", first.failed);
+        assert!(!interrupted.target_root.join(r"sub\b.dat").exists());
+        assert_eq!(read_text(&interrupted.target_root.join("a.dat"))?, "new a");
+
+        let second = undo_journal(
+            &journal,
+            UndoMode::Rollback,
+            &monitor,
+            InstallPhase::RollingBack,
+        );
+        assert!(second.failed.is_empty(), "{:?}", second.failed);
+        assert_eq!(read_text(&interrupted.target_root.join("a.dat"))?, "old a");
+        assert!(!interrupted.target_root.join("sub").exists());
+
+        let third = undo_journal(
+            &journal,
+            UndoMode::Rollback,
+            &monitor,
+            InstallPhase::RollingBack,
+        );
+        assert!(third.failed.is_empty(), "{:?}", third.failed);
+        assert!(third.undone.is_empty(), "{:?}", third.undone);
+        assert_eq!(read_text(&interrupted.target_root.join("a.dat"))?, "old a");
+        Ok(())
+    }
+
+    #[test]
+    fn uninstalling_removes_what_is_unchanged_and_the_record_of_it() -> Result<()> {
+        let work = temp_folder()?;
+        let (options, id) = installed(
+            work.path(),
+            &[("a.dat", b"a"), (r"sub\deep\b.dat", b"b")],
+            |_| {},
+        )?;
+        let summary = open_install(&options.state_root, &id)?.summary();
+        assert_eq!(summary.files, 2);
+        assert!(summary.finished);
+
+        let outcome = uninstall(&options, &id, false)?;
+
+        assert!(outcome.finished, "{:?}", outcome.report);
+        assert!(outcome.report.kept.is_empty(), "{:?}", outcome.report.kept);
+        assert!(!options.target_root.exists());
+        assert!(install_folders(&options.state_root)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn uninstalling_keeps_what_changed_what_the_user_added_and_the_folder_they_are_in() -> Result<()>
+    {
+        let work = temp_folder()?;
+        let (options, id) = installed(
+            work.path(),
+            &[
+                ("a.dat", b"a"),
+                ("changed.dat", b"as installed"),
+                (r"sub\b.dat", b"b"),
+            ],
+            |_| {},
+        )?;
+        let target = options.target_root.clone();
+        write_file(&target.join("changed.dat"), b"edited by the user")?;
+        write_file(&target.join(r"sub\mine.txt"), b"added by the user")?;
+
+        let outcome = uninstall(&options, &id, false)?;
+
+        assert!(outcome.finished, "{:?}", outcome.report);
+        assert_eq!(names_in(&target)?, ["changed.dat", "sub"]);
+        assert_eq!(names_in(&target.join("sub"))?, ["mine.txt"]);
+        assert_eq!(
+            read_text(&target.join("changed.dat"))?,
+            "edited by the user"
+        );
+        let kept = outcome.report.kept.join("\n");
+        assert!(kept.contains("changed.dat"), "{kept}");
+        assert!(kept.contains("sub"), "{kept}");
+        // Said once, for the folder that has them, and not for each folder above it as well.
+        assert_eq!(
+            outcome
+                .report
+                .kept
+                .iter()
+                .filter(|line| line.starts_with("The folder"))
+                .count(),
+            1,
+            "{kept}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn uninstalling_brings_back_what_was_overwritten_as_it_was() -> Result<()> {
+        let work = temp_folder()?;
+        let target = work.path().join("target");
+        write_file(&target.join("a.dat"), b"from before")?;
+        set_read_only(&target.join("a.dat"))?;
+        let (options, id) = installed(work.path(), &[("a.dat", b"new")], |_| {})?;
+        assert_eq!(read_text(&target.join("a.dat"))?, "new");
+
+        let outcome = uninstall(&options, &id, false)?;
+
+        assert!(outcome.finished, "{:?}", outcome.report);
+        assert_eq!(read_text(&target.join("a.dat"))?, "from before");
+        assert!(is_read_only(&target.join("a.dat"))?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_changed_file_that_replaced_another_stays_and_says_the_other_is_not_coming_back()
+    -> Result<()> {
+        let work = temp_folder()?;
+        let target = work.path().join("target");
+        write_file(&target.join("a.dat"), b"from before")?;
+        let (options, id) = installed(work.path(), &[("a.dat", b"new")], |_| {})?;
+        write_file(&target.join("a.dat"), b"edited since")?;
+
+        let outcome = uninstall(&options, &id, false)?;
+
+        assert_eq!(read_text(&target.join("a.dat"))?, "edited since");
+        assert!(
+            outcome
+                .report
+                .kept
+                .join("\n")
+                .contains("not being put back")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn user_data_stays_unless_someone_asks_for_it_to_go() -> Result<()> {
+        let mark_user_data = |manifest: &mut PackageManifest| {
+            manifest.file_inventory[1].classification = FileClassification::UserData;
+        };
+        let work = temp_folder()?;
+        let (options, id) = installed(
+            work.path(),
+            &[("a.dat", b"a"), ("settings.json", b"{}")],
+            mark_user_data,
+        )?;
+        let outcome = uninstall(&options, &id, false)?;
+        assert!(outcome.finished, "{:?}", outcome.report);
+        assert_eq!(names_in(&options.target_root)?, ["settings.json"]);
+        assert!(outcome.report.kept.join("\n").contains("settings.json"));
+
+        let work = temp_folder()?;
+        let (options, id) = installed(
+            work.path(),
+            &[("a.dat", b"a"), ("settings.json", b"{}")],
+            mark_user_data,
+        )?;
+        let outcome = uninstall(&options, &id, true)?;
+        assert!(outcome.finished, "{:?}", outcome.report);
+        assert!(!options.target_root.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn an_uninstall_that_could_not_finish_can_be_run_again() -> Result<()> {
+        let work = temp_folder()?;
+        let (options, id) = installed(work.path(), &[("a.dat", b"a"), ("b.dat", b"b")], |_| {})?;
+        let held = hold_exclusively(&options.target_root.join("a.dat"))?;
+
+        let outcome = uninstall(&options, &id, false)?;
+
+        assert!(!outcome.finished);
+        assert!(outcome.report.failed.join("\n").contains("a.dat"));
+        assert!(!options.target_root.join("b.dat").exists());
+        assert_eq!(install_folders(&options.state_root)?.len(), 1);
+
+        drop(held);
+        let outcome = uninstall(&options, &id, false)?;
+        assert!(outcome.finished, "{:?}", outcome.report);
+        assert!(!options.target_root.exists());
+        assert!(install_folders(&options.state_root)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_folder_swapped_for_a_link_does_not_carry_an_uninstall_outside() -> Result<()> {
+        let work = temp_folder()?;
+        let (options, id) = installed(
+            work.path(),
+            &[("a.dat", b"a"), (r"sub\b.dat", b"b")],
+            |_| {},
+        )?;
+        let target = options.target_root.clone();
+        // What is at the other end has the very same contents, so only the link check stops it.
+        let victim = work.path().join("victim");
+        write_file(&victim.join("b.dat"), b"b")?;
+        fs::remove_dir_all(target.join("sub"))
+            .map_err(|error| WinAppMigratorError::io(&target, error))?;
+        junction(&target.join("sub"), &victim)?;
+
+        let outcome = uninstall(&options, &id, false)?;
+
+        assert_eq!(read_text(&victim.join("b.dat"))?, "b");
+        assert!(
+            outcome.report.failed.join("\n").contains("link"),
+            "{:?}",
+            outcome.report
+        );
+        assert!(target.join("sub").exists(), "the link is left as it is");
+        Ok(())
+    }
+
+    #[test]
+    fn an_install_location_swapped_for_a_link_does_not_carry_a_rollback_outside() -> Result<()> {
+        let work = temp_folder()?;
+        let interrupted = interrupted_install(work.path())?;
+        let target = interrupted.target_root.clone();
+        let victim = work.path().join("victim");
+        write_file(&victim.join(r"sub\b.dat"), b"new b")?;
+        let moved = work.path().join("moved");
+        fs::rename(&target, &moved).map_err(|error| WinAppMigratorError::io(&target, error))?;
+        junction(&target, &victim)?;
+        let folder = install_folders(&interrupted.state_root)?
+            .pop()
+            .ok_or_else(|| WinAppMigratorError::InvalidInput("no journal".to_owned()))?;
+
+        let report = undo_journal(
+            &read_journal(&folder)?,
+            UndoMode::Rollback,
+            &InstallMonitor::default(),
+            InstallPhase::RollingBack,
+        );
+
+        assert_eq!(read_text(&victim.join(r"sub\b.dat"))?, "new b");
+        assert!(
+            report.failed.join("\n").contains("now leads to"),
+            "{report:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_hard_link_swapped_in_only_loses_its_name() -> Result<()> {
+        let work = temp_folder()?;
+        let (options, id) = installed(work.path(), &[("a.dat", b"a")], |_| {})?;
+        let installed_file = options.target_root.join("a.dat");
+        let victim = work.path().join("victim.dat");
+        write_file(&victim, b"a")?;
+        fs::remove_file(&installed_file)
+            .map_err(|error| WinAppMigratorError::io(&installed_file, error))?;
+        fs::hard_link(&victim, &installed_file)
+            .map_err(|error| WinAppMigratorError::io(&installed_file, error))?;
+
+        let outcome = uninstall(&options, &id, false)?;
+
+        assert!(outcome.finished, "{:?}", outcome.report);
+        assert!(!installed_file.exists());
+        assert_eq!(read_text(&victim)?, "a");
+        Ok(())
+    }
+
+    #[test]
+    fn an_id_that_is_not_one_is_refused_before_anything_is_read() -> Result<()> {
+        let work = temp_folder()?;
+        let state = work.path().join("state");
+        for id in [r"..\..\elsewhere", "wam-notthere", "", "CON"] {
+            assert!(open_install(&state, id).is_err(), "{id}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn what_powershell_says_goes_in_without_the_script_it_quotes() {
+        let said = "Exception calling \"Save\": Unable to save shortcut\r\n\
+                    At line:1 char:200\r\n\
+                    + ... $shortcut.Arguments = 'secret'; $shortcut.Save(); ...\r\n";
+        assert_eq!(
+            powershell_error_summary(said),
+            "Exception calling \"Save\": Unable to save shortcut"
+        );
+        assert_eq!(powershell_error_summary(""), "");
+    }
+
+    #[test]
+    fn the_uninstall_entry_runs_the_copy_in_the_records_folder_with_its_path_quoted() {
+        let manifest = bare_manifest();
+        let exe = Path::new(r"C:\ProgramData\WinAppMigrator\installs\wam-abc\uninstall.exe");
+        let values =
+            uninstall_entry_values(exe, "wam-abc", "Acme", &manifest, Path::new(r"C:\Acme"));
+        let text = |name: &str| {
+            values
+                .iter()
+                .find(|(value_name, _)| *value_name == name)
+                .map(|(_, value)| value.to_string())
+        };
+        assert_eq!(
+            text(UNINSTALL_STRING_VALUE).as_deref(),
+            Some(
+                r#""C:\ProgramData\WinAppMigrator\installs\wam-abc\uninstall.exe" --uninstall wam-abc"#
+            )
+        );
+        assert_eq!(
+            text(QUIET_UNINSTALL_STRING_VALUE).as_deref(),
+            Some(
+                r#""C:\ProgramData\WinAppMigrator\installs\wam-abc\uninstall.exe" --uninstall wam-abc --quiet"#
+            )
+        );
+        assert_eq!(text(DISPLAY_NAME_VALUE).as_deref(), Some("Acme"));
+    }
+
+    #[test]
+    fn a_tasks_folders_are_named_outermost_first() {
+        assert_eq!(task_folder_levels(r"\"), Vec::<String>::new());
+        assert_eq!(task_folder_levels(r"\Acme\"), [r"\Acme"]);
+        assert_eq!(
+            task_folder_levels(r"\Acme\Sync\"),
+            [r"\Acme", r"\Acme\Sync"]
+        );
+    }
+
+    #[test]
+    fn a_delayed_start_reaches_sc_as_what_it_asks_for() {
+        let mut service = sample_service();
+        service.start_type = Some(DELAYED_AUTOMATIC_START_LABEL.to_owned());
+        let arguments = sc_service_arguments(
+            "create",
+            &service,
+            Path::new(r"D:\App\svc.exe"),
+            None,
+            &ServiceAccount::Unspecified,
+        );
+        let arguments = strings(&arguments);
+        let start = arguments.iter().position(|argument| argument == "start=");
+        assert_eq!(
+            start
+                .and_then(|index| arguments.get(index + 1))
+                .map(String::as_str),
+            Some("delayed-auto")
+        );
     }
 
     fn app_map() -> Result<RestoreMap> {

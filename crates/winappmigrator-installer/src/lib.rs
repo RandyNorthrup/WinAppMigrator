@@ -4,3 +4,5 @@
 pub mod cleanup;
 pub mod gui;
 pub mod headless;
+pub mod uninstall;
+mod uninstall_gui;

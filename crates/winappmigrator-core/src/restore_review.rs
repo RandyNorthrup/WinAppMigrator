@@ -23,8 +23,8 @@ use crate::registry_target::{app_path_entries, is_path_variable, service_image_p
 use crate::restore_policy::{
     KnownFolders, SERVICES_PREFIX, ServiceAccount, ShortcutPlacement, driver_destination,
     environment_refusal, existing_service_refusal, install_location_refusal, is_autostart_entry,
-    is_valid_service_name, license_destination, read_task_definition, registry_refusal,
-    shortcut_placement, task_refusal,
+    is_source_uninstall_value, is_uninstall_entry_key, is_valid_service_name, license_destination,
+    read_task_definition, registry_refusal, shortcut_placement, task_refusal,
 };
 use crate::system_context::SystemContext;
 
@@ -33,6 +33,7 @@ const DESKTOP_FOLDER: &str = "Desktop";
 const START_MENU_SUBFOLDER: &str = r"Microsoft\Windows\Start Menu";
 const PARAMETERS_SUBKEY: &str = "parameters";
 const REFUSED_CODE: &str = "restore_refused";
+const DISPLAY_NAME_VALUE: &str = "DisplayName";
 const UNC_PREFIX: &str = r"\\";
 /// A stand-in target, for describing a package before an install location is chosen.
 const NO_TARGET_YET: &str = r"C:\WinAppMigrator install location";
@@ -81,11 +82,22 @@ pub(crate) struct ReviewedLicense<'a> {
     pub destination: PathBuf,
 }
 
+/// An app's entry in Settings' list of installed apps, which a package brought with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UninstallKey {
+    pub hive: RegistryHive,
+    pub key_path: String,
+    pub has_display_name: bool,
+}
+
 /// What a package may do on this PC, and what it was refused.
 pub(crate) struct ReviewedPackage<'a> {
     pub map: RestoreMap,
     pub files: Vec<&'a FileEntry>,
     pub registry: Vec<&'a RegistryEntry>,
+    /// The entries in `registry` that make an app's entry in Settings, which an install points
+    /// at its own uninstaller.
+    pub uninstall_keys: Vec<UninstallKey>,
     pub license_registry: Vec<&'a RegistryEntry>,
     pub license: Vec<ReviewedLicense<'a>>,
     pub services: Vec<ReviewedService<'a>>,
@@ -135,6 +147,7 @@ impl<'a> ReviewedPackage<'a> {
         let mut review = Self {
             files: Vec::new(),
             registry: Vec::new(),
+            uninstall_keys: Vec::new(),
             license_registry: Vec::new(),
             license: Vec::new(),
             services: Vec::new(),
@@ -344,9 +357,36 @@ impl<'a> ReviewedPackage<'a> {
     ) {
         for entry in &manifest.registry_keys_exported {
             match registry_refusal(entry, &self.map, restored_services, expand) {
-                None => self.registry.push(entry),
+                None => {
+                    self.note_uninstall_entry(entry);
+                    // How to remove it from the PC it came from. The install sets its own.
+                    if !is_source_uninstall_value(entry) {
+                        self.registry.push(entry);
+                    }
+                }
                 Some(reason) => self.refuse(registry_item(entry), reason),
             }
+        }
+    }
+
+    fn note_uninstall_entry(&mut self, entry: &RegistryEntry) {
+        if !is_uninstall_entry_key(&entry.key_path) {
+            return;
+        }
+        let is_display_name = entry
+            .value_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(DISPLAY_NAME_VALUE));
+        let known = self.uninstall_keys.iter_mut().find(|key| {
+            key.hive == entry.hive && key.key_path.eq_ignore_ascii_case(&entry.key_path)
+        });
+        match known {
+            Some(key) => key.has_display_name |= is_display_name,
+            None => self.uninstall_keys.push(UninstallKey {
+                hive: entry.hive.clone(),
+                key_path: entry.key_path.clone(),
+                has_display_name: is_display_name,
+            }),
         }
     }
 
@@ -826,6 +866,45 @@ mod tests {
             should_copy: true,
             reason: String::new(),
         }
+    }
+
+    #[test]
+    fn what_a_source_said_about_removing_it_does_not_survive_but_the_entry_does() -> Result<()> {
+        let value = |name: &str| RegistryEntry {
+            hive: RegistryHive::LocalMachine,
+            key_path: r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Acme".to_owned(),
+            value_name: Some(name.to_owned()),
+            value_data: Some(format!(r"{SOURCE}\unins000.exe")),
+            value_kind: Some(RegistryValueKind::String),
+            value_bytes_hex: None,
+            confidence: MatchConfidence::High,
+            requires_admin: true,
+        };
+        let mut manifest = acme_manifest();
+        manifest.registry_keys_exported = vec![
+            value("DisplayName"),
+            value("UninstallString"),
+            value("QuietUninstallString"),
+            value("ModifyPath"),
+        ];
+        let reviewed = review(&manifest)?;
+
+        let kept: Vec<_> = reviewed
+            .registry
+            .iter()
+            .filter_map(|entry| entry.value_name.as_deref())
+            .collect();
+        assert_eq!(kept, ["DisplayName"]);
+        assert!(reviewed.refused.is_empty(), "it is replaced, not refused");
+        assert_eq!(
+            reviewed.uninstall_keys,
+            [UninstallKey {
+                hive: RegistryHive::LocalMachine,
+                key_path: r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Acme".to_owned(),
+                has_display_name: true,
+            }]
+        );
+        Ok(())
     }
 
     fn acme_manifest() -> PackageManifest {

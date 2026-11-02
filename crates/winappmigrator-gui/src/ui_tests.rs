@@ -314,7 +314,21 @@ fn failed_and_cancelled_builds_explain_themselves() {
             .is_some()
     );
     assert!(harness.query_by_label("Copy error").is_some());
+    assert!(
+        harness.query_by_label("Log").is_none(),
+        "there is no log to point at"
+    );
     preview(&mut harness, "failed-dark");
+
+    let harness = harness_with(ThemeMode::Dark, |app| {
+        select_first(app);
+        app.migrate_state = OperationState::Failed;
+        app.last_error = Some("It failed.".to_owned());
+        app.log_file = Some(PathBuf::from(
+            r"C:\ProgramData\WinAppMigrator\logs\app-1.log",
+        ));
+    });
+    assert!(harness.query_by_label_contains("app-1.log").is_some());
 
     let harness = harness_with(ThemeMode::Dark, |app| {
         select_first(app);

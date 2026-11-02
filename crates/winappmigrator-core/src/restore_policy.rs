@@ -430,6 +430,21 @@ const REFUSED_DATA_FOLDERS: &[&str] = &[
     r"desktop\",
     r"start menu\",
 ];
+/// Where Settings finds what it lists under installed apps.
+const UNINSTALL_KEY: &str = r"software\microsoft\windows\currentversion\uninstall";
+/// What a captured entry says about how to change or remove the app on the PC it came from.
+/// None of it means anything here, and `WindowsInstaller` and `NoRemove` would stop Windows
+/// from using the uninstaller this entry is given.
+const SOURCE_UNINSTALL_VALUES: &[&str] = &[
+    "uninstallstring",
+    "quietuninstallstring",
+    "modifypath",
+    "uninstallpath",
+    "windowsinstaller",
+    "noremove",
+    "nomodify",
+    "norepair",
+];
 /// Windows' own scheduled tasks, which run with high rights and are expected to be there.
 const WINDOWS_TASK_FOLDER: &str = r"\microsoft\windows\";
 const SYSTEM_ACCOUNTS: &[&str] = &["s-1-5-18", "system", "localsystem"];
@@ -472,6 +487,23 @@ pub fn is_autostart_entry(entry: &RegistryEntry) -> bool {
             .value_name
             .as_deref()
             .is_some_and(|name| name.eq_ignore_ascii_case(ACTIVE_SETUP_COMMAND))
+}
+
+/// True when a key is an app's own entry in Settings' list of installed apps.
+pub fn is_uninstall_entry_key(key_path: &str) -> bool {
+    normalized_key(key_path)
+        .strip_prefix(UNINSTALL_KEY)
+        .and_then(|rest| rest.strip_prefix('\\'))
+        .is_some_and(|name| !name.is_empty() && !name.contains('\\'))
+}
+
+/// True for a value that only meant something on the source: how to remove the app from
+/// that PC. It is left out rather than refused, because the installer sets its own.
+pub fn is_source_uninstall_value(entry: &RegistryEntry) -> bool {
+    is_uninstall_entry_key(&entry.key_path)
+        && entry.value_name.as_deref().is_some_and(|name| {
+            SOURCE_UNINSTALL_VALUES.contains(&name.to_ascii_lowercase().as_str())
+        })
 }
 
 /// True when `command` starts a file this package restores. A quoted path means exactly
@@ -1047,6 +1079,56 @@ mod tests {
     use crate::models::MatchConfidence;
 
     const WINDOWS: &str = r"C:\Windows";
+
+    #[test]
+    fn what_a_source_said_about_removing_an_app_is_left_out() {
+        let value = |key: &str, name: &str| RegistryEntry {
+            hive: RegistryHive::LocalMachine,
+            key_path: key.to_owned(),
+            value_name: Some(name.to_owned()),
+            value_data: Some("x".to_owned()),
+            value_kind: Some(RegistryValueKind::String),
+            value_bytes_hex: None,
+            confidence: MatchConfidence::High,
+            requires_admin: true,
+        };
+        let entry = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Acme";
+        let wow = r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{A-B}";
+        for name in [
+            "UninstallString",
+            "QuietUninstallString",
+            "ModifyPath",
+            "UninstallPath",
+            "WindowsInstaller",
+            "NoRemove",
+        ] {
+            assert!(is_source_uninstall_value(&value(entry, name)), "{name}");
+            assert!(is_source_uninstall_value(&value(wow, name)), "{name}");
+        }
+        for (key, name) in [
+            (entry, "DisplayName"),
+            (entry, "InstallLocation"),
+            // Not an entry, and not the same value.
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                "UninstallString",
+            ),
+            (r"SOFTWARE\Acme", "UninstallString"),
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Acme\Sub",
+                "UninstallString",
+            ),
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\UninstallOther\Acme",
+                "UninstallString",
+            ),
+        ] {
+            assert!(
+                !is_source_uninstall_value(&value(key, name)),
+                "{key} {name}"
+            );
+        }
+    }
 
     #[test]
     fn ordinary_service_names_are_accepted() {

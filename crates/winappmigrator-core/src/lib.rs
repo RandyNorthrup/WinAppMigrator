@@ -7,7 +7,9 @@ pub mod errors;
 pub mod file_discovery;
 pub mod hashing;
 pub mod install_source;
+pub mod journal;
 pub mod license_scan;
+pub mod logging;
 pub mod models;
 pub mod package;
 pub mod path_rewrite;
@@ -23,6 +25,7 @@ pub mod reporting;
 pub mod restore;
 pub mod restore_policy;
 pub mod restore_review;
+pub mod rollback;
 pub mod scan;
 pub mod service_scan;
 pub mod shortcut_scan;
@@ -37,7 +40,7 @@ pub use models::*;
 pub use package::{create_package, create_package_monitored, read_embedded_manifest};
 pub use path_utils::hidden_command;
 pub use progress::{BuildMonitor, BuildStep, InstallMonitor, InstallPhase, InstallStep, Monitor};
-pub use restore::restore_package;
+pub use restore::{default_install_location, restore_package, restore_package_monitored};
 pub use restore_review::{
     SystemChange, SystemChangeKind, SystemChanges, install_location_problem, system_changes,
 };

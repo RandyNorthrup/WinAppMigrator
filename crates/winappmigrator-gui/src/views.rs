@@ -576,6 +576,10 @@ impl WinAppMigratorApp {
                 let error = self.last_error.clone().unwrap_or_default();
                 widgets::notice(ui, theme, Role::Danger, &error);
                 ui.add_space(SPACE_SM);
+                if let Some(log) = self.log_file.as_deref() {
+                    widgets::mono_path(ui, theme, "Log", &log.display().to_string());
+                    ui.add_space(SPACE_SM);
+                }
                 if widgets::icon_text_button(
                     ui,
                     theme,

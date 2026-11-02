@@ -879,8 +879,25 @@ pub struct RestoreResult {
     pub refused: Vec<Warning>,
     #[serde(default)]
     pub verification: Option<VerificationReport>,
-    pub restore_log_json: Option<PathBuf>,
-    pub restore_log_markdown: Option<PathBuf>,
+    /// The install's id, once it has finished and can be uninstalled.
+    #[serde(default)]
+    pub install_id: Option<String>,
+    /// What was put back after an install that failed or was cancelled.
+    #[serde(default)]
+    pub rollback: Option<UndoReport>,
+}
+
+/// What came of undoing an install. Paths and names only, like the log it goes in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndoReport {
+    /// What was removed or put back.
+    pub undone: Vec<String>,
+    /// What was left on purpose: it has changed since, or belongs to the user.
+    pub kept: Vec<String>,
+    /// What could not be undone, and why.
+    pub failed: Vec<String>,
+    /// What cannot be undone at all: runtimes that were installed.
+    pub left_behind: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -904,6 +921,10 @@ pub struct RestoreOptions {
     /// Defaults to true so existing callers keep restoring license data.
     #[serde(default = "default_true")]
     pub restore_license: bool,
+    /// Where installs keep their records. On a real PC this is only ever
+    /// `journal::machine_state_root`, and it is not something a caller of the installer can
+    /// choose: it is here so that a test can use a temp folder.
+    pub state_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

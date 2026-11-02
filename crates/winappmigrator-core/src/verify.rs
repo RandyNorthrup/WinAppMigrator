@@ -252,7 +252,7 @@ fn verify_restored_target(
     verify_services(&review.services, &review.map, items, warnings, errors);
     verify_drivers(&review, items, warnings, errors);
     verify_scheduled_tasks(&review.tasks, items, warnings, errors);
-    verify_shortcuts(&review.shortcuts, items, errors);
+    verify_shortcuts(&review.shortcuts, items, warnings, errors);
     Ok(())
 }
 
@@ -842,7 +842,7 @@ fn verify_services(
                         VerificationCategory::Service,
                         name(),
                         "Service exists but does not run the restored binary with its arguments.",
-                        Some(actual),
+                        Some(name()),
                     )
                 } else if !service_account_matches(service) {
                     failed_item(
@@ -951,12 +951,12 @@ fn verify_one_driver(reviewed: &ReviewedDriver<'_>) -> VerificationItem {
     let source = Some(destination.display().to_string());
     match service_image_path(&driver.service_name) {
         Ok(Some(actual)) if image_path_matches(&actual, destination, None, system_root()) => {}
-        Ok(Some(actual)) => {
+        Ok(Some(_)) => {
             return failed_item(
                 VerificationCategory::Driver,
                 name(),
                 "Driver service does not point at the restored image.",
-                Some(actual),
+                source,
             );
         }
         Ok(None) => {
@@ -1079,15 +1079,18 @@ fn task_runs_commands(xml: &str, expected: &[String]) -> bool {
             .all(|(actual, wanted)| same(actual, wanted))
 }
 
+/// A shortcut in a Startup folder has to be right, because it makes something run. Any other
+/// is only a way in to an app that works without it, as it is when restoring.
 fn verify_shortcuts(
     shortcuts: &[ReviewedShortcut],
     items: &mut Vec<VerificationItem>,
+    warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
     for shortcut in shortcuts {
         let destination = &shortcut.placement.destination;
         let name = || destination.display().to_string();
-        let item = match shortcut_target(destination) {
+        let mut item = match shortcut_target(destination) {
             Ok(Some(actual)) => {
                 if paths_equal(Path::new(&actual), &shortcut.target) {
                     passed_item(
@@ -1119,12 +1122,18 @@ fn verify_shortcuts(
             ),
         };
         if item.status == VerificationStatus::Failed {
-            errors.push(Warning::new(
+            let problem = Warning::new(
                 "verification_shortcut_failed",
                 WarningSeverity::Error,
                 item.message.clone(),
-                item.source.clone(),
-            ));
+                Some(name()),
+            );
+            if shortcut.placement.autostart {
+                errors.push(problem);
+            } else {
+                item.status = VerificationStatus::Warning;
+                warnings.push(problem);
+            }
         }
         items.push(item);
     }

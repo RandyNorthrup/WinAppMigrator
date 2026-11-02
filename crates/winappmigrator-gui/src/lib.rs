@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use winappmigrator_core::logging;
 use winappmigrator_core::path_utils::system_root;
 use winappmigrator_core::privilege::ProtectedFolder;
 use winappmigrator_core::{
@@ -37,6 +38,9 @@ const THEME_FILE: &str = "theme.txt";
 const BUSY_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
 pub fn run() -> eframe::Result {
+    logging::install("app");
+    // Setting up the folder runs other programs, and nothing should wait for that.
+    thread::spawn(logging::open_machine_log);
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT])
         .with_min_inner_size([MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
@@ -156,6 +160,8 @@ pub struct WinAppMigratorApp {
     build_started: Option<Instant>,
     last_outcome: Option<MigrationOutcome>,
     last_error: Option<String>,
+    /// Where this run is logging, to say when a build fails.
+    log_file: Option<PathBuf>,
     scroll_details_to_top: bool,
 }
 
@@ -186,6 +192,7 @@ impl WinAppMigratorApp {
             build_started: None,
             last_outcome: None,
             last_error: None,
+            log_file: None,
             scroll_details_to_top: false,
         }
     }
@@ -398,6 +405,7 @@ impl WinAppMigratorApp {
     }
 
     fn finish_build(&mut self) {
+        self.log_file = logging::current_log_file();
         self.monitor = None;
         self.build_progress = None;
         self.build_started = None;
@@ -498,6 +506,7 @@ fn run_build(
         Ok(package) => package,
         Err(WinAppMigratorError::Cancelled) => return MigrateMessage::Cancelled,
         Err(error) => {
+            tracing::error!(%error, "the installer could not be built");
             return MigrateMessage::Failed(format!("The installer could not be built. {error}"));
         }
     };

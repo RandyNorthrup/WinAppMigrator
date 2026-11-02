@@ -20,8 +20,13 @@ use winreg::enums::{
     REG_RESOURCE_LIST, REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, RegType,
 };
 
+use crate::journal::ServiceConfig;
 use crate::models::{EnvironmentScope, RegistryHive, RegistryValueKind};
 use crate::path_utils::path_is_strictly_inside;
+
+const USER_ENVIRONMENT_KEY: &str = "Environment";
+const MACHINE_ENVIRONMENT_KEY: &str =
+    r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
 
 /// The live `winreg` predefined root for a captured hive.
 pub(crate) fn registry_root(hive: &RegistryHive) -> RegKey {
@@ -36,12 +41,16 @@ pub(crate) fn registry_root(hive: &RegistryHive) -> RegKey {
 /// load-bearing magic string that must be identical on the write and verify
 /// sides — hence its single definition here.
 pub(crate) fn environment_registry_target(scope: &EnvironmentScope) -> (RegKey, &'static str) {
+    let (hive, key) = environment_location(scope);
+    (registry_root(&hive), key)
+}
+
+/// Where the environment variables for a scope are kept, as the hive and key that restoring
+/// and undoing record.
+pub(crate) fn environment_location(scope: &EnvironmentScope) -> (RegistryHive, &'static str) {
     match scope {
-        EnvironmentScope::User => (RegKey::predef(HKEY_CURRENT_USER), "Environment"),
-        EnvironmentScope::Machine => (
-            RegKey::predef(HKEY_LOCAL_MACHINE),
-            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-        ),
+        EnvironmentScope::User => (RegistryHive::CurrentUser, USER_ENVIRONMENT_KEY),
+        EnvironmentScope::Machine => (RegistryHive::LocalMachine, MACHINE_ENVIRONMENT_KEY),
     }
 }
 
@@ -58,6 +67,31 @@ pub(crate) fn service_image_path(service_name: &str) -> std::io::Result<Option<S
     Ok(Some(
         key.get_value::<String, _>("ImagePath").unwrap_or_default(),
     ))
+}
+
+/// How a service or driver on this PC is set up. `Ok(None)` when there is no such service.
+pub(crate) fn read_service_config(service_name: &str) -> std::io::Result<Option<ServiceConfig>> {
+    let key = match RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(format!(r"SYSTEM\CurrentControlSet\Services\{service_name}"))
+    {
+        Ok(key) => key,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(ServiceConfig {
+        image_path: key.get_value::<String, _>("ImagePath").unwrap_or_default(),
+        start: key.get_value::<u32, _>("Start").ok(),
+        delayed: key
+            .get_value::<u32, _>("DelayedAutostart")
+            .is_ok_and(|value| value != 0),
+        object_name: key.get_value::<String, _>("ObjectName").ok(),
+        display_name: key.get_value::<String, _>("DisplayName").ok(),
+        description: key.get_value::<String, _>("Description").ok(),
+        dependencies: key
+            .get_value::<Vec<String>, _>("DependOnService")
+            .unwrap_or_default(),
+        service_type: key.get_value::<u32, _>("Type").ok(),
+    }))
 }
 
 /// The account a service on this PC is set to run as, if it records one.
@@ -102,6 +136,20 @@ pub(crate) fn merge_path_entries(existing: &str, app_entries: &[String]) -> Stri
         }
     }
     merged
+}
+
+/// Take `added` back out of a `Path`, leaving everything else as it is, including whatever
+/// was added since and how it was written.
+pub(crate) fn remove_path_entries(current: &str, added: &[String]) -> String {
+    let added: Vec<String> = added
+        .iter()
+        .map(|entry| normalized_path_entry(entry))
+        .collect();
+    current
+        .split(';')
+        .filter(|entry| !added.contains(&normalized_path_entry(entry)))
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 pub(crate) fn path_contains_entry(value: &str, entry: &str) -> bool {
@@ -206,6 +254,20 @@ mod tests {
         );
 
         assert_eq!(merged, r"%SystemRoot%;C:\Tools\;C:\App");
+    }
+
+    #[test]
+    fn undoing_a_path_takes_out_only_what_was_added() {
+        let added = [r"C:\App\bin".to_owned(), r"C:\App\tools".to_owned()];
+        assert_eq!(
+            remove_path_entries(
+                r"%SystemRoot%;C:\Tools\;c:\app\BIN\;D:\New;C:\App\tools;C:\App\binary",
+                &added
+            ),
+            r"%SystemRoot%;C:\Tools\;D:\New;C:\App\binary"
+        );
+        assert_eq!(remove_path_entries(r"C:\App\bin", &added), "");
+        assert_eq!(remove_path_entries(r"D:\Other;", &added), r"D:\Other;");
     }
 
     #[test]

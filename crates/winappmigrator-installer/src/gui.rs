@@ -6,11 +6,12 @@
 //! the app, the install location, and — only when they were captured at build time —
 //! checkboxes to restore user data and license data, lists what it will set up beyond
 //! its files, what it will leave out, whether the installer is signed, and the runtime
-//! dependencies it will install, then unpacks, reinstalls, and hash-verifies on click.
+//! dependencies it will install, then unpacks, reinstalls, and hash-verifies on click, showing
+//! how far it has got. If that fails, or it is cancelled, what it changed is put back.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,12 +19,16 @@ use eframe::egui::{self, Margin, RichText};
 
 use winappmigrator_core::archive::has_certificate_table;
 use winappmigrator_core::authenticode::read_signature;
+use winappmigrator_core::journal::machine_state_root;
+use winappmigrator_core::logging;
 use winappmigrator_core::path_utils::system_root;
 use winappmigrator_core::prerequisites::spec_for_bundle;
+use winappmigrator_core::rollback::interrupted_installs;
 use winappmigrator_core::{
-    EmbeddedPackage, PackageManifest, RestoreOptions, RestoreResult, RuntimePrerequisite,
-    RuntimePrerequisiteKind, SystemChange, SystemChanges, WarningSeverity, hidden_command,
-    install_location_problem, read_embedded_manifest, restore_package, system_changes,
+    EmbeddedPackage, InstallMonitor, InstallPhase, InstallStep, PackageManifest, RestoreOptions,
+    RestoreResult, RuntimePrerequisite, RuntimePrerequisiteKind, SystemChange, SystemChanges,
+    UndoReport, WarningSeverity, WinAppMigratorError, default_install_location, hidden_command,
+    install_location_problem, read_embedded_manifest, restore_package_monitored, system_changes,
 };
 use winappmigrator_ui::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
@@ -39,6 +44,12 @@ const MAX_LISTED_CHANGES: usize = 300;
 /// push everything else off the screen.
 const MAX_LISTED_REFUSALS: usize = 20;
 const UNSIGNED_TEXT: &str = "Not signed: publisher unknown";
+/// What a cancelled install is called in its errors.
+const CANCELLED_CODE: &str = "install_cancelled";
+/// Added to what the person agrees to when they click Install.
+const CAN_BE_UNDONE_TEXT: &str = "If anything goes wrong, all of this is put back. You can also \
+                                  undo the install later from Settings, under Installed apps. \
+                                  Files it replaces come back. Runtimes it installs stay.";
 
 pub fn run() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
@@ -101,6 +112,9 @@ struct Outcome {
     messages: Vec<(Role, String)>,
     /// What the package asked for and the rules did not allow.
     refused: Vec<String>,
+    /// The install failed, or was cancelled, and this is what was put back.
+    rollback: Option<UndoReport>,
+    cancelled: bool,
 }
 
 impl Outcome {
@@ -128,12 +142,16 @@ enum Loaded {
     NoPackage,
     Failed(String),
     Signature(SignatureState),
+    /// Installs that never finished, which installing will undo first.
+    Interrupted(Vec<String>),
 }
 
 enum Msg {
-    Status(&'static str),
+    Progress(InstallStep),
     Done(Box<RestoreResult>),
     Failed(String),
+    /// Cancelled before anything had changed.
+    Cancelled,
 }
 
 struct InstallerApp {
@@ -157,14 +175,19 @@ struct InstallerApp {
     /// What the package sets up beyond files, and what it asked for and will not get.
     changes: SystemChanges,
     signature: SignatureState,
+    /// Apps with an install that never finished.
+    interrupted: Vec<String>,
 
     phase: Phase,
     applied_now: bool,
-    detail: String,
+    step: Option<InstallStep>,
+    monitor: Option<InstallMonitor>,
     started: Option<Instant>,
     receiver: Option<Receiver<Msg>>,
     outcome: Option<Outcome>,
     error: Option<String>,
+    cancelled_early: bool,
+    log_path: Option<PathBuf>,
 }
 
 impl InstallerApp {
@@ -186,13 +209,17 @@ impl InstallerApp {
             prereqs: Vec::new(),
             changes: SystemChanges::default(),
             signature: SignatureState::Checking,
+            interrupted: Vec::new(),
             phase: Phase::Idle,
             applied_now: false,
-            detail: String::new(),
+            step: None,
+            monitor: None,
             started: None,
             receiver: None,
             outcome: None,
             error: None,
+            cancelled_early: false,
+            log_path: None,
         }
     }
 
@@ -209,6 +236,10 @@ impl InstallerApp {
             };
             let _ = sender.send(loaded);
             ctx.request_repaint();
+            if let Some(state_root) = machine_state_root() {
+                let _ = sender.send(Loaded::Interrupted(interrupted_installs(&state_root)));
+                ctx.request_repaint();
+            }
             // Checking a signature can take as long as hashing the file, and the window has
             // what it needs without waiting for it.
             if let Ok(exe) = exe.as_deref() {
@@ -255,6 +286,7 @@ impl InstallerApp {
             Loaded::NoPackage => self.screen = Screen::NoPackage,
             Loaded::Failed(reason) => self.screen = Screen::Failed(reason),
             Loaded::Signature(signature) => self.signature = signature,
+            Loaded::Interrupted(apps) => self.interrupted = apps,
         }
     }
 
@@ -275,14 +307,7 @@ impl InstallerApp {
             .unwrap_or_default();
         self.version = meta.and_then(|app| app.version.clone()).unwrap_or_default();
         self.source_computer = manifest.source_computer_name.clone().unwrap_or_default();
-        self.target_root = meta
-            .and_then(|app| app.install_location.clone())
-            .or_else(|| {
-                manifest
-                    .main_executable_path
-                    .parent()
-                    .map(std::path::Path::to_path_buf)
-            })
+        self.target_root = default_install_location(manifest)
             .map(|path| path.display().to_string())
             .unwrap_or_default();
         self.show_user_data = manifest.included_user_data || manifest.included_program_data;
@@ -335,8 +360,17 @@ impl InstallerApp {
         self.applied_now = apply;
         self.outcome = None;
         self.error = None;
-        self.detail = "Unpacking…".to_owned();
+        self.cancelled_early = false;
+        self.log_path = None;
+        self.step = None;
         self.started = Some(Instant::now());
+        let progress = sender.clone();
+        let progress_ctx = ctx.clone();
+        let monitor = InstallMonitor::new(move |step| {
+            let _ = progress.send(Msg::Progress(step));
+            progress_ctx.request_repaint();
+        });
+        self.monitor = Some(monitor.clone());
         let choices = RestoreChoices {
             target_root: PathBuf::from(self.target_root.trim()),
             apply,
@@ -345,7 +379,7 @@ impl InstallerApp {
         };
         let ctx = ctx.clone();
         thread::spawn(move || {
-            let message = run_restore(&exe, &package, choices, &sender, &ctx);
+            let message = run_restore(&exe, &package, choices, &monitor);
             let _ = sender.send(message);
             ctx.request_repaint();
         });
@@ -357,17 +391,20 @@ impl InstallerApp {
         };
         loop {
             match receiver.try_recv() {
-                Ok(Msg::Status(status)) => status.clone_into(&mut self.detail),
+                Ok(Msg::Progress(step)) => self.step = Some(step),
                 Ok(Msg::Done(result)) => {
                     self.outcome = Some(outcome_from(&result, self.applied_now));
-                    self.phase = Phase::Done;
-                    self.receiver = None;
+                    self.finish_run();
                     return;
                 }
                 Ok(Msg::Failed(error)) => {
                     self.error = Some(error);
-                    self.phase = Phase::Done;
-                    self.receiver = None;
+                    self.finish_run();
+                    return;
+                }
+                Ok(Msg::Cancelled) => {
+                    self.cancelled_early = true;
+                    self.finish_run();
                     return;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -376,12 +413,25 @@ impl InstallerApp {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.error = Some("The install stopped unexpectedly.".to_owned());
-                    self.receiver = None;
-                    self.phase = Phase::Done;
+                    self.finish_run();
                     return;
                 }
             }
         }
+    }
+
+    fn finish_run(&mut self) {
+        self.receiver = None;
+        self.monitor = None;
+        self.step = None;
+        self.phase = Phase::Done;
+        self.log_path = logging::current_log_file();
+    }
+
+    fn is_cancelling(&self) -> bool {
+        self.monitor
+            .as_ref()
+            .is_some_and(InstallMonitor::is_cancelled)
     }
 }
 
@@ -409,7 +459,7 @@ fn load_package(exe: &Path) -> Loaded {
     match system_changes(&manifest) {
         Ok(changes) => Loaded::Ready(Arc::new(package), Box::new(manifest), changes),
         Err(error) => Loaded::Failed(format!(
-            "This installer's package asks for something unsafe, so it cannot be used: {error}"
+            "This installer's package cannot be used on this PC: {error}"
         )),
     }
 }
@@ -434,13 +484,13 @@ fn installer_signature(exe: &Path) -> SignatureState {
 
 /// Unpack the package only now, after the user clicked, so nothing sits on disk
 /// waiting to be tampered with while the window is idle, and restore it. The staging
-/// folder is removed when this returns.
+/// folder is removed when this returns. Both can be cancelled, and once the install has
+/// begun that puts back what it did. A preview changes nothing, so it does not start a log.
 fn run_restore(
     exe: &Path,
     package: &EmbeddedPackage,
     choices: RestoreChoices,
-    sender: &Sender<Msg>,
-    ctx: &egui::Context,
+    monitor: &InstallMonitor,
 ) -> Msg {
     let RestoreChoices {
         target_root,
@@ -448,6 +498,9 @@ fn run_restore(
         restore_user_data,
         restore_license,
     } = choices;
+    if apply {
+        logging::open_machine_log();
+    }
     // Remove extraction directories from previous or crashed runs first, so nothing
     // accumulates even if a prior window was killed before its own cleanup could run.
     crate::cleanup::sweep_stale_extractions(exe);
@@ -455,18 +508,19 @@ fn run_restore(
     // extract for lack of space on C:.
     let staging = match crate::cleanup::create_staging_dir(Some(&target_root), exe) {
         Ok(staging) => staging,
-        Err(error) => return Msg::Failed(format!("Could not create a staging folder: {error}")),
+        Err(error) => return failed(format!("Could not create a staging folder: {error}")),
     };
-    if let Err(error) = package.extract_to(staging.path()) {
-        return Msg::Failed(format!("Could not unpack the package: {error}"));
+    match package.extract_monitored(staging.path(), monitor) {
+        Ok(()) => {}
+        Err(WinAppMigratorError::Cancelled) => return Msg::Cancelled,
+        Err(error) => return failed(format!("Could not unpack the package: {error}")),
     }
-
-    let _ = sender.send(Msg::Status(if apply {
-        "Installing the application, its data, and its dependencies…"
-    } else {
-        "Working out what would change…"
-    }));
-    ctx.request_repaint();
+    let Some(state_root) = machine_state_root() else {
+        return failed(
+            "This PC's ProgramData folder could not be found, so the install could not be undone."
+                .to_owned(),
+        );
+    };
     let options = RestoreOptions {
         package_root: staging.path().to_path_buf(),
         target_root,
@@ -475,11 +529,18 @@ fn run_restore(
         force: true,
         restore_user_data,
         restore_license,
+        state_root,
     };
-    match restore_package(&options) {
+    match restore_package_monitored(&options, monitor, Some(package)) {
         Ok(result) => Msg::Done(Box::new(result)),
-        Err(error) => Msg::Failed(error.to_string()),
+        Err(WinAppMigratorError::Cancelled) => Msg::Cancelled,
+        Err(error) => failed(error.to_string()),
     }
+}
+
+fn failed(reason: String) -> Msg {
+    tracing::error!(%reason, "nothing was installed");
+    Msg::Failed(reason)
 }
 
 impl eframe::App for InstallerApp {
@@ -599,10 +660,24 @@ impl InstallerApp {
         // The result goes first: it is what the user is waiting for.
         if let Some(error) = self.error.as_ref() {
             widgets::notice(ui, theme, Role::Danger, error);
+            log_location_ui(ui, theme, self.log_path.as_deref());
+            widgets::section_gap(ui);
+        }
+        if self.cancelled_early {
+            widgets::notice(ui, theme, Role::Neutral, "Cancelled. Nothing was changed.");
             widgets::section_gap(ui);
         }
         if let Some(outcome) = self.outcome.as_ref() {
-            outcome_ui(ui, theme, outcome);
+            outcome_ui(ui, theme, outcome, self.log_path.as_deref());
+            widgets::section_gap(ui);
+        }
+        for app in &self.interrupted {
+            widgets::notice(
+                ui,
+                theme,
+                Role::Warning,
+                &format!("An earlier install of {app} never finished. Install undoes it first."),
+            );
             widgets::section_gap(ui);
         }
 
@@ -638,7 +713,8 @@ impl InstallerApp {
                     ui,
                     theme,
                     Role::Warning,
-                    "This folder already has files. Files with the same names are replaced.",
+                    "This folder already has files. Files with the same names are replaced, \
+                     and come back if you uninstall.",
                 );
             }
         });
@@ -650,7 +726,11 @@ impl InstallerApp {
             theme,
             "What this sets up beyond files",
             Some("All of this is done with administrator rights."),
-            |ui| system_changes_ui(ui, theme, &self.changes),
+            |ui| {
+                system_changes_ui(ui, theme, &self.changes);
+                ui.add_space(SPACE_XS);
+                widgets::hint(ui, theme, CAN_BE_UNDONE_TEXT);
+            },
         );
         widgets::section_gap(ui);
 
@@ -709,8 +789,10 @@ impl InstallerApp {
     fn draw_actions(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         if self.phase == Phase::Running {
             let elapsed = self.started.map_or(0, |start| start.elapsed().as_secs());
+            let cancelling = self.is_cancelling();
+            let (label, fraction) = step_label(self.step, self.applied_now, cancelling);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&self.detail).size(13.0).color(theme.text));
+                ui.label(RichText::new(label).size(13.0).color(theme.text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(widgets::format_elapsed(elapsed))
@@ -720,7 +802,18 @@ impl InstallerApp {
                 });
             });
             ui.add_space(SPACE_SM);
-            widgets::progress_bar(ui, theme, None);
+            widgets::progress_bar(ui, theme, fraction);
+            ui.add_space(SPACE_MD);
+            let can_cancel = !cancelling
+                && !self
+                    .step
+                    .is_some_and(|step| step.phase == InstallPhase::RollingBack);
+            if widgets::wide_button(ui, theme, ButtonKind::Secondary, "Cancel", can_cancel)
+                .clicked()
+                && let Some(monitor) = self.monitor.as_ref()
+            {
+                monitor.cancel();
+            }
             return;
         }
 
@@ -843,7 +936,72 @@ fn folder_has_files(folder: &Path) -> bool {
     std::fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_some())
 }
 
-fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome) {
+/// What a running install or preview is doing, and how much of that is done. A cancel takes
+/// effect at the next item, and once the install has begun means putting back what it did.
+fn step_label(
+    step: Option<InstallStep>,
+    applying: bool,
+    cancelling: bool,
+) -> (String, Option<f32>) {
+    let counted = |text: &str, step: &InstallStep| {
+        if step.total > 0 {
+            format!("{text}: {} of {}…", step.done.min(step.total), step.total)
+        } else {
+            format!("{text}…")
+        }
+    };
+    let Some(step) = step else {
+        return ("Getting ready…".to_owned(), None);
+    };
+    if step.phase == InstallPhase::RollingBack {
+        return (
+            counted("Putting back what was changed", &step),
+            step.fraction(),
+        );
+    }
+    if cancelling {
+        return ("Cancelling after the current step…".to_owned(), None);
+    }
+    let text = match step.phase {
+        InstallPhase::Unpacking => "Unpacking",
+        InstallPhase::CheckingPackage => "Checking the package",
+        InstallPhase::RecoveringEarlierInstall => "Undoing an earlier install that never finished",
+        _ if !applying => "Working out what would change",
+        InstallPhase::Prerequisites => "Installing runtimes",
+        InstallPhase::Files => "Copying files",
+        InstallPhase::Services => "Setting up services",
+        InstallPhase::Drivers => "Setting up drivers",
+        InstallPhase::Registry => "Writing registry settings",
+        InstallPhase::License => "Restoring license data",
+        InstallPhase::ScheduledTasks => "Setting up scheduled tasks",
+        InstallPhase::Shortcuts => "Making shortcuts",
+        InstallPhase::Environment => "Setting environment variables",
+        InstallPhase::UninstallEntry => "Adding the app to Settings",
+        InstallPhase::Verifying => "Checking what was installed",
+        InstallPhase::RollingBack | InstallPhase::Uninstalling => "Undoing",
+    };
+    (counted(text, &step), step.fraction())
+}
+
+fn log_location_ui(ui: &mut egui::Ui, theme: &Theme, log_path: Option<&Path>) {
+    if let Some(log_path) = log_path {
+        ui.add_space(SPACE_SM);
+        widgets::mono_path(ui, theme, "Log", &log_path.display().to_string());
+    }
+}
+
+fn rollback_ui(ui: &mut egui::Ui, theme: &Theme, report: &UndoReport) {
+    for line in &report.failed {
+        ui.add_space(SPACE_XS);
+        widgets::notice(ui, theme, Role::Danger, line);
+    }
+    for line in report.kept.iter().chain(&report.left_behind) {
+        ui.add_space(SPACE_XS);
+        widgets::notice(ui, theme, Role::Warning, line);
+    }
+}
+
+fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Option<&Path>) {
     let heading = if outcome.applied {
         "Install result"
     } else {
@@ -864,27 +1022,49 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome) {
             );
             ui.add_space(SPACE_SM);
         } else if outcome.applied {
-            widgets::notice(
-                ui,
-                theme,
-                Role::Danger,
-                "The install did not finish cleanly. Review the problems below.",
-            );
+            let (role, text) = match outcome.rollback.as_ref() {
+                Some(report) if !report.failed.is_empty() => (
+                    Role::Danger,
+                    "The install failed, and not all of what it changed could be put back. What \
+                     is left is listed below, and the next install tries again.",
+                ),
+                Some(_) if outcome.cancelled => (
+                    Role::Warning,
+                    "The install was cancelled, and what it changed was put back.",
+                ),
+                Some(_) => (
+                    Role::Danger,
+                    "The install failed, and what it changed was put back.",
+                ),
+                None => (
+                    Role::Danger,
+                    "The install did not finish cleanly. Review the problems below.",
+                ),
+            };
+            widgets::notice(ui, theme, role, text);
+            log_location_ui(ui, theme, log_path);
             ui.add_space(SPACE_SM);
         }
         widgets::metric_tiles(
             ui,
             theme,
             &[
-                metric(
-                    if outcome.applied {
-                        "Changes made"
-                    } else {
-                        "Changes planned"
-                    },
-                    outcome.changes.len().to_string(),
-                    Role::Accent,
-                ),
+                match outcome.rollback.as_ref() {
+                    Some(report) => metric(
+                        "Changes put back",
+                        report.undone.len().to_string(),
+                        Role::Accent,
+                    ),
+                    None => metric(
+                        if outcome.applied {
+                            "Changes made"
+                        } else {
+                            "Changes planned"
+                        },
+                        outcome.changes.len().to_string(),
+                        Role::Accent,
+                    ),
+                },
                 metric(
                     "Warnings",
                     outcome.warnings.to_string(),
@@ -946,7 +1126,11 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome) {
             widgets::notice(ui, theme, *role, message);
         }
         refused_ui(ui, theme, &outcome.refused);
-        if !outcome.changes.is_empty() {
+        if let Some(report) = outcome.rollback.as_ref() {
+            rollback_ui(ui, theme, report);
+        }
+        // What an install made and then took back is not worth listing.
+        if !outcome.changes.is_empty() && outcome.rollback.is_none() {
             ui.add_space(SPACE_SM);
             egui::CollapsingHeader::new(
                 RichText::new(format!("Changes ({})", outcome.changes.len()))
@@ -1034,6 +1218,11 @@ fn outcome_from(result: &RestoreResult, applied: bool) -> Outcome {
             .iter()
             .map(|refused| refused.message.clone())
             .collect(),
+        rollback: result.rollback.clone(),
+        cancelled: result
+            .errors
+            .iter()
+            .any(|error| error.code == CANCELLED_CODE),
     }
 }
 
@@ -1136,6 +1325,8 @@ mod tests {
                 Vec::new()
             },
             refused: Vec::new(),
+            rollback: None,
+            cancelled: false,
         }
     }
 
@@ -1344,18 +1535,236 @@ mod tests {
     }
 
     #[test]
-    fn running_install_hides_the_buttons() {
+    fn running_install_hides_the_buttons_shows_how_far_it_has_got_and_can_be_cancelled() {
         let mut app = sample_installer(ThemeMode::Dark);
         app.phase = Phase::Running;
-        app.detail = "Installing the application, its data, and its dependencies…".to_owned();
+        app.applied_now = true;
+        app.step = Some(InstallStep::new(InstallPhase::Files, 40, 200));
+        app.monitor = Some(InstallMonitor::default());
         let mut harness = harness_for(app);
         assert!(harness.query_by_label("Install").is_none());
         assert!(
             harness
-                .query_by_label_contains("Installing the application")
+                .query_by_label_contains("Copying files: 40 of 200")
                 .is_some()
         );
+        assert!(
+            !harness
+                .get_by_label("Cancel")
+                .accesskit_node()
+                .is_disabled()
+        );
         preview(&mut harness, "running-dark");
+    }
+
+    #[test]
+    fn clicking_cancel_asks_the_install_to_stop() {
+        let monitor = InstallMonitor::default();
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.phase = Phase::Running;
+        app.applied_now = true;
+        app.step = Some(InstallStep::new(InstallPhase::Files, 1, 2));
+        app.monitor = Some(monitor.clone());
+        let mut harness = harness_for(app);
+        harness.get_by_label("Cancel").click();
+        harness.run_steps(2);
+        assert!(monitor.is_cancelled());
+        assert!(
+            harness
+                .query_by_label_contains("Cancelling after the current step")
+                .is_some()
+        );
+        assert!(
+            harness
+                .get_by_label("Cancel")
+                .accesskit_node()
+                .is_disabled()
+        );
+    }
+
+    #[test]
+    fn putting_things_back_shows_progress_and_cannot_be_cancelled() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.phase = Phase::Running;
+        app.applied_now = true;
+        app.step = Some(InstallStep::new(InstallPhase::RollingBack, 3, 9));
+        app.monitor = Some(InstallMonitor::default());
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .query_by_label_contains("Putting back what was changed: 3 of 9")
+                .is_some()
+        );
+        assert!(
+            harness
+                .get_by_label("Cancel")
+                .accesskit_node()
+                .is_disabled()
+        );
+    }
+
+    #[test]
+    fn every_step_has_words_for_it_and_a_preview_says_it_changes_nothing() {
+        for phase in [
+            InstallPhase::Unpacking,
+            InstallPhase::CheckingPackage,
+            InstallPhase::RecoveringEarlierInstall,
+            InstallPhase::Prerequisites,
+            InstallPhase::Files,
+            InstallPhase::Services,
+            InstallPhase::Drivers,
+            InstallPhase::Registry,
+            InstallPhase::License,
+            InstallPhase::ScheduledTasks,
+            InstallPhase::Shortcuts,
+            InstallPhase::Environment,
+            InstallPhase::UninstallEntry,
+            InstallPhase::Verifying,
+            InstallPhase::RollingBack,
+        ] {
+            let step = Some(InstallStep::new(phase, 0, 0));
+            assert!(!step_label(step, true, false).0.is_empty());
+        }
+        let (label, _) = step_label(
+            Some(InstallStep::new(InstallPhase::Files, 1, 2)),
+            false,
+            false,
+        );
+        assert!(
+            label.starts_with("Working out what would change"),
+            "{label}"
+        );
+        let (label, fraction) = step_label(
+            Some(InstallStep::new(InstallPhase::Unpacking, 1, 4)),
+            false,
+            false,
+        );
+        assert!(label.contains("1 of 4"), "{label}");
+        assert_eq!(fraction, Some(0.25));
+        assert_eq!(step_label(None, true, false).1, None);
+    }
+
+    #[test]
+    fn the_person_is_told_it_can_be_undone_before_installing() {
+        let harness = harness_for(sample_installer(ThemeMode::Dark));
+        assert!(
+            harness
+                .query_by_label_contains("undo the install later from Settings")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn an_install_that_never_finished_is_mentioned_before_installing() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.interrupted = vec!["Contoso Notes".to_owned()];
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .query_by_label_contains("An earlier install of Contoso Notes never finished")
+                .is_some()
+        );
+    }
+
+    fn failed_with_rollback(report: UndoReport) -> InstallerApp {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.phase = Phase::Done;
+        app.log_path = Some(PathBuf::from(
+            r"C:\ProgramData\WinAppMigrator\logs\install-1.log",
+        ));
+        let mut outcome = sample_outcome(true, 1);
+        outcome.rollback = Some(report);
+        app.outcome = Some(outcome);
+        app
+    }
+
+    #[test]
+    fn a_failed_install_says_it_was_put_back_and_where_the_log_is() {
+        let mut harness = harness_for(failed_with_rollback(UndoReport {
+            undone: vec!["Removed a file".to_owned()],
+            left_behind: vec!["The runtime stays.".to_owned()],
+            ..UndoReport::default()
+        }));
+        assert!(
+            harness
+                .query_by_label_contains("what it changed was put back")
+                .is_some()
+        );
+        assert!(harness.query_by_label_contains("install-1.log").is_some());
+        assert!(
+            harness
+                .query_by_label_contains("The runtime stays")
+                .is_some()
+        );
+        assert!(harness.query_by_label("Changes put back").is_some());
+        assert!(
+            harness.query_by_label("Install").is_some(),
+            "it can be tried again"
+        );
+        preview(&mut harness, "rolled-back-dark");
+    }
+
+    #[test]
+    fn what_could_not_be_put_back_is_said_plainly() {
+        let harness = harness_for(failed_with_rollback(UndoReport {
+            failed: vec![r"C:\App\app.exe could not be removed: access is denied.".to_owned()],
+            ..UndoReport::default()
+        }));
+        assert!(
+            harness
+                .query_by_label_contains("not all of what it changed could be put back")
+                .is_some()
+        );
+        assert!(
+            harness
+                .query_by_label_contains("app.exe could not be")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_cancelled_install_says_so_rather_than_that_it_failed() {
+        let mut app = failed_with_rollback(UndoReport::default());
+        if let Some(outcome) = app.outcome.as_mut() {
+            outcome.cancelled = true;
+        }
+        let harness = harness_for(app);
+        assert!(harness.query_by_label_contains("was cancelled").is_some());
+        assert!(harness.query_by_label_contains("install failed").is_none());
+
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.phase = Phase::Done;
+        app.cancelled_early = true;
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .query_by_label_contains("Nothing was changed")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_clean_install_points_at_no_log() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.phase = Phase::Done;
+        app.outcome = Some(sample_outcome(true, 0));
+        app.log_path = Some(PathBuf::from(
+            r"C:\ProgramData\WinAppMigrator\logs\install-1.log",
+        ));
+        let harness = harness_for(app);
+        assert!(harness.query_by_label_contains("install-1.log").is_none());
+    }
+
+    #[test]
+    fn an_error_before_anything_changed_also_says_where_the_log_is() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.phase = Phase::Done;
+        app.error = Some("Could not unpack the package.".to_owned());
+        app.log_path = Some(PathBuf::from(
+            r"C:\ProgramData\WinAppMigrator\logs\install-2.log",
+        ));
+        let harness = harness_for(app);
+        assert!(harness.query_by_label_contains("install-2.log").is_some());
     }
 
     #[test]

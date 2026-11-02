@@ -4,10 +4,11 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use winappmigrator_core::journal::STAGING_PREFIX;
 use winappmigrator_core::privilege::ProtectedFolder;
 
 /// Prefix of the directories the installer extracts its embedded package into.
-pub const EXTRACTION_PREFIX: &str = "winappmigrator-install-";
+pub const EXTRACTION_PREFIX: &str = STAGING_PREFIX;
 
 /// A younger extraction folder may belong to an installer that is still running. An
 /// install that has been going for this long and has stopped touching its folder is not
