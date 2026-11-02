@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use tempfile::TempDir;
 
-use crate::path_utils::hidden_command;
+use crate::path_utils::{POWERSHELL_IMPORT_SECURITY, hidden_command};
 
 /// SIDs rather than names, because the names are translated on other Windows languages.
 const ADMINISTRATORS_SID: &str = "*S-1-5-32-544";
@@ -191,7 +191,7 @@ fn confirm_administrators_only(folder: &Path) -> io::Result<()> {
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            READ_SDDL_SCRIPT,
+            &format!("{POWERSHELL_IMPORT_SECURITY}{READ_SDDL_SCRIPT}"),
         ])
         .env(ACL_PATH_VARIABLE, folder)
         .output()?;

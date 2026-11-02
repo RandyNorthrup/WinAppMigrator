@@ -28,7 +28,7 @@ use crate::file_discovery::package_destination_path;
 use crate::models::{
     AppArchitecture, PrerequisiteBundle, PrerequisiteRegistryProbe, RuntimePrerequisiteKind,
 };
-use crate::path_utils::hidden_command;
+use crate::path_utils::{POWERSHELL_IMPORT_APPX, POWERSHELL_IMPORT_UTILITY, hidden_command};
 
 const WINGET_EXE: &str = "winget.exe";
 const WINGET_NOT_INSTALLED: &str = "winget is not installed";
@@ -320,7 +320,7 @@ fn trusted_winget_path() -> std::result::Result<PathBuf, String> {
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            WINGET_LOCATION_SCRIPT,
+            &format!("{POWERSHELL_IMPORT_APPX}{POWERSHELL_IMPORT_UTILITY}{WINGET_LOCATION_SCRIPT}"),
         ])
         .output()
         .map_err(|error| format!("could not look for winget: {error}"))?;

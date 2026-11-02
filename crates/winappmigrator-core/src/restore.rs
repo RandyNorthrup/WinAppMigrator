@@ -23,7 +23,10 @@ use crate::models::{
 };
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
-use crate::path_utils::{escape_powershell_single, hidden_command, system_root};
+use crate::path_utils::{
+    POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_TASKS, POWERSHELL_IMPORT_UTILITY,
+    escape_powershell_single, hidden_command, system_root,
+};
 use crate::prerequisites::{
     PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
 };
@@ -1418,7 +1421,7 @@ fn write_task_definition(folder: &Path, xml: &str) -> io::Result<PathBuf> {
 fn register_task_script(xml_path: &Path, task_path: &str, task_name: &str, force: bool) -> String {
     let force_flag = if force { "$true" } else { "$false" };
     format!(
-        "$xml = Get-Content -Raw -Encoding UTF8 -LiteralPath '{}'; Register-ScheduledTask -TaskName '{}' -TaskPath '{}' -Xml $xml -Force:{force_flag} | Out-Null",
+        "{POWERSHELL_IMPORT_MANAGEMENT}{POWERSHELL_IMPORT_TASKS}$xml = Get-Content -Raw -Encoding UTF8 -LiteralPath '{}'; Register-ScheduledTask -TaskName '{}' -TaskPath '{}' -Xml $xml -Force:{force_flag} | Out-Null",
         escape_powershell_single(&xml_path.display().to_string()),
         escape_powershell_single(task_name),
         escape_powershell_single(task_path),
@@ -1448,7 +1451,7 @@ fn apply_shortcut(shortcut: &ReviewedShortcut) -> std::result::Result<String, Wa
 
 fn shortcut_script(shortcut: &ReviewedShortcut) -> String {
     let mut script = format!(
-        "$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath = '{}';",
+        "{POWERSHELL_IMPORT_UTILITY}$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath = '{}';",
         escape_powershell_single(&shortcut.placement.destination.display().to_string()),
         escape_powershell_single(&shortcut.target.display().to_string()),
     );

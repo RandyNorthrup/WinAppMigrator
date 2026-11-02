@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::models::{ShortcutEntry, Warning, WarningSeverity};
-use crate::path_utils::{POWERSHELL_UTF8_OUTPUT, hidden_command, path_is_within};
+use crate::path_utils::{
+    POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT,
+    hidden_command, path_is_within,
+};
 use crate::system_context::SystemContext;
 
 const LNK_HEADER_SIZE: u32 = 0x4C;
@@ -138,7 +141,9 @@ fn shortcut_entry(
 }
 
 fn run_powershell(script: &str) -> std::io::Result<String> {
-    let script = format!("{POWERSHELL_UTF8_OUTPUT}{script}");
+    let script = format!(
+        "{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_MANAGEMENT}{POWERSHELL_IMPORT_UTILITY}{script}"
+    );
     let output = hidden_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()?;

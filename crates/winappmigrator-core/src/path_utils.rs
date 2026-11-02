@@ -44,9 +44,19 @@ const POWERSHELL_ENVIRONMENT: &[&str] = &[
 ];
 /// Put at the start of a PowerShell script whose output is read back. It otherwise writes
 /// the console's code page, which turns `größe` into bytes that are not UTF-8. This form
-/// writes no byte order mark.
+/// writes no byte order mark, and uses no command, so it costs no search for one.
 pub const POWERSHELL_UTF8_OUTPUT: &str =
-    "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; ";
+    "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); ";
+/// Put at the start of a PowerShell script, for the commands it uses. PowerShell finds a
+/// command it has not loaded by looking through every module, and with no module cache that
+/// means reading all of them. A call this short never saves a cache, and the fixed
+/// environment leaves out the location one might be in, so on Windows Server each call would
+/// take more than 20 seconds. Naming the module goes straight to it.
+pub const POWERSHELL_IMPORT_SECURITY: &str = "Import-Module Microsoft.PowerShell.Security; ";
+pub const POWERSHELL_IMPORT_UTILITY: &str = "Import-Module Microsoft.PowerShell.Utility; ";
+pub const POWERSHELL_IMPORT_MANAGEMENT: &str = "Import-Module Microsoft.PowerShell.Management; ";
+pub const POWERSHELL_IMPORT_TASKS: &str = "Import-Module ScheduledTasks; ";
+pub const POWERSHELL_IMPORT_APPX: &str = "Import-Module Appx; ";
 
 /// Build a `Command` that does not pop up a console window for the child
 /// process. Every external tool WinAppMigrator runs (sc.exe, PowerShell, winget,

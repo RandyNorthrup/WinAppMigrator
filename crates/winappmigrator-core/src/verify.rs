@@ -16,7 +16,8 @@ use crate::models::{
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
-    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, system_root,
+    POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command,
+    system_root,
 };
 use crate::prerequisites::{is_present, spec_for_bundle};
 use crate::registry_target::{
@@ -1163,7 +1164,7 @@ fn shortcut_target(path: &Path) -> std::io::Result<Option<String>> {
         return Ok(None);
     }
     let script = format!(
-        "{POWERSHELL_UTF8_OUTPUT}$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath",
+        "{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_UTILITY}$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath",
         escape_powershell_single(path.display().to_string().as_str())
     );
     let output = hidden_command(POWERSHELL_EXE)
