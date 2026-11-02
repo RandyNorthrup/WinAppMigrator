@@ -11,7 +11,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::reject_unsafe_components;
 use crate::models::InstallerStub;
-use crate::progress::{BuildMonitor, BuildStep};
+use crate::progress::{BuildMonitor, BuildStep, InstallMonitor, InstallPhase, InstallStep};
 
 const ZIP_BUFFER_SIZE: usize = 1024 * 1024;
 const SFX_MAGIC: &[u8] = b"WINAPPMIGRATOR_SFX_V2";
@@ -37,6 +37,10 @@ const SECTION_RAW_SIZE_FIELD: u64 = 16;
 const SECTION_RAW_POINTER_FIELD: u64 = 20;
 const PE32_MAGIC: u16 = 0x10B;
 const PE32_PLUS_MAGIC: u16 = 0x20B;
+/// Offset of the PE checksum from the start of the optional header, in both PE formats.
+const PE_CHECKSUM_FIELD: u64 = 64;
+const PE_CHECKSUM_LEN: usize = 4;
+const PE_DATA_DIRECTORY_ENTRY_LEN: usize = 8;
 /// Offset of the security data directory from the start of the optional header.
 const PE32_SECURITY_DIRECTORY: u64 = 128;
 const PE32_PLUS_SECURITY_DIRECTORY: u64 = 144;
@@ -115,14 +119,21 @@ pub fn extract_zip_archive(archive_path: &Path, destination_root: &Path) -> Resu
         .map_err(|error| WinAppMigratorError::io(destination_root, error))?;
     let file =
         File::open(archive_path).map_err(|error| WinAppMigratorError::io(archive_path, error))?;
-    extract_zip_reader(file, destination_root)
+    extract_zip_reader(file, destination_root, &InstallMonitor::default())
 }
 
-fn extract_zip_reader<R: Read + Seek>(reader: R, destination_root: &Path) -> Result<()> {
+fn extract_zip_reader<R: Read + Seek>(
+    reader: R,
+    destination_root: &Path,
+    monitor: &InstallMonitor,
+) -> Result<()> {
     let mut archive =
         ZipArchive::new(reader).map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
 
-    for index in 0..archive.len() {
+    let total = archive.len();
+    for index in 0..total {
+        monitor.checkpoint()?;
+        monitor.report(InstallStep::new(InstallPhase::Unpacking, index, total));
         let mut file = archive
             .by_index(index)
             .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
@@ -162,6 +173,7 @@ fn extract_zip_reader<R: Read + Seek>(reader: R, destination_root: &Path) -> Res
         io::copy(&mut file, &mut output)
             .map_err(|error| WinAppMigratorError::io(&destination, error))?;
     }
+    monitor.report(InstallStep::new(InstallPhase::Unpacking, total, total));
     Ok(())
 }
 
@@ -280,9 +292,41 @@ impl EmbeddedPackage {
 
     /// Unpack the package into `destination_root`.
     pub fn extract_to(&self, destination_root: &Path) -> Result<()> {
+        self.extract_monitored(destination_root, &InstallMonitor::default())
+    }
+
+    /// Unpack the package, reporting each file and stopping with
+    /// [`WinAppMigratorError::Cancelled`] if it is cancelled.
+    pub fn extract_monitored(
+        &self,
+        destination_root: &Path,
+        monitor: &InstallMonitor,
+    ) -> Result<()> {
         fs::create_dir_all(destination_root)
             .map_err(|error| WinAppMigratorError::io(destination_root, error))?;
-        extract_zip_reader(BufReader::new(self.section()?), destination_root)
+        extract_zip_reader(BufReader::new(self.section()?), destination_root, monitor)
+    }
+
+    /// Write the stub this installer was built from, with no package and no signature, to a
+    /// new file. See [`bare_stub_image`].
+    pub fn write_bare_stub(&self, destination: &Path) -> Result<()> {
+        let mut file = self
+            .file
+            .try_clone()
+            .map_err(|error| WinAppMigratorError::io("installer package", error))?;
+        let image = read_stub_image(&mut file, self.location.start)
+            .map_err(|error| WinAppMigratorError::io("installer package", error))?;
+        let image = bare_stub_image(image)
+            .map_err(|error| WinAppMigratorError::io("installer package", error))??;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .map_err(|error| WinAppMigratorError::io(destination, error))?;
+        output
+            .write_all(&image)
+            .map_err(|error| WinAppMigratorError::io(destination, error))?;
+        Ok(())
     }
 
     /// Read one file without extracting the rest.
@@ -308,6 +352,66 @@ pub fn has_embedded_self_archive(sfx_executable: &Path) -> Result<bool> {
     let location = locate_embedded_archive(&mut file)
         .map_err(|error| WinAppMigratorError::io(sfx_executable, error))??;
     Ok(location.is_some())
+}
+
+fn read_stub_image<F: Read + Seek>(file: &mut F, len: u64) -> io::Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut image = Vec::new();
+    file.take(len).read_to_end(&mut image)?;
+    Ok(image)
+}
+
+/// Turn the part of an installer before its package back into the bare stub it was built
+/// from. **A bare stub must never carry a valid signature.** One would let anyone hide a
+/// package in its certificate table and have it run elevated under that name, as
+/// [`refuse_signed_stub`] explains. An installer may have been signed by whoever built it, and
+/// signing leaves two marks in the headers before the package: the table's location, and
+/// the checksum. With those cleared and everything after the program's own sections cut off,
+/// the certificate table is gone, and with it any signature. An image that does not come
+/// out that way is refused, not written.
+fn bare_stub_image(mut image: Vec<u8>) -> io::Result<Result<Vec<u8>>> {
+    let not_a_stub = || {
+        WinAppMigratorError::InvalidInput(
+            "the part of this installer before its package is not a program".to_owned(),
+        )
+    };
+    let len = image.len() as u64;
+    let mut reader = io::Cursor::new(&image);
+    let Some(pe_offset) = pe_header(&mut reader, len)? else {
+        return Ok(Err(not_a_stub()));
+    };
+    let Some(image_end) = pe_image_end(&mut reader, len)? else {
+        return Ok(Err(not_a_stub()));
+    };
+    let optional_header = pe_offset + PE_SIGNATURE_LEN + COFF_HEADER_LEN;
+    let directory = match read_u16_at(&mut reader, len, optional_header)? {
+        Some(PE32_MAGIC) => optional_header + PE32_SECURITY_DIRECTORY,
+        Some(PE32_PLUS_MAGIC) => optional_header + PE32_PLUS_SECURITY_DIRECTORY,
+        _ => return Ok(Err(not_a_stub())),
+    };
+    let checksum = optional_header + PE_CHECKSUM_FIELD;
+    if image_end > len
+        || directory + PE_DATA_DIRECTORY_ENTRY_LEN as u64 > image_end
+        || checksum + PE_CHECKSUM_LEN as u64 > image_end
+    {
+        return Ok(Err(not_a_stub()));
+    }
+    // Fits, by the check above.
+    let (Ok(image_end), Ok(directory), Ok(checksum)) = (
+        usize::try_from(image_end),
+        usize::try_from(directory),
+        usize::try_from(checksum),
+    ) else {
+        return Ok(Err(not_a_stub()));
+    };
+    image.truncate(image_end);
+    image[checksum..checksum + PE_CHECKSUM_LEN].fill(0);
+    image[directory..directory + PE_DATA_DIRECTORY_ENTRY_LEN].fill(0);
+    let mut reader = io::Cursor::new(&image);
+    if certificate_table(&mut reader, image_end as u64)?.is_some() {
+        return Ok(Err(not_a_stub()));
+    }
+    Ok(Ok(image))
 }
 
 /// Whether a file carries an Authenticode signature at all, valid or not, which can be
@@ -734,7 +838,12 @@ mod tests {
                 tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
             let zip = zip_holding(&[name])?;
             assert!(
-                extract_zip_reader(io::Cursor::new(zip), root.path()).is_err(),
+                extract_zip_reader(
+                    io::Cursor::new(zip),
+                    root.path(),
+                    &InstallMonitor::default()
+                )
+                .is_err(),
                 "{name} should be refused"
             );
             assert_eq!(
@@ -762,7 +871,11 @@ mod tests {
         let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
         let zip = zip_holding(&names)?;
 
-        extract_zip_reader(io::Cursor::new(zip), root.path())?;
+        extract_zip_reader(
+            io::Cursor::new(zip),
+            root.path(),
+            &InstallMonitor::default(),
+        )?;
 
         for name in names {
             assert!(root.path().join(name).is_file(), "{name}");
@@ -777,7 +890,14 @@ mod tests {
         fs::write(&planted, b"keep").map_err(|error| WinAppMigratorError::io(&planted, error))?;
         let zip = zip_holding(&["a.txt"])?;
 
-        assert!(extract_zip_reader(io::Cursor::new(zip), root.path()).is_err());
+        assert!(
+            extract_zip_reader(
+                io::Cursor::new(zip),
+                root.path(),
+                &InstallMonitor::default()
+            )
+            .is_err()
+        );
         assert_eq!(
             fs::read(&planted).map_err(|error| WinAppMigratorError::io(&planted, error))?,
             b"keep"
@@ -928,6 +1048,112 @@ mod tests {
         let raw_pointer = section + SECTION_RAW_POINTER_FIELD as usize;
         bytes[raw_pointer..raw_pointer + 4].copy_from_slice(&0x400_u32.to_le_bytes());
         bytes
+    }
+
+    /// A minimal stub, with an installer built from it: package, footer, padding, and a
+    /// certificate table, with the marks signing leaves in the headers.
+    fn signed_installer_from(stub: &[u8]) -> (Vec<u8>, u64) {
+        const PE_OFFSET: usize = 0x80;
+        let payload = b"package";
+        let mut tail = payload.to_vec();
+        tail.extend_from_slice(&footer_for(payload));
+        let padding = (8 - (stub.len() as u64 + tail.len() as u64) % 8) % 8;
+        tail.resize(tail.len() + padding as usize, 0);
+        let offset = stub.len() as u64 + tail.len() as u64;
+        let mut bytes = stub.to_vec();
+        let optional = PE_OFFSET + (PE_SIGNATURE_LEN + COFF_HEADER_LEN) as usize;
+        let directory = optional + PE32_PLUS_SECURITY_DIRECTORY as usize;
+        bytes[directory..directory + 4].copy_from_slice(&(offset as u32).to_le_bytes());
+        bytes[directory + 4..directory + 8].copy_from_slice(&64_u32.to_le_bytes());
+        let checksum = optional + PE_CHECKSUM_FIELD as usize;
+        bytes[checksum..checksum + 4].copy_from_slice(&0x1234_5678_u32.to_le_bytes());
+        bytes.extend_from_slice(&tail);
+        bytes.resize(bytes.len() + 64, 0xAB);
+        (bytes, stub.len() as u64)
+    }
+
+    fn carve(stub_part: Vec<u8>) -> Result<Vec<u8>> {
+        bare_stub_image(stub_part)
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?
+    }
+
+    #[test]
+    fn a_bare_stub_carved_from_a_signed_installer_has_no_signature_left() -> Result<()> {
+        let stub = fake_pe_with_section(0x800);
+        let (installer, start) = signed_installer_from(&stub);
+        assert!(
+            certificate_table(&mut io::Cursor::new(&installer), installer.len() as u64)
+                .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?
+                .is_some()
+        );
+
+        let carved = carve(
+            read_stub_image(&mut io::Cursor::new(&installer), start)
+                .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?,
+        )?;
+
+        // Byte for byte what it was built from, signing's marks included.
+        assert_eq!(carved, stub);
+        assert_eq!(
+            certificate_table(&mut io::Cursor::new(&carved), carved.len() as u64)
+                .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?,
+            None
+        );
+        assert_eq!(locate(carved)?, None, "it reads as a bare stub");
+        Ok(())
+    }
+
+    #[test]
+    fn a_bare_stub_carved_from_an_unsigned_installer_is_what_it_was_built_from() -> Result<()> {
+        let stub = fake_pe_with_section(0x800);
+        assert_eq!(carve(stub.clone())?, stub);
+        Ok(())
+    }
+
+    #[test]
+    fn anything_past_the_program_does_not_survive_carving() -> Result<()> {
+        let stub = fake_pe_with_section(0x800);
+        let mut with_extra = stub.clone();
+        with_extra.extend_from_slice(&[0xEE; 32]);
+        assert_eq!(carve(with_extra)?, stub);
+        Ok(())
+    }
+
+    #[test]
+    fn what_is_not_a_program_is_not_carved() {
+        assert!(carve(b"not a program at all".to_vec()).is_err());
+        // Its sections claim to run past what is there.
+        let mut cut_off = fake_pe_with_section(0x800);
+        cut_off.truncate(0x500);
+        assert!(carve(cut_off).is_err());
+    }
+
+    #[test]
+    fn unpacking_reports_each_file_and_can_be_cancelled() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let zip = zip_holding(&["one.txt", "two.txt"])?;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&seen);
+        let monitor = InstallMonitor::new(move |step: InstallStep| {
+            if let Ok(mut steps) = sink.lock() {
+                steps.push((step.done, step.total));
+            }
+        });
+        extract_zip_reader(io::Cursor::new(&zip), root.path(), &monitor)?;
+        let steps = seen
+            .lock()
+            .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))?
+            .clone();
+        assert_eq!(steps, [(0, 2), (1, 2), (2, 2)]);
+
+        let other = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        monitor.cancel();
+        assert!(matches!(
+            extract_zip_reader(io::Cursor::new(&zip), other.path(), &monitor),
+            Err(WinAppMigratorError::Cancelled)
+        ));
+        assert!(!other.path().join("one.txt").exists());
+        Ok(())
     }
 
     #[test]

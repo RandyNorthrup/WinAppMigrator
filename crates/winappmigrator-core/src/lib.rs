@@ -36,7 +36,7 @@ pub use errors::{Result, WinAppMigratorError};
 pub use models::*;
 pub use package::{create_package, create_package_monitored, read_embedded_manifest};
 pub use path_utils::hidden_command;
-pub use progress::{BuildMonitor, BuildStep};
+pub use progress::{BuildMonitor, BuildStep, InstallMonitor, InstallPhase, InstallStep, Monitor};
 pub use restore::restore_package;
 pub use restore_review::{
     SystemChange, SystemChangeKind, SystemChanges, install_location_problem, system_changes,

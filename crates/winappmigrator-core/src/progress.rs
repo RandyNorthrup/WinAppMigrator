@@ -1,4 +1,4 @@
-//! Lets a front end follow an installer build and cancel it.
+//! Lets a front end follow a long job and cancel it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,18 +21,84 @@ pub enum BuildStep {
     WritingInstaller,
 }
 
-type Observer = Arc<dyn Fn(BuildStep) + Send + Sync>;
+/// What an install or an uninstall is doing, in the order an install does it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallPhase {
+    Unpacking,
+    /// Hash-checking the package. Reads all of it, and has no count to give.
+    CheckingPackage,
+    /// Undoing an earlier install that never finished.
+    RecoveringEarlierInstall,
+    Prerequisites,
+    Files,
+    Services,
+    Drivers,
+    Registry,
+    License,
+    ScheduledTasks,
+    Shortcuts,
+    Environment,
+    UninstallEntry,
+    Verifying,
+    /// Putting back what a failed or cancelled install changed.
+    RollingBack,
+    /// Undoing a finished install.
+    Uninstalling,
+}
 
-/// Reports build progress and carries the request to cancel. Clones share the same
-/// cancel flag, so the UI thread can cancel a build running on a worker thread.
-#[derive(Clone, Default)]
-pub struct BuildMonitor {
-    observer: Option<Observer>,
+/// How far an install or an uninstall has got. `total` is zero when there is no count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallStep {
+    pub phase: InstallPhase,
+    pub done: usize,
+    pub total: usize,
+}
+
+impl InstallStep {
+    pub fn new(phase: InstallPhase, done: usize, total: usize) -> Self {
+        Self { phase, done, total }
+    }
+
+    /// How much of this phase is done, if it can say.
+    pub fn fraction(&self) -> Option<f32> {
+        (self.total > 0).then(|| self.done.min(self.total) as f32 / self.total as f32)
+    }
+}
+
+type Observer<S> = Arc<dyn Fn(S) + Send + Sync>;
+
+/// Reports progress and carries the request to cancel. Clones share the same cancel flag,
+/// so the UI thread can cancel a job running on a worker thread.
+pub struct Monitor<S> {
+    observer: Option<Observer<S>>,
     cancelled: Arc<AtomicBool>,
 }
 
-impl BuildMonitor {
-    pub fn new(observer: impl Fn(BuildStep) + Send + Sync + 'static) -> Self {
+/// Follows the building of an installer.
+pub type BuildMonitor = Monitor<BuildStep>;
+/// Follows an install or an uninstall.
+pub type InstallMonitor = Monitor<InstallStep>;
+
+impl<S> Clone for Monitor<S> {
+    fn clone(&self) -> Self {
+        Self {
+            observer: self.observer.clone(),
+            cancelled: Arc::clone(&self.cancelled),
+        }
+    }
+}
+
+impl<S> Default for Monitor<S> {
+    fn default() -> Self {
+        Self {
+            observer: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl<S> Monitor<S> {
+    pub fn new(observer: impl Fn(S) + Send + Sync + 'static) -> Self {
         Self {
             observer: Some(Arc::new(observer)),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -47,13 +113,13 @@ impl BuildMonitor {
         self.cancelled.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn report(&self, step: BuildStep) {
+    pub(crate) fn report(&self, step: S) {
         if let Some(observer) = self.observer.as_ref() {
             observer(step);
         }
     }
 
-    /// Stop the build with [`WinAppMigratorError::Cancelled`] if it was cancelled.
+    /// Stop the job with [`WinAppMigratorError::Cancelled`] if it was cancelled.
     pub(crate) fn checkpoint(&self) -> Result<()> {
         if self.is_cancelled() {
             return Err(WinAppMigratorError::Cancelled);
@@ -107,5 +173,15 @@ mod tests {
             ]
         );
         Ok(())
+    }
+
+    #[test]
+    fn an_install_step_knows_how_far_along_it_is() {
+        let step = InstallStep::new(InstallPhase::Files, 1, 4);
+        assert_eq!(step.fraction(), Some(0.25));
+        assert_eq!(
+            InstallStep::new(InstallPhase::CheckingPackage, 0, 0).fraction(),
+            None
+        );
     }
 }
