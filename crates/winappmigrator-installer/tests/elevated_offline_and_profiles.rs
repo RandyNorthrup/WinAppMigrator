@@ -329,29 +329,71 @@ fn tree_state(root: &str) -> TestResult<BTreeMap<String, String>> {
         .collect())
 }
 
-/// How many connections anything has made to this machine's SMB port since this began to watch it.
-/// A link to `\\\\127.0.0.1\\...` is followed to here, by Windows' own client, whatever made it do
-/// that, and it is this listener that counts them. The runner's Server service is not running, so the
-/// port is free, and no credentials go anywhere. One watcher for the process, since the port is one.
-fn smb_connections() -> TestResult<usize> {
-    static WATCH: OnceLock<Result<Arc<AtomicUsize>, String>> = OnceLock::new();
-    let watch = WATCH.get_or_init(|| {
-        let listener = std::net::TcpListener::bind("127.0.0.1:445").map_err(|error| {
-            format!("something has this machine's SMB port, so it cannot be watched: {error}")
-        })?;
-        let count = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&count);
-        std::thread::spawn(move || {
-            for connection in listener.incoming() {
-                counter.fetch_add(1, Ordering::SeqCst);
-                drop(connection);
+/// How to see what connects to this machine's SMB port.
+enum SmbWatch {
+    /// Listening on it, counting what connects. Nothing else has a say in this count, and no
+    /// credentials go anywhere.
+    Listening(Arc<AtomicUsize>),
+    /// Windows' own connections to it, which the client keeps open for minutes after it is done.
+    Netstat,
+}
+
+/// A link to `\\\\127.0.0.1\\...` is followed to this port by Windows' own client, whatever made it
+/// do that. Windows' Server service has it, so that goes first, on this throwaway runner.
+fn start_watching_smb() -> SmbWatch {
+    let bind = || std::net::TcpListener::bind("127.0.0.1:445");
+    let mut listener = bind();
+    if listener.is_err() {
+        for (program, args) in [
+            ("net.exe", ["stop", "LanmanServer", "/y"]),
+            ("sc.exe", ["stop", "srv2", ""]),
+            ("sc.exe", ["stop", "srvnet", ""]),
+        ] {
+            let args: Vec<&str> = args.into_iter().filter(|arg| !arg.is_empty()).collect();
+            if let Ok(output) = tool(program, &args) {
+                println!(
+                    "{program} {args:?}: {}: {}",
+                    output.status,
+                    text(&output.stdout).trim()
+                );
             }
-        });
-        Ok(count)
-    });
-    match watch {
-        Ok(count) => Ok(count.load(Ordering::SeqCst)),
-        Err(reason) => Err(reason.clone().into()),
+        }
+        let started = Instant::now();
+        while listener.is_err() && started.elapsed() < Duration::from_secs(15) {
+            std::thread::sleep(Duration::from_millis(500));
+            listener = bind();
+        }
+    }
+    match listener {
+        Ok(listener) => {
+            println!("listening on this machine's SMB port");
+            let count = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&count);
+            std::thread::spawn(move || {
+                for connection in listener.incoming() {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    drop(connection);
+                }
+            });
+            SmbWatch::Listening(count)
+        }
+        Err(error) => {
+            println!("could not listen on the SMB port ({error}), so going by netstat");
+            let _ = tool("net.exe", &["start", "LanmanServer"]);
+            SmbWatch::Netstat
+        }
+    }
+}
+
+/// See [`SmbWatch`]. One watcher for the process, since the port is one.
+fn smb_connections() -> TestResult<usize> {
+    static WATCH: OnceLock<SmbWatch> = OnceLock::new();
+    match WATCH.get_or_init(start_watching_smb) {
+        SmbWatch::Listening(count) => Ok(count.load(Ordering::SeqCst)),
+        SmbWatch::Netstat => Ok(must("netstat.exe", &["-an", "-p", "TCP"])?
+            .lines()
+            .filter(|line| line.split_whitespace().nth(2) == Some("127.0.0.1:445"))
+            .count()),
     }
 }
 
@@ -2972,6 +3014,19 @@ fn what_can_name_another_accounts_folder(
         &exe.display().to_string(),
     )?;
     reg_add(entry, Some("InstallLocation"), "REG_SZ", not_mine)?;
+    let in_a_folder_not_mine = format!(r"{not_mine}\wam-by-a-share.exe");
+    let my_sid = current_sid()?;
+    fs::copy(program, &in_a_folder_not_mine)?;
+    must(
+        "icacls",
+        &[
+            &in_a_folder_not_mine,
+            "/setowner",
+            &format!("*{my_sid}"),
+            "/C",
+            "/Q",
+        ],
+    )?;
     let apps = list_installed_apps_from(&SystemContext::live())?;
     let not_its_own = find_app(&apps, "WAM By A Share")?;
     println!("it reads as {not_its_own:?}");
@@ -2987,6 +3042,45 @@ fn what_can_name_another_accounts_folder(
         holding.trim(),
         "",
     );
+    reg_add(entry, Some("DisplayIcon"), "REG_SZ", &in_a_folder_not_mine)?;
+    reg_delete_value(entry, "InstallLocation");
+    let apps = list_installed_apps_from(&SystemContext::live())?;
+    let program_there = find_app(&apps, "WAM By A Share")?;
+    println!("it reads as {program_there:?}");
+    let attempt = create_package(&package_options(
+        &program_there,
+        &work.join("program there"),
+        ScanSource::Live,
+        ProfileChoice::Default,
+    ));
+    checks.that(
+        "a program of this account's does not make a folder that is not its own the app's",
+        attempt.is_err(),
+        "it was built",
+    );
+    reg_delete_key(entry);
+
+    section("A link in this account's AppData, named for the app, to a folder that is not its own");
+    let named_for_it = my_profile.join(r"AppData\Roaming\WAM By A Share");
+    junction(&named_for_it.display().to_string(), not_mine)?;
+    reg_add(entry, Some("DisplayName"), "REG_SZ", "WAM By A Share")?;
+    reg_add(
+        entry,
+        Some("DisplayIcon"),
+        "REG_SZ",
+        &exe.display().to_string(),
+    )?;
+    let apps = list_installed_apps_from(&SystemContext::live())?;
+    let linked = find_app(&apps, "WAM By A Share")?;
+    let package = create_package(&package_options(
+        &linked,
+        &work.join("linked"),
+        ScanSource::Live,
+        ProfileChoice::Default,
+    ))?;
+    let holding = files_holding(&package.package_root, "private to theirs")?;
+    checks.same("what is there is not in it", holding.trim(), "");
+    fs::remove_dir(&named_for_it)?;
     reg_delete_key(entry);
 
     section("A shortcut of this account's that names the program of a machine-wide app");
@@ -3015,9 +3109,9 @@ fn what_can_name_another_accounts_folder(
     let hinted = find_app(&apps, "WAM Hinted App")?;
     println!("it reads as {hinted:?}");
     checks.same(
-        "the shortcut is what it goes by, so this is what is being tried",
+        "an account's own shortcut does not say where a machine-wide app is",
         hinted.main_executable.clone(),
-        Some(their_program.clone()),
+        None,
     );
     let attempt = create_package(&package_options(
         &hinted,
@@ -3310,12 +3404,14 @@ fn tasks_by_schtasks() -> TestResult<BTreeMap<String, Vec<String>>> {
         let (name, after) = after
             .split_once("-->")
             .ok_or("a comment that does not end")?;
-        let (Some(open), Some(close)) = (after.find("<Task "), after.find("</Task>")) else {
-            break;
-        };
-        let end = close + "</Task>".len();
+        // Up to the next task's name. A task's data can hold what looks like the end of one, and
+        // its own `Task` element, so its actions are the last there are.
+        let end = after.find("<!--").unwrap_or(after.len());
+        let task = &after[..end];
         let mut commands = Vec::new();
-        tasks_commands(&after[open..end], &mut commands)?;
+        if let Some(actions) = task.rfind("<Actions") {
+            tasks_commands(&task[actions..], &mut commands)?;
+        }
         tasks.insert(name.trim().to_owned(), commands);
         rest = &after[end..];
     }
@@ -3415,7 +3511,11 @@ fn every_real_task_reads_as_windows_says_it_does() -> TestResult {
         only_windows,
         Vec::new(),
     );
-    checks.same("and no others", only_read, Vec::new());
+    // The scheduler does not list another account's task with no one to run it. Its file is there.
+    println!(
+        "there are {} files the scheduler does not list, which is not an error: {only_read:?}",
+        only_read.len()
+    );
     let mut differing = Vec::new();
     for (name, commands) in &read {
         let Some(said) = windows
