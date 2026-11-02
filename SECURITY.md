@@ -55,11 +55,13 @@ may be able to write to.
   it is closed to everyone else. None of that goes in a log, which holds paths and key names only, and
   which only administrators can read. A file it replaced is moved aside with the permissions it had, so
   whoever could read it before still can, by a path they would have to know.
-- **Links.** Before each delete and restore, it holds every folder on the way, checks that none of them has
-  become a link, and that the folder it is all under still leads where it did during the install.
-  Whatever fails that is left alone and reported, even if what is at the other end is byte for byte what it
-  would have removed. It checks again after the last thing that can be made to wait. This is by path, so
-  what is listed under [known gaps](#known-gaps) for an install location others can write to applies here too.
+- **Links.** For each delete and restore, and each file an install writes, it holds every folder on the
+  way and keeps a hidden file open in the last one until it is done. A held folder cannot be moved, and a
+  folder with something held in it cannot be emptied, which it would have to be to become a link, so making
+  what it does wait does not let anyone lead it somewhere else. With that in place, it checks that none of them
+  is a link, and that the folder it is all under still leads where it did during the install. Whatever fails
+  that is left alone and reported, even if what is at the other end is byte for byte what it would have
+  removed. The file goes in by a path, so see [known gaps](#known-gaps).
 - **Only what it did.** An uninstall, and undoing an install that never finished, delete a file only if it is
   still what the install wrote, and put back a value only if it still holds what the install wrote. They
   remove only the entries added to `Path`, a key or folder only if it is empty, and a service or task only if
@@ -96,11 +98,14 @@ the installer stub must never be signed.
 that matter most for deciding whether to run an installer:
 
 - An install location outside a protected folder, such as `D:\Apps`, stays writable by other
-  programs on the PC. Links are checked just before each file is written, removed, or put back, but a
-  program running at that moment could still race the check, which matters most for what an elevated
-  uninstall deletes. It can also change the installed files afterward. Choose a location under
-  `C:\Program Files` for anything that installs a service or a driver. Closing this needs acting through a
-  handle to the folder rather than by a path, which this project's rules on `unsafe` code do not allow.
+  programs on the PC, which can change the installed files afterward. Choose a location under
+  `C:\Program Files` for anything that installs a service or a driver. While one is being installed or
+  undone, what could go wrong is much narrower: [each folder is pinned](#undoing-an-install), and it
+  is only in the moment the pin goes in that a program could get past that, by turning a folder into a
+  link and back several times, between checks microseconds apart, with nothing to make any of them
+  wait. Closing that needs acting through a handle to the folder rather than by a path, which this
+  project's rules on `unsafe` code do not allow. A power cut in that moment leaves an empty hidden
+  `.wam-pin-` file, which does nothing, and goes if the folder it is in does.
 - A file or folder in an install that someone else can write to can be kept open to make an undo fail. It
   is reported and can be tried again, and an install that never finished stops the next install until it
   can be undone. If that cannot ever happen, an administrator removes its folder under

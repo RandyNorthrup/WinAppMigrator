@@ -259,8 +259,13 @@ pub enum Change {
         task_name: String,
         xml: String,
     },
-    /// A runtime that was installed. It may be in use by anything, so it is only reported.
+    /// A runtime about to be installed. It may then be in use by anything, so it is only
+    /// reported.
     Prerequisite {
+        name: String,
+    },
+    /// A runtime that was not installed after all.
+    PrerequisiteSkipped {
         name: String,
     },
 }
@@ -851,6 +856,14 @@ impl ReadJournal {
                         }
                     }
                 }
+                Change::PrerequisiteSkipped { name } => {
+                    let found = settled.iter().rposition(|earlier| {
+                        matches!(earlier, Change::Prerequisite { name: earlier_name } if earlier_name == name)
+                    });
+                    if let Some(index) = found {
+                        settled.remove(index);
+                    }
+                }
                 other => settled.push(other.clone()),
             }
         }
@@ -1246,6 +1259,12 @@ mod tests {
             sha256: "abc".to_owned(),
         })?;
         journal.note(Change::FileUndone { path: dropped })?;
+        journal.note(Change::Prerequisite {
+            name: "Runtime".to_owned(),
+        })?;
+        journal.note(Change::PrerequisiteSkipped {
+            name: "Runtime".to_owned(),
+        })?;
         journal.note(Change::Task {
             task_path: r"\Acme\".to_owned(),
             task_name: "Sync".to_owned(),

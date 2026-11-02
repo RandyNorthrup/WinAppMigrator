@@ -1028,7 +1028,7 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
             ui.add_space(SPACE_SM);
         } else if outcome.applied {
             let (role, text) = match outcome.rollback.as_ref() {
-                Some(report) if !report.failed.is_empty() => (
+                Some(report) if !report.failed.is_empty() || report.waiting_for_a_drive => (
                     Role::Danger,
                     "The install failed, and not all of what it changed could be put back. What \
                      is left is listed below, and the next install tries again.",

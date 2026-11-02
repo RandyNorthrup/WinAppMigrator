@@ -4,6 +4,7 @@ use std::io;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
 
@@ -34,8 +35,9 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 /// Lets someone who is not elevated start a file, which is how Windows finds out from its
 /// manifest that it has to ask for elevation. No one but administrators can change it.
 const USERS_MAY_START_GRANT: &str = "*S-1-5-32-545:(RX)";
-/// Put briefly in a folder while its permissions are read. See [`read_with_folder_pinned`].
-const PIN_FILE_PREFIX: &str = ".wam-pin-";
+/// Put briefly in a folder while something is done in it. See [`pin_held_folder`].
+pub(crate) const PIN_FILE_PREFIX: &str = ".wam-pin-";
+const FILE_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const DELETE: u32 = 0x0001_0000;
 const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
@@ -129,8 +131,7 @@ pub fn hold_folder(folder: &Path) -> io::Result<File> {
 /// placeholder, which redirects nothing, passes.
 ///
 /// Whoever can write to it can still empty it and turn that same folder into a link, which a
-/// hold does not stop, so a path that matters has to be checked again after the last thing
-/// that can be made to wait.
+/// hold does not stop. [`pin_held_folder`] does.
 pub fn hold_real_folder(folder: &Path) -> io::Result<File> {
     let hold = OpenOptions::new()
         .read(true)
@@ -169,7 +170,7 @@ pub fn ensure_protected_folder(folder: &Path) -> io::Result<()> {
         Some(false) => return Ok(()),
         None => return Err(unknown_elevation()),
     }
-    let is_protected = read_with_folder_pinned(folder).is_ok();
+    let is_protected = read_with_folder_pinned(folder, &hold).is_ok();
     drop(hold);
     if is_protected {
         return Ok(());
@@ -195,7 +196,7 @@ fn protect_new_folder(folder: &Path) -> io::Result<()> {
 pub fn confirm_protected_folder(folder: &Path) -> io::Result<()> {
     let hold = hold_real_folder(folder)?;
     let result = match elevation() {
-        Some(true) => read_with_folder_pinned(folder),
+        Some(true) => read_with_folder_pinned(folder, &hold),
         Some(false) => Ok(()),
         None => Err(unknown_elevation()),
     };
@@ -203,19 +204,47 @@ pub fn confirm_protected_folder(folder: &Path) -> io::Result<()> {
     result
 }
 
-/// Check permissions by a path, knowing they are that folder's. What reads them follows links,
-/// so someone with write access could turn the folder into a link to one of the right kind for
-/// just that long, and back. Turning a folder into a link needs it to be empty, and a file held
-/// open in it cannot be moved out, so with one there it stays what it is. The caller holds the
-/// folder, so it cannot be renamed either. The file goes when closed, however this process ends.
-fn read_with_folder_pinned(folder: &Path) -> io::Result<()> {
+/// Keep a held folder from being turned into a link for as long as the result is alive.
+/// Turning a folder into a link needs it to be empty, and a file held open in it cannot be
+/// moved out. While a folder is held, it cannot be renamed, and so with both, anything done
+/// by a path through it stays there, even if whoever can write to it can make that wait.
+///
+/// This is by a path too, so the folder may have been turned into a link just before this,
+/// putting the file somewhere else. So it has to be seen where it was meant to be, with the
+/// folder still real on both sides of looking. The file goes when closed, however this process
+/// ends, unless the power does first, and is hidden so it does not flicker on a Desktop.
+pub(crate) fn pin_held_folder(folder: &Path, hold: &File) -> io::Result<File> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = folder.join(format!(
+        "{PIN_FILE_PREFIX}{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     let pin = OpenOptions::new()
         .write(true)
         .create_new(true)
         .access_mode(GENERIC_WRITE | DELETE)
         .share_mode(0)
+        .attributes(FILE_ATTRIBUTE_HIDDEN)
         .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
-        .open(folder.join(format!("{PIN_FILE_PREFIX}{}", std::process::id())))?;
+        .open(&path)?;
+    let in_place = hold.metadata()?.is_dir()
+        && fs::symlink_metadata(&path).is_ok()
+        && hold.metadata()?.is_dir();
+    if in_place {
+        return Ok(pin);
+    }
+    Err(io::Error::other(format!(
+        "{} became a link while it was being used",
+        folder.display()
+    )))
+}
+
+/// Check permissions by a path, knowing they are that folder's. What reads them follows links,
+/// so someone with write access could otherwise turn the folder into a link to one of the right
+/// kind for just that long, and back. The caller holds the folder.
+fn read_with_folder_pinned(folder: &Path, hold: &File) -> io::Result<()> {
+    let pin = pin_held_folder(folder, hold)?;
     let result = confirm_administrators_only(folder);
     drop(pin);
     result
@@ -621,10 +650,123 @@ mod tests {
     #[test]
     fn pinning_a_folder_leaves_nothing_in_it() -> io::Result<()> {
         let folder = tempfile::tempdir()?;
+        let hold = hold_real_folder(folder.path())?;
+        let pin = pin_held_folder(folder.path(), &hold)?;
+        assert_eq!(fs::read_dir(folder.path())?.count(), 1);
+        drop(pin);
         // Whether or not this process is elevated, in which case a temp folder also fails.
-        let _ = read_with_folder_pinned(folder.path());
+        let _ = read_with_folder_pinned(folder.path(), &hold);
         assert_eq!(fs::read_dir(folder.path())?.count(), 0);
         Ok(())
+    }
+
+    /// Turn a folder that already exists into a link, the way anyone who can write to it can,
+    /// by asking the file system directly, and return the Windows error, `0` if it worked.
+    fn try_to_turn_into_a_link(folder: &Path, target: &Path) -> io::Result<String> {
+        let script = format!(
+            r#"Import-Module Microsoft.PowerShell.Utility; Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class WamLink {{
+  [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security,
+    uint disposition, uint flags, IntPtr template);
+  [DllImport("kernel32", SetLastError = true)]
+  static extern bool DeviceIoControl(SafeFileHandle device, uint code, byte[] input, int inputSize,
+    IntPtr output, int outputSize, out int returned, IntPtr overlapped);
+  public static int Make(string folder, string target) {{
+    using (var handle = CreateFile(folder, 0x40000000, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero)) {{
+      if (handle.IsInvalid) {{ return Marshal.GetLastWin32Error(); }}
+      var name = System.Text.Encoding.Unicode.GetBytes(@"\??\" + target);
+      var data = new byte[name.Length + 20];
+      BitConverter.GetBytes(0xA0000003u).CopyTo(data, 0);
+      BitConverter.GetBytes((ushort)(name.Length + 12)).CopyTo(data, 4);
+      BitConverter.GetBytes((ushort)name.Length).CopyTo(data, 10);
+      BitConverter.GetBytes((ushort)(name.Length + 2)).CopyTo(data, 12);
+      name.CopyTo(data, 16);
+      int returned;
+      return DeviceIoControl(handle, 0x000900A4, data, data.Length, IntPtr.Zero, 0, out returned, IntPtr.Zero)
+        ? 0 : Marshal.GetLastWin32Error();
+    }}
+  }}
+}}
+'@; [WamLink]::Make('{}', '{}')"#,
+            folder.display(),
+            target.display()
+        );
+        let output = hidden_command(POWERSHELL_EXE)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    /// All of what pinning rests on, from the file system itself. Holding a folder does not keep
+    /// it from being turned into a link, and a file held open in it does, and when it happens
+    /// anyway, it shows on the hold, and pinning notices.
+    #[test]
+    fn a_pinned_folder_cannot_be_turned_into_a_link_and_one_only_held_can() -> io::Result<()> {
+        const DIRECTORY_NOT_EMPTY: &str = "145";
+        const WORKED: &str = "0";
+        let work = tempfile::tempdir()?;
+        let parent = fs::canonicalize(work.path())?;
+        let parent = Path::new(crate::path_utils::without_verbatim_prefix(
+            parent.to_str().ok_or_else(|| io::Error::other("a name"))?,
+        ));
+        let folder = parent.join("folder");
+        let elsewhere = parent.join("elsewhere");
+        fs::create_dir(&folder)?;
+        fs::create_dir(&elsewhere)?;
+        let hold = hold_real_folder(&folder)?;
+
+        let pin = pin_held_folder(&folder, &hold)?;
+        assert_eq!(
+            try_to_turn_into_a_link(&folder, &elsewhere)?,
+            DIRECTORY_NOT_EMPTY
+        );
+        assert!(hold.metadata()?.is_dir());
+        drop(pin);
+
+        assert_eq!(try_to_turn_into_a_link(&folder, &elsewhere)?, WORKED);
+        assert!(!hold.metadata()?.is_dir(), "it shows on the hold");
+        assert!(hold_real_folder(&folder).is_err());
+        assert!(
+            pin_held_folder(&folder, &hold).is_err(),
+            "pinning notices the file went somewhere else"
+        );
+        assert_eq!(fs::read_dir(&elsewhere)?.count(), 0, "and leaves nothing");
+        drop(hold);
+        // A link goes without touching what it points at.
+        fs::remove_dir(&folder)
+    }
+
+    /// The rest of what pinning is for, against what can be tried from a normal shell.
+    #[test]
+    fn a_pinned_folder_cannot_be_emptied_or_moved() -> io::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let folder = parent.path().join("folder");
+        fs::create_dir(&folder)?;
+        let hold = hold_real_folder(&folder)?;
+        let pin = pin_held_folder(&folder, &hold)?;
+
+        let pin_path = fs::read_dir(&folder)?
+            .flatten()
+            .map(|entry| entry.path())
+            .next()
+            .ok_or_else(|| io::Error::other("no pin"))?;
+        assert!(fs::rename(&pin_path, parent.path().join("moved")).is_err());
+        assert!(fs::remove_file(&pin_path).is_err());
+        assert!(fs::remove_dir(&folder).is_err());
+        assert!(fs::rename(&folder, parent.path().join("renamed")).is_err());
+
+        drop(pin);
+        drop(hold);
+        fs::remove_dir(&folder)
     }
 
     #[test]

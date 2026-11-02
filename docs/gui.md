@@ -165,7 +165,8 @@ thread, because checking who can change that record runs other programs. It says
 removed and what will stay, has one option, to also remove user data and licenses, which is off,
 shows progress, and then lists what it undid, what it left and why, and what it could not do,
 with where the log is if anything failed. `--quiet` does the same with no window, for
-`QuietUninstallString`. An uninstall that could not finish keeps the entry in Settings, so it can
+`QuietUninstallString`. An uninstall that could not finish, including one waiting for a drive that
+is not connected, which is not called a failure, keeps the entry in Settings, so it can
 be run again from there.
 
 ## Conventions

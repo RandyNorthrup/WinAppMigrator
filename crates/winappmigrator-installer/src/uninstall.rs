@@ -94,7 +94,7 @@ fn run_quiet(cli: &UninstallCli) -> Result<bool> {
         println!("Log: {}", log.display());
     }
     finish(&outcome);
-    Ok(outcome.report.failed.is_empty())
+    Ok(outcome.finished)
 }
 
 fn print_outcome(outcome: &UninstallOutcome) {

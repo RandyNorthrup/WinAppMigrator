@@ -19,13 +19,14 @@ use crate::models::{
     RegistryEntry, RegistryHive, ScheduledTaskEntry, ServiceEntry, Warning, WarningSeverity,
 };
 use crate::path_rewrite::RestoreMap;
-use crate::path_utils::{path_is_within, strip_prefix_ignore_case, system_root};
+use crate::path_utils::{path_is_within, resolved_location, strip_prefix_ignore_case, system_root};
 use crate::registry_target::{app_path_entries, is_path_variable, service_image_path};
 use crate::restore_policy::{
     KnownFolders, SERVICES_PREFIX, ServiceAccount, ShortcutPlacement, driver_destination,
-    environment_refusal, existing_service_refusal, install_location_refusal, is_autostart_entry,
-    is_source_uninstall_value, is_uninstall_entry_key, is_valid_service_name, license_destination,
-    read_task_definition, registry_refusal, shortcut_placement, task_refusal,
+    environment_refusal, existing_service_refusal, install_location_refusal,
+    install_placement_refusal, is_autostart_entry, is_source_uninstall_value,
+    is_uninstall_entry_key, is_valid_service_name, license_destination, read_task_definition,
+    registry_refusal, shortcut_placement, task_refusal,
 };
 use crate::system_context::SystemContext;
 
@@ -662,17 +663,28 @@ pub fn install_location_problem(target_root: &Path) -> Option<String> {
     {
         return Some(STATE_ROOT_REFUSAL.to_owned());
     }
-    install_location_refusal(
-        target_root,
-        system_root(),
-        &known_base_dirs(&SystemContext::live()),
-    )
+    let shared_folders = known_base_dirs(&SystemContext::live());
+    install_location_refusal(target_root, system_root(), &shared_folders).or_else(|| {
+        // And where it really is, past any link or short name.
+        install_placement_refusal(
+            &resolved_location(target_root),
+            system_root(),
+            &shared_folders,
+        )
+    })
 }
 
 /// True when an install location would put an app's files where installs keep their records.
 /// What an uninstall trusts is there, and a package gets to suggest the location.
 pub(crate) fn overlaps_state_root(target_root: &Path, state_root: &Path) -> bool {
-    path_is_within(target_root, state_root) || path_is_within(state_root, target_root)
+    let overlap = |target: &Path, state: &Path| {
+        path_is_within(target, state) || path_is_within(state, target)
+    };
+    overlap(target_root, state_root)
+        || overlap(
+            &resolved_location(target_root),
+            &resolved_location(state_root),
+        )
 }
 
 fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
@@ -878,6 +890,33 @@ mod tests {
             classification: FileClassification::AppOwned,
             should_copy: true,
             reason: String::new(),
+        }
+    }
+
+    /// Reads only.
+    #[test]
+    fn no_way_of_writing_it_gets_past_where_records_are_kept_or_the_windows_folder() {
+        let Some(state_root) = machine_state_root() else {
+            return;
+        };
+        let state_text = state_root.display().to_string();
+        let windows_text = system_root().display().to_string();
+        for spelled in [
+            state_text.replacen(r"\", r"\.\", 1),
+            state_text.replacen(r"\", r"\\", 1),
+            state_text.replace('\\', "/"),
+            format!(r"{state_text}\installs\wam-abc"),
+            state_text.replacen(r"\", r"\.\", 1) + r"\installs\wam-abc",
+            format!(r"\\?\{state_text}\installs\wam-abc"),
+            windows_text.replacen(r"\", r"\.\", 1) + r"\Acme",
+            windows_text.replacen(r"\", r"\\", 1) + r"\Acme",
+            format!(r"\\?\{windows_text}\Acme"),
+            format!(r"{windows_text}.\Acme"),
+        ] {
+            assert!(
+                install_location_problem(Path::new(&spelled)).is_some(),
+                "{spelled}"
+            );
         }
     }
 

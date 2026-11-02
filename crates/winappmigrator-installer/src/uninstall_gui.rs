@@ -310,7 +310,8 @@ impl UninstallApp {
         if keepable > 0 {
             widgets::section_gap(ui);
             let description = format!(
-                "{keepable} items of its settings, data, and license. They stay unless this is on."
+                "{keepable} items of its settings, data, and license. They stay unless this is \
+                 on, and anything they replaced only comes back if it is."
             );
             widgets::card_titled(ui, theme, "Options", None, |ui| {
                 widgets::option_row(
@@ -415,7 +416,7 @@ fn draw_outcome(
     log_path: Option<&std::path::Path>,
 ) {
     let report = &outcome.report;
-    if report.failed.is_empty() {
+    if outcome.finished {
         widgets::notice(
             ui,
             theme,
@@ -425,6 +426,14 @@ fn draw_outcome(
             } else {
                 "The app was uninstalled, except for what is listed below."
             },
+        );
+    } else if report.failed.is_empty() {
+        widgets::notice(
+            ui,
+            theme,
+            Role::Warning,
+            "Part of it is on a drive that is not connected. Connect it, and uninstall again \
+             from Settings.",
         );
     } else {
         widgets::notice(
@@ -630,7 +639,7 @@ mod tests {
 
     fn done_with(report: UndoReport) -> UninstallApp {
         let mut app = sample(ThemeMode::Dark);
-        let finished = report.failed.is_empty();
+        let finished = report.failed.is_empty() && !report.waiting_for_a_drive;
         app.log_path = Some(PathBuf::from(
             r"C:\ProgramData\WinAppMigrator\logs\uninstall-1.log",
         ));
@@ -640,6 +649,22 @@ mod tests {
             remove_after_exit: None,
         }));
         app
+    }
+
+    #[test]
+    fn a_drive_that_is_not_connected_is_not_called_a_failure_or_finished() {
+        let harness = harness_for(done_with(UndoReport {
+            kept: vec![r"What this install put in E:\App is on a drive.".to_owned()],
+            waiting_for_a_drive: true,
+            ..UndoReport::default()
+        }));
+        assert!(
+            harness
+                .query_by_label_contains("drive that is not connected")
+                .is_some()
+        );
+        assert!(harness.query_by_label_contains("was uninstalled").is_none());
+        assert!(harness.query_by_label_contains("Not all of it").is_none());
     }
 
     #[test]

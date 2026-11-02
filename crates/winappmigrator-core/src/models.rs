@@ -898,6 +898,9 @@ pub struct UndoReport {
     pub failed: Vec<String>,
     /// What cannot be undone at all: runtimes that were installed.
     pub left_behind: Vec<String>,
+    /// Some of it is on a drive that is not connected, and can be undone when it is.
+    #[serde(default)]
+    pub waiting_for_a_drive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

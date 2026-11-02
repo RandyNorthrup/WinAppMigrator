@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -332,14 +332,63 @@ pub fn normalize_name_for_match(value: &str) -> String {
         .collect()
 }
 
-/// A path as lowercase text with forward slashes and any trailing separator removed, for
-/// comparing paths that come from different records. `C:\` becomes `c:`.
+/// A path as lowercase text with one kind of separator and none at the end, for comparing paths
+/// that come from different records. `C:\` becomes `c:`. It goes by the path's parts, because
+/// Windows reads `C:\.\Windows`, `C:\\Windows`, and `\\?\C:\Windows` all as `C:\Windows`, and
+/// what decides where something may go cannot be told apart from it by how it is written.
 fn comparable_path(path: &Path) -> String {
-    let lower = path
-        .to_string_lossy()
-        .replace('/', "\\")
-        .to_ascii_lowercase();
-    lower.trim_end_matches('\\').to_owned()
+    let mut text = String::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::VerbatimDisk(drive) | Prefix::Disk(drive) => {
+                    text.push(char::from(drive));
+                    text.push(':');
+                }
+                Prefix::VerbatimUNC(server, share) => {
+                    text.push_str(r"\\");
+                    text.push_str(&server.to_string_lossy());
+                    text.push('\\');
+                    text.push_str(&share.to_string_lossy());
+                }
+                _ => text.push_str(&prefix.as_os_str().to_string_lossy()),
+            },
+            Component::RootDir => {
+                if text.is_empty() {
+                    text.push('\\');
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::Normal(_) => {
+                if !text.is_empty() && !text.ends_with('\\') {
+                    text.push('\\');
+                }
+                text.push_str(&component.as_os_str().to_string_lossy());
+            }
+        }
+    }
+    text.to_ascii_lowercase()
+}
+
+/// Where a location really is, as far as it exists yet: links followed and short names spelled
+/// out for what is there, and the rest as it was given. For what must not be fooled by either.
+pub fn resolved_location(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(current) {
+            let mut location = real;
+            location.extend(missing.iter().rev());
+            return location;
+        }
+        match (current.file_name(), current.parent()) {
+            (Some(name), Some(parent)) => {
+                missing.push(name);
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// True when `path` is `root` or lies inside it, ignoring case. Unlike a text prefix,
@@ -599,6 +648,56 @@ mod tests {
             git
         ));
         assert!(!path_is_within(Path::new(r"C:\Program Files"), git));
+    }
+
+    #[test]
+    fn a_path_is_the_same_path_however_it_is_written() {
+        let windows = Path::new(r"C:\Windows");
+        for spelled in [
+            r"C:\.\Windows\x",
+            r"C:\\Windows\x",
+            r"C:/Windows/x",
+            r"c:\windows\.\x\",
+            r"\\?\C:\Windows\x",
+        ] {
+            assert!(path_is_within(Path::new(spelled), windows), "{spelled}");
+        }
+        assert!(path_is_within(
+            Path::new(r"C:\Windows"),
+            Path::new(r"\\?\C:\Windows\")
+        ));
+        assert!(path_is_within(
+            Path::new(r"C:\ProgramData\.\WinAppMigrator\installs"),
+            Path::new(r"C:\ProgramData\WinAppMigrator")
+        ));
+        assert!(!path_is_within(Path::new(r"C:\Windows2\x"), windows));
+        assert!(!path_is_within(Path::new(r"C:\x\Windows"), windows));
+    }
+
+    #[test]
+    fn a_resolved_location_follows_a_link_and_keeps_what_is_not_there_yet() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let real = std::fs::canonicalize(work.path())?;
+        std::fs::create_dir(work.path().join("elsewhere"))?;
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(work.path().join("link"))
+            .arg(work.path().join("elsewhere"))
+            .output()?;
+        assert!(made.status.success());
+
+        let location = resolved_location(&work.path().join(r"link\not\there"));
+        assert!(path_is_within(
+            &location,
+            &real.join(r"elsewhere\not\there")
+        ));
+        assert!(path_is_within(
+            &real.join(r"elsewhere\not\there"),
+            &location
+        ));
+        Ok(())
     }
 
     #[test]

@@ -10,10 +10,12 @@
 //! belongs to the app must keep working.
 
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use crate::errors::Result;
-use crate::file_discovery::{has_reserved_device_name, restore_destination, safe_relative_path};
+use crate::file_discovery::{
+    has_reserved_device_name, is_reserved_device_name, restore_destination, safe_relative_path,
+};
 use crate::models::{DriverEntry, RegistryEntry, RegistryHive, RegistryValueKind};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
@@ -160,6 +162,29 @@ pub fn install_location_refusal(
     {
         return Some("it must not contain \"..\"".to_owned());
     }
+    // Windows would read these as something other than what they say, and so what they say
+    // cannot be compared with anything.
+    let reads_as_something_else = target_root.components().any(|component| match component {
+        // Including a share, which can be this PC's own drives under another name.
+        Component::Prefix(prefix) => !matches!(prefix.kind(), Prefix::Disk(_)),
+        Component::Normal(name) => {
+            let name = name.to_string_lossy();
+            name.ends_with(['.', ' ']) || name.contains(':') || is_reserved_device_name(&name)
+        }
+        _ => false,
+    });
+    if reads_as_something_else {
+        return Some("it has to be a plain path on a drive of this PC".to_owned());
+    }
+    install_placement_refusal(target_root, windows_dir, shared_folders)
+}
+
+/// Why an install location is somewhere an app cannot go, however it was written.
+pub(crate) fn install_placement_refusal(
+    target_root: &Path,
+    windows_dir: &Path,
+    shared_folders: &[PathBuf],
+) -> Option<String> {
     if is_drive_root(target_root) {
         return Some("it cannot be a whole drive".to_owned());
     }
@@ -514,10 +539,11 @@ pub fn is_source_uninstall_value(entry: &RegistryEntry) -> bool {
                 // Settings opens an icon just by showing it, so one on a network share would
                 // hand that server the name and password hash of whoever looks at the list.
                 || (name == DISPLAY_ICON_VALUE
-                    && entry
-                        .value_data
-                        .as_deref()
-                        .is_some_and(|data| data.trim_start_matches('"').starts_with(UNC_PREFIX)))
+                    && entry.value_data.as_deref().is_some_and(|data| {
+                        data.trim_start_matches(['"', ' '])
+                            .replace('/', "\\")
+                            .starts_with(UNC_PREFIX)
+                    }))
         })
 }
 
@@ -790,6 +816,17 @@ pub fn com_server_refusal(
             "this COM class already belongs to {existing}, which is outside the install location"
         )
     })
+}
+
+/// The key of the COM class a registry key is part of, in lowercase, if it is part of one.
+pub fn com_class_key(key_path: &str) -> Option<String> {
+    let key = normalized_key(key_path);
+    let class = key
+        .strip_prefix(CLSID_PREFIX)?
+        .split('\\')
+        .next()
+        .filter(|class| !class.is_empty())?;
+    Some(format!("{CLSID_PREFIX}{class}"))
 }
 
 /// True for a value naming what COM loads for a class.
@@ -1122,8 +1159,15 @@ mod tests {
             assert!(is_source_uninstall_value(&value(wow, name)), "{name}");
         }
         let mut icon = value(entry, "DisplayIcon");
-        icon.value_data = Some(r"\\server\share\app.ico".to_owned());
-        assert!(is_source_uninstall_value(&icon));
+        for network in [
+            r"\\server\share\app.ico",
+            r"//server/share/app.ico",
+            r#""\\server\share\app.ico",0"#,
+            r" \\server\share\app.ico",
+        ] {
+            icon.value_data = Some(network.to_owned());
+            assert!(is_source_uninstall_value(&icon), "{network}");
+        }
         icon.value_data = Some(r"C:\Program Files\Acme\app.exe,0".to_owned());
         assert!(!is_source_uninstall_value(&icon));
         for (key, name) in [
@@ -1149,6 +1193,44 @@ mod tests {
                 "{key} {name}"
             );
         }
+    }
+
+    #[test]
+    fn an_install_location_windows_would_read_as_something_else_is_refused() {
+        for spelled in [
+            r"\\?\C:\Apps\Acme",
+            r"\\.\C:\Apps\Acme",
+            r"\\?\UNC\server\share\Acme",
+            r"\\server\share\Acme",
+            r"\\localhost\C$\Windows\Acme",
+            r"C:\Windows.\Acme",
+            r"C:\Windows \Acme",
+            r"C:\Apps\Acme:stream",
+            r"C:\Apps\CON\Acme",
+        ] {
+            let refused = install_location_refusal(Path::new(spelled), Path::new(WINDOWS), &[]);
+            assert!(refused.is_some(), "{spelled}");
+        }
+        for spelled in [
+            r"C:\.\Windows\Acme",
+            r"C:\\Windows\Acme",
+            r"C:/Windows/Acme",
+        ] {
+            let refused = install_location_refusal(Path::new(spelled), Path::new(WINDOWS), &[]);
+            assert_eq!(
+                refused.as_deref(),
+                Some("it cannot be the Windows folder"),
+                "{spelled}"
+            );
+        }
+        assert_eq!(
+            install_location_refusal(Path::new(r"C:\Apps\Acme"), Path::new(WINDOWS), &[]),
+            None
+        );
+        assert_eq!(
+            install_location_refusal(Path::new(r"C:\Apps\Acme 2.0"), Path::new(WINDOWS), &[]),
+            None
+        );
     }
 
     #[test]

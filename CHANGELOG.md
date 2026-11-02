@@ -18,13 +18,26 @@ All notable project changes are tracked here.
   - Runtimes it installed stay, and are reported as left behind.
   - Without the record being safe to keep, an install no longer starts, and only one install or uninstall
     runs at a time.
+  - An install on a drive that is no longer connected does not stop the next install. It is undone when the
+    drive is back.
 - **An app installed this way has an uninstaller.** Its entry in Settings runs a bare copy of the stub kept
   in that same folder, never in the install folder, and with `QuietUninstallString`, no window. It undoes
   only what the journal says that install did: a file or value that has changed since is kept and reported,
   overwritten files come back, only added `Path` entries come out, what you added stays, and so do user
   data and licenses unless you ask. It stops a service before deleting it. It can be run again if it could
-  not finish, and removes itself after it exits. The source PC's `UninstallString`, `QuietUninstallString`,
-  `ModifyPath`, and `WindowsInstaller` no longer survive. A package with no entry gets one.
+  not finish, and removes itself after it exits. If part of it is on a drive that is not connected, it says
+  so, and its entry stays to finish from. A service that will not stop is removed when the PC restarts. The
+  source PC's `UninstallString`, `QuietUninstallString`, `ModifyPath`, and `WindowsInstaller` no longer
+  survive. A package with no entry gets one.
+- **An install location is judged by where it really is.** `C:\.\Windows\x`, `\\?\C:\Windows\x`, a short name,
+  and a link could all pass for somewhere else. **A network share is now refused,** since it can be this PC's
+  own drive by another name, and so is a part Windows would read differently, such as one ending in a dot.
+- **Writing a file can no longer be led somewhere else by making it wait.** Each file is written with the
+  way there held, and with something held open in the last folder, so that none of them can become a link.
+- **A COM class that belongs to something else is now left alone whole.** A value beside a refused server,
+  such as `ThreadingModel`, could still be written over it.
+- **A source PC's `DisplayIcon` on a network share is dropped however it is written,** with quotes, leading
+  spaces, or forward slashes.
 - **Logs are kept,** in `%ProgramData%\WinAppMigrator\logs`, which only administrators can read, with a limit
   on size and on how many are kept. They hold paths and key names only, and a test pins that. `--log <FILE>`
   adds a file of your own. Both windows say where the log is when something fails. Warnings that used to

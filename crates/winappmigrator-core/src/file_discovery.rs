@@ -18,7 +18,7 @@ use crate::path_utils::{
     program_data_dir, public_profile_dir, strip_prefix_ignore_case, user_profile_dir,
     windows_build,
 };
-use crate::privilege::{hold_folder, hold_real_folder};
+use crate::privilege::{hold_folder, hold_real_folder, pin_held_folder};
 use crate::product_match::{MatchScope, ProductNames};
 use crate::system_context::SystemContext;
 
@@ -302,6 +302,81 @@ pub(crate) fn hold_path_below_root(root: &Path, candidate: &Path) -> Result<Vec<
     }
     ensure_within_root(root, candidate)?;
     Ok(holds)
+}
+
+/// Make a missing folder on the way down. It is what will keep its parent from being emptied
+/// once it is held, so until then, that is the pin's job.
+fn make_folder_in_held_parent(folder: &Path, parent_hold: Option<&fs::File>) -> Result<()> {
+    let parent = folder.parent().ok_or_else(|| {
+        WinAppMigratorError::InvalidInput(format!("{} has no parent folder", folder.display()))
+    })?;
+    let parent_hold = parent_hold
+        .ok_or_else(|| WinAppMigratorError::InvalidInput("nothing is held".to_owned()))?;
+    let _pin = pin_held_folder(parent, parent_hold)
+        .map_err(|error| WinAppMigratorError::io(parent, error))?;
+    match fs::create_dir(folder) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+            Err(WinAppMigratorError::io(folder, error))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A path that stays where it leads for as long as this is alive. See [`pin_path_below_root`].
+pub(crate) struct PinnedPath {
+    _holds: Vec<fs::File>,
+    _pin: fs::File,
+}
+
+/// Before writing, moving, or deleting at `candidate` with full rights. Holds `root` and every
+/// folder down to the one `candidate` is in, making any that are missing, one at a time, so
+/// that none is made through a link. Each folder holds the next, which cannot be moved out, so
+/// none of them can be emptied, and the last has a file held open in it for the same reason, so
+/// none can be turned into a link. Only then is the path checked, with
+/// [`ensure_within_root`], so that what it found is still so when what the caller does has
+/// been made to wait, which whoever can write to these folders can arrange. A link at or above
+/// `root` is the caller's business, as there.
+pub(crate) fn pin_path_below_root(root: &Path, candidate: &Path) -> Result<PinnedPath> {
+    let relative = strip_prefix_ignore_case(candidate, root)
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .ok_or_else(|| {
+            WinAppMigratorError::InvalidInput(format!(
+                "path escapes intended root: {}",
+                candidate.display()
+            ))
+        })?;
+    let mut holds = vec![hold_folder(root).map_err(|error| WinAppMigratorError::io(root, error))?];
+    let mut current = root.to_path_buf();
+    if let Some(folders) = relative.parent() {
+        for component in folders.components() {
+            current.push(component);
+            let held = match hold_real_folder(&current) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    make_folder_in_held_parent(&current, holds.last())?;
+                    hold_real_folder(&current)
+                }
+                held => held,
+            };
+            holds.push(held.map_err(|_| {
+                WinAppMigratorError::InvalidInput(format!(
+                    "refusing to go through a link: {}",
+                    current.display()
+                ))
+            })?);
+        }
+    }
+    let pin = holds
+        .last()
+        .ok_or_else(|| WinAppMigratorError::InvalidInput("nothing is held".to_owned()))
+        .and_then(|hold| {
+            pin_held_folder(&current, hold)
+                .map_err(|error| WinAppMigratorError::io(&current, error))
+        })?;
+    ensure_within_root(root, candidate)?;
+    Ok(PinnedPath {
+        _holds: holds,
+        _pin: pin,
+    })
 }
 
 /// Create the install location, hold it open, and confirm it is a real folder. Run once,
@@ -1549,6 +1624,45 @@ mod tests {
         assert!(hold_path_below_root(&root, &root).is_err());
         // A folder that is not there has nothing below it to go through.
         assert!(hold_path_below_root(&root, &root.join(r"gone\file.txt")).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn pinning_the_way_to_a_file_makes_what_is_missing_refuses_links_and_leaves_nothing()
+    -> Result<()> {
+        let base = temp_base()?;
+        let root = base.path().join("root");
+        fs::create_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
+        let elsewhere = base.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere)
+            .map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
+        let made = crate::path_utils::hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(root.join("linked"))
+            .arg(&elsewhere)
+            .output()
+            .map_err(|error| WinAppMigratorError::io(&root, error))?;
+        assert!(made.status.success());
+
+        let pinned = pin_path_below_root(&root, &root.join(r"new\deep\file.txt"))?;
+        let deep = root.join(r"new\deep");
+        assert!(deep.is_dir(), "what was missing was made");
+        assert_eq!(fs::read_dir(&deep).map_or(0, Iterator::count), 1);
+        assert!(fs::rename(&deep, root.join(r"new\moved")).is_err());
+        drop(pinned);
+        assert_eq!(fs::read_dir(&deep).map_or(1, Iterator::count), 0);
+
+        // In the folder itself as well.
+        drop(pin_path_below_root(&root, &root.join("file.txt"))?);
+
+        assert!(pin_path_below_root(&root, &root.join(r"linked\file.txt")).is_err());
+        assert!(pin_path_below_root(&root, &root.join(r"linked\new\file.txt")).is_err());
+        assert_eq!(fs::read_dir(&elsewhere).map_or(1, Iterator::count), 0);
+        assert!(pin_path_below_root(&root, &root.join("linked")).is_err());
+        assert!(pin_path_below_root(&root, &root).is_err());
+        assert!(pin_path_below_root(&root, &elsewhere.join("file.txt")).is_err());
         Ok(())
     }
 

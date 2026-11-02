@@ -14,8 +14,8 @@ use winreg::enums::{REG_DWORD, REG_NONE, REG_SZ};
 use crate::archive::EmbeddedPackage;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
-    ensure_target_root, ensure_within_root, package_destination_path, safe_relative_path,
-    split_user_data_relative, write_root_for,
+    ensure_target_root, ensure_within_root, package_destination_path, pin_path_below_root,
+    safe_relative_path, split_user_data_relative, write_root_for,
 };
 use crate::hashing::sha256_file;
 use crate::journal::{
@@ -32,8 +32,7 @@ use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_TASKS, POWERSHELL_IMPORT_UTILITY,
-    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, path_is_within,
-    sanitize_filename, system_root,
+    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, path_is_within, system_root,
 };
 use crate::prerequisites::{
     PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
@@ -46,7 +45,7 @@ use crate::registry_target::{
     registry_value_name, service_image_path,
 };
 use crate::restore_policy::{
-    COM_SERVER_KEYS, ServiceAccount, com_server_refusal, existing_service_refusal,
+    COM_SERVER_KEYS, ServiceAccount, com_class_key, com_server_refusal, existing_service_refusal,
     existing_task_refusal, is_autostart_entry, is_com_server_entry, is_uninstall_entry_key,
     paths_equal, restored_value_bytes, restored_value_text, service_image_path_value,
 };
@@ -66,6 +65,8 @@ pub(crate) const SC_EXE: &str = "sc.exe";
 /// Buffer for copying a file out of the package. Large files are the slow ones.
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 const UNINSTALL_KEY_FOR_NEW_ENTRIES: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+/// Well within what a key's name may be.
+const MAX_UNINSTALL_KEY_NAME_CHARS: usize = 200;
 const UNINSTALL_STRING_VALUE: &str = "UninstallString";
 const QUIET_UNINSTALL_STRING_VALUE: &str = "QuietUninstallString";
 const NO_MODIFY_VALUE: &str = "NoModify";
@@ -85,11 +86,12 @@ const INSTALL_LOCATION_VALUE: &str = "InstallLocation";
 /// are left out like any other refusal rather than failing the install. They depend on what
 /// is on this PC at that moment, so the review before the install could not see them.
 const REFUSALS_FOUND_WHEN_INSTALLING: [&str; 4] = [
-    "registry_com_class_exists",
+    COM_CLASS_EXISTS_CODE,
     "scheduled_task_exists_elsewhere",
     "service_exists_elsewhere",
     "driver_exists_elsewhere",
 ];
+const COM_CLASS_EXISTS_CODE: &str = "registry_com_class_exists";
 const CANCELLED_CODE: &str = "install_cancelled";
 const JOURNAL_WRITE_FAILED_CODE: &str = "journal_write_failed";
 /// What PowerShell says can quote its script, on any language of Windows, and a script can hold
@@ -187,7 +189,17 @@ pub fn restore_package_monitored(
         busy_lock = Some(lock_state(&options.state_root).map_err(nowhere_to_keep_a_record)?);
         // Before anything looks at what is on this PC, since what an install that never
         // finished left there is not to be taken for anything.
-        for earlier in recover_interrupted_installs(&options.state_root, monitor)? {
+        let recovery = recover_interrupted_installs(&options.state_root, monitor)?;
+        for folder in &recovery.not_trusted {
+            recovered_warnings.push(Warning::new(
+                "earlier_install_not_trusted",
+                WarningSeverity::Warning,
+                "A record of an install that never finished was left alone, because others can \
+                 change it. Whatever that install changed is still there.",
+                Some(folder.display().to_string()),
+            ));
+        }
+        for earlier in recovery.recovered {
             recovered_warnings.push(Warning::new(
                 "earlier_install_undone",
                 WarningSeverity::Warning,
@@ -743,11 +755,27 @@ impl Run<'_, '_> {
     fn restore_registry(&mut self) {
         let review = self.review;
         let total = review.registry.len();
+        let refused_classes = if self.journal.is_some() {
+            com_classes_to_leave_alone(&review.registry, &review.map)
+        } else {
+            Vec::new()
+        };
         for (done, entry) in review.registry.iter().enumerate() {
             if self.stopped() {
                 return;
             }
             self.progress(InstallPhase::Registry, done, total);
+            // All of a class, whatever order it comes in. A server is refused for itself, below.
+            let in_refused_class = com_class_key(&entry.key_path)
+                .is_some_and(|class| refused_classes.contains(&class));
+            if in_refused_class && !is_com_server_entry(entry) {
+                self.record_failure(registry_warning(
+                    COM_CLASS_EXISTS_CODE,
+                    entry,
+                    "this COM class already belongs to something outside the install location",
+                ));
+                continue;
+            }
             let autostart = is_autostart_entry(entry);
             let Some(journal) = self.journal.as_mut() else {
                 let message = format!(
@@ -934,6 +962,19 @@ impl Run<'_, '_> {
                     );
                 }
                 PrerequisiteInstallOutcome::Skipped(reason) => {
+                    let noted = self.journal.as_mut().map(|journal| {
+                        journal.note(Change::PrerequisiteSkipped {
+                            name: prerequisite.name.clone(),
+                        })
+                    });
+                    if let Some(Err(error)) = noted {
+                        self.errors.push(Warning::new(
+                            JOURNAL_WRITE_FAILED_CODE,
+                            WarningSeverity::Error,
+                            format!("Could not record a runtime that was skipped: {error}"),
+                            None,
+                        ));
+                    }
                     self.warnings.push(Warning::new(
                         "prerequisite_skipped",
                         WarningSeverity::Info,
@@ -1288,10 +1329,7 @@ impl Run<'_, '_> {
                 hive: RegistryHive::LocalMachine,
                 // Named for the app and not the install, so a second install over the first
                 // takes over its line in Settings, and the first's comes back with it.
-                key_path: format!(
-                    "{UNINSTALL_KEY_FOR_NEW_ENTRIES}\\WinAppMigrator {}",
-                    sanitize_filename(self.app_name)
-                ),
+                key_path: uninstall_key_for(self.app_name),
                 has_display_name: false,
             });
         }
@@ -1331,6 +1369,18 @@ impl Run<'_, '_> {
             ));
         }
     }
+}
+
+/// The key of an entry for an app that came with none. A key's name can be nearly anything but a
+/// separator, so two apps only share one if they have the same name.
+fn uninstall_key_for(app_name: &str) -> String {
+    let name: String = app_name
+        .chars()
+        .filter(|character| !character.is_control())
+        .map(|character| if character == '\\' { '_' } else { character })
+        .take(MAX_UNINSTALL_KEY_NAME_CHARS)
+        .collect();
+    format!("{UNINSTALL_KEY_FOR_NEW_ENTRIES}\\WinAppMigrator {name}")
 }
 
 /// The command that uninstalls an install, with the program's path quoted.
@@ -1764,6 +1814,38 @@ fn apply_registry_entry(
     ))
 }
 
+/// The COM classes in `entries` that belong to something else on this PC. A new value under one
+/// can change it by itself, in a key that a refused server would not have been in, and it
+/// cannot depend on which came first. A class with no server in the package has nothing of its
+/// own to compare, so if one is on this PC, that is someone else's.
+fn com_classes_to_leave_alone(entries: &[&RegistryEntry], map: &RestoreMap) -> Vec<String> {
+    let with_a_server: Vec<String> = entries
+        .iter()
+        .filter(|entry| is_com_server_entry(entry))
+        .filter_map(|entry| com_class_key(&entry.key_path))
+        .collect();
+    let mut refused: Vec<String> = Vec::new();
+    for entry in entries {
+        let Some(class) = com_class_key(&entry.key_path) else {
+            continue;
+        };
+        if refused.contains(&class) {
+            continue;
+        }
+        let new_value = if is_com_server_entry(entry) {
+            map.rewrite(entry.value_data.as_deref().unwrap_or_default())
+        } else if with_a_server.contains(&class) {
+            continue;
+        } else {
+            String::new()
+        };
+        if com_class_refusal(&entry.hive, &class, &new_value, map).is_some() {
+            refused.push(class);
+        }
+    }
+    refused
+}
+
 /// Look at what the class is registered as on this PC, before writing over it. A per-user
 /// registration wins over the machine's, so a new one in `HKCU` takes over a class that
 /// only exists in `HKLM` just as surely. Any server of the class counts: registering a
@@ -1776,8 +1858,20 @@ fn refuse_taking_over_com_class(
     let Some((class_key, _)) = entry.key_path.trim_end_matches('\\').rsplit_once('\\') else {
         return Ok(());
     };
-    let mut hives = vec![&entry.hive];
-    if entry.hive == RegistryHive::CurrentUser {
+    match com_class_refusal(&entry.hive, class_key, &new_value, map) {
+        Some(refusal) => Err(registry_warning(COM_CLASS_EXISTS_CODE, entry, refusal)),
+        None => Ok(()),
+    }
+}
+
+fn com_class_refusal(
+    hive: &RegistryHive,
+    class_key: &str,
+    new_value: &str,
+    map: &RestoreMap,
+) -> Option<String> {
+    let mut hives = vec![hive];
+    if *hive == RegistryHive::CurrentUser {
         hives.push(&RegistryHive::LocalMachine);
     }
     for hive in hives {
@@ -1787,17 +1881,13 @@ fn refuse_taking_over_com_class(
                 .and_then(|key| key.get_value::<String, _>(""));
             if let Ok(existing) = existing
                 && let Some(refusal) =
-                    com_server_refusal(&existing, &new_value, map.target_root(), system_root())
+                    com_server_refusal(&existing, new_value, map.target_root(), system_root())
             {
-                return Err(registry_warning(
-                    "registry_com_class_exists",
-                    entry,
-                    refusal,
-                ));
+                return Some(refusal);
             }
         }
     }
-    Ok(())
+    None
 }
 
 fn apply_environment_variable(
@@ -2260,21 +2350,21 @@ fn apply_shortcut(
         .map_err(journal_failed)?;
     fs::create_dir_all(&placement.root)
         .map_err(|error| warning_io("shortcut_parent_create_failed", &placement.root, error))?;
-    ensure_within_root(&placement.root, destination).map_err(|error| {
+    let invalid_destination = |error: WinAppMigratorError| {
         Warning::new(
             "shortcut_destination_invalid",
             WarningSeverity::Error,
             error.to_string(),
             Some(destination.display().to_string()),
         )
-    })?;
+    };
+    ensure_within_root(&placement.root, destination).map_err(invalid_destination)?;
     if let Some(parent) = destination.parent() {
         journal
             .note_new_folders(&placement.root, parent, ItemKind::Program)
             .map_err(journal_failed)?;
-        fs::create_dir_all(parent)
-            .map_err(|error| warning_io("shortcut_parent_create_failed", parent, error))?;
     }
+    let _pinned = pin_path_below_root(&placement.root, destination).map_err(invalid_destination)?;
     let replaces = fs::symlink_metadata(destination).is_ok();
     let backup = journal
         .note_file(
@@ -2293,7 +2383,7 @@ fn apply_shortcut(
     }
     if let Err(warning) = run_powershell_script(&shortcut_script(shortcut)) {
         if let Some(found) = backup.and_then(|number| find_backup(journal.folder(), number))
-            && let Err(error) = put_back_backup(&found, destination, &placement.root)
+            && let Err(error) = put_back_backup(&found, destination)
         {
             return Err(Warning::new(
                 "shortcut_put_back_failed",
@@ -2386,8 +2476,12 @@ fn copy_restore_file(
             destination.display()
         ))
     })?;
+    if fs::symlink_metadata(&root).is_err() {
+        journal.note_new_folders_to(&root, item)?;
+        fs::create_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
+    }
     journal.note_new_folders(&root, parent, item)?;
-    fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
+    let _pinned = pin_path_below_root(&root, destination)?;
 
     let replaces = match fs::symlink_metadata(destination) {
         Ok(metadata) if metadata.is_dir() => {
@@ -4255,6 +4349,78 @@ mod tests {
             )
         );
         assert_eq!(text(DISPLAY_NAME_VALUE).as_deref(), Some("Acme"));
+    }
+
+    #[test]
+    fn apps_only_share_an_uninstall_entry_if_they_have_the_same_name() {
+        assert_ne!(uninstall_key_for("日本語"), uninstall_key_for("中文語"));
+        assert_ne!(uninstall_key_for("Acme 1.0"), uninstall_key_for("Acme 2.0"));
+        assert_eq!(uninstall_key_for("Acme"), uninstall_key_for("Acme"));
+        let odd = uninstall_key_for("Acme\\Evil\u{7}");
+        assert!(odd.ends_with(r"\WinAppMigrator Acme_Evil"), "{odd}");
+        let long = uninstall_key_for(&"x".repeat(1000));
+        assert!(long.chars().count() < 300);
+    }
+
+    /// Reads only: the class is Windows' own, and every PC has it.
+    #[test]
+    fn all_of_a_class_that_belongs_to_something_else_is_left_alone() -> Result<()> {
+        let map = app_map()?;
+        let refused_key = format!(r"{SHELL_LINK_CLASS}\InprocServer32");
+        let refused = com_entry(
+            RegistryHive::LocalMachine,
+            refused_key.clone(),
+            RegistryValueKind::String,
+        );
+        let own = com_entry(
+            RegistryHive::LocalMachine,
+            r"SOFTWARE\Classes\CLSID\{5A7E6E0C-0000-4000-8000-000000000000}\InprocServer32"
+                .to_owned(),
+            RegistryValueKind::String,
+        );
+        let class = SHELL_LINK_CLASS.to_ascii_lowercase();
+        assert_eq!(
+            com_classes_to_leave_alone(&[&refused, &own], &map),
+            std::slice::from_ref(&class)
+        );
+        // In any order, and even with no server in the package at all.
+        let mut sibling = refused.clone();
+        sibling.value_name = Some("ThreadingModel".to_owned());
+        assert_eq!(
+            com_classes_to_leave_alone(&[&sibling, &refused], &map),
+            std::slice::from_ref(&class)
+        );
+        assert_eq!(com_classes_to_leave_alone(&[&sibling], &map), [class]);
+        assert!(com_classes_to_leave_alone(&[&own], &map).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_shortcut_cut_off_before_its_hash_was_recorded_is_still_undone() -> Result<()> {
+        let work = temp_folder()?;
+        let root = work.path().join("links");
+        let link = root.join("app.lnk");
+        write_file(&link, b"from before")?;
+        let options = restore_options(work.path(), work.path().join("no package"), true);
+        let mut journal = journal_for_test(&options)?;
+        let backup = journal.note_file(&link, &root, ItemKind::Program, true, None, None)?;
+        let number =
+            backup.ok_or_else(|| WinAppMigratorError::InvalidInput("no backup".to_owned()))?;
+        journal.back_up(&link, number)?;
+        write_file(&link, b"made, and the record of it never written")?;
+        let folder = journal.folder().to_path_buf();
+        drop(journal);
+
+        let report = undo_journal(
+            &read_journal(&folder)?,
+            UndoMode::Recovery,
+            &InstallMonitor::default(),
+            InstallPhase::RollingBack,
+        );
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(read_text(&link)?, "from before");
+        Ok(())
     }
 
     #[test]
