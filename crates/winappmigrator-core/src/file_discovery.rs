@@ -961,6 +961,20 @@ fn anyone_can_create_in(kind: &FootprintKind) -> bool {
     )
 }
 
+/// Whether this kind of place is the account's own to say where it is. A link in its `AppData`, or a
+/// value for where its Documents are, could otherwise take an app's name there to anything an
+/// administrator can read, so what is found there has to really be that account's.
+fn is_of_one_account(kind: &FootprintKind) -> bool {
+    matches!(
+        kind,
+        FootprintKind::RoamingAppData
+            | FootprintKind::LocalAppData
+            | FootprintKind::LocalLowAppData
+            | FootprintKind::Documents
+            | FootprintKind::SavedGames
+    )
+}
+
 fn is_a_link(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
 }
@@ -1063,6 +1077,9 @@ fn collect_roots(
     for root in raw {
         let is_for_this_scan = system.may_read(&root.path)
             && !(anyone_can_create_in(&root.kind) && is_a_link(&root.path))
+            && !(is_of_one_account(&root.kind)
+                && root.path.exists()
+                && !system.is_the_accounts_own(&root.path))
             && (!root.path.exists()
                 || may_take_from(&root.path, context.install_location.as_deref(), system));
         if !is_for_this_scan {

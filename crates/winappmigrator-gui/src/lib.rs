@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use winappmigrator_core::logging;
-use winappmigrator_core::path_utils::{signed_in_user, signed_in_user_if_known, system_root};
+use winappmigrator_core::path_utils::{signed_in_user, system_root};
 use winappmigrator_core::privilege::ProtectedFolder;
 use winappmigrator_core::{
     AppSelection, BuildMonitor, BuildStep, InstalledApp, InstallerStub, PackageOptions,
@@ -294,10 +294,12 @@ impl WinAppMigratorApp {
 
     /// Pick a connected drive (a disk from another PC) as the scan source.
     fn pick_offline_drive(&mut self) {
-        let Some(root) = rfd::FileDialog::new()
+        let picked = rfd::FileDialog::new()
             .set_title("Select the connected drive's root (e.g. E:\\)")
-            .pick_folder()
-        else {
+            .pick_folder();
+        // The dialog leaves this process in whatever folder was chosen, and a scan searches that.
+        let _ = std::env::set_current_dir(system_root());
+        let Some(root) = picked else {
             return;
         };
         // A Windows system volume has \Windows and \Users. Check those (which are
@@ -653,12 +655,11 @@ fn sanitized_app_label(app_name: &str) -> String {
 /// common path does not require the user to choose a folder manually.
 pub(crate) fn default_output_for(app_name: &str) -> String {
     let safe = sanitized_app_label(app_name);
-    // The folders of the person at the PC, not those of an administrator named at the UAC prompt,
-    // which they could not get to. Only if that is known yet: nothing here should wait for it.
-    let base = signed_in_user_if_known()
-        .and_then(|signed_in| signed_in.account())
-        .map(|account| account.profile.clone())
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+    // Whoever is running this. An installer holds what they chose to put in it, which may be
+    // someone else's, and an administrator named at the UAC prompt should not find it left in the
+    // folders of whoever is signed in, or write through a link they made there.
+    let base = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("WinAppMigrator")
         .join(if safe.is_empty() {

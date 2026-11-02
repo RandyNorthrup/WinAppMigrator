@@ -138,7 +138,9 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             && (system.is_in_another_profile(path)
                 || (installed_for_one_account && !system.is_the_accounts_own(path)))
     };
-    if is_someone_elses(&executable_path) {
+    // Its folder too, all of which is taken with it.
+    if is_someone_elses(&executable_path) || executable_path.parent().is_some_and(is_someone_elses)
+    {
         return Err(WinAppMigratorError::InvalidInput(format!(
             "{} is in another account's folders or is not this account's, and this app's own \
              record does not say it belongs there, so it was not read.",
@@ -241,6 +243,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
                     }
                 })
                 .unwrap_or_default(),
+            installed_for_one_account,
         },
         &system,
     );

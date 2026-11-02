@@ -51,6 +51,7 @@ pub struct RawUninstallEntry {
 /// What every entry in a listing is checked against, read once for the whole listing.
 pub struct InventoryContext {
     hints: ExecutableHints,
+    machine_hints: ExecutableHints,
     known_base_dirs: Vec<PathBuf>,
 }
 
@@ -58,6 +59,7 @@ impl InventoryContext {
     pub fn read(system: &SystemContext) -> Self {
         Self {
             hints: ExecutableHints::read(system),
+            machine_hints: ExecutableHints::read_machine_wide(system),
             known_base_dirs: known_base_dirs(system),
         }
     }
@@ -239,7 +241,11 @@ pub fn parse_uninstall_entry(
     // A folder can be listed with no look at what is in it, so what is found there may be a link.
     let main_executable = guess_main_executable(
         system,
-        inventory,
+        if install_scope == InstallScope::PerUser {
+            &inventory.hints
+        } else {
+            &inventory.machine_hints
+        },
         raw,
         install_location.as_deref(),
         display_name.as_str(),
@@ -302,7 +308,7 @@ fn usable_install_location(
 /// it to `install_source::primary_executable` when the app is scanned.
 fn guess_main_executable(
     system: &SystemContext,
-    inventory: &InventoryContext,
+    hints: &ExecutableHints,
     raw: &RawUninstallEntry,
     install_location: Option<&Path>,
     display_name: &str,
@@ -317,7 +323,7 @@ fn guess_main_executable(
     resolved(&raw.display_icon)
         .or_else(|| {
             let names = ProductNames::new(Some(display_name), raw.publisher.as_deref(), &[], &[]);
-            inventory.hints.find(&names, install_location)
+            hints.find(&names, install_location)
         })
         .or_else(|| {
             install_location
@@ -483,6 +489,7 @@ mod tests {
             &system,
             &InventoryContext {
                 hints: ExecutableHints::default(),
+                machine_hints: ExecutableHints::default(),
                 known_base_dirs: known_base_dirs(&system),
             },
             raw,

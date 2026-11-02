@@ -257,11 +257,6 @@ pub fn signed_in_user() -> &'static SignedInUser {
     SIGNED_IN_USER.get_or_init(query_signed_in_user)
 }
 
-/// [`signed_in_user`], if something has asked already, without waiting for it.
-pub fn signed_in_user_if_known() -> Option<&'static SignedInUser> {
-    SIGNED_IN_USER.get()
-}
-
 static SIGNED_IN_USER: OnceLock<SignedInUser> = OnceLock::new();
 
 fn query_signed_in_user() -> SignedInUser {
@@ -677,6 +672,24 @@ pub fn is_on_a_local_disk(path: &Path) -> bool {
         }
         Some(Component::RootDir) => false,
         _ => true,
+    }
+}
+
+/// Whether [`resolved_location`] can say where a path really is. Being missing is not a problem,
+/// since nothing is there. Anything else is: it can be listed through a link to a place with no
+/// name to give, such as a shadow copy, which would read as being wherever the link is.
+pub fn location_can_be_told(path: &Path) -> bool {
+    let mut current = path;
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(_) => return true,
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return false,
+            Err(_) => {}
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => return true,
+        }
     }
 }
 

@@ -22,12 +22,17 @@ const ACL_PATH_VARIABLE: &str = "WAM_ACL_PATH";
 const READ_SDDL_SCRIPT: &str = "(Get-Acl -LiteralPath $env:WAM_ACL_PATH).Sddl";
 const READ_OWNER_SCRIPT: &str = "(Get-Acl -LiteralPath $env:WAM_ACL_PATH).\
 GetOwner([Security.Principal.SecurityIdentifier]).Value";
-/// Who owns what an elevated installer wrote: Administrators, SYSTEM, and TrustedInstaller.
-const ADMINISTRATIVE_OWNERS: &[&str] = &[
-    "S-1-5-32-544",
-    "S-1-5-18",
-    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
-];
+/// `yes` if only Administrators, SYSTEM, and TrustedInstaller own a file and can change it. The bits
+/// are every right that writes to a file or its permissions, and the generic ones that include them.
+const ONLY_ADMINISTRATORS_CAN_CHANGE_SCRIPT: &str = "$acl = Get-Acl -LiteralPath $env:WAM_ACL_PATH; \
+$admins = 'S-1-5-32-544', 'S-1-5-18', \
+'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'; \
+$owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; \
+$write = 0x2 -bor 0x4 -bor 0x10 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000; \
+$others = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | \
+Where-Object { $_.AccessControlType -eq 'Allow' -and ([int]$_.FileSystemRights -band $write) -and \
+$admins -notcontains $_.IdentityReference.Value }); \
+if ($admins -contains $owner -and $others.Count -eq 0) { 'yes' } else { 'no' }";
 /// The owner a protected folder has in SDDL, the form that reads the same in any language.
 const SDDL_ADMINISTRATORS_OWNER: &str = "O:BA";
 const SDDL_GROUP_MARKER: &str = "G:";
@@ -454,15 +459,26 @@ pub fn owner_of(path: &Path) -> Option<String> {
     (output.status.success() && owner.starts_with("S-1-")).then_some(owner)
 }
 
-/// Whether only someone with administrator rights could have written this file, going by who it
-/// says owns it. Without elevation there is no one to be fooled, since this reads only what its
-/// own account can.
-pub fn was_written_by_an_administrator(path: &Path) -> bool {
-    !is_elevated()
-        || owner_of(path).is_some_and(|owner| {
-            ADMINISTRATIVE_OWNERS
-                .iter()
-                .any(|known| known.eq_ignore_ascii_case(&owner))
+/// Whether only someone with administrator rights could have written this file as it is now: it is
+/// theirs, and no one else may change it. Editing a file keeps its owner, and a folder under `C:\\`
+/// lets anyone edit one by default. Without elevation there is no one to be fooled, since this reads
+/// only what its own account can.
+pub fn only_administrators_can_change(path: &Path) -> bool {
+    if !is_elevated() {
+        return true;
+    }
+    let text = path.to_string_lossy();
+    hidden_command(POWERSHELL_EXE)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("{POWERSHELL_IMPORT_SECURITY}{ONLY_ADMINISTRATORS_CAN_CHANGE_SCRIPT}"),
+        ])
+        .env(ACL_PATH_VARIABLE, without_verbatim_prefix(&text))
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "yes"
         })
 }
 

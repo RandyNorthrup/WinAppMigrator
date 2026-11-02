@@ -492,7 +492,9 @@ fn package_drivers(
             let unique = format!("{}_{}", sanitize_artifact_name(&driver.service_name), leaf);
             let relative = PathBuf::from(DRIVERS_DIR).join(safe_relative_path(Path::new(&unique)));
             match package_destination_path(output_dir, &relative).and_then(|destination| {
-                copy_file_preserving_basic_metadata(image, &destination).map(|()| destination)
+                copy_file_preserving_basic_metadata(image, &destination)
+                    .and_then(|()| reader.check_after_copying(image))
+                    .map(|()| destination)
             }) {
                 Ok(destination) => match sha256_file(&destination) {
                     // Only mark as bundled when we have an integrity hash, so
@@ -586,6 +588,7 @@ fn package_one_license_artifact(
     };
     if source.is_file() {
         let staged = copy_file_preserving_basic_metadata(&source, &destination)
+            .and_then(|()| reader.check_after_copying(&source))
             .and_then(|()| staged_fingerprint(&destination));
         let Ok((hash, size)) = staged else {
             let _ = fs::remove_file(&destination);

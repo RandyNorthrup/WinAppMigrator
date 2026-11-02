@@ -26,7 +26,7 @@ use crate::path_utils::{
     is_auxiliary_executable, is_drive_root, looks_like_executable, path_is_within,
     split_command_executable_path, walk_asking,
 };
-use crate::privilege::was_written_by_an_administrator;
+use crate::privilege::only_administrators_can_change;
 use crate::product_match::{MatchScope, ProductNames};
 use crate::registry_scan::{RecordedRegistryKey, RecordedRegistryRoot, registry_value_text};
 use crate::shortcut_scan::{lnk_target_path, read_shortcut_file};
@@ -79,9 +79,9 @@ const MAX_APPX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Whether what an install log says can be taken at its word. It names files and registry values
 /// to package, and it is a file in the app's own folder, which any account may be able to write to
-/// if that folder is somewhere like `C:\Tools`. A machine-wide app's log is written by an
-/// administrator. An app of one account's is held to that account's own things anyway, and on a
-/// drive none of what it says can lead off the drive.
+/// if that folder is somewhere like `C:\Tools`. So for a machine-wide app, only administrators can
+/// be able to change it. An app of one account's is held to that account's own things anyway, and
+/// on a drive none of what it says can lead off the drive.
 fn record_can_be_believed(
     app: &InstalledApp,
     log: &Path,
@@ -90,10 +90,10 @@ fn record_can_be_believed(
 ) -> bool {
     let believed = system.is_offline()
         || app.install_scope == InstallScope::PerUser
-        || was_written_by_an_administrator(log);
+        || only_administrators_can_change(log);
     if !believed {
         evidence.push(format!(
-            "{} was not used: an administrator did not write it, so anyone could have",
+            "{} was not used: others than administrators can change it",
             log.display()
         ));
     }
@@ -348,8 +348,19 @@ struct ShortcutHint {
 impl ExecutableHints {
     pub(crate) fn read(system: &SystemContext) -> Self {
         Self::keeping_usable(
-            read_app_paths_targets(system),
-            read_start_menu_shortcuts(system),
+            read_app_paths_targets(system, true),
+            read_start_menu_shortcuts(system, true),
+            system,
+        )
+    }
+
+    /// Only what takes an administrator to write. An account can write a shortcut or an App Paths
+    /// key of its own with no rights at all, naming any folder as a machine-wide app's, which would
+    /// then be packaged whole.
+    pub(crate) fn read_machine_wide(system: &SystemContext) -> Self {
+        Self::keeping_usable(
+            read_app_paths_targets(system, false),
+            read_start_menu_shortcuts(system, false),
             system,
         )
     }
@@ -429,13 +440,15 @@ fn executable_stem_matches(path: &Path, names: &ProductNames) -> bool {
         .is_some_and(|stem| names.names_executable(stem))
 }
 
-fn read_app_paths_targets(system: &SystemContext) -> Vec<PathBuf> {
+fn read_app_paths_targets(system: &SystemContext, of_users_too: bool) -> Vec<PathBuf> {
     let mut keys = Vec::new();
     for flags in [KEY_READ | KEY_WOW64_64KEY, KEY_READ | KEY_WOW64_32KEY] {
         keys.extend(system.open_hklm(APP_PATHS_PREFIX, flags).ok());
     }
-    for user in system.user_hives() {
-        keys.extend(user.open(APP_PATHS_PREFIX, KEY_READ).ok());
+    if of_users_too {
+        for user in system.user_hives() {
+            keys.extend(user.open(APP_PATHS_PREFIX, KEY_READ).ok());
+        }
     }
     let mut seen = BTreeSet::new();
     let mut targets = Vec::new();
@@ -460,15 +473,17 @@ fn read_app_paths_targets(system: &SystemContext) -> Vec<PathBuf> {
     targets
 }
 
-fn read_start_menu_shortcuts(system: &SystemContext) -> Vec<ShortcutHint> {
+fn read_start_menu_shortcuts(system: &SystemContext, of_users_too: bool) -> Vec<ShortcutHint> {
     let mut folders = Vec::new();
     if let Some(program_data) = system.program_data() {
         folders.push(program_data.join(START_MENU_PROGRAMS));
     }
     // Only of the account this is about: another's shortcut says nothing about this one's apps,
     // and following one would take that person's folder for the app's.
-    for user in system.user_hives() {
-        folders.push(user.profile_dir.join(USER_START_MENU_PROGRAMS));
+    if of_users_too {
+        for user in system.user_hives() {
+            folders.push(user.profile_dir.join(USER_START_MENU_PROGRAMS));
+        }
     }
     let mut shortcuts = Vec::new();
     for folder in folders.into_iter().filter(|folder| system.may_read(folder)) {
@@ -521,7 +536,12 @@ pub fn primary_executable(
 ) -> Option<PathBuf> {
     let names = app_product_names(app);
     let location = app.install_location.as_deref();
-    if let Some(found) = ExecutableHints::read(system).find(&names, location) {
+    let hints = if app.install_scope == InstallScope::PerUser {
+        ExecutableHints::read(system)
+    } else {
+        ExecutableHints::read_machine_wide(system)
+    };
+    if let Some(found) = hints.find(&names, location) {
         return Some(found);
     }
 

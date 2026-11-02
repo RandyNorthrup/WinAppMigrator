@@ -51,8 +51,8 @@ use crate::models::{Warning, WarningSeverity};
 use crate::package::copy_file_backup_mode;
 use crate::path_utils::{
     SignedInUser, file_name_string, has_parent_step, hidden_command, is_on_a_local_disk,
-    is_person_sid, path_is_within, resolved_location, signed_in_user, strip_prefix_ignore_case,
-    system_root, windows_build,
+    is_person_sid, location_can_be_told, path_is_within, resolved_location, signed_in_user,
+    strip_prefix_ignore_case, system_root, windows_build,
 };
 use crate::privilege::{ProtectedFolder, ensure_protected_folder, is_elevated, owner_of};
 
@@ -624,6 +624,9 @@ impl OtherAccountsFolders {
     pub fn hold(&self, path: &Path) -> bool {
         if self.folders.is_empty() {
             return false;
+        }
+        if !location_can_be_told(path) {
+            return true;
         }
         let real = resolved_location(path);
         self.folders
@@ -1276,7 +1279,7 @@ impl SystemContext {
     /// that person's own, however a value on the PC came to name it.
     pub fn is_in_another_profile(&self, path: &Path) -> bool {
         // Finding out looks through links. What may not be read is no one's to take anyway.
-        if !self.may_read(path) {
+        if !self.may_read(path) || !location_can_be_told(path) {
             return true;
         }
         let path = resolved_location(path);
@@ -1287,7 +1290,7 @@ impl SystemContext {
 
     /// Whether a path is in the profile of the account this scan is about, by where it really is.
     pub fn is_in_the_accounts_profile(&self, path: &Path) -> bool {
-        if !self.may_read(path) || has_parent_step(path) {
+        if !self.may_read(path) || has_parent_step(path) || !location_can_be_told(path) {
             return false;
         }
         let real = resolved_location(path);
@@ -1307,7 +1310,7 @@ impl SystemContext {
         if self.is_in_the_accounts_profile(path) {
             return true;
         }
-        if !self.may_read(path) || has_parent_step(path) {
+        if !self.may_read(path) || has_parent_step(path) || !location_can_be_told(path) {
             return false;
         }
         owner_of(&resolved_location(path)).is_some_and(|owner| {

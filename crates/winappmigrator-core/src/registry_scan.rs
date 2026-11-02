@@ -143,6 +143,9 @@ pub struct RegistryScanContext {
     /// Keys and values the app's install record names: exact, so they are captured
     /// whatever they are called.
     pub recorded_keys: Vec<RecordedRegistryKey>,
+    /// Nothing machine-wide goes by the name or the record of such an app, since both are that
+    /// account's to write. What names its program is still its own.
+    pub installed_for_one_account: bool,
 }
 
 /// A registry root as an install record names it.
@@ -207,7 +210,9 @@ pub fn scan_registry_artifacts(
 
     let names = context_product_names(context);
     let hklm = RegRoot::Hklm(system);
-    scan_recorded_keys(context, &hklm, &mut entries, &mut warnings);
+    if !context.installed_for_one_account {
+        scan_recorded_keys(context, &hklm, &mut entries, &mut warnings);
+    }
     scan_app_paths(context, &hklm, &mut entries, &mut warnings);
     scan_uninstall_entries(context, &hklm, HKLM_UNINSTALL, &mut entries, &mut warnings);
     scan_uninstall_entries(
@@ -218,7 +223,9 @@ pub fn scan_registry_artifacts(
         &mut warnings,
     );
     scan_run_keys(context, &hklm, &mut entries, &mut warnings);
-    scan_software_children(context, &names, &hklm, &mut entries, &mut warnings);
+    if !context.installed_for_one_account {
+        scan_software_children(context, &names, &hklm, &mut entries, &mut warnings);
+    }
     scan_class_registrations(
         context,
         &hklm,
@@ -1401,6 +1408,7 @@ mod tests {
             publisher: None,
             source_registry_path: None,
             recorded_keys: Vec::new(),
+            installed_for_one_account: false,
         };
 
         assert!(!value_matches_context(&context, "ad 9.6.8"));
@@ -1414,6 +1422,7 @@ mod tests {
             publisher: Some("The Git Development Community".to_owned()),
             source_registry_path: None,
             recorded_keys: Vec::new(),
+            installed_for_one_account: false,
         }
     }
 
@@ -1465,6 +1474,7 @@ mod tests {
             publisher: Some("NVIDIA Corporation".to_owned()),
             source_registry_path: None,
             recorded_keys: Vec::new(),
+            installed_for_one_account: false,
         };
         assert!(!value_matches_context(
             &context,
@@ -1487,6 +1497,7 @@ mod tests {
             publisher: Some("Igor Pavlov".to_owned()),
             source_registry_path: None,
             recorded_keys: Vec::new(),
+            installed_for_one_account: false,
         });
         assert!(
             seven_zip.matches_top_level("7-Zip", MatchScope::ProgramFolders),
@@ -1500,6 +1511,7 @@ mod tests {
             publisher: Some("Adobe Inc.".to_owned()),
             source_registry_path: None,
             recorded_keys: Vec::new(),
+            installed_for_one_account: false,
         });
         assert!(
             !photoshop.matches_top_level("Adobe", MatchScope::ProgramFolders),
