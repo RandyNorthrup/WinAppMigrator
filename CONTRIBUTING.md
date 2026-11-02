@@ -29,7 +29,28 @@ cargo deny check
 ```
 
 From a normal shell, the end-to-end test skips its reinstall step, because the installer demands
-elevation. Run it from an elevated shell to cover the whole flow.
+elevation. Run it from an elevated shell to cover the whole flow. It only installs to a temp folder.
+
+## Tests must not change the machine
+
+Tests and manual runs stay in temp folders. What really changes a PC is covered by
+`crates/winappmigrator-installer/tests/elevated_round_trip.rs`, which runs only in the
+`Elevated round trip` job in CI, on GitHub's runner, which is elevated and is thrown away afterward.
+
+It sets up a harmless app there, with files, services, a driver entry, scheduled tasks, registry
+values, environment variables, and shortcuts. It builds an installer from that with the real code,
+removes all of it, runs the installer, and checks the machine with Windows' own tools, not with the
+app's verifier. Packages written by hand cover what a scan cannot produce, such as asking for what
+the rules refuse.
+
+It does nothing unless `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`, and
+`WAM_ELEVATED_E2E=1` are all set, and with them set it fails if it is not elevated. **Never set those
+on a real PC.** Without them it skips, so it is safe to run locally, and that shows only that it
+compiles.
+
+When you change how something is restored, extend this test, and push to see it run. What it cannot
+do: load a driver, since one that is not signed must never start, and sign in, so Run values and
+Startup shortcuts are checked but not run.
 
 Keep the docs true: update the README, `docs/`, and `CHANGELOG.md` in the same change as the code.
 

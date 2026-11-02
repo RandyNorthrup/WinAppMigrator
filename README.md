@@ -113,6 +113,9 @@ Please read these before relying on it, especially on a one-way trip from a fail
   for example, so an installer built from NVIDIA App alone does not have it.
 - **An installer cannot reach 4 GiB.** Windows cannot start an executable that large, so the build fails
   and says so. Large apps may not fit.
+- **Building to a FAT32 or exFAT drive needs room on your system drive.** Those drives cannot keep the
+  build's working files private, so they go in the system's temp folder, and only the installer is
+  written to the drive.
 - **Installs have no rollback, and no uninstaller is created.** A failure can leave an install part-way,
   and files with the same names are replaced. The window warns you if the folder already has files.
 - **Building from a connected drive captures less than building from the running PC.** COM, file
@@ -171,9 +174,9 @@ Run with any argument, an installer skips its window. With `--target-root` it pr
 | `--restore-user-data` | Put user data in the real AppData and ProgramData folders, not under the target |
 | `--no-restore-license` | Skip captured license data, which is otherwise restored |
 
-Pipe the output somewhere to read it, for example `| Out-String`. The installer is a windowed program, so
-it does not write to an interactive console. Automation still needs an elevated shell, because the
-installer demands elevation.
+It prints its warnings and errors, and what it left out. Pipe the output somewhere to read it, for example
+`| Out-String`. The installer is a windowed program, so it does not write to an interactive console.
+Automation still needs an elevated shell, because the installer demands elevation.
 
 ## Building from source
 

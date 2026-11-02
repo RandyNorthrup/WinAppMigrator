@@ -953,7 +953,8 @@ fn create_services(root: &str) -> TestResult {
             "DisplayName=",
             service.display_name,
         ];
-        // A virtual account is set afterward below, the order this test knows works.
+        // A virtual account is set afterward below. Restoring asks for it in `create`, so the
+        // source is not set up in the way that is being tested.
         match service.source_object {
             Some(object) if object.starts_with("NT AUTHORITY") => {
                 args.extend(["obj=", object, "password=", ""]);
@@ -2763,61 +2764,6 @@ fn staging_folder_is_locked_down_and_fails_closed() -> TestResult {
 // Downloads
 // ---------------------------------------------------------------------------------------
 
-fn time_powershell() {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let args = ["-NoProfile", "-NonInteractive", "-Command", "1+1"];
-    let path = std::env::var("Path").unwrap_or_default();
-    let run = |label: &str, mut command: Command| {
-        let started = Instant::now();
-        let output = command.args(args).output();
-        println!(
-            "timing {label}: {:?} {:?}",
-            started.elapsed(),
-            output.map(|output| output.status.code())
-        );
-    };
-    let plain = || Command::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
-    for _ in 0..2 {
-        run("plain", plain());
-        let mut no_window = plain();
-        no_window.creation_flags(CREATE_NO_WINDOW);
-        run("plain, no window", no_window);
-        let mut no_modules = plain();
-        no_modules.env_remove("PSModulePath");
-        run("plain, default module path", no_modules);
-        run(
-            "hidden_command",
-            winappmigrator_core::hidden_command("powershell.exe"),
-        );
-        let mut windowed = winappmigrator_core::hidden_command("powershell.exe");
-        windowed.creation_flags(0);
-        run("hidden_command, with a window", windowed);
-        let mut with_path = winappmigrator_core::hidden_command("powershell.exe");
-        with_path.env("Path", &path);
-        run("hidden_command, with Path", with_path);
-        let mut more = winappmigrator_core::hidden_command("powershell.exe");
-        for name in [
-            "PROCESSOR_IDENTIFIER",
-            "PROCESSOR_LEVEL",
-            "PROCESSOR_REVISION",
-            "LOGONSERVER",
-            "USERDOMAIN_ROAMINGPROFILE",
-            "SESSIONNAME",
-            "DriverData",
-        ] {
-            if let Ok(value) = std::env::var(name) {
-                more.env(name, value);
-            }
-        }
-        run("hidden_command, with more system variables", more);
-    }
-    println!(
-        "timing env: {:?}",
-        std::env::vars().map(|(name, _)| name).collect::<Vec<_>>()
-    );
-}
-
 /// A redirect is where a download would be led off HTTPS. This needs a public server that
 /// redirects to plain HTTP, and if none answers it says so, rather than passing silently or
 /// failing a build over someone else's service.
@@ -2826,7 +2772,6 @@ fn downloads_stay_on_https() -> TestResult {
     if !may_change_this_machine()? {
         return Ok(());
     }
-    time_powershell();
     let mut checks = Checks::default();
     let work = tempfile::tempdir()?;
     let destination = work.path().join("download.bin");

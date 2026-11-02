@@ -4,6 +4,28 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **The code that changes a PC has now run for real.** A CI job on GitHub's throwaway Windows runner
+  sets up a harmless app, builds an installer from it with the real code, removes it, installs it,
+  and checks the machine with `sc.exe`, `reg.exe`, `schtasks.exe`, and the shell. It starts the
+  restored services and a task, to see what Windows really runs and as whom, and it covers packages
+  asking for what the rules refuse, links planted at the install location, and a real download and
+  install of the Visual C++ runtime. The test does nothing anywhere else. It found these, now fixed:
+  - An installer crashed on a file name with a character across its third byte, such as
+    `Größe.txt`, because of a bug in the zip library's name check.
+  - That check also refused a name such as `aux.h`, which a scan copies, so one such file stopped the
+    whole install.
+  - On a drive that keeps no permissions, such as FAT32 or exFAT, a staging folder was called
+    protected while it stayed open to everyone, because `icacls` reports success there. Its
+    permissions are now read back, and the folder is not used unless they came out as asked. The
+    installer stages elsewhere, and the app, which may be building to a USB stick, uses the system's
+    temp folder.
+  - When the folder above holds its permissions in an older form, the account that made a staging
+    folder stayed on it after inheritance was cut off.
+  - A list of paths in a `REG_MULTI_SZ` value kept pointing at the old location.
+  - A scan lost a scheduled task whose command is quoted, and listed one with two programs twice, so
+    that the second copy failed against the first.
+- **An installer's command line now prints its warnings and errors.** They were only in logs in the
+  staging folder, which is gone by the time it exits.
 - **The installer says what it will do.** Before installing, its window lists the services, drivers,
   scheduled tasks, autostart entries, shortcuts, and `Path` changes the package sets up, what the
   rules left out, and whether the installer is signed and by whom, or "Not signed: publisher

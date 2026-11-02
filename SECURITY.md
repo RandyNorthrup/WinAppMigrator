@@ -35,9 +35,10 @@ installer is about to trust, and an honest package reaching too far:
   with full rights if it asks to. That is what installing an app is. Before anything happens, the
   installer's window lists the services, drivers, scheduled tasks, autostart entries, shortcuts, and
   `Path` changes it will set up, what it will leave out, and whether it is signed and by whom. Read it.
-- **While it runs,** its staging folder is writable only by administrators, that folder and the
-  install location cannot be renamed and replaced, and it will not write through a link at or below
-  the install location. From the moment it opens its own file, that cannot be changed or swapped.
+- **While it runs,** its staging folder is writable only by administrators, and a drive that cannot
+  keep that, such as FAT32 or exFAT, is not used for it. That folder and the install location cannot be
+  renamed and replaced, and it will not write through a link at or below the install location. From
+  the moment it opens its own file, that cannot be changed or swapped.
 
 ## An installer can contain secrets
 
