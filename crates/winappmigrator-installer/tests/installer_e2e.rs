@@ -104,12 +104,20 @@ fn build_installer_then_reinstall_and_verify_on_clean_target() -> TestResult {
     // 2. Reinstall on a clean target, headlessly. The installer reinstalls,
     //    hash-verifies both its package and the reinstalled files, and exits
     //    non-zero on any mismatch — so a successful exit asserts the pipeline.
+    //    An install records itself in ProgramData and adds an entry to Settings, which
+    //    only GitHub's throwaway runner may have done to it. Elsewhere, even when
+    //    elevated, this stops at a preview, which changes nothing.
     let target = work.path().join("target");
+    let may_install = std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+        && std::env::var("RUNNER_ENVIRONMENT").as_deref() == Ok("github-hosted");
     let apply = match Command::new(&installer)
         .arg("--target-root")
         .arg(&target)
-        .arg("--apply")
-        .arg("--force")
+        .args(if may_install {
+            ["--apply", "--force"].as_slice()
+        } else {
+            ["--dry-run"].as_slice()
+        })
         .output()
     {
         Ok(output) => output,
@@ -132,6 +140,10 @@ fn build_installer_then_reinstall_and_verify_on_clean_target() -> TestResult {
         String::from_utf8_lossy(&apply.stderr)
     );
 
+    if !may_install {
+        assert!(!target.exists(), "a preview changes nothing");
+        return Ok(());
+    }
     assert!(target.is_dir(), "target directory was not created");
     assert!(
         count_files(&target) >= 1,

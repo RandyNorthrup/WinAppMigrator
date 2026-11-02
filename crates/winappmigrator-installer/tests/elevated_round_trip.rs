@@ -8,6 +8,10 @@
 //! at the machine with Windows' own tools rather than with the app's verifier. Packages
 //! written by hand cover what a scan cannot produce, such as asking for refused items.
 //!
+//! It then takes an install back out in every way that can happen: an uninstall run as Windows
+//! would run it, a failure late in an install, and an installer killed part-way, comparing the
+//! machine before and after with those same tools.
+//!
 //! **These tests change the machine they run on, and nothing here undoes it.** They do
 //! nothing unless `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`, and
 //! `WAM_ELEVATED_E2E=1` are all set. Never set those on a real PC. With all three set
@@ -19,11 +23,13 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Debug, Display};
 use std::fs;
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use winappmigrator_core::archive::create_zip_archive;
+use winappmigrator_core::archive::{create_zip_archive, has_certificate_table};
 use winappmigrator_core::hashing::sha256_file;
 use winappmigrator_core::path_utils::POWERSHELL_UTF8_OUTPUT;
 use winappmigrator_core::prerequisites::download;
@@ -51,6 +57,18 @@ const PROGRAM_DATA_FOLDER: &str = r"C:\ProgramData\WAM E2E App";
 const MARKER_DIR: &str = r"C:\ProgramData\WAM E2E Markers";
 /// On the source's `Path`, and belonging to something else, so it must not be restored.
 const OTHER_PATH_ENTRY: &str = r"C:\WAM E2E Other Tool\bin";
+/// Where everything an install keeps is. Fixed, so a test can only look.
+const STATE_ROOT: &str = r"C:\ProgramData\WinAppMigrator";
+const INSTALLS_DIR: &str = r"C:\ProgramData\WinAppMigrator\installs";
+const LOGS_DIR: &str = r"C:\ProgramData\WinAppMigrator\logs";
+/// In values the fake app holds, and never to be found in a log.
+const SECRET_IN_REGISTRY: &str = "wam-e2e-secret-in-the-registry";
+const SECRET_IN_ENVIRONMENT: &str = "wam-e2e-secret-in-the-environment";
+/// How long the folder of an uninstaller is given to go after it exits.
+const SELF_REMOVAL_PATIENCE: Duration = Duration::from_secs(90);
+/// What a process gets from Windows for starting a program that demands elevation, which is
+/// the answer that means Windows could read it, so a person would get asked.
+const ERROR_ELEVATION_REQUIRED: i32 = 740;
 
 const HKLM_APP_KEY: &str = r"HKLM\Software\WAM E2E Vendor\WAM E2E App";
 const HKLM_WOW_KEY: &str = r"HKLM\Software\WOW6432Node\WAM E2E Vendor\WAM E2E App";
@@ -104,13 +122,28 @@ fn main() {
     let exe = std::env::current_exe()
         .map(|path| path.display().to_string())
         .unwrap_or_default();
+    let started = after("--try-run")
+        .map(|path| match Command::new(&path).output() {
+            Ok(_) => "ran".to_owned(),
+            Err(error) => format!("refused: {}", error.raw_os_error().unwrap_or_default()),
+        })
+        .unwrap_or_default();
+    let read = after("--try-read")
+        .map(|path| match std::fs::read(&path) {
+            Ok(_) => "read".to_owned(),
+            Err(error) => format!("refused: {error}"),
+        })
+        .unwrap_or_default();
     let probe = after("--try-write")
         .map(|path| match std::fs::write(&path, b"planted") {
             Ok(()) => "written".to_owned(),
             Err(error) => format!("refused: {error}"),
         })
         .unwrap_or_default();
-    let text = format!("exe={exe}\nwho={who}\nargs={}\nprobe={probe}\n", args.join("|"));
+    let text = format!(
+        "exe={exe}\nwho={who}\nargs={}\nstarted={started}\nread={read}\nprobe={probe}\n",
+        args.join("|")
+    );
     let _ = std::fs::write(format!(r"C:\ProgramData\WAM E2E Markers\{marker}.txt"), text);
 }
 "#;
@@ -511,6 +544,12 @@ fn expected_registry(root: &str) -> Vec<ExpectedValue> {
             "REG_EXPAND_SZ",
             r"%ProgramData%\WAM E2E App\logs".to_owned(),
         ),
+        value(
+            HKLM_APP_KEY,
+            Some("ApiToken"),
+            "REG_SZ",
+            SECRET_IN_REGISTRY.to_owned(),
+        ),
         value(HKLM_APP_KEY, Some("Count"), "REG_DWORD", "0x2a".to_owned()),
         value(
             HKLM_APP_KEY,
@@ -576,12 +615,6 @@ fn expected_registry(root: &str) -> Vec<ExpectedValue> {
         ),
         value(
             UNINSTALL_KEY,
-            Some("UninstallString"),
-            "REG_SZ",
-            format!("\"{exe}\" --uninstall"),
-        ),
-        value(
-            UNINSTALL_KEY,
             Some("EstimatedSize"),
             "REG_DWORD",
             "0x10".to_owned(),
@@ -633,6 +666,12 @@ fn expected_registry(root: &str) -> Vec<ExpectedValue> {
             root.to_owned(),
         ),
         value(
+            MACHINE_ENVIRONMENT_KEY,
+            Some("WAM_E2E_TOKEN"),
+            "REG_SZ",
+            format!(r"{root}\{SECRET_IN_ENVIRONMENT}"),
+        ),
+        value(
             USER_ENVIRONMENT_KEY,
             Some("WAM_E2E_USER_HOME"),
             "REG_SZ",
@@ -680,9 +719,9 @@ const SERVICES: [ServiceSpec; 5] = [
         name: "WamE2ENetwork",
         marker: "service-network",
         display_name: "WAM E2E Network Service",
-        source_start: "auto",
+        source_start: "delayed-auto",
         source_object: Some(r"NT AUTHORITY\NetworkService"),
-        expected_start: "AUTO_START",
+        expected_start: "AUTO_START  (DELAYED)",
         expected_object: r"NT AUTHORITY\NetworkService",
         expected_sid: Some("S-1-5-20"),
     },
@@ -1042,6 +1081,20 @@ fn create_fake_app(
     for expected in expected_registry(root) {
         reg_add(&expected.key, expected.name, expected.kind, &expected.data)?;
     }
+    // What the source says about removing it from the source, which must not survive.
+    for (name, data) in [
+        (
+            "UninstallString",
+            format!("\"{}\" --uninstall", app_exe(root)),
+        ),
+        (
+            "QuietUninstallString",
+            format!("\"{}\" --uninstall /S", app_exe(root)),
+        ),
+        ("ModifyPath", format!("\"{}\" --modify", app_exe(root))),
+    ] {
+        reg_add(UNINSTALL_KEY, Some(name), "REG_SZ", &data)?;
+    }
     // On the source this one is not quoted. See `expected_registry`.
     reg_add(
         HKCU_RUN_KEY,
@@ -1095,6 +1148,7 @@ fn remove_fake_app(
     reg_delete_value(HKLM_RUN_KEY, APP_NAME);
     reg_delete_value(HKCU_RUN_KEY, APP_NAME);
     reg_delete_value(MACHINE_ENVIRONMENT_KEY, "WAM_E2E_HOME");
+    reg_delete_value(MACHINE_ENVIRONMENT_KEY, "WAM_E2E_TOKEN");
     reg_delete_value(USER_ENVIRONMENT_KEY, "WAM_E2E_USER_HOME");
     write_paths(paths, &paths.machine, &paths.user)?;
     for task in [SYSTEM_TASK, USER_TASK] {
@@ -1206,6 +1260,293 @@ fn run_installer(installer: &Path, args: &[&str]) -> TestResult<InstallerRun> {
 
 fn stub_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_winappmigrator-installer"))
+}
+
+// ---------------------------------------------------------------------------------------
+// Comparing the machine before and after
+// ---------------------------------------------------------------------------------------
+
+/// How the machine stands, as Windows' own tools say, for everything the fake app touches.
+type Snapshot = BTreeMap<String, String>;
+
+/// Every file and folder under `root`, with its hash, attributes, and permissions.
+fn tree_details(root: &str) -> TestResult<BTreeMap<String, String>> {
+    if !Path::new(root).exists() {
+        return Ok(BTreeMap::new());
+    }
+    let shown = powershell(&format!(
+        "$root = {}; $sha = [Security.Cryptography.SHA256]::Create(); \
+         Get-ChildItem -LiteralPath $root -Recurse -Force | ForEach-Object {{ \
+           $name = $_.FullName.Substring($root.Length + 1); \
+           $access = try {{ $_.GetAccessControl('Access').Sddl }} catch {{ 'unreadable' }}; \
+           if ($_.PSIsContainer) {{ '{{0}}|folder|{{1}}' -f $name, $access }} else {{ \
+             $file = [IO.File]::OpenRead('\\\\?\\' + $_.FullName); \
+             $hash = [BitConverter]::ToString($sha.ComputeHash($file)) -replace '-', ''; \
+             $file.Close(); \
+             '{{0}}|{{1}}|{{2}}|{{3}}' -f $name, $hash, ($_.Attributes -band 7), $access }} }}",
+        quoted(root)
+    ))?;
+    Ok(shown
+        .lines()
+        .filter_map(|line| line.split_once('|'))
+        .map(|(path, details)| (path.to_owned(), details.to_owned()))
+        .collect())
+}
+
+fn whole_key(key: &str) -> TestResult<String> {
+    let output = tool("reg.exe", &["query", key, "/s"])?;
+    Ok(if output.status.success() {
+        text(&output.stdout)
+    } else {
+        "absent".to_owned()
+    })
+}
+
+fn task_folder_exists(path: &str) -> TestResult<bool> {
+    let shown = powershell(&format!(
+        "$s = New-Object -ComObject Schedule.Service; $s.Connect(); \
+         try {{ $null = $s.GetFolder({}); 'yes' }} catch {{ 'no' }}",
+        quoted(path)
+    ))?;
+    Ok(shown.trim() == "yes")
+}
+
+/// Everything the fake app, installed at `root`, can have touched.
+fn machine_snapshot(root: &str, folders: &ShellFolders, data: &[PathBuf]) -> TestResult<Snapshot> {
+    let mut snapshot = Snapshot::new();
+    snapshot.insert(
+        "install folder exists".to_owned(),
+        Path::new(root).exists().to_string(),
+    );
+    for (path, details) in tree_details(root)? {
+        snapshot.insert(format!(r"file {path}"), details);
+    }
+    let parameters = format!(r"{SERVICES_KEY}\WamE2ELocal\Parameters");
+    for key in [
+        HKLM_APP_KEY,
+        r"HKLM\Software\WAM E2E Vendor",
+        HKLM_WOW_KEY,
+        r"HKLM\Software\WOW6432Node\WAM E2E Vendor",
+        HKCU_APP_KEY,
+        r"HKCU\Software\WAM E2E Vendor",
+        UNINSTALL_KEY,
+        APP_PATHS_KEY,
+        CLSID_KEY,
+        HKCU_EXTENSION_KEY,
+        HKCU_PROG_ID_KEY,
+        &parameters,
+    ] {
+        snapshot.insert(format!("registry key {key}"), whole_key(key)?);
+    }
+    for (key, name) in [
+        (HKLM_RUN_KEY, APP_NAME),
+        (HKCU_RUN_KEY, APP_NAME),
+        (MACHINE_ENVIRONMENT_KEY, "WAM_E2E_HOME"),
+        (MACHINE_ENVIRONMENT_KEY, "WAM_E2E_TOKEN"),
+        (MACHINE_ENVIRONMENT_KEY, "Path"),
+        (USER_ENVIRONMENT_KEY, "WAM_E2E_USER_HOME"),
+        (USER_ENVIRONMENT_KEY, "Path"),
+    ] {
+        snapshot.insert(format!(r"value {key}\{name}"), reg_state(key, Some(name))?);
+    }
+    for name in SERVICES
+        .iter()
+        .map(|service| service.name)
+        .chain([DRIVER_NAME])
+    {
+        snapshot.insert(format!("sc.exe qc {name}"), format!("{:?}", sc_qc(name)?));
+        snapshot.insert(
+            format!("sc.exe qdescription {name}"),
+            shown("sc.exe", &["qdescription", name, "8192"])?,
+        );
+        snapshot.insert(
+            format!("delayed start of {name}"),
+            reg_state(&format!(r"{SERVICES_KEY}\{name}"), Some("DelayedAutostart"))?,
+        );
+    }
+    for task in [SYSTEM_TASK, USER_TASK] {
+        snapshot.insert(
+            format!("schtasks.exe {task}"),
+            format!("{:?}", task_xml(&task_full_name(task))?),
+        );
+    }
+    snapshot.insert(
+        "the task folder".to_owned(),
+        task_folder_exists(TASK_FOLDER.trim_end_matches('\\'))?.to_string(),
+    );
+    for spec in shortcut_specs(folders, root) {
+        snapshot.insert(
+            format!("shortcut {}", spec.path),
+            format!("{:?}", read_shortcut(&spec.path)?),
+        );
+    }
+    for folder in [&folders.start_menu, &folders.common_start_menu] {
+        let path = format!(r"{folder}\Programs\{APP_NAME}");
+        snapshot.insert(
+            format!("folder {path}"),
+            Path::new(&path).exists().to_string(),
+        );
+    }
+    for path in data {
+        snapshot.insert(
+            format!("data {}", path.display()),
+            sha256_of_file_if_there(path)?,
+        );
+    }
+    Ok(snapshot)
+}
+
+fn sha256_of_file_if_there(path: &Path) -> TestResult<String> {
+    Ok(if path.is_file() {
+        sha256_file(path)?
+    } else {
+        "absent".to_owned()
+    })
+}
+
+/// That two snapshots agree, other than for what is named in `except`.
+fn check_same_state(
+    checks: &mut Checks,
+    label: &str,
+    actual: &Snapshot,
+    expected: &Snapshot,
+    except: &[String],
+) {
+    let keys: std::collections::BTreeSet<&String> = actual.keys().chain(expected.keys()).collect();
+    let different: Vec<String> = keys
+        .into_iter()
+        .filter(|key| {
+            !except
+                .iter()
+                .any(|excepted| key.starts_with(excepted.as_str()))
+        })
+        .filter(|key| actual.get(*key) != expected.get(*key))
+        .map(|key| {
+            format!(
+                "{key}\n    was: {:?}\n    now: {:?}",
+                expected.get(key),
+                actual.get(key)
+            )
+        })
+        .collect();
+    checks.that(label, different.is_empty(), different.join("\n"));
+}
+
+fn installs_on_record() -> TestResult<Vec<String>> {
+    if !Path::new(INSTALLS_DIR).is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut names: Vec<String> = fs::read_dir(INSTALLS_DIR)?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// What Windows does with a value like `UninstallString`: hands the whole line to a shell.
+fn run_as_windows_would(command_line: &str) -> TestResult<InstallerRun> {
+    println!("\n--- as Windows would: {command_line}");
+    let output = Command::new("cmd.exe")
+        .raw_arg(format!("/D /S /C \"{command_line}\""))
+        .output()?;
+    let shown = format!("{}{}", text(&output.stdout), text(&output.stderr));
+    println!("{shown}--- exit: {}", output.status);
+    Ok(InstallerRun {
+        success: output.status.success(),
+        output: shown,
+    })
+}
+
+/// Run an install's uninstaller with no window, as Windows would be told to, with anything
+/// extra added, and wait for its folder to go.
+fn uninstall_quietly(checks: &mut Checks, id: &str, extra: &str) -> TestResult<InstallerRun> {
+    let command =
+        format!("\"{INSTALLS_DIR}\\{id}\\uninstall.exe\" --uninstall {id} --quiet{extra}");
+    let run = run_as_windows_would(&command)?;
+    let folder = Path::new(INSTALLS_DIR).join(id);
+    let started = Instant::now();
+    while folder.exists() && run.success && started.elapsed() < SELF_REMOVAL_PATIENCE {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    if run.success {
+        checks.that(
+            "the uninstaller's folder went once it had exited",
+            !folder.exists(),
+            folder.display(),
+        );
+    }
+    Ok(run)
+}
+
+fn install_id_in(output: &str) -> TestResult<String> {
+    Ok(output
+        .lines()
+        .find_map(|line| line.strip_prefix("Install id: "))
+        .ok_or("the install did not say its id")?
+        .trim()
+        .to_owned())
+}
+
+/// The newest folder on record that was not there before.
+fn new_install_folder(before: &[String]) -> TestResult<Option<PathBuf>> {
+    Ok(installs_on_record()?
+        .into_iter()
+        .find(|name| !before.contains(name))
+        .map(|name| Path::new(INSTALLS_DIR).join(name)))
+}
+
+/// Start an installer, wait for its journal to say it has got as far as `marker`, and kill it,
+/// as a power cut or a crash would stop it.
+fn kill_installer_at(
+    installer: &Path,
+    args: &[&str],
+    marker: &str,
+    checks: &mut Checks,
+) -> TestResult<Option<PathBuf>> {
+    let before = installs_on_record()?;
+    println!(
+        "\n--- {} {}, killed at {marker}",
+        installer.display(),
+        args.join(" ")
+    );
+    let mut child = Command::new(installer)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let started = Instant::now();
+    let mut reached = None;
+    while started.elapsed() < Duration::from_secs(300) {
+        if let Some(folder) = new_install_folder(&before)?
+            && fs::read_to_string(folder.join("journal.jsonl"))
+                .is_ok_and(|journal| journal.contains(marker))
+        {
+            reached = Some(folder);
+            break;
+        }
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    child.kill()?;
+    child.wait()?;
+    checks.that(
+        &format!("the installer got as far as {marker} before it was killed"),
+        reached.is_some(),
+        "it finished or stopped first",
+    );
+    if let Some(folder) = reached.as_ref() {
+        let journal = fs::read_to_string(folder.join("journal.jsonl"))?;
+        checks.that(
+            "its journal does not say it finished",
+            !journal.contains("committed"),
+            "it says it finished",
+        );
+    }
+    Ok(reached)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1331,7 +1672,69 @@ fn check_restored(
 
     check_driver(checks, root)?;
     check_tasks(checks, root)?;
-    check_shortcuts(checks, folders, root)
+    check_shortcuts(checks, folders, root)?;
+    check_uninstall_entry(checks, root).map(|_| ())
+}
+
+/// What Settings would run, read from the registry and looked at from outside. Returns the
+/// install's id.
+fn check_uninstall_entry(checks: &mut Checks, root: &str) -> TestResult<String> {
+    let uninstall = entry_value("UninstallString")?;
+    let quiet = entry_value("QuietUninstallString")?;
+    let exe_end = uninstall
+        .find(r#".exe" "#)
+        .ok_or("no program in UninstallString")?
+        + 4;
+    let exe = uninstall[1..exe_end].to_owned();
+    let id = uninstall
+        .rsplit(' ')
+        .next()
+        .ok_or("no id in UninstallString")?
+        .to_owned();
+    checks.same(
+        "reg.exe: UninstallString runs the copy in the admin-only folder, with its path quoted",
+        uninstall.clone(),
+        format!("\"{INSTALLS_DIR}\\{id}\\uninstall.exe\" --uninstall {id}"),
+    );
+    checks.same(
+        "reg.exe: QuietUninstallString is the same with --quiet",
+        quiet,
+        format!("{uninstall} --quiet"),
+    );
+    checks.that(
+        "the uninstaller is not in the install folder",
+        !exe.to_ascii_lowercase()
+            .starts_with(&root.to_ascii_lowercase()),
+        &exe,
+    );
+    checks.same(
+        "reg.exe: the source's ModifyPath did not survive",
+        reg_value(UNINSTALL_KEY, Some("ModifyPath"))?,
+        None,
+    );
+    for flag in ["NoModify", "NoRepair"] {
+        checks.same(
+            &format!("reg.exe: {flag}"),
+            reg_value(UNINSTALL_KEY, Some(flag))?,
+            Some(("REG_DWORD".to_owned(), "0x1".to_owned())),
+        );
+    }
+    let signature = powershell(&format!(
+        "(Get-AuthenticodeSignature -LiteralPath {}).Status",
+        quoted(&exe)
+    ))?;
+    checks.same(
+        "Get-AuthenticodeSignature: the uninstaller is not signed",
+        signature.trim(),
+        "NotSigned",
+    );
+    Ok(id)
+}
+
+fn entry_value(name: &str) -> TestResult<String> {
+    Ok(reg_value(UNINSTALL_KEY, Some(name))?
+        .ok_or_else(|| format!("the uninstall entry has no {name}"))?
+        .1)
 }
 
 /// As far as a driver can be checked without loading one. It is registered and points at
@@ -1522,6 +1925,15 @@ fn check_scan(checks: &mut Checks, manifest: &PackageManifest) {
         .services_detected
         .iter()
         .find(|service| service.service_name == "WamE2ECustom");
+    let delayed = manifest
+        .services_detected
+        .iter()
+        .find(|service| service.service_name == "WamE2ENetwork");
+    checks.same(
+        "scan: a delayed automatic start is told from a plain one",
+        delayed.and_then(|service| service.start_type.as_deref()),
+        Some("delayed-automatic"),
+    );
     checks.same(
         "scan: the custom account",
         custom.and_then(|service| service.account_name.as_deref()),
@@ -1840,6 +2252,8 @@ fn round_trip_of_a_real_app() -> TestResult {
     checks.that("the preview succeeded", preview.success, &preview.output);
     check_is_gone(&mut checks, TARGET_ROOT, &folders, &paths, &data)?;
 
+    uninstall_puts_the_machine_back(&mut checks, &installer, &folders, &paths, &data)?;
+
     section("Install on the clean machine, without --force");
     let install = run_installer(
         &installer,
@@ -1919,6 +2333,10 @@ fn round_trip_of_a_real_app() -> TestResult {
     )?;
     check_services_really_run(&mut checks, TARGET_ROOT)?;
 
+    an_install_over_another_comes_back_out(&mut checks, &installer, &folders, &data)?;
+    a_late_failure_puts_everything_back(&mut checks, &installer, &folders, &data)?;
+    a_killed_installer_is_undone_by_the_next_run(&mut checks, &installer, &folders, &data)?;
+
     section("The runtime it carries really installs, when it is missing");
     println!(
         "before: {:?} {:?}",
@@ -1969,7 +2387,504 @@ fn round_trip_of_a_real_app() -> TestResult {
     );
     check_services_really_run(&mut checks, TARGET_ROOT)?;
 
+    logs_are_kept_and_hold_no_secrets(&mut checks, work.path())?;
+
     checks.finish()
+}
+
+const FORCED_INSTALL: [&str; 5] = [
+    "--target-root",
+    TARGET_ROOT,
+    "--apply",
+    "--force",
+    "--restore-user-data",
+];
+
+/// On a machine with none of the fake app on it.
+fn uninstall_puts_the_machine_back(
+    checks: &mut Checks,
+    installer: &Path,
+    folders: &ShellFolders,
+    paths: &OriginalPaths,
+    data: &[PathBuf],
+) -> TestResult {
+    section("Uninstalling as Windows would puts the machine back");
+    let clean = machine_snapshot(TARGET_ROOT, folders, data)?;
+    let records = installs_on_record()?;
+    let install = run_installer(installer, &FORCED_INSTALL)?;
+    checks.that("the install succeeded", install.success, &install.output);
+    let id = check_uninstall_entry(checks, TARGET_ROOT)?;
+    checks.same(
+        "reg.exe: the delayed start came back as delayed",
+        reg_value(
+            &format!(r"{SERVICES_KEY}\WamE2ENetwork"),
+            Some("DelayedAutostart"),
+        )?,
+        Some(("REG_DWORD".to_owned(), "0x1".to_owned())),
+    );
+    let installed = machine_snapshot(TARGET_ROOT, folders, data)?;
+
+    // The window opens, and nothing happens until someone clicks in it. It cannot be driven
+    // here, and this runner may not be able to show one at all.
+    let uninstall = entry_value("UninstallString")?;
+    println!("\n--- starting, as Windows would, with a window: {uninstall}");
+    let mut window = Command::new("cmd.exe")
+        .raw_arg(format!("/D /S /C \"{uninstall}\""))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    std::thread::sleep(Duration::from_secs(10));
+    match window.try_wait()? {
+        Some(status) => println!("it exited by itself, with {status}: no window on this runner"),
+        None => println!("still running after 10 seconds, waiting for someone to click"),
+    }
+    let _ = tool(
+        "taskkill.exe",
+        &["/F", "/T", "/PID", &window.id().to_string()],
+    );
+    let _ = window.wait();
+    let after_window = machine_snapshot(TARGET_ROOT, folders, data)?;
+    check_same_state(
+        checks,
+        "the uninstaller with a window changed nothing without being asked",
+        &after_window,
+        &installed,
+        &[],
+    );
+
+    let quiet = entry_value("QuietUninstallString")?;
+    let run = run_as_windows_would(&quiet)?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+    checks.that(
+        "it said user data stays",
+        run.output.contains("settings.json stays"),
+        &run.output,
+    );
+    let folder = Path::new(INSTALLS_DIR).join(&id);
+    let started = Instant::now();
+    while folder.exists() && started.elapsed() < SELF_REMOVAL_PATIENCE {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    checks.that(
+        "the uninstaller removed its own folder once it had exited",
+        !folder.exists(),
+        folder.display(),
+    );
+    checks.same("no record is left", installs_on_record()?, records.clone());
+    let after = machine_snapshot(TARGET_ROOT, folders, data)?;
+    let data_keys: Vec<String> = data
+        .iter()
+        .map(|path| format!("data {}", path.display()))
+        .collect();
+    check_same_state(
+        checks,
+        "the machine is as it was, apart from the user data",
+        &after,
+        &clean,
+        &data_keys,
+    );
+    for path in data {
+        checks.that(
+            &format!("user data stays unless asked for: {}", path.display()),
+            path.is_file(),
+            "it is gone",
+        );
+        if let Some(parent) = path.parent() {
+            fs::remove_dir_all(parent)?;
+        }
+    }
+
+    section("What another program changed in between is left alone");
+    let install = run_installer(installer, &FORCED_INSTALL)?;
+    checks.that("the install succeeded", install.success, &install.output);
+    let id = install_id_in(&install.output)?;
+    fs::write(app_conf(TARGET_ROOT), b"changed by the user")?;
+    fs::write(format!(r"{TARGET_ROOT}\notes.txt"), b"added by the user")?;
+    reg_add(HKLM_APP_KEY, Some("InstallDir"), "REG_SZ", "changed since")?;
+    reg_add(
+        HKLM_APP_KEY,
+        Some("AddedLater"),
+        "REG_SZ",
+        "another program's",
+    )?;
+    reg_add(
+        MACHINE_ENVIRONMENT_KEY,
+        Some("WAM_E2E_HOME"),
+        "REG_SZ",
+        "changed since",
+    )?;
+    let later_entry = r"C:\WAM E2E Added Later\bin";
+    let (_, machine_path) =
+        reg_value(MACHINE_ENVIRONMENT_KEY, Some("Path"))?.ok_or("no machine Path")?;
+    reg_add(
+        MACHINE_ENVIRONMENT_KEY,
+        Some("Path"),
+        &paths.machine_kind,
+        &path_with(&machine_path, &[later_entry]),
+    )?;
+    let changed_image = format!("\"{}\" --changed", app_exe(TARGET_ROOT));
+    must(
+        "sc.exe",
+        &["config", "WamE2ELocal", "binPath=", &changed_image],
+    )?;
+    powershell(&format!(
+        "$action = New-ScheduledTaskAction -Execute {} -Argument '--changed'; \
+         Set-ScheduledTask -TaskName {} -TaskPath {} -Action $action | Out-Null",
+        quoted(&app_exe(TARGET_ROOT)),
+        quoted(USER_TASK),
+        quoted(TASK_FOLDER),
+    ))?;
+
+    let run = uninstall_quietly(checks, &id, " --remove-user-data")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+    checks.same(
+        "only the file that was changed and the one that was added stay",
+        tree_hashes(TARGET_ROOT)?
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![r"conf\app.conf".to_owned(), "notes.txt".to_owned()],
+    );
+    checks.same(
+        "what the user wrote in that file is still there",
+        fs::read(app_conf(TARGET_ROOT))?,
+        b"changed by the user".to_vec(),
+    );
+    checks.same(
+        "reg.exe: a value someone else changed is left",
+        reg_value(HKLM_APP_KEY, Some("InstallDir"))?.map(|(_, data)| data),
+        Some("changed since".to_owned()),
+    );
+    checks.same(
+        "reg.exe: a value someone else added is left",
+        reg_value(HKLM_APP_KEY, Some("AddedLater"))?.map(|(_, data)| data),
+        Some("another program's".to_owned()),
+    );
+    checks.same(
+        "reg.exe: the rest of what the install wrote there is gone",
+        reg_value(HKLM_APP_KEY, Some("Count"))?,
+        None,
+    );
+    checks.same(
+        "reg.exe: an environment variable someone else changed is left",
+        reg_value(MACHINE_ENVIRONMENT_KEY, Some("WAM_E2E_HOME"))?.map(|(_, data)| data),
+        Some("changed since".to_owned()),
+    );
+    checks.same(
+        "reg.exe: only the app's entry came out of the machine Path",
+        reg_value(MACHINE_ENVIRONMENT_KEY, Some("Path"))?.map(|(_, data)| data),
+        Some(path_with(&paths.machine, &[later_entry])),
+    );
+    checks.same(
+        "sc.exe: a service someone else changed is left",
+        sc_field(&sc_qc("WamE2ELocal")?, "BINARY_PATH_NAME"),
+        changed_image,
+    );
+    checks.that(
+        "sc.exe: a service nobody changed is gone",
+        !service_exists("WamE2ESystem")?,
+        "it is still there",
+    );
+    checks.that(
+        "schtasks.exe: a task someone else changed is left",
+        task_xml(&task_full_name(USER_TASK))?.is_some_and(|xml| xml.contains("--changed")),
+        "it is gone or changed",
+    );
+    checks.that(
+        "schtasks.exe: a task nobody changed is gone",
+        task_xml(&task_full_name(SYSTEM_TASK))?.is_none(),
+        "it is still there",
+    );
+    for (what, wanted) in [
+        ("the changed file", "app.conf stays"),
+        ("the folder", "stays, because it holds files"),
+        ("the value", r"InstallDir stays"),
+        ("the environment variable", "WAM_E2E_HOME stays"),
+        ("the service", "WamE2ELocal stays"),
+        ("the task", "Per User stays"),
+    ] {
+        checks.that(
+            &format!("it reported {what}"),
+            run.output.contains(wanted),
+            &run.output,
+        );
+    }
+    for path in data {
+        checks.that(
+            &format!("user data went, having been asked for: {}", path.display()),
+            !path.exists(),
+            "it is still there",
+        );
+    }
+
+    // What was left, as someone would clean it up.
+    must("sc.exe", &["delete", "WamE2ELocal"])?;
+    must(
+        "schtasks.exe",
+        &["/delete", "/tn", &task_full_name(USER_TASK), "/f"],
+    )?;
+    let _ = powershell(&format!(
+        "$s = New-Object -ComObject Schedule.Service; $s.Connect(); \
+         $s.GetFolder('\\').DeleteFolder({}, 0)",
+        quoted(TASK_FOLDER.trim_end_matches('\\'))
+    ));
+    reg_delete_key(HKLM_APP_KEY);
+    reg_delete_key(r"HKLM\Software\WAM E2E Vendor");
+    reg_delete_value(MACHINE_ENVIRONMENT_KEY, "WAM_E2E_HOME");
+    write_paths(paths, &paths.machine, &paths.user)?;
+    fs::remove_dir_all(TARGET_ROOT)?;
+    let after = machine_snapshot(TARGET_ROOT, folders, data)?;
+    check_same_state(
+        checks,
+        "and with that cleaned up, nothing else is left anywhere",
+        &after,
+        &clean,
+        &[],
+    );
+    Ok(())
+}
+
+/// With an install in place, another over it, and then that one uninstalled.
+fn an_install_over_another_comes_back_out(
+    checks: &mut Checks,
+    installer: &Path,
+    folders: &ShellFolders,
+    data: &[PathBuf],
+) -> TestResult {
+    section("An install over another comes back out, and what it replaced comes back");
+    // So that there is something for it to replace that it will not write itself.
+    reg_add(HKLM_APP_KEY, Some("Count"), "REG_DWORD", "0x63")?;
+    fs::write(app_conf(TARGET_ROOT), b"as it was before\r\n")?;
+    let before = machine_snapshot(TARGET_ROOT, folders, data)?;
+    let forced = run_installer(installer, &FORCED_INSTALL)?;
+    checks.that("the install succeeded", forced.success, &forced.output);
+    let id = install_id_in(&forced.output)?;
+    checks.same(
+        "reg.exe: it replaced the value",
+        reg_value(HKLM_APP_KEY, Some("Count"))?.map(|(_, data)| data),
+        Some("0x2a".to_owned()),
+    );
+    let run = uninstall_quietly(checks, &id, " --remove-user-data")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+    let after = machine_snapshot(TARGET_ROOT, folders, data)?;
+    check_same_state(checks, "the machine is as it was", &after, &before, &[]);
+    Ok(())
+}
+
+/// Files, values, a service, and a task are all already there, and what is about to fail comes
+/// after nearly everything else has been done.
+fn a_late_failure_puts_everything_back(
+    checks: &mut Checks,
+    installer: &Path,
+    folders: &ShellFolders,
+    data: &[PathBuf],
+) -> TestResult {
+    section("A failure late in an install puts everything back");
+    let before = machine_snapshot(TARGET_ROOT, folders, data)?;
+    let records = installs_on_record()?;
+    // A shortcut in the Startup folder makes something run, so failing to replace it fails the
+    // install, and shortcuts are nearly the last thing to be done.
+    let startup = shortcut_specs(folders, TARGET_ROOT)
+        .pop()
+        .ok_or("no startup shortcut")?
+        .path;
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&startup)?;
+    let run = run_installer(installer, &FORCED_INSTALL)?;
+    drop(held);
+    checks.that("the install reports failure", !run.success, &run.output);
+    checks.that(
+        "it says what it did about it",
+        run.output.contains("what it changed was put back"),
+        &run.output,
+    );
+    checks.that(
+        "everything could be undone",
+        run.output.contains("Could not be undone: 0"),
+        &run.output,
+    );
+    let after = machine_snapshot(TARGET_ROOT, folders, data)?;
+    check_same_state(checks, "the machine is as it was", &after, &before, &[]);
+    checks.same(
+        "the backups and the record went with it",
+        installs_on_record()?,
+        records.clone(),
+    );
+
+    section("So does a file an administrator is denied");
+    let conf = app_conf(TARGET_ROOT);
+    must("icacls", &[&conf, "/deny", "*S-1-1-0:(DE)"])?;
+    let before = machine_snapshot(TARGET_ROOT, folders, data)?;
+    let run = run_installer(installer, &FORCED_INSTALL)?;
+    checks.that("the install reports failure", !run.success, &run.output);
+    checks.that(
+        "everything could be undone",
+        run.output.contains("Could not be undone: 0"),
+        &run.output,
+    );
+    let after = machine_snapshot(TARGET_ROOT, folders, data)?;
+    check_same_state(checks, "the machine is as it was", &after, &before, &[]);
+    checks.same("no record is left", installs_on_record()?, records);
+    must("icacls", &[&conf, "/remove:d", "*S-1-1-0"])?;
+    Ok(())
+}
+
+fn a_killed_installer_is_undone_by_the_next_run(
+    checks: &mut Checks,
+    installer: &Path,
+    folders: &ShellFolders,
+    data: &[PathBuf],
+) -> TestResult {
+    let package = hand_built_package("WAM E2E Recover Source")?;
+    let other = package.build("recover")?;
+    let other_target = format!(r"{PROGRAM_FILES}\WAM E2E Recover");
+    let other_install = ["--target-root", other_target.as_str(), "--apply", "--force"];
+    let before = machine_snapshot(TARGET_ROOT, folders, data)?;
+    for (marker, stage) in [
+        (r#""change":"service""#, "setting up services"),
+        (r#""change":"task""#, "setting up tasks"),
+        (r#""change":"environment_value""#, "nearly done"),
+    ] {
+        section(&format!("Killed {stage}, and undone by the next run"));
+        let killed = kill_installer_at(installer, &FORCED_INSTALL, marker, checks)?;
+        let preview = run_installer(&other, &["--target-root", &other_target])?;
+        checks.that("a preview succeeds", preview.success, &preview.output);
+        checks.that(
+            "a preview says an earlier install never finished",
+            preview.output.contains("earlier_install_never_finished"),
+            &preview.output,
+        );
+        checks.that(
+            "and leaves it where it is",
+            killed.as_ref().is_some_and(|folder| folder.exists()),
+            "its record is gone",
+        );
+        let next = run_installer(&other, &other_install)?;
+        checks.that("the next install succeeds", next.success, &next.output);
+        checks.that(
+            "it says it undid the earlier one",
+            next.output.contains("earlier_install_undone"),
+            &next.output,
+        );
+        checks.that(
+            "the record of the killed one is gone",
+            killed.as_ref().is_some_and(|folder| !folder.exists()),
+            "it is still there",
+        );
+        let after = machine_snapshot(TARGET_ROOT, folders, data)?;
+        check_same_state(checks, "the machine is as it was", &after, &before, &[]);
+    }
+
+    section("Killed while undoing that, and finished by the run after");
+    let killed = kill_installer_at(
+        installer,
+        &FORCED_INSTALL,
+        r#""change":"environment_value""#,
+        checks,
+    )?
+    .ok_or("the installer did not get far enough to be killed")?;
+    let backups = killed.join("backups");
+    let waiting_with = fs::read_dir(&backups)?.count();
+    let mut undoing = Command::new(&other)
+        .args(other_install)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let started = Instant::now();
+    let mut caught_it = false;
+    while started.elapsed() < Duration::from_secs(120) {
+        if fs::read_dir(&backups).map_or(0, Iterator::count) < waiting_with {
+            caught_it = true;
+            break;
+        }
+        if undoing.try_wait()?.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    undoing.kill()?;
+    undoing.wait()?;
+    println!(
+        "killed part-way through undoing: {caught_it}, with {} of {waiting_with} backups left",
+        fs::read_dir(&backups).map_or(0, Iterator::count)
+    );
+    checks.that(
+        "the record is still there, since that did not finish",
+        !caught_it || killed.exists(),
+        "its record is gone",
+    );
+    let next = run_installer(&other, &other_install)?;
+    checks.that("the run after that succeeds", next.success, &next.output);
+    let after = machine_snapshot(TARGET_ROOT, folders, data)?;
+    check_same_state(checks, "the machine is as it was", &after, &before, &[]);
+    checks.that("its record is gone too", !killed.exists(), killed.display());
+    Ok(())
+}
+
+fn logs_are_kept_and_hold_no_secrets(checks: &mut Checks, work: &Path) -> TestResult {
+    section("What is logged is kept, and holds no secrets");
+    check_is_protected(checks, LOGS_DIR)?;
+    check_is_protected(checks, INSTALLS_DIR)?;
+    check_is_protected(checks, STATE_ROOT)?;
+    let logs: Vec<PathBuf> = fs::read_dir(LOGS_DIR)?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    checks.that(
+        "there are logs, and no more than the limit",
+        !logs.is_empty() && logs.len() <= 20,
+        format!("{logs:?}"),
+    );
+    // Asked for by name as well, and held to the same.
+    let asked_for = work.join("asked-for.log");
+    let package = hand_built_package("WAM E2E Log Source")?;
+    let installer = package.build("logged")?;
+    let target = format!(r"{PROGRAM_FILES}\WAM E2E Logged");
+    let asked_text = asked_for.display().to_string();
+    let run = run_installer(
+        &installer,
+        &["--target-root", &target, "--apply", "--log", &asked_text],
+    )?;
+    checks.that("the install succeeded", run.success, &run.output);
+    checks.that(
+        "a log asked for by name was written",
+        fs::read_to_string(&asked_for).is_ok_and(|log| log.contains("install finished")),
+        asked_for.display(),
+    );
+    let refused = run_installer(
+        &installer,
+        &["--target-root", &target, "--apply", "--log", &asked_text],
+    )?;
+    checks.that(
+        "one that is already there is refused, and nothing is done",
+        !refused.success,
+        &refused.output,
+    );
+    let mut text_of_logs = String::new();
+    for log in logs.iter().chain([&asked_for]) {
+        text_of_logs.push_str(&fs::read_to_string(log)?);
+    }
+    checks.that(
+        "the logs say what happened",
+        text_of_logs.contains("install started") && text_of_logs.contains(APP_NAME),
+        "they do not",
+    );
+    for secret in [SECRET_IN_REGISTRY, SECRET_IN_ENVIRONMENT, "the app's data"] {
+        checks.that(
+            &format!("no log holds {secret}"),
+            !text_of_logs.contains(secret),
+            "it was there",
+        );
+    }
+    let id = install_id_in(&run.output)?;
+    let mut uninstall_checks = Checks::default();
+    let run = uninstall_quietly(&mut uninstall_checks, &id, "")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2369,9 +3284,8 @@ fn ask_for_refused_items(package: &mut HandBuilt) -> TestResult<Vec<&'static str
     ])
 }
 
-/// Ask for what the rules cannot refuse up front, because it depends on what is on this PC,
-/// or fails only at the moment it would run.
-fn ask_for_what_fails(package: &mut HandBuilt, canary: &Path) -> TestResult {
+/// Ask for what the rules cannot refuse up front, because it depends on what is on this PC.
+fn ask_for_what_is_refused_when_installing(package: &mut HandBuilt) {
     let own = package.program.clone();
     package.manifest.registry_keys_exported.push(registry_entry(
         RegistryHive::LocalMachine,
@@ -2387,27 +3301,33 @@ fn ask_for_what_fails(package: &mut HandBuilt, canary: &Path) -> TestResult {
         &own,
         &exec_action(&own),
     ));
-    // On the Arm64 runtime, which this runner does not have, so it gets as far as running.
-    let (hash, size) = package.add_file(r"prerequisites\vc_redist.arm64.exe", canary)?;
-    let prerequisite = |relative: &str, hash: &str, size: u64| RuntimePrerequisite {
-        name: format!("Hostile runtime at {relative}"),
-        kind: RuntimePrerequisiteKind::VisualCppRedistributable,
-        evidence: String::new(),
-        install_manually: true,
-        present_on_source: None,
-        bundle: Some(PrerequisiteBundle {
-            architecture: AppArchitecture::Arm64,
-            package_relative_path: Some(PathBuf::from(relative)),
-            hash_sha256: Some(hash.to_owned()),
-            size_bytes: Some(size),
-        }),
-        presence_probe: None,
-    };
-    let (own_hash, own_size) = package.add_file(r"prerequisites\elsewhere.exe", canary)?;
-    package.manifest.runtime_prerequisites.extend([
-        prerequisite(r"prerequisites\vc_redist.arm64.exe", &hash, size),
-        prerequisite(r"prerequisites\elsewhere.exe", &own_hash, own_size),
-    ]);
+}
+
+/// Ask for a runtime whose file is not what it should be, or is not where it should be. On the
+/// Arm64 runtime, which this runner does not have, so it gets as far as running.
+fn ask_for_a_runtime_that_fails(
+    package: &mut HandBuilt,
+    canary: &Path,
+    relative: &str,
+) -> TestResult {
+    let (hash, size) = package.add_file(relative, canary)?;
+    package
+        .manifest
+        .runtime_prerequisites
+        .push(RuntimePrerequisite {
+            name: format!("Hostile runtime at {relative}"),
+            kind: RuntimePrerequisiteKind::VisualCppRedistributable,
+            evidence: String::new(),
+            install_manually: true,
+            present_on_source: None,
+            bundle: Some(PrerequisiteBundle {
+                architecture: AppArchitecture::Arm64,
+                package_relative_path: Some(PathBuf::from(relative)),
+                hash_sha256: Some(hash),
+                size_bytes: Some(size),
+            }),
+            presence_probe: None,
+        });
     Ok(())
 }
 
@@ -2467,9 +3387,7 @@ fn hostile_package_gets_nothing_it_was_refused() -> TestResult {
         checks.same(label, after.get(label), Some(was));
     }
 
-    section("A package that fails at the moment it would do something");
-    let canary_marker = "unmarked";
-    remove_marker(canary_marker);
+    section("What can only be refused at the moment it would be done");
     let notepad = r"C:\Windows\System32\notepad.exe";
     powershell(&format!(
         "$action = New-ScheduledTaskAction -Execute {}; \
@@ -2479,41 +3397,31 @@ fn hostile_package_gets_nothing_it_was_refused() -> TestResult {
         quoted(notepad)
     ))?;
     let class_before = reg_state(&format!(r"HKLM\{SHELL_LINK_CLASS}"), None)?;
-    let mut package = hand_built_package("WAM E2E Failing Source")?;
-    ask_for_what_fails(&mut package, &fake_app_program()?)?;
-    let installer = package.build("failing")?;
-    let failing_target = format!(r"{PROGRAM_FILES}\WAM E2E Failing");
+    let mut package = hand_built_package("WAM E2E Refused Source")?;
+    ask_for_what_is_refused_when_installing(&mut package);
+    let installer = package.build("refused")?;
+    let refused_target = format!(r"{PROGRAM_FILES}\WAM E2E Refused");
     let run = run_installer(
         &installer,
-        &["--target-root", &failing_target, "--apply", "--force"],
+        &["--target-root", &refused_target, "--apply", "--force"],
     )?;
-    checks.that("the install reports failure", !run.success, &run.output);
-    for (what, code) in [
-        ("the COM class", "registry_com_class_exists"),
-        ("the existing task", "scheduled_task_exists_elsewhere"),
-        ("the unsigned runtime", "prerequisite_install_failed"),
+    checks.that(
+        "refusing those does not fail the install",
+        run.success,
+        &run.output,
+    );
+    for (what, wanted) in [
+        ("the COM class", r"InprocServer32"),
+        ("the existing task", r"\WAM E2E Hostile\Existing"),
     ] {
         checks.that(
-            &format!("reported: {what}"),
-            run.output.contains(code),
+            &format!("reported as left out: {what}"),
+            run.output
+                .lines()
+                .any(|line| line.contains(wanted) && line.contains("was left out")),
             &run.output,
         );
     }
-    checks.that(
-        "the runtime's signature is what stopped it",
-        run.output.contains("failed its signature check"),
-        &run.output,
-    );
-    checks.that(
-        "a runtime outside its proper place is refused",
-        run.output.contains("not where it belongs"),
-        &run.output,
-    );
-    checks.that(
-        "the fake runtime never ran",
-        wait_for_marker(canary_marker, Duration::from_secs(5)).is_none(),
-        "its marker appeared",
-    );
     checks.same(
         "reg.exe: Windows' shortcut class is still Windows'",
         reg_state(&format!(r"HKLM\{SHELL_LINK_CLASS}"), None)?,
@@ -2522,8 +3430,54 @@ fn hostile_package_gets_nothing_it_was_refused() -> TestResult {
     let existing = task_xml(r"\WAM E2E Hostile\Existing")?.unwrap_or_default();
     checks.that(
         "schtasks.exe: the existing task still runs what it did",
-        existing.contains("notepad.exe") && !existing.contains("WAM E2E Failing"),
+        existing.contains("notepad.exe") && !existing.contains("WAM E2E Refused"),
         &existing,
+    );
+
+    section("A step that fails at the moment it would do something");
+    let canary_marker = "unmarked";
+    remove_marker(canary_marker);
+    for (name, relative, expected) in [
+        (
+            "WAM E2E Failing Source",
+            r"prerequisites\vc_redist.arm64.exe",
+            "failed its signature check",
+        ),
+        (
+            "WAM E2E Misplaced Source",
+            r"prerequisites\elsewhere.exe",
+            "not where it belongs",
+        ),
+    ] {
+        let mut package = hand_built_package(name)?;
+        ask_for_a_runtime_that_fails(&mut package, &fake_app_program()?, relative)?;
+        let installer = package.build(name)?;
+        let target = format!(r"{PROGRAM_FILES}\{name} Target");
+        let run = run_installer(
+            &installer,
+            &["--target-root", &target, "--apply", "--force"],
+        )?;
+        checks.that("the install reports failure", !run.success, &run.output);
+        checks.that(
+            "it says the runtime could not be installed",
+            run.output.contains("prerequisite_install_failed"),
+            &run.output,
+        );
+        checks.that(
+            &format!("and why: {expected}"),
+            run.output.contains(expected),
+            &run.output,
+        );
+        checks.that(
+            "it put back what it had done",
+            run.output.contains("what it changed was put back") && !Path::new(&target).exists(),
+            &run.output,
+        );
+    }
+    checks.that(
+        "the fake runtime never ran",
+        wait_for_marker(canary_marker, Duration::from_secs(5)).is_none(),
+        "its marker appeared",
     );
 
     section("A link planted at the install location");
@@ -2570,7 +3524,163 @@ fn hostile_package_gets_nothing_it_was_refused() -> TestResult {
         1,
     );
 
+    an_uninstall_cannot_be_led_outside_the_install(&mut checks)?;
+    a_signed_installer_leaves_an_unsigned_uninstaller(&mut checks)?;
+
     checks.finish()
+}
+
+/// A package of a program and a file in a folder, installed at `target`.
+fn installed_with_a_subfolder(name: &str, target: &str) -> TestResult<String> {
+    let mut package = hand_built_package(name)?;
+    let content = package.work.path().join("plugin.dat");
+    fs::write(&content, b"the same in both places")?;
+    let relative = r"files\sub\plugin.dat";
+    let (hash, size) = package.add_file(relative, &content)?;
+    let source = Path::new(&package.program)
+        .parent()
+        .ok_or("no install folder")?
+        .join(r"sub\plugin.dat");
+    package.manifest.file_inventory.push(FileEntry {
+        path: source.clone(),
+        original_path: source,
+        package_relative_path: Some(PathBuf::from(relative)),
+        suggested_destination_path: None,
+        size_bytes: Some(size),
+        hash_sha256: Some(hash),
+        classification: FileClassification::AppOwned,
+        should_copy: true,
+        reason: String::new(),
+    });
+    let installer = package.build(name)?;
+    let run = run_installer(&installer, &["--target-root", target, "--apply", "--force"])?;
+    if !run.success {
+        return Err(format!("the install failed: {}", run.output).into());
+    }
+    install_id_in(&run.output)
+}
+
+fn junction(link: &str, target: &str) -> TestResult {
+    must("cmd.exe", &["/D", "/C", "mklink", "/J", link, target]).map(|_| ())
+}
+
+/// The install folder can be one other programs may write to, and an uninstaller runs elevated.
+/// What it finds has been swapped for a link is left, even when what is at the other end
+/// is byte for byte what it would have removed.
+fn an_uninstall_cannot_be_led_outside_the_install(checks: &mut Checks) -> TestResult {
+    let victim = format!(r"{PROGRAM_FILES}\WAM E2E Swap Victim");
+    fs::create_dir_all(&victim)?;
+    let victim_file = format!(r"{victim}\plugin.dat");
+    fs::write(&victim_file, b"the same in both places")?;
+    fs::create_dir_all(format!(r"{victim}\sub"))?;
+    let victim_nested = format!(r"{victim}\sub\plugin.dat");
+    fs::write(&victim_nested, b"the same in both places")?;
+
+    section("A folder in the install swapped for a link");
+    let target = format!(r"{PROGRAM_FILES}\WAM E2E Swap");
+    let id = installed_with_a_subfolder("WAM E2E Swap Source", &target)?;
+    let sub = format!(r"{target}\sub");
+    fs::remove_dir_all(&sub)?;
+    junction(&sub, &victim)?;
+    let run = uninstall_quietly(checks, &id, "")?;
+    checks.that(
+        "it reports what it could not undo, rather than succeeding",
+        !run.success && run.output.contains("through a link"),
+        &run.output,
+    );
+    checks.same(
+        "what the link points at is untouched",
+        fs::read(&victim_file)?,
+        b"the same in both places".to_vec(),
+    );
+    fs::remove_dir(&sub)?;
+    let run = uninstall_quietly(checks, &id, "")?;
+    checks.that(
+        "with the link gone, running it again finishes the job",
+        run.success && !Path::new(&target).exists(),
+        &run.output,
+    );
+
+    section("The install location swapped for a link");
+    let target = format!(r"{PROGRAM_FILES}\WAM E2E Swap Root");
+    let id = installed_with_a_subfolder("WAM E2E Swap Root Source", &target)?;
+    let moved = format!(r"{PROGRAM_FILES}\WAM E2E Swap Root Moved");
+    fs::rename(&target, &moved)?;
+    junction(&target, &victim)?;
+    let run = uninstall_quietly(checks, &id, "")?;
+    checks.that(
+        "it reports that it now leads elsewhere, rather than succeeding",
+        !run.success && run.output.contains("now leads to"),
+        &run.output,
+    );
+    checks.same(
+        "what the link points at is untouched",
+        fs::read(&victim_nested)?,
+        b"the same in both places".to_vec(),
+    );
+    Ok(())
+}
+
+/// Whoever builds an installer may sign it. What it leaves behind for Windows to run elevated
+/// must not carry that signature, or anyone could turn that copy into anything they like.
+/// The certificate is a throwaway made here, trusted only on this runner, and has nothing to
+/// do with this project's.
+fn a_signed_installer_leaves_an_unsigned_uninstaller(checks: &mut Checks) -> TestResult {
+    section("A validly signed installer leaves an uninstaller with no signature");
+    let package = hand_built_package("WAM E2E Signed Source")?;
+    let installer = package.build("signed")?;
+    let installer_text = installer.display().to_string();
+    let signed = powershell(&format!(
+        "$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=WAM E2E Throwaway' \
+           -CertStoreLocation Cert:\\LocalMachine\\My; \
+         foreach ($name in 'Root', 'TrustedPublisher') {{ \
+           $store = New-Object Security.Cryptography.X509Certificates.X509Store $name, 'LocalMachine'; \
+           $store.Open('ReadWrite'); $store.Add($cert); $store.Close() }}; \
+         $null = Set-AuthenticodeSignature -LiteralPath {path} -Certificate $cert -HashAlgorithm SHA256; \
+         (Get-AuthenticodeSignature -LiteralPath {path}).Status",
+        path = quoted(&installer_text)
+    ))?;
+    checks.same(
+        "Get-AuthenticodeSignature: the installer is validly signed",
+        signed.trim(),
+        "Valid",
+    );
+    checks.that(
+        "it has a certificate table",
+        has_certificate_table(&installer)?,
+        "it does not",
+    );
+    let target = format!(r"{PROGRAM_FILES}\WAM E2E Signed");
+    let run = run_installer(&installer, &["--target-root", &target, "--apply"])?;
+    checks.that("the signed installer installs", run.success, &run.output);
+    let id = install_id_in(&run.output)?;
+    let uninstaller = Path::new(INSTALLS_DIR).join(&id).join("uninstall.exe");
+    let status = powershell(&format!(
+        "$s = Get-AuthenticodeSignature -LiteralPath {}; '{{0}}|{{1}}' -f $s.Status, $s.SignerCertificate",
+        quoted(&uninstaller.display().to_string())
+    ))?;
+    checks.same(
+        "Get-AuthenticodeSignature: the uninstaller it left is not signed",
+        status.trim(),
+        "NotSigned|",
+    );
+    checks.that(
+        "the uninstaller has no certificate table",
+        !has_certificate_table(&uninstaller)?,
+        "it has one",
+    );
+    checks.same(
+        "the uninstaller is byte for byte the stub it was built from",
+        sha256_file(&uninstaller)?,
+        sha256_file(&stub_binary())?,
+    );
+    let run = uninstall_quietly(checks, &id, "")?;
+    checks.that(
+        "it still works",
+        run.success && !Path::new(&target).exists(),
+        &run.output,
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2757,7 +3867,134 @@ fn staging_folder_is_locked_down_and_fails_closed() -> TestResult {
     ))?;
     checks.same("no staging folder is left on that volume", left.trim(), "");
 
+    section("From another drive, what an install replaces is copied, and still comes back");
+    let plain_file = Path::new(&fat32_target).join("WAM E2E Plain Source.exe");
+    let hash_before = sha256_file(&plain_file)?;
+    fs::write(&plain_file, b"changed since")?;
+    let changed_hash = sha256_file(&plain_file)?;
+    let run = run_installer(
+        &installer,
+        &["--target-root", &fat32_target, "--apply", "--force"],
+    )?;
+    checks.that("the install over it succeeded", run.success, &run.output);
+    checks.same(
+        "the program is back to what the package holds",
+        sha256_file(&plain_file)?,
+        hash_before.clone(),
+    );
+    let id = install_id_in(&run.output)?;
+    let backups = Path::new(INSTALLS_DIR).join(&id).join("backups");
+    let names: Vec<String> = fs::read_dir(&backups)?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    checks.that(
+        "the backup is a copy, since a file cannot be moved between drives",
+        names.iter().any(|name| name.ends_with(".copied")),
+        format!("{names:?}"),
+    );
+    let run = uninstall_quietly(&mut checks, &id, "")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+    checks.same(
+        "what it replaced came back",
+        sha256_file(&plain_file)?,
+        changed_hash,
+    );
+
+    what_only_administrators_may_change_they_alone_can(&mut checks, &probe)?;
+
     checks.finish()
+}
+
+/// With a real account that is not an administrator. Everything an uninstaller trusts is here,
+/// and it runs elevated.
+fn what_only_administrators_may_change_they_alone_can(
+    checks: &mut Checks,
+    probe: &str,
+) -> TestResult {
+    section("An account that is not an administrator cannot change what an uninstaller trusts");
+    let package = hand_built_package("WAM E2E Protected Source")?;
+    let installer = package.build("protected")?;
+    let target = format!(r"{PROGRAM_FILES}\WAM E2E Protected");
+    let force = fs::create_dir_all(&target).and_then(|()| {
+        fs::write(
+            Path::new(&target).join("WAM E2E Protected Source.exe"),
+            b"something to replace",
+        )
+    });
+    force?;
+    let run = run_installer(
+        &installer,
+        &["--target-root", &target, "--apply", "--force"],
+    )?;
+    checks.that("the install succeeded", run.success, &run.output);
+    let id = install_id_in(&run.output)?;
+    let folder = format!(r"{INSTALLS_DIR}\{id}");
+    let uninstaller = format!(r"{folder}\uninstall.exe");
+    check_is_protected(checks, &folder)?;
+
+    let probe_with = |marker: &str,
+                      argument: &str,
+                      path: &str|
+     -> TestResult<Option<BTreeMap<String, String>>> {
+        remove_marker(marker);
+        let image = format!("\"{probe}\" --marker {marker} {argument} \"{path}\"");
+        must("sc.exe", &["config", "WamE2EProbe", "binPath=", &image])?;
+        let _ = tool("sc.exe", &["start", "WamE2EProbe"])?;
+        Ok(wait_for_marker(marker, Duration::from_secs(60)))
+    };
+    for (name, path) in [
+        ("the per-install folder", format!(r"{folder}\planted.txt")),
+        ("its journal", format!(r"{folder}\journal.jsonl")),
+        ("its uninstaller", uninstaller.clone()),
+        ("its backups", format!(r"{folder}\backups\planted.txt")),
+        (
+            "a backup itself",
+            format!(r"{folder}\backups\00000001.moved"),
+        ),
+        (
+            "the installs folder",
+            format!(r"{INSTALLS_DIR}\planted.txt"),
+        ),
+        ("the logs folder", format!(r"{LOGS_DIR}\planted.log")),
+        ("the state folder", format!(r"{STATE_ROOT}\planted.txt")),
+    ] {
+        let exists_before = Path::new(&path).exists();
+        let marker = probe_with("protected-write", "--try-write", &path)?;
+        let result = marker_field(&marker, "probe");
+        let who = marker_field(&marker, "who");
+        checks.that(
+            &format!("LocalService could not write to {name}"),
+            result.starts_with("refused") && who.contains("S-1-5-19"),
+            format!("{who}: {result}"),
+        );
+        checks.same(
+            &format!("nothing was planted in {name}"),
+            Path::new(&path).exists(),
+            exists_before,
+        );
+    }
+    let journal_read = probe_with(
+        "protected-read",
+        "--try-read",
+        &format!(r"{folder}\journal.jsonl"),
+    )?;
+    let result = marker_field(&journal_read, "read");
+    checks.that(
+        "LocalService cannot read the journal, which can hold what values held",
+        result.starts_with("refused"),
+        &result,
+    );
+    let started = probe_with("protected-run", "--try-run", &uninstaller)?;
+    checks.same(
+        "starting the uninstaller gets as far as Windows asking for elevation, so it can be \
+         started from Settings by someone who is not elevated yet",
+        marker_field(&started, "started"),
+        format!("refused: {ERROR_ELEVATION_REQUIRED}"),
+    );
+    let run = uninstall_quietly(checks, &id, "")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------
