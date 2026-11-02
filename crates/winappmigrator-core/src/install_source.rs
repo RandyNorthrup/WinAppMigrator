@@ -151,7 +151,14 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
         InstallMethod::WindowsInstaller => {
             let products = product_code
                 .as_deref()
-                .map(|code| msi_products_of(code, &app.display_name, system))
+                .map(|code| {
+                    msi_products_of(
+                        code,
+                        &app.display_name,
+                        app.install_scope == InstallScope::PerUser,
+                        system,
+                    )
+                })
                 .unwrap_or_default();
             if products.len() > 1 {
                 evidence.push(format!(
@@ -1491,12 +1498,22 @@ pub fn squish_guid(guid: &str) -> Option<String> {
 /// code of its own that owns no files, and only its hidden packages do. Each package's
 /// dependency key names the bundles that depend on it (WiX's dependency extension). A
 /// runtime the bundle merely chained is a prerequisite and stays out.
-fn msi_products_of(product_code: &str, display_name: &str, system: &SystemContext) -> Vec<String> {
+///
+/// An account's own hive says only what is so of an app of its own, since it takes no rights to
+/// write there, and it could otherwise add any product to a machine-wide app.
+fn msi_products_of(
+    product_code: &str,
+    display_name: &str,
+    of_users_too: bool,
+    system: &SystemContext,
+) -> Vec<String> {
     let mut products = vec![product_code.to_owned()];
     let mut dependency_keys: Vec<RegKey> = Vec::new();
     dependency_keys.extend(system.open_hklm(MSI_DEPENDENCIES_PATH, KEY_READ).ok());
-    for user in system.user_hives() {
-        dependency_keys.extend(user.open(MSI_DEPENDENCIES_PATH, KEY_READ).ok());
+    if of_users_too {
+        for user in system.user_hives() {
+            dependency_keys.extend(user.open(MSI_DEPENDENCIES_PATH, KEY_READ).ok());
+        }
     }
     for key in dependency_keys {
         for provider in key.enum_keys().flatten() {

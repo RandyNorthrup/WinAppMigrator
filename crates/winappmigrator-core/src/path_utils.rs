@@ -629,7 +629,9 @@ impl<F: FnMut(&Path, bool) -> bool> Iterator for AskingWalk<F> {
             }
             let entry = match self.open.last_mut()?.next() {
                 Some(Ok(entry)) => entry,
+                // It would likely say the same again, on a failing disk or a damaged folder.
                 Some(Err(error)) => {
+                    self.open.pop();
                     return Some(Err(WalkFailure {
                         path: PathBuf::new(),
                         error,

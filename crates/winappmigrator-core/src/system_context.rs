@@ -30,7 +30,7 @@
 //! reads). WinAppMigrator always runs elevated, so the mount succeeds; `reg load`
 //! surfaces any failure (missing hive, access denied) directly.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read as _;
@@ -629,21 +629,22 @@ pub struct OtherAccountsFolders {
     /// Where the app is, which is allowed to be in one if the scan found that it may be.
     app_folder: Option<PathBuf>,
     /// The links that were on the way to what is being copied, such as a folder moved to another
-    /// disk. Any other has been made since. A walk does not go through a link, so all of these are
-    /// above where it started.
-    links_seen: BTreeSet<String>,
+    /// disk, and where each led. Any other has been made since. A walk does not go through a link,
+    /// so all of these are above where it started.
+    links_seen: BTreeMap<String, PathBuf>,
 }
 
 impl OtherAccountsFolders {
     /// Whether a path leads somewhere it should not now, wherever it says it is: through a link that
-    /// was not there when it was scanned, or into one of the other accounts' folders.
+    /// was not there when it was scanned or leads somewhere else now, or into one of the other
+    /// accounts' folders.
     pub fn hold(&self, path: &Path) -> bool {
         if !self.is_of_this_pc {
             return false;
         }
         let has_a_new_link = path.ancestors().any(|step| {
             fs::symlink_metadata(step).is_ok_and(|metadata| metadata.file_type().is_symlink())
-                && !self.links_seen.contains(&comparison_key(step))
+                && self.links_seen.get(&comparison_key(step)) != Some(&resolved_location(step))
         });
         if has_a_new_link || !location_can_be_told(path) {
             return true;
@@ -1321,10 +1322,12 @@ impl SystemContext {
 
     /// Whether what an app installed for one account says is its own could be. Its entry in that
     /// account's registry takes no rights to write, and can name anything an administrator can
-    /// read, so it has to be in that account's profile, or that account has to own it. On a drive,
-    /// all of it is the owner's to read, and accounts there are checked by whose folder it is.
+    /// read, so it has to be in that account's profile, or that account has to own it. A drive
+    /// keeps who owns what, though not on a volume with no permissions, and `C:\\Windows.old` or the
+    /// recycle bin there are as much someone else's as a profile. Without elevation there is no one
+    /// to be fooled, since this reads only what its own account can.
     pub fn is_the_accounts_own(&self, path: &Path) -> bool {
-        if self.offline.is_some() || !is_elevated() {
+        if !is_elevated() {
             return self.may_read(path);
         }
         if self.is_in_the_accounts_profile(path) {
@@ -1371,7 +1374,7 @@ impl SystemContext {
             return OtherAccountsFolders::default();
         }
         let mut looked_at = BTreeSet::new();
-        let mut links_seen = BTreeSet::new();
+        let mut links_seen = BTreeMap::new();
         for path in to_copy {
             for step in path.ancestors() {
                 let key = comparison_key(step);
@@ -1381,7 +1384,7 @@ impl SystemContext {
                 if fs::symlink_metadata(step)
                     .is_ok_and(|metadata| metadata.file_type().is_symlink())
                 {
-                    links_seen.insert(key);
+                    links_seen.insert(key, resolved_location(step));
                 }
             }
         }
@@ -2230,7 +2233,7 @@ mod tests {
             is_of_this_pc: true,
             folders: vec![resolved_location(&bob)],
             app_folder: Some(resolved_location(&mine.join("app"))),
-            links_seen: BTreeSet::new(),
+            links_seen: BTreeMap::new(),
         };
         assert!(others.hold(&swapped.join("secret.txt")));
         assert!(others.hold(&bob.join("secret.txt")));
@@ -2239,7 +2242,7 @@ mod tests {
             is_of_this_pc: true,
             folders: vec![resolved_location(&bob)],
             app_folder: Some(resolved_location(&bob.join("Apps"))),
-            links_seen: BTreeSet::new(),
+            links_seen: BTreeMap::new(),
         };
         assert!(
             !in_theirs.hold(&bob.join(r"Apps\x.exe")),
@@ -2269,11 +2272,21 @@ mod tests {
         let moved_file = moved.join("x.txt");
         let scanned_after =
             system.other_accounts_folders(None, std::iter::once(moved_file.as_path()));
-        assert!(!scanned_after.links_seen.is_empty());
-        assert!(
-            scanned_after.links_seen.contains(&comparison_key(&moved)),
-            "it was there"
-        );
+        assert!(!scanned_after.hold(&moved_file), "it was there");
+
+        // The same link, leading somewhere else now.
+        let somewhere_else = work.path().join("somewhere else");
+        fs::create_dir_all(&somewhere_else)?;
+        fs::remove_dir(&moved)?;
+        let remade = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&moved)
+            .arg(&somewhere_else)
+            .output()?;
+        assert!(remade.status.success());
+        assert!(scanned_after.hold(&moved_file), "it leads somewhere else");
         Ok(())
     }
 

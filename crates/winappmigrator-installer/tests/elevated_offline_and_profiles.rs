@@ -59,6 +59,7 @@ const OTHER_SECRET: &str = "wam-other-account-private";
 const HOST_REGISTRY_KEY: &str = r"HKLM\SOFTWARE\WAM Host Registry Secret";
 const HOST_REGISTRY_TARGET: &str = r"\REGISTRY\MACHINE\SOFTWARE\WAM Host Registry Secret";
 const HOST_USER_KEY: &str = r"Software\WAM Host User Secret";
+const CLAIMING_APP: &str = "WAM Claiming App";
 /// Where this machine's own marker is, by a share of its own, which is enough to see a connection.
 const HOST_SHARE: &str = r"\\127.0.0.1\C$\WAM Host Secret";
 
@@ -1162,6 +1163,32 @@ fn edit_the_drives_registry(paths: &Paths) -> TestResult {
             )
         },
     )?;
+    // An account's own entry that claims what is left of someone else's, somewhere that is not a
+    // profile any more.
+    edit_hive(
+        &format!(r"{DRIVE_FOLDER}\Users\{}\NTUSER.DAT", paths.profile_name),
+        |key| {
+            let entry = format!(
+                r"{key}\Software\Microsoft\Windows\CurrentVersion\Uninstall\{CLAIMING_APP}"
+            );
+            reg_add(&entry, Some("DisplayName"), "REG_SZ", CLAIMING_APP)?;
+            reg_add(
+                &entry,
+                Some("InstallLocation"),
+                "REG_SZ",
+                &format!(r"C:\Windows.old\Users\{OTHER_ON_DRIVE}\Documents"),
+            )?;
+            reg_add(
+                &entry,
+                Some("DisplayIcon"),
+                "REG_SZ",
+                &format!(
+                    r"{}\AppData\Local\{CLAIMING_APP}\claiming.exe",
+                    paths.profile
+                ),
+            )
+        },
+    )?;
     // A known folder that is a link to a share.
     edit_hive(
         &format!(r"{DRIVE_FOLDER}\Users\{OTHER_ON_DRIVE}\NTUSER.DAT"),
@@ -1245,6 +1272,13 @@ fn plant_the_links(paths: &Paths, program: &Path) -> TestResult {
         must("cmd", &["/C", "mklink", "/D", &link, HOST_SHARE])?;
         fs::create_dir(format!(r"\\?\{link}."))?;
     }
+    // What is left of another account's, and an app of this one's that says that is where it is.
+    let old_documents = format!(r"{DRIVE_FOLDER}\Windows.old\Users\{OTHER_ON_DRIVE}\Documents");
+    fs::create_dir_all(&old_documents)?;
+    fs::write(format!(r"{old_documents}\old.txt"), OTHER_SECRET)?;
+    let claiming = format!(r"{profile}\AppData\Local\{CLAIMING_APP}");
+    fs::create_dir_all(&claiming)?;
+    fs::copy(program, format!(r"{claiming}\claiming.exe"))?;
     // The same under `Users` with a space, where the link reads as the real folder until something
     // is asked for inside it.
     fs::create_dir(format!(r"{DRIVE_FOLDER}\Users\spaced"))?;
@@ -2112,6 +2146,18 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
             checks.same("the marker is not in that either", holding.trim(), "");
         }
     }
+
+    section("An account's own entry cannot claim what it does not own, on a drive either");
+    let claiming = find_app(&apps, CLAIMING_APP)?;
+    println!("it reads as {claiming:?}");
+    let package = create_package(&package_options(
+        &claiming,
+        &work.path().join("claiming"),
+        source.clone(),
+        ProfileChoice::Default,
+    ))?;
+    let holding = files_holding(&package.package_root, OTHER_SECRET)?;
+    checks.same("none of what is there is in it", holding.trim(), "");
 
     section("A license store on the drive with links in it gets its own files and no others");
     let licensed = create_package(&PackageOptions {

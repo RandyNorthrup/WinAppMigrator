@@ -84,9 +84,9 @@ its own registry, and its own shortcuts. So what these say does not count for mu
 - Only the install location in an app's machine-wide record may be in another account's folder, and only as it is
   written, with no link on the way. Any account may be able to make a folder on `C:\`.
 - An app installed for one account has to be in that account's profile or be owned by that account, its folder as well as
-  its program. That covers a redirected folder outside a profile, which no profile check would see. On this PC that is
-  asked of Windows' owner for the folder, so an app that account's installer put somewhere as an administrator is
-  refused too, and says so.
+  its program. That covers a redirected folder outside a profile, which no profile check would see, and on a drive, what is
+  left of an account in `Windows.old` or the recycle bin. It goes by the folder's owner, which a drive keeps, so an app that
+  account's installer put somewhere as an administrator, or on a volume with no permissions, is refused too, and says so.
 - A machine-wide app does not go by an account's shortcut or App Paths key to find its program, since either could name
   any folder, which would be taken whole.
 - What is found by an app's name in an account's `AppData`, Documents, or Saved Games has the same rule: it has to be in
@@ -113,9 +113,11 @@ folder redirected to a share is not included, and an app on a share cannot be bu
 folder, or goes through a link that was not there when it was scanned. Whoever can write in a scanned folder could make
 part of it a link and undo that around the moment a file is opened, and they would have to know a name that is there.
 Closing that needs the opened file's own path from Windows, which takes `unsafe` code this project does not otherwise
-have in the core. A stale machine-wide record that names a folder any account can make, on `C:\`, can lead to wherever a
+have in the core. A link that was there when scanned is asked about too, in case it leads elsewhere by then. A stale
+machine-wide record that names a folder any account can make, on `C:\`, can lead to wherever a
 link there does, as long as that is not in another account's profile. A symbolic link to a share, which needs
-Developer Mode or that right, is also still followed on this PC when finding where a folder really is. Folder and task
+Developer Mode or that right, is also still followed on this PC, by anything looking at a folder an account's value or
+listing names. Folder and task
 names of other accounts can appear in a package's warnings. The folder picker is Windows' own and runs before any of
 this, so what the shell itself does on browsing a hostile drive is not something this controls. An installer is written
 where whoever runs the app says, by default in that account's folders, not those of whoever is signed in, whose data it may

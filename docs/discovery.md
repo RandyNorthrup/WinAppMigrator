@@ -351,14 +351,16 @@ has to pass the same check, since a link there or a value for where Documents ar
 A machine-wide app finds its program by `ExecutableHints::read_machine_wide`, which leaves out an account's own shortcuts
 and App Paths. Its Inno Setup or NSIS log is only used if only administrators can change it
 (`privilege::only_administrators_can_change`), since that names files and registry values to package and sits in the
-app's own folder. None of these ownership checks apply on a drive, whose accounts are all the owner's to read, but which
-is held to the rule above about whose folder something is in.
+app's own folder, and an account's own hive does not add MSI products to it. A log is taken at its word on a drive, where it
+cannot lead off the drive and is held to the rules above, and a drive keeps who owns a folder, so that is read the same
+way there. It cannot be told on a volume with no permissions, and something outside the account's profile is refused then.
 
 A folder named for an app in `ProgramData` or Public Documents that is a link is left out, since any account can make one.
 Whether something is in a folder goes by where both really are (`is_really_within`), and a place with no name to give, such
 as a shadow copy, cannot be told at all (`location_can_be_told`), so it counts as refused. A build asks again before and
 after copying each file on this PC whether it leads into another account's folder or goes through a link that was not there
-when it was scanned (`OtherAccountsFolders`), since whoever can write in a scanned folder can change what is there.
+when it was scanned, or that leads somewhere else now (`OtherAccountsFolders`), since whoever can write in a scanned folder
+can change what is there.
 
 `profile_survey.rs` finds out who has data for an app, so that the app can ask. It loads every hive once,
 when the list of apps is read, and keeps only the names of keys under `Software`. Asking about an app

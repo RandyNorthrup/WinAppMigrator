@@ -752,8 +752,10 @@ pub(crate) fn copy_file_backup_mode(source: &Path, destination: &Path) -> Result
         .arg(source_dir)
         .arg(destination_dir)
         .arg(file_name)
+        // It goes by the name, ignoring case, and a folder can be case-sensitive, so `/XJ`: a link
+        // of the same name must not be what is copied.
         .args([
-            "/B", "/NJH", "/NJS", "/NP", "/NDL", "/NC", "/NS", "/R:1", "/W:1",
+            "/B", "/XJ", "/NJH", "/NJS", "/NP", "/NDL", "/NC", "/NS", "/R:1", "/W:1",
         ])
         .status()
         .map_err(|error| WinAppMigratorError::io(source, error))?;
