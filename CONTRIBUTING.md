@@ -44,6 +44,13 @@ removes all of it, runs the installer, and checks the machine with Windows' own 
 app's verifier. Packages written by hand cover what a scan cannot produce, such as asking for what
 the rules refuse.
 
+Another app is tied into Windows every way there is: COM, a link protocol, a file type, a shell extension,
+firewall rules, an event log source, fonts, an ODBC driver and source, 32-bit Run and App Paths, and compatibility
+settings, with another app's entries beside it from before to the end. Canaries in what looks like a credential
+or a license are searched for in the unpacked package and the logs, and hostile packages ask for each thing
+the rules refuse, and for what is already there. Each runtime spec's URL is really downloaded and checked as
+Microsoft's.
+
 It then takes that install back out every way that can happen, comparing the machine before and after:
 an uninstall run from the command line Windows has for it, with and without things another program
 changed in between, a failure late in an install, and an installer killed part-way and while undoing

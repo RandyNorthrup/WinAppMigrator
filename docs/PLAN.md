@@ -52,6 +52,14 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   (`elevated_offline_and_profiles.rs`) does the same from a real NTFS drive made hostile on purpose,
   with real second accounts, and against every real scheduled task. See
   [CONTRIBUTING](../CONTRIBUTING.md).
+- What ties an app into Windows: COM with its type libraries, interfaces, and AppIDs, ProgIDs, URL
+  protocols, `OpenWithProgids`, shell extensions, `RegisteredApplications`, firewall rules, fonts, ODBC, event
+  log sources, compatibility settings, and 32-bit Run and App Paths, each the app's by what it points at, all
+  restored by rules, in the consent list, and journaled. Certificates are only reported.
+- Credentials are left out and named, whatever else was asked for, and with the License option off so are
+  licenses. What that cannot catch is in [SECURITY](../SECURITY.md#an-installer-can-contain-secrets).
+- Runtimes read from all of an app's programs: Visual C++ by each version, and .NET from its
+  `runtimeconfig.json` and its own metadata, telling .NET Framework from modern .NET.
 - Dev/release build profiles tuned (deps + first-party optimized in dev for fast
   tests; LTO + single codegen unit + strip in release).
 
@@ -79,36 +87,28 @@ a single launched-window screenshot — never scripted clicks on a live window.
 
 From the audit of 2026-11-01. Items are removed from this list as they are fixed.
 
-**Accuracy**
-
-1. **Missing integrations.** URL protocols, shell extensions, TypeLib/AppID, firewall rules,
-   fonts, certificates, ODBC, event log sources, and 32-bit Run and App Paths keys.
-
 **Security and data safety**
 
-2. **An unsigned package still cannot be authenticated.** Restore rules limit what a package
+1. **An unsigned package still cannot be authenticated.** Restore rules limit what a package
    can ask for, but it can run its own files with full rights, and its hashes travel with it.
    Only signing a finished installer proves origin. An install location outside a protected
    folder also stays writable by other programs on the PC, which can race the link checks and
    change installed files afterward. A program already on the PC can swap a running installer's
    file in the moment before it opens it, which a handle to the running image would close.
-3. **Secrets.** All values under an app's registry keys and license files in its install
-   folder are captured even with the license option off. Apply the license classifiers
-   when opted out, and redact secret-named values.
 
 **Performance**
 
-4. Every byte is read about five times to build and four times to install. Hash while
+2. Every byte is read about five times to build and four times to install. Hash while
    copying, in parallel.
-5. Compression is single-threaded, and recompresses formats that are already compressed.
+3. Compression is single-threaded, and recompresses formats that are already compressed.
 
 **Features**
 
-6. Footprint preview with include and exclude before building, offering folders that nearly
+4. Footprint preview with include and exclude before building, offering folders that nearly
    match the product's name, which are now left out.
-7. Size and free-space check before building.
-8. A way past the 4 GiB limit: a small loader plus a data file beside it.
-9. Target OS and architecture check.
+5. Size and free-space check before building.
+6. A way past the 4 GiB limit: a small loader plus a data file beside it.
+7. Target OS and architecture check.
 
 ## Not in scope for this release line
 

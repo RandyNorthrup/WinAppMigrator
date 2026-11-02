@@ -9,8 +9,8 @@ rather than in a public issue. Include the version and the steps to reproduce it
 ## What to know before you run an installer
 
 An installer built with WinAppMigrator runs **elevated** and reinstalls what its package
-describes: files, registry values, services, drivers, scheduled tasks, shortcuts, and runtime
-installers.
+describes: files, registry values, services, drivers, scheduled tasks, shortcuts, firewall rules,
+and runtime installers.
 
 **The package is not authenticated.** Its hashes catch damage, and an edit by anyone who does not
 also update them, because they travel with it. An installer can only be proven to come from
@@ -31,10 +31,52 @@ installer is about to trust, and an honest package reaching too far:
   over a service, task, or COM class already on the PC. Which installer runs for a runtime, and how,
   is compiled in, and the file must be signed by Microsoft. What is refused is listed. The lists are
   of what is known to be dangerous, so a package can still do something they do not name.
+- **What ties an app into Windows has rules of its own,** in one place. A class, interface, type library,
+  AppID, event source, and ODBC driver or source is all or nothing, and one part refused takes the rest with it:
+  - A COM class's server, a link protocol's command, and what a shell extension loads have to be files the
+    package installs. Windows' own only counts as a server from a short list of what hosts a class, by exact name
+    and with nothing after it. So `scrobj.dll` and `cmd.exe` do not count, and neither does a share.
+  - A file type can run through a program of Windows' only from a short list, such as `wscript.exe` and
+    `rundll32.exe`, and only if it is handed a file of the package straight away. `cmd.exe /c anything <file>` does
+    not count, and what comes after that file goes to it. A value registering any of this cannot start with a network
+    path, even for an icon, since Windows opens one just by showing it. One that reaches a share through a variable is
+    not caught by that, and it is shown in the list of what is set up.
+  - An interface goes through a class of the package, or Windows' marshaler and a type library of the package. An
+    AppID cannot run as an account or on another PC. `AppID\<program>` has to be for a file of the package, and not
+    one in Windows' own program folders. That is by file name, so a package could ship a file named for
+    another app's program, if that app has no such key.
+  - `Applications\<program>`, which is what "Open with" goes by, has to be for a file of the package too. A verb
+    can only run what its command says: `IsolatedCommand` is held to the same rule, and `CommandStore` is refused.
+  - A firewall rule is for one program the package installs, never for all, and cannot override other rules or let
+    traffic in through NAT. It is set through `netsh`, and an uninstall takes out a rule of that name, way, program,
+    protocol, and ports, if it is still as it was added.
+  - An event log source is only a new one, whose messages come from files the package installs. Nothing about a log
+    itself can be changed, and no source is added to the Security log.
+  - An ODBC driver's files have to be the package's, and a source's driver has to be the package's or Windows', with
+    what else it loads the package's. ODBC's own settings, including what traces every call, cannot be set. A font is
+    only registered by a path the package installs.
+  - **A certificate is never added.** `SystemCertificates` stays refused, and the installer names the ones the app
+    seemed to rely on for you to decide about.
+  - **What the PC already has as something else's stays.** That goes for a protocol, a file type, what opening one does,
+    a class in either view or either hive, with or without a server of its own, an interface, a type library, an AppID,
+    an event source in any log, a font, a driver, a source, a program name, what "Open with" goes by, a Default apps entry,
+    an autostart value, and a firewall rule that says something else. `--force` does not change it. The only thing a
+    package can then ask for is exactly what is there. So a server copied from this PC does not let in what comes
+    beside it, and for these, a value only added to something of someone else's is refused like one that replaces it.
+    Any app can add a verb of its own to a type that is another's, as "Git Bash Here" does, if it runs the package's own
+    file, and `http` and the like can gain one too, while what opens them now stays.
+  - **Being in the install location says nothing by itself.** A package suggests that place, so a package that said its
+    home was another app's folder could otherwise call everything of that app's its own. What is on this PC only counts
+    as an earlier install there if a record in the admin-only folder says one was. That goes for services, drivers, and
+    tasks too. It does not go for files: `--force` replaces a file of the same name wherever it is put, which the
+    installer warns of, and an uninstall puts back.
 - **The rules do not make a package safe.** A package may still run its own files, as a service
   with full rights if it asks to. That is what installing an app is. Before anything happens, the
-  installer's window lists the services, drivers, scheduled tasks, autostart entries, shortcuts, and
-  `Path` changes it will set up, what it will leave out, and whether it is signed and by whom. Read it.
+  installer's window lists the services, drivers, scheduled tasks, autostart entries, shortcuts,
+  `Path` changes, shell extensions, menu commands, link protocols, file types, COM classes and
+  permissions, firewall rules, event log sources, fonts, ODBC drivers and sources, compatibility settings,
+  and Default apps entries it will set up, what it will leave out, and whether it is signed and by whom. Read it.
+  Each of them is journaled first, so a rollback and an uninstall take it back out.
 - **While it runs,** its staging folder is writable only by administrators, and a drive that cannot
   keep that, such as FAT32 or exFAT, is not used for it. That folder and the install location cannot be
   renamed and replaced, and it will not write through a link at or below the install location. From
@@ -183,12 +225,34 @@ may be able to write to.
 
 ## An installer can contain secrets
 
-Treat an installer as being as sensitive as the PC it came from. WinAppMigrator does not hunt
-for secrets, but it copies what an app keeps in its own folders and registry keys, which can
-include license keys, tokens, and saved passwords. That happens even with the License option
-off, for example a license file in the install folder or a value under the app's registry key.
-The User data option adds one account's settings and documents. The package also records the
-name of the computer the app was on, and the name of that account's profile folder.
+Treat an installer as being as sensitive as the PC it came from.
+
+**What is left out.** A registry value, a service's setting, an environment variable, or a command-line
+option named for a credential (`Password`, `ApiKey`, `Token`, `ClientSecret`, and so on), or holding a connection
+string or URL with one in it, or a blob only DPAPI can read, is not captured at all, whatever else was asked
+for. Nor are files named for what they hold (`.env`, `id_rsa`, `credentials.json`, a browser's `Login Data`,
+`*.pfx`, `*.kdbx`, and so on), or a `.pem` or `.key` that holds a private key. They are named when you build and in the
+installer, and never with what they hold. Since there is nothing of them in a package, there is nothing to
+overwrite what the other PC has, and you may have to enter them again.
+
+With the License option off, the same goes for license files, values, variables, and options, by the same rules
+that find them when it is on. With it on, licenses come along and credentials still do not.
+
+**What this cannot catch.** This goes by names and a few shapes of text, and a heuristic cannot find every secret:
+
+- It does not look inside an app's own files. A password in a settings file, a database, or a format of its own is
+  copied like the rest of the file, and that goes for everything the User data option adds.
+- A value whose name does not say what it holds, such as `Data` or `Blob1`, is captured, unless what it holds has one
+  of those shapes.
+- Rules that catch more would break more apps, so `TokenizerPath` and `PasswordPolicyVersion` are kept, and a file
+  called `tokens.txt` is too.
+- What is encrypted some other way than DPAPI is copied as it is, and is not decrypted to look.
+
+So an installer can contain secrets, and **it has to be handled accordingly**: do not post one or send it to anyone you
+would not hand the PC to. Reading the list of what was left out tells you what was found, and says nothing of what
+was not.
+
+The package also records the name of the computer the app was on, and the name of that account's profile folder.
 
 ## How the executables protect themselves
 

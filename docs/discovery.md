@@ -375,9 +375,9 @@ copyable_bytes, included }` groups the inventory by root for the report.
 ## Registry, services, and other integrations
 
 - `registry_scan.rs` captures the keys and values the install record names, values under
-  the app's keys, COM registrations and file associations that point at the app, Run keys,
-  and App Paths. Under `Software`, in both the normal and `WOW6432Node` views, a key counts
-  when:
+  the app's keys, Run keys, and App Paths, and takes what ties the app into Windows from
+  `integration_scan.rs`, below. Under `Software`, in both the normal and `WOW6432Node` views, a key
+  counts when:
   - it is named for the product, by the same rules as folders (`Software\7-Zip`,
     `Software\Mozilla\Firefox`), or
   - it records the install folder in a value named for that, such as `InstallDir`, so VLC's
@@ -390,12 +390,11 @@ copyable_bytes, included }` groups the inventory by root for the report.
 
   A value points at the app only if it names the executable or a path inside the install
   folder as a whole path, so `C:\Program Files\Git` is not `C:\Program Files\GitHub CLI`. A
-  bare `rundll32.exe` in a command matches nothing. A file type counts as the app's only when
-  opening it or its icon points there. Otherwise just the verbs the app added to it are
-  captured, so Windows' `LibraryFolder` is not copied because PowerShell added a verb.
+  bare `rundll32.exe` in a command matches nothing.
 
-  Every value under a matched key is captured, whatever its name, so a key's license or token
-  values come along even with the license option off.
+  On Windows 10 and 11, `WOW6432Node\...\App Paths` is the same key as the other, seen through the 32-bit
+  view, which the runner shows, and a mounted hive does not have that link to read. So only what the
+  plain view does not have is taken from it, which on those versions is nothing. A 32-bit `Run` key is its own.
 - `service_scan.rs` captures services and drivers whose image is the main executable or
   under the install location, with a service's arguments and `Parameters` key.
   `parse_image_path` reads an `ImagePath` however it is written: quoted or not, `\??\` and
@@ -416,8 +415,63 @@ copyable_bytes, included }` groups the inventory by root for the report.
   captured `Path` is merged on restore: only entries under the install location are added
   to the target's value, which is otherwise left alone.
 
-Not captured: URL protocols, shell extensions, TypeLib and AppID registrations, firewall
-rules, fonts, certificates, ODBC sources, and event log sources.
+### What ties an app into Windows
+
+`integration_scan.rs` finds the rest, for the machine and for the account being read, on this PC or a
+connected drive, through `SystemContext`. **An entry is the app's if what it points at is.** Its name says
+nothing, since these sit side by side with everyone else's. Each is read for the file it names, and that is compared
+with the files the app has, as its own PC calls them. On a connected drive that is only ever text, so nothing can be
+led to the host's files, and per-user classes are read from `UsrClass.dat`.
+
+| | What makes it the app's |
+| --- | --- |
+| **COM class** | A server is a file of the app and none is someone else's, or Windows hosts it and its `CodeBase`, icon, or instance properties are. A server that is someone else's makes the class theirs, whatever else in it mentions the app. Read in both views, for the machine and the account |
+| **ProgID** | What opening it runs is the app, or with no command to go by, its `CLSID` is. A class naming a ProgID does not make it the app's unless that names the class back |
+| **Type library** | A `win32`, `win64`, or `arm64` file is the app's. A class naming one does not make it so |
+| **Interface** | Its `ProxyStubClsid32` is a class of the app's, or its `TypeLib` is a library of the app's |
+| **AppID** | A class of the app's names it, or `AppID\<its server>` names one of those |
+| **URL protocol, file type** | What it opens is the app, which goes for `http` only if it is the browser that has it. Anything else only has the verbs and handlers the app added to it |
+| **`OpenWithProgids`, `OpenWithList`** | Only the app's own line in a list that is the type's, not the rest of it |
+| **Shell extensions** | `shellex` handlers, icon overlays, the `Approved` list, and Explorer namespaces, that name a class of the app's |
+| **`RegisteredApplications`, `Clients`** | Its capabilities have an icon of the app's or open a type of the app's, or what a client opens or shows as its icon is the app |
+| **Firewall rule** | Its program is a file of the app |
+| **Font** | Registered by a path to a file of the app. One in `C:\Windows\Fonts` only if a machine-wide install record names it, which is then copied under the install location and never into Windows' folder. One with the app's name that nothing says is its own is reported |
+| **ODBC driver** | Its `Driver` or `Setup` is a file of the app |
+| **ODBC source** | It uses a driver of the app's, or has the app's exact name. One using Windows' driver under another name says nothing of whose it is, so it is missed, on purpose. Its password is left out like any |
+| **Event log source** | One of its message files is a file of the app |
+| **Compatibility setting** | It is for a program of the app |
+| **Certificate** | Reported only, never restored: one in a trust store of the machine or the account whose subject names the app or its publisher. So one that names neither is not found |
+
+The reverse lookup is once per scan. Each key under `CLSID`, `Interface`, and `Classes` has only what says what runs
+read from it, in place of a walk of each subtree. These are the largest keys there are, 30,000 under `Interface` on a
+PC with Visual Studio, so they are gone through on a few threads, each with its own handle, which only read. What they
+find is then captured one at a time. `Interface` is only read in a view that has one of the app's classes in it,
+or with a type library of the app's.
+
+### What is not captured at all
+
+`secret_rules.rs` holds what looks like a credential, and its rules are pure, with false positives pinned by tests. What
+it takes for one is not in a package, whatever else was asked for, and is named in `secrets_left_out`, in the report, and
+by the installer. There is nothing to redact, so nothing can overwrite a real value on the other PC.
+
+- A value goes by its name, by words: `DbPassword`, `db_password`, `dbpassword`, and `PassWord2` are all one, and
+  `PasswordPolicyVersion`, `TokenizerPath`, `MaxTokens`, and `RememberPassword` are settings about one. A default
+  value goes by its key's name, unless that is a file type. A number or flag holds nothing, and neither does what
+  Windows fills in, such as `%1`.
+- Whatever it is called, a value is left out if it holds a connection string or URL with a password in it, a command with
+  an option named for one, or a blob only DPAPI can read.
+- A command line loses just the option: a service's arguments and its suggested `sc.exe` command, a task's arguments and
+  definition, a shortcut's arguments, what opens a file type, and the uninstall string. A task definition that cannot be
+  read to check it is dropped.
+- A file goes by its name (`.env`, `id_rsa`, `credentials.json`, and so on) or its extension (`*.pfx`, `*.kdbx`). A `.pem` or
+  `.key` only if a private key is in it, since Git and Python each ship a `cacert.pem` they cannot work without.
+
+With the License option off, `license_scan.rs`'s own rules take license files, values, service settings, command-line
+options, and variables out in the same way, named in `licenses_left_out`. Its FlexLM, CodeMeter, and Sentinel stores count only
+for an app with that framework's client files, and a `*_LICENSE_FILE` variable only if it names the app or its folder. A file
+in a store that looks like a credential is not copied either.
+
+This cannot catch everything. See [SECURITY.md](../SECURITY.md#an-installer-can-contain-secrets).
 
 ## Options
 
@@ -435,32 +489,36 @@ rules, fonts, certificates, ODBC sources, and event log sources.
 
 ## Runtime prerequisites
 
-`scan::runtime_prerequisites_from_signals` infers the runtimes an app needs from
-its imports, app-local DLLs, and footprint, and `prerequisites.rs` resolves each
-to a concrete on-target plan (bundled installer, winget, or a Windows optional
-feature), verified by a registry probe where one exists. A package records which kind and
-build it needs and any payload it bundled. Everything that decides what runs comes from the
-specs compiled into `prerequisites.rs`, and a payload must be signed by Microsoft.
+`runtime_detection.rs` reads what an app needs from all of its programs, and `prerequisites.rs` resolves each
+to a concrete on-target plan (bundled installer, winget, or a Windows optional feature), verified by a registry probe
+where one exists. A package records which kind and build it needs and any payload it bundled. Everything that decides
+what runs comes from the specs compiled into `prerequisites.rs`, and a payload must be signed by Microsoft.
 
-The Visual C++ redistributable is downloaded at build time and embedded. If that download
-fails, the build warns and the installer tries winget on the target. The detection is
-coarse: every VC++ version maps to the 2015+ redistributable, and the `msvcr`/`msvcp`
-prefixes also match Windows' own `msvcrt.dll`.
+**Which programs.** Each of the app's programs counts for its own build, shallowest first, with the DLLs they import from their
+own folders, up to 64 programs, 512 files, and 2 GiB read, and a warning if that was reached. What exists to install or support an
+app is left out, by `is_auxiliary_executable`, by folders such as `_CommonRedist`, and by the likes of `wininst` and
+Squirrel. So are the Arm64 launchers packaging tools leave around, on an app that is not Arm64.
 
-.NET is detected by reading the managed image's **CLR metadata-root version**
-(`pe_scan::dotnet_metadata_version`, the `BSJB` root's version string):
+**Visual C++.** A DLL is the runtime its name says, by the digits in it (`msvcr120`, `msvcp140`, `vcruntime140`, `mfc100`, and the
+rest), so `msvcrt.dll` and `mfc42.dll`, which are Windows' own, are not one at all. Every version from 2005 has a spec of its own,
+with its own Microsoft URL, downloaded at build time and embedded, and winget on the target if that failed. 2005 and 2008 have
+no probe, so their installers are always run. 2003 and earlier have no installer here, and a debug build's DLLs are
+not something Microsoft redistributes, so each of those is named in a warning.
 
-- `mscoree`/`clr` host + CLR `v1.x`/`v2.0` → **.NET Framework 3.5**
-  (`DotNetFramework35`), installed by enabling the **`NetFx3` Windows optional
-  feature via DISM** (`/online /enable-feature /featurename:NetFx3 /all`). The
-  payload comes from Windows Update or install media; on failure the installer
-  gives an actionable fallback message.
-- `mscoree` host + CLR `v4.0` → **.NET Framework 4.x** (`DotNetFramework4x`),
-  in-box on Windows 10/11 — listed and probed, never installed.
-- `hostfxr`/`coreclr` → self-contained modern .NET (ships app-local).
-- Otherwise a managed image → modern **.NET Desktop Runtime**, installed on the target
-  through winget (`Microsoft.DotNet.DesktopRuntime.8`, whatever version the app needs), so
-  it needs internet there. It has no presence probe.
+**.NET** is told by what it says of itself, since .NET Framework and modern .NET both say `v4.0.30319`:
+
+- A `*.runtimeconfig.json` beside a program gives the framework and its major version, and a self-contained one needs nothing.
+- Otherwise the assembly's own metadata: its `TargetFramework` attribute, and whether it refers to `mscorlib`, and to the
+  desktop and ASP.NET Core assemblies.
+- CLR `v1.x` or `v2.0` is **.NET Framework 3.5**, installed by enabling the **`NetFx3` Windows optional feature via DISM**
+  (`/online /enable-feature /featurename:NetFx3 /all`). The payload comes from Windows Update or install media.
+- CLR `v4.0` without those is **.NET Framework 4.x**, in-box on Windows 10 and 11: listed and probed, never installed.
+- Modern .NET is the **.NET, Desktop, or ASP.NET Core runtime** of that major version. 6 to 10 have a spec, from `aka.ms/dotnet`,
+  embedded like Visual C++, with winget as what is left. No such ASP.NET Core 6 for Arm64 exists. Any other version
+  is named in a warning, and nothing is installed in its place. There is no probe, since its versions are values
+  named after each build, and an installer run on top of itself just exits.
+
+Each URL is really downloaded, and checked as Microsoft's with `Get-AuthenticodeSignature`, on the throwaway runner.
 
 ## Scanning an offline volume (a disk from another PC)
 
@@ -598,8 +656,27 @@ applies them to a whole package. Restoring, verification, and the installer's wi
 from the same review, so verification expects exactly what was allowed. What is refused goes
 in `RestoreResult.refused`, and the rest of the install goes ahead.
 
-Any rule added for a new kind of capture belongs there too. Event log sources, for example, live
-under `SYSTEM\CurrentControlSet\Services\EventLog`, which is refused today because nothing writes it.
+Any rule added for a new kind of capture belongs there too.
+
+What ties an app into Windows goes by what points at what. `PackageRegistrations` says what a whole package has,
+and `registration_refusal` and `registered_value_refusal` go by that. A class counts as the package's only if a server it has
+is, and no other is anything but one of Windows' hosts. A unit, meaning a class, interface, type library, AppID, event source, ODBC
+driver or source, program name, `Applications\<program>`, or `Clients` entry, is all or nothing when it is refused as a whole.
+A single value refused for what it says by itself, such as an icon on a share, is only that value.
+
+What depends on what this PC has can only be seen when installing, so `restore.rs` looks then. A class, or a unit of any of those
+kinds, whose key is there and is not from an earlier install here, is left alone unless the package has exactly what is there. That
+goes for both views, and for the machine's as well as the account's, since a per-user registration wins over the machine's. So do
+a type or protocol that says what it is, by what opens it or by which verb it starts with, an autostart value, a font, and a Default
+apps entry. A verb the package only adds to a type goes by that verb alone. They go in `RestoreResult.refused`, as "left out", and
+`--force` does not change it.
+
+**An earlier install here** means a record in the admin-only folder says one was at this location. A package suggests the location
+itself, so what is on this PC does not count as the package's for naming it. Services, drivers, and tasks go by the same.
+
+A firewall rule is told from another by its name, way, program, protocol, and ports, and one like it that says something else
+is left alone. A journal entry goes first, and rollback and uninstall take out only that one by all of those. Rules that differ
+by nothing but their profile or addresses are taken for one, so only the first is added, and it says it was already there.
 
 ## Known limitations
 
@@ -624,3 +701,7 @@ The ones that most affect what gets captured:
   opens the app cannot be told without Windows' help, and it is counted and left out.
 - **Size.** Windows cannot start an executable of 4 GiB or more, so a larger package fails
   the build with that reason.
+- **An ODBC source that uses Windows' own driver goes by the app's exact name.** It points at a driver, and not at
+  the app, so one named anything else stays behind.
+- **A secret can be missed.** The rules go by names and a few shapes of text. See
+  [What is not captured at all](#what-is-not-captured-at-all).

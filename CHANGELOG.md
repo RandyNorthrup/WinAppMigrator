@@ -4,6 +4,31 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **What ties an app into Windows now comes along.** COM type libraries, interfaces, AppIDs, and ProgIDs, per-user
+  32-bit classes, URL protocols, `OpenWithProgids`, context menu handlers, icon overlays, the `Shell Extensions\Approved` list,
+  Explorer namespaces, `RegisteredApplications` and `Clients` entries, firewall rules, fonts, ODBC drivers and sources,
+  event log sources, compatibility settings, and 32-bit Run keys. Each is the app's by what it points at, with an exact name
+  only for a data source, so another app's class or file type does not come along, on this PC or a connected drive.
+- **All of that goes by the rules, in the list you agree to, and comes back out.** What it runs or loads has to be a file the
+  package installs. Firewall rules go through `netsh`, for one program, never all. Anything the PC already has as something
+  else's stays, `--force` or not, including `http`, a class in either view or hive, and an event source in any log. A rollback
+  and an uninstall take each of them back out. Fonts in `C:\Windows\Fonts` are copied to the install folder only if a
+  machine-wide install record names them, and otherwise reported.
+- **Certificates are reported, and never installed.** A package cannot add to a trust store. The ones an app seems to rely on are
+  named for you to decide about.
+- **Credentials are left out of a package, and named.** Values, service settings, variables, command-line options, and files that
+  look like passwords, tokens, or private keys are not captured at all, even with the License option on, so a package has
+  nothing to overwrite what the other PC has. This goes by names and shapes of text, so it cannot catch everything, and an installer
+  should still be handled as being as sensitive as the PC it came from.
+- **The License option now means what it says.** With it off, license files, values, service settings, options, and variables are not
+  captured at all, and only their names are noted. Before, a license file in the install folder and every value under an app's keys
+  came along anyway, and a variable's value was recorded. A framework's license store and a `*_LICENSE_FILE` variable also have to be tied
+  to the app now.
+- **Runtimes are read from all of an app's programs, as what they are.** A Visual C++ DLL is the version its name says, and Windows' own
+  `msvcrt.dll` no longer counts as one. Every version from 2005 has its own installer, and every .NET version is no longer .NET 8:
+  it comes from `runtimeconfig.json` and the assembly's own metadata, which also tell .NET Framework from modern .NET. .NET 6 to 10 are
+  now embedded when you build, like Visual C++. A runtime with no installer here is named in a warning, and nothing is installed in its place.
+- **The installer prints what it will set up before it starts,** when run from a script, and what each warning and error is about.
 - **Building from a connected drive works, and has been run for real.** It compared the registry's `C:\` paths
   with `E:\` paths, so COM classes, file associations, Run keys, App Paths, and environment variables never
   matched, and it had never been tried on a real drive. They are compared as the source PC called them now, so

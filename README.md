@@ -43,12 +43,13 @@ services, and runtimes, and packs them into a single `.exe`.
 
 - **One file.** The app is one portable `.exe`, and so is every installer it builds.
 - **Works from a pulled drive.** Connect the disk from a failed PC and pick an app from it.
-- **Brings the runtimes along.** The Visual C++ runtime is downloaded when you build and embedded, so it
-  installs without internet.
+- **Brings the runtimes along.** The Visual C++ and .NET runtimes an app needs are downloaded when you build
+  and embedded, so they install without internet.
 - **Checks its work.** The installer checks its package's hashes before writing anything, then checks
   the files it installed.
 - **Says what it will do.** Before installing, it lists the services, drivers, scheduled tasks, autostart
-  entries, shortcuts, and `Path` changes it sets up, and whether it is signed and by whom. A preview goes
+  entries, shortcuts, `Path` changes, shell extensions, link protocols, file types, COM classes, firewall rules,
+  and the rest of what it sets up, what it left out, and whether it is signed and by whom. A preview goes
   further, listing every change.
 - **Can be undone.** If anything goes wrong, or you cancel, everything is put back. Later, you can uninstall
   it from Settings like any other app, and files it replaced come back.
@@ -98,12 +99,15 @@ installer opens in the theme it was built with.</sub>
 | | Included | Notes |
 | --- | --- | --- |
 | **Program files** | Always | Found through MSI and Inno Setup records, NSIS logs, App Paths, and folders named exactly for the product |
-| **Registry** | Always | The app's keys, plus COM and file associations pointing at it |
+| **Registry** | Always | The app's keys, plus what points at a file it has: COM classes with their type libraries, interfaces, and AppIDs, file types, link protocols, menu commands, shell extensions, Default apps entries, and 32-bit Run and App Paths entries |
+| **Firewall rules, fonts, ODBC, event log sources, compatibility settings** | Always | Each only for a file the app has. A font in `C:\Windows\Fonts` comes only if a machine-wide install record names it, and goes in the install folder |
+| **Certificates** | Reported only | The ones the app seems to rely on are named. They are never installed, because whether to trust one is for you to decide |
 | **Services and drivers** | Always | Services keep their arguments, settings, and built-in account. A custom account's password cannot be moved, so that service is set up as LocalService and the installer says so. Drivers the app owns are re-registered. Vendor and inbox drivers are reported instead, because they cannot be redistributed |
 | **Scheduled tasks, shortcuts, environment variables** | Always | A captured `Path` is merged into the target's, never replaced |
-| **Runtimes** | Always | Visual C++ is embedded, or comes through winget if its download failed at build time. .NET comes through winget or a Windows feature, or is part of Windows already, so it can need internet on the target |
+| **Runtimes** | Always | Read from all of the app's programs. Visual C++ 2005 and later, and .NET 6 to 10, are embedded, or come through winget if the download failed at build time. .NET Framework 3.5 is a Windows feature that can need internet on the target, and 4.x is part of Windows. A runtime with no installer here, such as Visual C++ 2003 or .NET 5, is named in a warning, and nothing is installed in its place |
 | **User data** | Your choice | AppData, ProgramData, Documents, and Saved Games. Online-only OneDrive files are skipped |
-| **License data** | Your choice | License files and stores. Reports whether each is likely tied to the machine. [Never bypasses activation](SECURITY.md#licensing-data) |
+| **License data** | Your choice | License files, values, and stores. With this off they are not captured at all, and only their names are noted. Reports whether each is likely tied to the machine. [Never bypasses activation](SECURITY.md#licensing-data) |
+| **Credentials** | Never | Values and files that look like passwords, tokens, or private keys are left out and named when you build. [This cannot catch everything](#security) |
 
 ## Limitations
 
@@ -146,8 +150,12 @@ Please read these before relying on it, especially on a one-way trip from a fail
 - **The app does not write to a connected drive,** which reads a copy of its registry files. Windows itself
   can still update last-access times and its own records on any disk it mounts, and reading a failing drive
   can finish it off, so **image a failing drive first**, and scan the image.
-- **Some things are not captured:** URL protocols, shell extensions, firewall rules, fonts, certificates,
-  and ODBC sources. Microsoft Store apps are not listed.
+- **What another app has on the new PC stays that app's.** A link protocol, a file type, a COM class, an event
+  log source, a font name, or anything like it that is already there as something else's is left alone,
+  `--force` or not, and the installer says so. An app that expected to be the one opening `http` links has to be
+  set as the default again, as Windows would have you do anyway.
+- **Some things are left behind.** An ODBC source that uses Windows' own driver has to have the app's exact name,
+  since it points at a driver and not at the app. Microsoft Store apps are not listed.
 - **An installer holds one account's data.** It is read from whoever is signed in, or from the account you
   choose, and goes to whoever is signed in where the installer runs. That is so even if another
   administrator was named at the UAC prompt, and if who is signed in cannot be told, it says so and leaves
@@ -176,8 +184,11 @@ The full list, with planned fixes, is in the [plan](docs/PLAN.md#open-issues-mos
 
 - **Only run installers you trust.** An installer runs elevated and installs what its package holds. It
   refuses what no app should do and lists what it will set up, but only a signature proves who made it.
-- **An installer can contain secrets.** It copies what the app keeps in its folders and registry keys,
-  which can include license keys and tokens, even with the License option off. Share one accordingly.
+- **An installer can contain secrets.** Values and files that look like credentials are left out and named
+  when you build, and with the License option off so are license files and values. That goes by names and a
+  few shapes of text. It cannot see inside an app's own settings file or database, or catch a value with a name
+  that does not say what it is. So treat an installer as being as sensitive as the PC it came from.
+  [More](SECURITY.md#an-installer-can-contain-secrets).
 - **Signing.** Starting with the next release, the app is signed (publisher: Randy Northrup), and each
   release records build provenance you can check with `gh attestation verify`. Current downloads are
   unsigned. Installers you build are not signed unless you sign them, so Windows shows "Unknown
@@ -207,7 +218,7 @@ prints usage.
 | `--target-root <DIR>` | Where to install. Must be a full path. Without it, `--apply` and `--dry-run` use where the app was, if the checks the window makes allow that |
 | `--apply` | Actually install. Without it nothing is installed: the package is unpacked to a temporary folder, which is then removed |
 | `--dry-run` | Preview, stated explicitly |
-| `--force` | Replace existing files, registry values, services, tasks, shortcuts, and environment variables. Without it, an existing file stops the install before anything changes |
+| `--force` | Replace existing files, registry values, services, tasks, shortcuts, and environment variables. Without it, an existing file stops the install before anything changes. Services, tasks, and what ties an app into Windows stay another app's either way. A file of the same name is replaced, and comes back on uninstall |
 | `--restore-user-data` | Put user data in the real AppData, Documents, Saved Games, and ProgramData folders of whoever is signed in, not under the target |
 | `--no-restore-license` | Skip captured license data, which is otherwise restored |
 | `--log <FILE>` | Also write the log to this file, which must not exist yet |

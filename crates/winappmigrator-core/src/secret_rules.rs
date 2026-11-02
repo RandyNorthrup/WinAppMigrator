@@ -80,6 +80,10 @@ const STILL_THE_VALUE: &[&str] = &[
     "hash",
     "hashed",
     "key",
+    "new",
+    "old",
+    "prev",
+    "previous",
     "str",
     "string",
     "text",
@@ -89,7 +93,7 @@ const STILL_THE_VALUE: &[&str] = &[
 /// `RememberPassword`, `MaxTokens`. Not `Saved`, since `SavedPassword` is the password.
 const ABOUT_THE_VALUE: &[&str] = &[
     "allow", "ask", "change", "disable", "enable", "expire", "forgot", "has", "hide", "is", "max",
-    "min", "no", "prompt", "remember", "require", "requires", "reset", "save", "show", "use",
+    "min", "no", "prompt", "remember", "require", "requires", "save", "show", "use",
 ];
 /// What a name can end in with nothing to show where the words start: `dbpassword`, `accesstoken`.
 const RUN_TOGETHER_ENDS: &[&str] = &[
@@ -171,6 +175,7 @@ const DPAPI_PROVIDER_GUID_HEX: &str = "d08c9ddf0115d1118c7a00c04fc297eb";
 /// In hex: four bytes of version come before that.
 const DPAPI_GUID_OFFSET: usize = 8;
 const LEFT_OUT_REASON_SECRET: &str = "it looks like a credential";
+const NAME_HOLDS_A_CREDENTIAL: &str = "(a value whose name holds a credential)";
 const LEFT_OUT_REASON_LICENSE: &str = "the License option is off";
 /// A default value is named by its key, but not one under this: `Acme.Token` is a file type.
 const NOT_NAMED_BY_THEIR_KEY: &str = r"software\classes";
@@ -239,7 +244,9 @@ fn is_run_together_credential(word: &str) -> bool {
     RUN_TOGETHER_ENDS.iter().any(|end| {
         word.strip_suffix(end)
             .is_some_and(|before| !before.is_empty() && !ABOUT_THE_VALUE.contains(&before))
-    })
+    }) || word
+        .strip_suffix(PASS_WORD)
+        .is_some_and(|before| PASS_QUALIFIERS.contains(&before))
 }
 
 /// Where the part of a name that says it is a credential ends, if it says so at this word.
@@ -248,7 +255,10 @@ fn credential_ending_at(words: &[String], index: usize) -> Option<usize> {
     if SECRET_WORDS.contains(&word) || is_run_together_credential(word) {
         return Some(index);
     }
-    if word == PASS_WORD && index > 0 && PASS_QUALIFIERS.contains(&words[index - 1].as_str()) {
+    // Alone, there is nothing else it could be. `PassCount` is about something else.
+    if word == PASS_WORD
+        && (words.len() == 1 || (index > 0 && PASS_QUALIFIERS.contains(&words[index - 1].as_str())))
+    {
         return Some(index);
     }
     words
@@ -291,7 +301,13 @@ fn is_a_placeholder(text: &str) -> bool {
 /// Whether text holds a credential in a shape that says so, whatever the value is called: a
 /// connection string with a password in it, or a URL with a user's password or a key.
 pub fn value_holds_credentials(text: &str) -> bool {
-    url_has_a_password(text)
+    // `Password = x` is as good as `Password=x` to whatever reads a connection string.
+    let text = text
+        .replace(" =", "=")
+        .replace("\t=", "=")
+        .replace("= ", "=")
+        .replace("=\t", "=");
+    url_has_a_password(&text)
         || text
             .split([';', '&', '?', ' ', '\t', '\n', '\r'])
             .filter_map(|field| field.split_once('='))
@@ -369,6 +385,10 @@ pub fn is_secret_registry_value(entry: &RegistryEntry) -> bool {
     );
     !holds_nothing
         && (named_for_it
+            || entry
+                .value_name
+                .as_deref()
+                .is_some_and(value_holds_credentials)
             || value_holds_credentials(text)
             || (is_text && !without_secret_arguments(text).1.is_empty())
             || (is_binary && is_dpapi_hex(hex)))
@@ -588,11 +608,14 @@ pub(crate) fn registry_entry_name(entry: &RegistryEntry) -> String {
         crate::models::RegistryHive::LocalMachine => "HKLM",
         crate::models::RegistryHive::CurrentUser => "HKCU",
     };
-    format!(
-        r"{hive}\{}\{}",
-        entry.key_path,
-        entry.value_name.as_deref().unwrap_or("(Default)")
-    )
+    // Names are what is said of a value, but a recent URL can be all a value's name is.
+    let name = entry.value_name.as_deref().unwrap_or("(Default)");
+    let name = if value_holds_credentials(name) {
+        NAME_HOLDS_A_CREDENTIAL
+    } else {
+        name
+    };
+    format!(r"{hive}\{}\{name}", entry.key_path)
 }
 
 /// Whether a value under an app's keys is license data: its own name says so, or the name of a key
@@ -723,6 +746,21 @@ pub(crate) fn take_licenses_from_settings(
     names: &ProductNames,
     left_out: &mut LeftOut,
 ) {
+    // A command in a value, such as a Run key's, is left out as a whole. It may not run without it.
+    settings.registry.retain(|entry| {
+        let is_text = matches!(
+            entry.value_kind,
+            None | Some(RegistryValueKind::String | RegistryValueKind::ExpandString)
+        );
+        let is_a_license = is_text
+            && !without_license_arguments(entry.value_data.as_deref().unwrap_or_default())
+                .1
+                .is_empty();
+        if is_a_license {
+            left_out.license(registry_entry_name(entry));
+        }
+        !is_a_license
+    });
     for service in settings.services.iter_mut() {
         service.parameters.retain(|entry| {
             let is_a_license = is_license_registry_entry(entry, names);
@@ -753,8 +791,7 @@ pub(crate) fn take_secrets_from_settings(
         !secret
     });
     settings.environment.retain(|variable| {
-        let secret =
-            is_secret_value_name(&variable.name) || value_holds_credentials(&variable.value);
+        let secret = is_secret_value_name(&variable.name) || holds_a_credential(&variable.value);
         if secret {
             left_out.secret(format!("The environment variable {}", variable.name));
         }
@@ -899,6 +936,12 @@ mod tests {
             // Anywhere it says so, whatever else it says first.
             "TokenPassword",
             "PasswordPolicyPassword",
+            // What was missed by the first pass of a review.
+            "Pass",
+            "userpass",
+            "PasswordResetToken",
+            "ResetToken",
+            "PasswordOld",
         ] {
             assert!(is_secret_value_name(name), "{name}");
         }
@@ -961,6 +1004,8 @@ mod tests {
             "https://user:hunter2@example.com/x",
             "https://example.com/x?token=abc",
             "app.exe --password=hunter2",
+            "Server=db; Password = hunter2;",
+            "Pwd =hunter2",
         ] {
             assert!(value_holds_credentials(text), "{text}");
         }
@@ -1023,6 +1068,14 @@ mod tests {
         ] {
             assert!(!is_secret_registry_value(&not_secret), "{not_secret:?}");
         }
+        assert!(
+            is_secret_registry_value(&entry("https://me:hunter2@example.com/", Text, "x", "")),
+            "all a value's name is can be where it was"
+        );
+        assert!(
+            !registry_entry_name(&entry("https://me:hunter2@example.com/", Text, "x", ""))
+                .contains("hunter2")
+        );
         let in_a_command = entry("Run", Text, r#""C:\A\a.exe" --token abc"#, "");
         assert!(
             is_secret_registry_value(&in_a_command),
@@ -1179,7 +1232,20 @@ mod tests {
     ) -> LeftOut {
         let names = ProductNames::new(Some("Acme"), None, &[], &[]);
         let mut left_out = LeftOut::default();
-        let (mut registry, mut environment) = (Vec::new(), Vec::new());
+        let mut registry = vec![entry(
+            "Runner",
+            RegistryValueKind::String,
+            r#""C:\A\a.exe" --license-key=abc"#,
+            "",
+        )];
+        let mut environment = vec![EnvironmentVariableEntry {
+            scope: crate::models::EnvironmentScope::Machine,
+            name: "ACME_OPTS".to_owned(),
+            value: "--password hunter2".to_owned(),
+            value_kind: RegistryValueKind::String,
+            requires_admin: true,
+            confidence: MatchConfidence::High,
+        }];
         let mut settings = ScannedSettings {
             registry: &mut registry,
             services,
@@ -1195,6 +1261,14 @@ mod tests {
             take_licenses_from_settings(&mut settings, &names, &mut left_out);
         }
         take_secrets_from_settings(&mut settings, &mut left_out);
+        let expected_kept = usize::from(!licenses_too);
+        assert_eq!(
+            settings.registry.len(),
+            expected_kept,
+            "{:?}",
+            settings.registry
+        );
+        assert!(settings.environment.is_empty());
         left_out
     }
 
@@ -1275,7 +1349,7 @@ mod tests {
                 .unwrap_or_default()
                 .contains(SECRET)
         );
-        assert_eq!(left_out.secrets.len(), 4, "{:?}", left_out.secrets);
+        assert_eq!(left_out.secrets.len(), 5, "{:?}", left_out.secrets);
         assert!(
             left_out
                 .secrets
@@ -1292,7 +1366,7 @@ mod tests {
         assert_eq!(services[0].arguments.as_deref(), Some("--port 80"));
         assert!(!services[0].restore_command_suggestion.contains("abc"));
         assert!(services[0].parameters.is_empty());
-        assert_eq!(left_out.licenses.len(), 2, "{:?}", left_out.licenses);
+        assert_eq!(left_out.licenses.len(), 3, "{:?}", left_out.licenses);
 
         let mut services = [service_with("--license=abc --port 80")];
         let left_out = take_all(&mut services, &mut [], &mut [], &mut app, false);
