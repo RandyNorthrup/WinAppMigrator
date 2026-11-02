@@ -56,7 +56,8 @@ controlled. So:
 - **What a folder's listing says is not what opening it does.** Windows drops a dot or a space from the end of a name,
   so a real folder `x.` opens the link `x` beside it, and a link `x ` reads as the real `x`. So each thing found by
   listing a folder is asked about by name before it is opened, and a walk goes in only after that. A name that ends
-  that way, a name that is not text, or one this Windows would open as a device, is not read.
+  that way, a name that is not text, or one this Windows would open as a device, is not read. A path a value records is
+  first read as Windows would read it, so that it is the real name that is asked about.
 - **There are limits on what a drive can make this do.** A hive is copied by reading it, up to 4 GiB, and 32 GiB for
   all of a run's. There are limits on a program, an install log, an AppX manifest, a task, how many tasks an app keeps,
   how many accounts are listed, and how much of the registry is captured. How much of an app's own files can be staged
@@ -67,8 +68,9 @@ controlled. So:
   it starts. It goes by a lease each run holds, so it leaves another run's alone, and it only touches a key named
   the way this app names one.
 - **Registry links depend on Windows.** A key in a hive can be a link to somewhere else in the registry, and this does
-  not open them specially. On the runner, Windows refused to follow one out of a hive this loaded, from each of
-  `SOFTWARE`, `SYSTEM`, and `NTUSER.DAT`, which is tested. If Windows ever allowed that, nothing here would stop it.
+  not open them specially. On the runner, Windows refused `reg query` through one out of a hive loaded from `SOFTWARE` and
+  from `NTUSER.DAT`, and what a link in those and in `SYSTEM` led to did not reach a package, which is tested. If Windows
+  ever allowed that, nothing here would stop it.
 - **Loading a hive runs Windows' own parser on it.** A drive made to attack that parser needs no bug here, and this
   project cannot do anything about one. Read a drive from someone you do not trust on a machine you can lose.
 
@@ -92,7 +94,7 @@ its own registry, and its own shortcuts. So what these say does not count for mu
 - What is found by an app's name in an account's `AppData`, Documents, or Saved Games has the same rule: it has to be in
   that account's profile or owned by it. A link there, or a value for where Documents are, could otherwise reach anything
   an administrator can read.
-- Such an app gets nothing machine-wide by its name, in files or the registry, since its name is whatever its entry says
+- An app installed for one account gets nothing machine-wide by its name, in files or the registry, since its name is whatever its entry says
   and `ProgramData\<name>` may be anyone's. Its install log can only name that account's registry and files in its own
   folders.
 - A machine-wide app's install log is only believed if only administrators can change it. It names files and registry
@@ -116,14 +118,13 @@ folder, or goes through a link that was not there when it was scanned. Whoever c
 part of it a link and undo that around the moment a file is opened, and they would have to know a name that is there.
 Closing that needs the opened file's own path from Windows, which takes `unsafe` code this project does not otherwise
 have in the core. A link that was there when scanned is asked about too, in case it leads elsewhere by then. A stale
-machine-wide record that names a folder any account can make, on `C:\`, can lead to wherever a
-link there does, as long as that is not in another account's profile. A symbolic link to a share, which needs
-Developer Mode or that right, is also still followed on this PC, by anything looking at a folder an account's value or
-listing names. Folder and task
-names of other accounts can appear in a package's warnings. The folder picker is Windows' own and runs before any of
-this, so what the shell itself does on browsing a hostile drive is not something this controls. An installer is written
-where whoever runs the app says, by default in that account's folders, not those of whoever is signed in, whose data it may
-hold.
+machine-wide record that names a folder any account can make, on `C:\`, can lead to wherever a link there does, as long
+as that is not in another account's profile. A symbolic link to a share, which needs Developer Mode or that right, is also
+still followed on this PC, by anything looking at a folder an account's value or listing names. A hard link in a scanned
+folder looks like any other file, though making one takes being able to open the file. Folder and task names of other
+accounts can appear in a package's warnings. The folder picker is Windows' own and runs before any of this, so what the
+shell itself does on browsing a hostile drive is not something this controls. An installer is written where whoever runs
+the app says, by default in that account's folders, not those of whoever is signed in, whose data it may hold.
 
 An elevated process can be run by another administrator than the person at the PC, whose `%APPDATA%` and
 `HKEY_CURRENT_USER` are not that person's. So who a scan or an install is for comes from the owner of this session's
