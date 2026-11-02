@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use winappmigrator_core::journal::STAGING_PREFIX;
 use winappmigrator_core::privilege::ProtectedFolder;
+use winappmigrator_core::space::volume_stats_at;
 
 /// Prefix of the directories the installer extracts its embedded package into.
 pub const EXTRACTION_PREFIX: &str = STAGING_PREFIX;
@@ -72,6 +73,11 @@ fn is_stale_folder(path: &Path, now: SystemTime, age: Duration) -> bool {
 /// [`EXTRACTION_PREFIX`] keeps every staging directory matchable by
 /// [`sweep_stale_extractions`]. Removed when the result drops.
 ///
+/// `unpacked_bytes` is how much will go in it. The destination's drive has to have room for that
+/// twice over to be worth it, since the same files go on to the install location. A drive that
+/// will not say how much room it has is taken at its word, and if nowhere has room, the first place
+/// that can be used is, for what checks the room to say so.
+///
 /// Elevated code reads from this folder, so it is made admin-only before anything is
 /// written there, and held so it cannot be swapped. A location where that fails is not
 /// used, and if none works the install does not go ahead. A link on the way to the install
@@ -80,19 +86,39 @@ fn is_stale_folder(path: &Path, now: SystemTime, age: Duration) -> bool {
 pub fn create_staging_dir(
     target_root: Option<&Path>,
     executable: &Path,
+    unpacked_bytes: u64,
 ) -> std::io::Result<ProtectedFolder> {
     // The nearest existing ancestor of the install location sits on the
     // destination drive.
-    let mut ancestor = target_root;
-    while let Some(dir) = ancestor {
-        if is_real_folder(dir)
-            && let Ok(staging) = ProtectedFolder::new_in(dir, EXTRACTION_PREFIX)
-        {
-            return Ok(staging);
-        }
-        ancestor = dir.parent();
+    let destination =
+        target_root.and_then(|target| target.ancestors().find(|ancestor| is_real_folder(ancestor)));
+    let beside_installer = executable.parent();
+    let has_room = |place: &Path, needed: u64| {
+        volume_stats_at(place).is_none_or(|stats| stats.free_bytes >= needed)
+    };
+    if let Some(destination) =
+        destination.filter(|place| has_room(place, unpacked_bytes.saturating_mul(2)))
+        && let Ok(staging) = ProtectedFolder::new_in(destination, EXTRACTION_PREFIX)
+    {
+        return Ok(staging);
     }
-    if let Some(parent) = executable.parent()
+    if let Some(parent) = beside_installer.filter(|place| has_room(place, unpacked_bytes))
+        && let Ok(staging) = ProtectedFolder::new_in(parent, EXTRACTION_PREFIX)
+    {
+        return Ok(staging);
+    }
+    if has_room(&std::env::temp_dir(), unpacked_bytes)
+        && let Ok(staging) = ProtectedFolder::new_in_temp(EXTRACTION_PREFIX)
+    {
+        return Ok(staging);
+    }
+    // Nowhere has room. What checks that says so, of the first place that would have been used.
+    if let Some(destination) = destination
+        && let Ok(staging) = ProtectedFolder::new_in(destination, EXTRACTION_PREFIX)
+    {
+        return Ok(staging);
+    }
+    if let Some(parent) = beside_installer
         && let Ok(staging) = ProtectedFolder::new_in(parent, EXTRACTION_PREFIX)
     {
         return Ok(staging);
@@ -174,7 +200,21 @@ mod tests {
     {
         let base = tempfile::tempdir()?;
         let target = base.path().join(r"not\there\yet");
-        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"))?;
+        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"), 0)?;
+        assert_eq!(staging.path().parent(), Some(base.path()));
+        Ok(())
+    }
+
+    #[test]
+    fn staging_passes_over_a_drive_without_room_when_another_has_it() -> std::io::Result<()> {
+        let base = tempfile::tempdir()?;
+        // Not on any drive there is, so there is only the temp folder's to fall back on, and more
+        // than any drive holds, so nothing has room and the first place that can be is used.
+        let staging = create_staging_dir(
+            Some(&base.path().join("target")),
+            &base.path().join("x.exe"),
+            u64::MAX,
+        )?;
         assert_eq!(staging.path().parent(), Some(base.path()));
         Ok(())
     }
@@ -194,7 +234,7 @@ mod tests {
             .output()?;
         assert!(made.status.success());
 
-        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"))?;
+        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"), 0)?;
 
         assert_eq!(staging.path().parent(), Some(base.path()));
         assert_eq!(std::fs::read_dir(&elsewhere)?.count(), 0);

@@ -5,6 +5,7 @@
 //! been chosen, so a few checks that depend on what is already at that location can only
 //! happen once one has: a task or COM class that belongs to something else is refused then.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -22,9 +23,9 @@ use crate::journal::machine_state_root;
 use crate::license_scan::is_license_env_var;
 use crate::models::{
     AppArchitecture, CertificateEntry, DriverEntry, EnvironmentScope, EnvironmentVariableEntry,
-    FileClassification,
-    FileEntry, FirewallRuleEntry, LeftOutItem, LicenseArtifact, PackageManifest, RegistryEntry,
-    RegistryHive, ScheduledTaskEntry, ServiceEntry, Warning, WarningSeverity,
+    FileClassification, FileEntry, FirewallRuleEntry, LeftOutItem, LicenseArtifact,
+    PackageManifest, RegistryEntry, RegistryHive, ScheduledTaskEntry, ServiceEntry, Warning,
+    WarningSeverity,
 };
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
@@ -41,6 +42,9 @@ use crate::restore_policy::{
     is_uninstall_entry_key, is_valid_service_name, license_destination, platform_fit,
     read_task_definition, registered_value_refusal, registration_of, registration_refusal,
     registration_unit_of, registry_refusal, shortcut_placement, task_refusal,
+};
+use crate::space::{
+    DRIVER_ALLOWANCE_BYTES, PlaceNeed, PlannedFile, RoomCheck, install_needs, on_same_volume,
 };
 use crate::system_context::SystemContext;
 
@@ -1012,6 +1016,96 @@ pub fn refuse_what_cannot_run_here(manifest: &PackageManifest) -> Result<Platfor
         ))),
         None => Ok(fit),
     }
+}
+
+/// What an install of this package would need and where, with what it would replace as things stand.
+/// A file that is refused takes no room. Nothing is looked at beyond whether each destination is
+/// there and how big it is, and it is the same review the install goes by.
+#[allow(clippy::too_many_arguments)]
+pub fn install_places(
+    manifest: &PackageManifest,
+    target_root: &Path,
+    restore_user_data: bool,
+    restore_license: bool,
+    staging: &Path,
+    unpacked_bytes: u64,
+    state_root: &Path,
+    stub_bytes: u64,
+) -> Result<Vec<PlaceNeed>> {
+    let review = ReviewedPackage::new(manifest, target_root, restore_user_data, restore_license)?;
+    let mut planned: Vec<PlannedFile> = review
+        .files
+        .iter()
+        .filter_map(|file| {
+            let destination = review.map.destination_of(&file.original_path)?;
+            Some(PlannedFile {
+                destination: destination.to_path_buf(),
+                new_bytes: file.size_bytes.unwrap_or(0),
+                replaced_bytes: replaced_bytes(destination),
+            })
+        })
+        .collect();
+    for driver in &review.drivers {
+        planned.push(PlannedFile {
+            destination: driver.destination.clone(),
+            new_bytes: DRIVER_ALLOWANCE_BYTES,
+            replaced_bytes: replaced_bytes(&driver.destination),
+        });
+    }
+    for license in &review.license {
+        if license.artifact.store_files.is_empty() {
+            planned.push(PlannedFile {
+                destination: license.destination.clone(),
+                new_bytes: license.artifact.size_bytes.unwrap_or(0),
+                replaced_bytes: replaced_bytes(&license.destination),
+            });
+        }
+        for file in &license.artifact.store_files {
+            let destination = license.destination.join(&file.relative_path);
+            planned.push(PlannedFile {
+                new_bytes: file.size_bytes,
+                replaced_bytes: replaced_bytes(&destination),
+                destination,
+            });
+        }
+    }
+    // By its folder, since a large app replaces many files in few folders.
+    let asked: RefCell<HashMap<PathBuf, bool>> = RefCell::new(HashMap::new());
+    let on_records_volume = |destination: &Path| {
+        let folder = destination.parent().unwrap_or(destination).to_path_buf();
+        *asked
+            .borrow_mut()
+            .entry(folder)
+            .or_insert_with(|| on_same_volume(destination, state_root))
+    };
+    Ok(install_needs(
+        staging,
+        unpacked_bytes,
+        &planned,
+        state_root,
+        stub_bytes,
+        &on_records_volume,
+    ))
+}
+
+/// How big a file already at a destination is, and nothing is followed to find out.
+fn replaced_bytes(destination: &Path) -> u64 {
+    std::fs::symlink_metadata(destination).map_or(0, |metadata| metadata.len())
+}
+
+/// Stop an install or a preview that does not have the room it needs, before anything is unpacked.
+/// What could not be checked is returned, for saying.
+pub fn refuse_without_room_to_install(needs: &[PlaceNeed]) -> Result<RoomCheck> {
+    let room = RoomCheck::on_this_pc(needs);
+    let shortfalls = room.shortfalls();
+    if shortfalls.is_empty() {
+        return Ok(room);
+    }
+    Err(WinAppMigratorError::InvalidInput(format!(
+        "there is not enough room for this, so nothing was changed. {}. Free up some space there, \
+         or choose an install location on another drive.",
+        shortfalls.join(". ")
+    )))
 }
 
 /// Why this install location must not be used on this PC, if so.

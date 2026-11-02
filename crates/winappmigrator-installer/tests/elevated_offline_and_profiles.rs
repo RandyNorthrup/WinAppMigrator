@@ -30,10 +30,10 @@ use winappmigrator_core::path_utils::{POWERSHELL_UTF8_OUTPUT, signed_in_user};
 use winappmigrator_core::privilege::is_elevated;
 use winappmigrator_core::task_scan::read_task_files;
 use winappmigrator_core::{
-    AppSelection, EmbeddedPackage, InstalledApp, InstallerStub, PackageManifest, PackageOptions,
-    ProfileChoice, RegistryHive, ScanSource, SystemContext, create_package,
-    default_install_location, list_installed_apps_from, read_embedded_manifest, survey_profiles,
-    sweep_leaked_hive_mounts,
+    AppArchitecture, AppSelection, EmbeddedPackage, InstalledApp, InstallerStub, PackageManifest,
+    PackageOptions, PackageResult, ProfileChoice, RegistryHive, ScanSource, SourcePlatform,
+    SystemContext, create_package, default_install_location, list_installed_apps_from,
+    read_embedded_manifest, survey_profiles, sweep_leaked_hive_mounts,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -378,6 +378,20 @@ fn tree_differences(
 }
 
 /// Any file under a folder that holds this text, by Windows' own search.
+/// What is in a build's package, by Windows' own search. An app's files go straight from where they
+/// are into the installer, so looking in them takes unpacking it.
+fn files_holding_in_package(package: &PackageResult, needle: &str) -> TestResult<String> {
+    let mut holding = files_holding(&package.package_root, needle)?;
+    if let Some(installer) = package.self_extracting_archive_path.as_deref() {
+        let unpacked = tempfile::tempdir()?;
+        EmbeddedPackage::open(installer)?
+            .ok_or("the installer has no package")?
+            .extract_to(unpacked.path())?;
+        holding.push_str(&files_holding(unpacked.path(), needle)?);
+    }
+    Ok(holding)
+}
+
 fn files_holding(folder: &Path, needle: &str) -> TestResult<String> {
     powershell(&format!(
         "Get-ChildItem -LiteralPath {} -Recurse -File -Force -ErrorAction SilentlyContinue | \
@@ -1172,6 +1186,13 @@ fn edit_the_drives_registry(paths: &Paths) -> TestResult {
             "REG_SZ",
             SOURCE_COMPUTER,
         )?;
+        // Not what this runner is, so that what comes out can only have come from the drive.
+        reg_add(
+            &format!(r"{control_set}\Control\Session Manager\Environment"),
+            Some("PROCESSOR_ARCHITECTURE"),
+            "REG_SZ",
+            "ARM64",
+        )?;
         // A service that names this machine's files. It is no part of the app, and must not be
         // looked at for what it says.
         for (name, image) in [
@@ -1562,7 +1583,6 @@ fn package_options(
         selection: AppSelection::InstalledApp(Box::new(app.clone())),
         output_dir: output.to_path_buf(),
         current_directory: None,
-        archive_format: None,
         create_self_extracting_archive: true,
         self_extracting_stub: Some(InstallerStub::File(stub_binary())),
         installer_dir: None,
@@ -1596,6 +1616,14 @@ fn check_the_scan(checks: &mut Checks, manifest: &PackageManifest, paths: &Paths
             .as_deref()
             .is_some_and(|version| version.contains(&format!(".{SOURCE_BUILD}.77"))),
         format!("{:?}", manifest.source_windows_version),
+    );
+    checks.same(
+        "the build and the architecture are the drive's, from its own hives",
+        manifest.source_platform.clone(),
+        Some(SourcePlatform {
+            windows_build: SOURCE_BUILD.parse().ok(),
+            architecture: AppArchitecture::Arm64,
+        }),
     );
     checks.same(
         "the install location is where it was on its PC",
@@ -2326,17 +2354,17 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
     );
 
     section("What looks like a credential on the drive is not in it, by Windows' own search");
-    let holding = files_holding(&package.package_root, DRIVE_CANARY)?;
+    let holding = files_holding_in_package(&package, DRIVE_CANARY)?;
     checks.same("the canary is in no file", holding.trim(), "");
 
     section("Nothing of this machine's is in it, by Windows' own search of what was packaged");
-    let holding = files_holding(&package.package_root, HOST_SECRET)?;
+    let holding = files_holding_in_package(&package, HOST_SECRET)?;
     checks.same(
         "the marker on this machine is in no file",
         holding.trim(),
         "",
     );
-    let holding = files_holding(&package.package_root, OTHER_SECRET)?;
+    let holding = files_holding_in_package(&package, OTHER_SECRET)?;
     checks.same("another account's data is in no file", holding.trim(), "");
     checks.that(
         "a registry link to this machine was not followed into the package",
@@ -2367,7 +2395,7 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
         attempt.as_ref().map(|result| result.files_copied)
     );
     if let Ok(result) = attempt.as_ref() {
-        let holding = files_holding(&result.package_root, HOST_SECRET)?;
+        let holding = files_holding_in_package(result, HOST_SECRET)?;
         checks.same("the marker is not in that either", holding.trim(), "");
     }
     let by_a_forged_selection = package_options(
@@ -2406,7 +2434,7 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
             attempt.as_ref().map(|result| result.files_copied)
         );
         if let Ok(result) = attempt.as_ref() {
-            let holding = files_holding(&result.package_root, HOST_SECRET)?;
+            let holding = files_holding_in_package(result, HOST_SECRET)?;
             checks.same("the marker is not in that either", holding.trim(), "");
         }
     }
@@ -2420,7 +2448,7 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
         source.clone(),
         ProfileChoice::Default,
     ))?;
-    let holding = files_holding(&package.package_root, OTHER_SECRET)?;
+    let holding = files_holding_in_package(&package, OTHER_SECRET)?;
     checks.same("none of what is there is in it", holding.trim(), "");
 
     section("A license store on the drive with links in it gets its own files and no others");
@@ -2433,9 +2461,9 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
             ProfileChoice::Default,
         )
     })?;
-    let holding = files_holding(&licensed.package_root, HOST_SECRET)?;
+    let holding = files_holding_in_package(&licensed, HOST_SECRET)?;
     checks.same("the marker is in no file", holding.trim(), "");
-    let holding = files_holding(&licensed.package_root, "a real license")?;
+    let holding = files_holding_in_package(&licensed, "a real license")?;
     checks.that("its own license is there", !holding.trim().is_empty(), "no");
 
     section("Another account on the drive, on request");
@@ -2640,10 +2668,11 @@ fn a_killed_scan_is_swept(checks: &mut Checks, work: &Path) -> TestResult {
     holder.kill()?;
     let _ = holder.wait()?;
     let left: Vec<String> = wam_mounts()?.into_iter().filter(is_ours).collect();
-    checks.same(
+    // It can have loaded another account's in between looking and killing it.
+    checks.that(
         "reg.exe: killing it left every hive loaded",
-        left.len(),
-        held.len(),
+        held.iter().all(|name| left.contains(name)),
+        format!("{left:?} does not have all of {held:?}"),
     );
 
     let swept = sweep_leaked_hive_mounts();
@@ -3245,7 +3274,7 @@ fn what_can_name_another_accounts_folder(
         ScanSource::Live,
         ProfileChoice::Default,
     ))?;
-    let holding = files_holding(&package.package_root, "private to theirs")?;
+    let holding = files_holding_in_package(&package, "private to theirs")?;
     checks.same("none of that account's data is in it", holding.trim(), "");
     let connections_now = smb_connections()?;
     checks.that(
@@ -3300,7 +3329,7 @@ fn what_can_name_another_accounts_folder(
         ScanSource::Live,
         ProfileChoice::Default,
     ))?;
-    let holding = files_holding(&package.package_root, "private to theirs")?;
+    let holding = files_holding_in_package(&package, "private to theirs")?;
     checks.same(
         "what is there is not in it, whatever the entry says",
         holding.trim(),
@@ -3342,7 +3371,7 @@ fn what_can_name_another_accounts_folder(
         ScanSource::Live,
         ProfileChoice::Default,
     ))?;
-    let holding = files_holding(&package.package_root, "private to theirs")?;
+    let holding = files_holding_in_package(&package, "private to theirs")?;
     checks.same("what is there is not in it", holding.trim(), "");
     fs::remove_dir(&named_for_it)?;
     reg_delete_key(entry);
@@ -3419,7 +3448,7 @@ fn what_can_name_another_accounts_folder(
         ScanSource::Live,
         ProfileChoice::Default,
     ))?;
-    let holding = files_holding(&package.package_root, "private to theirs")?;
+    let holding = files_holding_in_package(&package, "private to theirs")?;
     checks.same("what is past the link is not in it", holding.trim(), "");
     fs::remove_dir(&twin)?;
     fs::remove_dir(format!(r"\\?\{}.", twin.display()))?;
@@ -3437,7 +3466,7 @@ fn what_can_name_another_accounts_folder(
         ScanSource::Live,
         ProfileChoice::Default,
     ))?;
-    let holding = files_holding(&package.package_root, "private to theirs")?;
+    let holding = files_holding_in_package(&package, "private to theirs")?;
     checks.same("what is past that link is not in it", holding.trim(), "");
     fs::remove_dir(&spaced)?;
     fs::remove_dir(&named_for_it)?;
@@ -3484,7 +3513,7 @@ fn what_can_name_another_accounts_folder(
                     ScanSource::Live,
                     ProfileChoice::Default,
                 ))?;
-                let holding = files_holding(&package.package_root, "private to theirs")?;
+                let holding = files_holding_in_package(&package, "private to theirs")?;
                 checks.same("none of it is in the package", holding.trim(), "");
                 let _ = fs::remove_dir(&named_for_it);
                 reg_delete_key(entry);

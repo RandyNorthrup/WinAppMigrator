@@ -484,7 +484,6 @@ pub struct PackageOptions {
     pub selection: AppSelection,
     pub output_dir: PathBuf,
     pub current_directory: Option<PathBuf>,
-    pub archive_format: Option<PackageArchiveFormat>,
     pub create_self_extracting_archive: bool,
     #[serde(skip)]
     pub self_extracting_stub: Option<InstallerStub>,
@@ -527,7 +526,6 @@ impl PackageOptions {
             selection: AppSelection::ExecutablePath(executable_path.into()),
             output_dir: output_dir.into(),
             current_directory: None,
-            archive_format: None,
             create_self_extracting_archive: false,
             self_extracting_stub: None,
             installer_dir: None,
@@ -542,12 +540,6 @@ impl PackageOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PackageArchiveFormat {
-    Zip,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageResult {
     pub package_root: PathBuf,
@@ -555,8 +547,10 @@ pub struct PackageResult {
     pub reports_dir: PathBuf,
     pub files_copied: usize,
     pub warnings: Vec<Warning>,
-    pub archive_path: Option<PathBuf>,
     pub self_extracting_archive_path: Option<PathBuf>,
+    /// The data file beside the installer, for a package too big to be in one executable.
+    #[serde(default)]
+    pub data_file_path: Option<PathBuf>,
 }
 
 /// Where a file was under a user's folder that can be somewhere else on each PC, such as

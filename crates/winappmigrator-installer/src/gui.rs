@@ -9,6 +9,7 @@
 //! dependencies it will install, then unpacks, reinstalls, and hash-verifies on click, showing
 //! how far it has got. If that fails, or it is cancelled, what it changed is put back.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
@@ -24,11 +25,14 @@ use winappmigrator_core::logging;
 use winappmigrator_core::path_utils::system_root;
 use winappmigrator_core::prerequisites::spec_for_bundle;
 use winappmigrator_core::rollback::interrupted_installs;
+use winappmigrator_core::space::PlaceNeed;
 use winappmigrator_core::{
     EmbeddedPackage, InstallMonitor, InstallPhase, InstallStep, PackageManifest, RestoreOptions,
-    RestoreResult, RuntimePrerequisite, RuntimePrerequisiteKind, SystemChange, SystemChanges,
-    UndoReport, WarningSeverity, WinAppMigratorError, default_install_location, hidden_command,
-    install_location_problem, read_embedded_manifest, restore_package_monitored, system_changes,
+    RestoreResult, RoomCheck, RuntimePrerequisite, RuntimePrerequisiteKind, SystemChange,
+    SystemChanges, UndoReport, Warning, WarningSeverity, WinAppMigratorError,
+    default_install_location, hidden_command, install_location_problem, install_places, panic_text,
+    preview_needs, read_embedded_manifest, refuse_without_room_to_install,
+    restore_package_monitored, system_changes,
 };
 use winappmigrator_ui::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
@@ -157,6 +161,10 @@ enum Msg {
 
 struct InstallerApp {
     checked_target: std::cell::RefCell<Option<(String, Option<String>)>>,
+    /// What the install location was last looked at for, and how much room there is.
+    checked_room: std::cell::RefCell<Option<(String, RoomCheck)>>,
+    /// How much room the package takes unpacked, and what goes to the install location.
+    unpacked_bytes: u64,
     theme: Theme,
     screen: Screen,
     /// The package, checked and held open. Every read goes through this.
@@ -206,6 +214,8 @@ impl InstallerApp {
             version: String::new(),
             source_computer: String::new(),
             checked_target: std::cell::RefCell::new(None),
+            checked_room: std::cell::RefCell::new(None),
+            unpacked_bytes: 0,
             target_root: String::new(),
             user_data_profile: String::new(),
             show_user_data: false,
@@ -274,6 +284,7 @@ impl InstallerApp {
     fn finish_load(&mut self, loaded: Loaded, ctx: &egui::Context) {
         match loaded {
             Loaded::Ready(package, manifest, changes) => {
+                self.unpacked_bytes = package.unpacked_bytes().unwrap_or(0);
                 self.package = Some(package);
                 self.apply_manifest(&manifest);
                 self.changes = changes;
@@ -356,6 +367,29 @@ impl InstallerApp {
         problem
     }
 
+    /// How much room an install to this location would need, for showing while it is chosen. What
+    /// it would replace is added when it is really asked to go ahead. Asked on every frame, and it
+    /// looks at the disk, so it is only asked again once the text has changed.
+    fn room_for_target(&self) -> Option<RoomCheck> {
+        let text = self.target_root.trim();
+        if text.is_empty() || self.unpacked_bytes == 0 || !Path::new(text).is_absolute() {
+            return None;
+        }
+        let mut checked = self.checked_room.borrow_mut();
+        if let Some((checked_text, room)) = checked.as_ref()
+            && checked_text == text
+        {
+            return Some(room.clone());
+        }
+        let room = RoomCheck::on_this_pc(&[PlaceNeed {
+            place: PathBuf::from(text),
+            bytes: self.unpacked_bytes.saturating_mul(2),
+            what: "unpacking the package and installing it",
+        }]);
+        *checked = Some((text.to_owned(), room.clone()));
+        Some(room)
+    }
+
     fn start(&mut self, apply: bool, ctx: &egui::Context) {
         if self.phase == Phase::Running || !self.target_is_valid() {
             return;
@@ -398,7 +432,19 @@ impl InstallerApp {
         };
         let ctx = ctx.clone();
         thread::spawn(move || {
-            let message = run_restore(&exe, &package, choices, &monitor);
+            // What goes wrong in a way nothing was ready for still has to end in something a person
+            // can read, or this window would say it was running forever and could not be closed.
+            let message = catch_unwind(AssertUnwindSafe(|| {
+                run_restore(&exe, &package, choices, &monitor)
+            }))
+            .unwrap_or_else(|panic| {
+                let reason = panic_text(panic.as_ref());
+                tracing::error!(%reason, "the install stopped unexpectedly");
+                Msg::Failed(format!(
+                    "The install stopped unexpectedly: {reason}. If it had begun, running an \
+                     installer again undoes what it did first."
+                ))
+            });
             let _ = sender.send(message);
             ctx.request_repaint();
         });
@@ -523,23 +569,53 @@ fn run_restore(
     // Remove extraction directories from previous or crashed runs first, so nothing
     // accumulates even if a prior window was killed before its own cleanup could run.
     crate::cleanup::sweep_stale_extractions(exe);
-    // Stage on the install destination's drive, so a large package never fails to
-    // extract for lack of space on C:.
-    let staging = match crate::cleanup::create_staging_dir(Some(&target_root), exe) {
-        Ok(staging) => staging,
-        Err(error) => return failed(format!("Could not create a staging folder: {error}")),
-    };
-    match package.extract_monitored(staging.path(), monitor) {
-        Ok(()) => {}
-        Err(WinAppMigratorError::Cancelled) => return Msg::Cancelled,
-        Err(error) => return failed(format!("Could not unpack the package: {error}")),
-    }
     let Some(state_root) = machine_state_root() else {
         return failed(
             "This PC's ProgramData folder could not be found, so the install could not be undone."
                 .to_owned(),
         );
     };
+    let unpacked_bytes = match package.unpacked_bytes() {
+        Ok(bytes) => bytes,
+        Err(error) => return failed(format!("Could not read the package: {error}")),
+    };
+    // Stage on the install destination's drive, so a large package never fails to
+    // extract for lack of space on C:.
+    let staging = match crate::cleanup::create_staging_dir(Some(&target_root), exe, unpacked_bytes)
+    {
+        Ok(staging) => staging,
+        Err(error) => return failed(format!("Could not create a staging folder: {error}")),
+    };
+    let manifest = match read_embedded_manifest(package) {
+        Ok(manifest) => manifest,
+        Err(error) => return failed(format!("Could not read the package: {error}")),
+    };
+    let places = if apply {
+        install_places(
+            &manifest,
+            &target_root,
+            restore_user_data,
+            restore_license,
+            staging.path(),
+            unpacked_bytes,
+            &state_root,
+            package.stub_bytes(),
+        )
+    } else {
+        Ok(preview_needs(staging.path(), unpacked_bytes))
+    };
+    let could_not_tell = match places.and_then(|places| refuse_without_room_to_install(&places)) {
+        Ok(room) => room.could_not_tell(),
+        Err(error) => return failed(error.to_string()),
+    };
+    for note in &could_not_tell {
+        tracing::warn!(%note, "free space could not be checked");
+    }
+    match package.extract_monitored(staging.path(), monitor) {
+        Ok(()) => {}
+        Err(WinAppMigratorError::Cancelled) => return Msg::Cancelled,
+        Err(error) => return failed(format!("Could not unpack the package: {error}")),
+    }
     let options = RestoreOptions {
         package_root: staging.path().to_path_buf(),
         target_root,
@@ -551,7 +627,17 @@ fn run_restore(
         state_root,
     };
     match restore_package_monitored(&options, monitor, Some(package)) {
-        Ok(result) => Msg::Done(Box::new(result)),
+        Ok(mut result) => {
+            for note in could_not_tell {
+                result.warnings.push(Warning::new(
+                    "free_space_unknown",
+                    WarningSeverity::Warning,
+                    note,
+                    None,
+                ));
+            }
+            Msg::Done(Box::new(result))
+        }
         Err(WinAppMigratorError::Cancelled) => Msg::Cancelled,
         Err(error) => failed(error.to_string()),
     }
@@ -743,6 +829,26 @@ impl InstallerApp {
                     "This folder already has files. Files with the same names are replaced, \
                      and come back if you uninstall.",
                 );
+            }
+            if let Some(room) = self.room_for_target() {
+                ui.add_space(SPACE_XS);
+                widgets::kv_row(ui, theme, "Room needed", &room.summary());
+                for shortfall in room.shortfalls() {
+                    ui.add_space(SPACE_XS);
+                    widgets::notice(
+                        ui,
+                        theme,
+                        Role::Warning,
+                        &format!(
+                            "There may not be enough room here: {shortfall}. It can unpack on \
+                             another drive, but the app's files still have to fit."
+                        ),
+                    );
+                }
+                for note in room.could_not_tell() {
+                    ui.add_space(SPACE_XS);
+                    widgets::hint(ui, theme, &note);
+                }
             }
         });
         widgets::section_gap(ui);
@@ -1290,6 +1396,7 @@ mod tests {
     use winappmigrator_core::SystemChangeKind;
 
     const PREVIEW_DIR_VARIABLE: &str = "WAM_UI_PREVIEW_DIR";
+    const SAMPLE_UNPACKED_BYTES: u64 = 412 * 1024 * 1024;
 
     fn sample_installer(mode: ThemeMode) -> InstallerApp {
         let mut app = InstallerApp::blank();
@@ -1348,7 +1455,24 @@ mod tests {
             refused: Vec::new(),
             notes: Vec::new(),
         };
+        app.unpacked_bytes = SAMPLE_UNPACKED_BYTES;
+        *app.checked_room.borrow_mut() = Some((
+            app.target_root.clone(),
+            sample_room(2 * SAMPLE_UNPACKED_BYTES, Some(356 * 1024 * 1024 * 1024)),
+        ));
         app
+    }
+
+    /// What a drive says, by a test and not by this PC, so that a picture of it stays the same.
+    fn sample_room(needed_bytes: u64, free_bytes: Option<u64>) -> RoomCheck {
+        RoomCheck {
+            drives: vec![winappmigrator_core::space::DriveRoom {
+                drive: "C:".to_owned(),
+                needed_bytes,
+                free_bytes,
+                what_for: vec!["unpacking the package and installing it"],
+            }],
+        }
     }
 
     fn sample_outcome(applied: bool, errors: usize) -> Outcome {
@@ -1379,6 +1503,56 @@ mod tests {
 
     fn preview_dir() -> Option<PathBuf> {
         std::env::var_os(PREVIEW_DIR_VARIABLE).map(PathBuf::from)
+    }
+
+    #[test]
+    fn the_window_says_how_much_room_it_needs_where() {
+        let harness = harness_for(sample_installer(ThemeMode::Dark));
+        assert!(
+            harness
+                .query_by_label_contains("up to 824.0 MiB on C: (356.0 GiB free)")
+                .is_some()
+        );
+        assert!(
+            harness
+                .query_by_label_contains("may not be enough room")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_location_without_room_says_so_before_anything_is_tried() {
+        let app = sample_installer(ThemeMode::Dark);
+        *app.checked_room.borrow_mut() = Some((
+            app.target_root.clone(),
+            sample_room(2 * SAMPLE_UNPACKED_BYTES, Some(1024)),
+        ));
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .query_by_label_contains("may not be enough room")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_drive_that_will_not_say_is_said_not_to_have_said() {
+        let app = sample_installer(ThemeMode::Dark);
+        *app.checked_room.borrow_mut() = Some((app.target_root.clone(), sample_room(1024, None)));
+        let harness = harness_for(app);
+        assert!(harness.query_by_label_contains("would not say").is_some());
+        assert!(
+            harness
+                .query_by_label_contains("may not be enough room")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_location_that_is_not_a_full_path_has_no_room_to_show() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.target_root = r"relative\folder".to_owned();
+        assert_eq!(app.room_for_target(), None);
     }
 
     fn harness_for(app: InstallerApp) -> Harness<'static, InstallerApp> {

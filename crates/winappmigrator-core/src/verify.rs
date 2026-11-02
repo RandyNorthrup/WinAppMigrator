@@ -5,21 +5,23 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use winreg::RegValue;
 
+use crate::archive::{EmbeddedPackage, PackageDigests};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{package_destination_path, safe_relative_path};
-use crate::hashing::sha256_file;
+use crate::hashing::{ReadBack, read_back_files, sha256_file};
 use crate::models::{
     EnvironmentVariableEntry, FileEntry, LicenseStoreFile, PackageManifest, RegistryEntry,
     RegistryValueKind, VERIFICATION_SCHEMA_VERSION, VerificationCategory, VerificationItem,
     VerificationOptions, VerificationReport, VerificationStatus, Warning, WarningSeverity,
 };
-use crate::package::{PreparedPackage, read_manifest};
+use crate::package::{PreparedPackage, read_embedded_manifest, read_manifest};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command,
     system_root,
 };
 use crate::prerequisites::{is_present, spec_for_bundle};
+use crate::progress::BuildMonitor;
 use crate::registry_target::{
     app_path_entries, environment_registry_target, is_path_variable, path_contains_entry,
     registry_hive_name, registry_raw_type, registry_root, service_image_path, service_object_name,
@@ -39,28 +41,157 @@ const VERIFICATION_REPORT_JSON: &str = "verification_report.json";
 const VERIFICATION_REPORT_MARKDOWN: &str = "verification_report.md";
 const POWERSHELL_EXE: &str = "powershell.exe";
 
+/// How a package's own files are checked.
+#[derive(Clone, Copy)]
+pub(crate) enum PackageFiles<'a> {
+    /// By reading them where they are.
+    OnDisk,
+    /// By what was seen of each as it came out of the package. Reading it again from the folder
+    /// only an administrator can write to, a moment later, could not tell anything more.
+    Seen(&'a PackageDigests),
+}
+
+impl PackageFiles<'_> {
+    /// Whether a file is in the package, at this path and by this name in the package.
+    fn has(self, path: &Path, relative: &Path) -> bool {
+        match self {
+            Self::OnDisk => path.is_file(),
+            Self::Seen(digests) => digests.get(relative).is_some(),
+        }
+    }
+
+    fn verify(
+        self,
+        name: String,
+        path: &Path,
+        relative: &Path,
+        expected_size: Option<u64>,
+        expected_hash: Option<&str>,
+    ) -> Result<VerificationItem> {
+        let category = VerificationCategory::PackageFile;
+        match self {
+            Self::OnDisk => verify_hash(category, name, path, expected_size, expected_hash),
+            Self::Seen(digests) => {
+                let Some(seen) = digests.get(relative) else {
+                    return Ok(failed_item(
+                        category,
+                        name,
+                        "Packaged file is missing.",
+                        Some(path.display().to_string()),
+                    ));
+                };
+                Ok(compare_with_expected(
+                    category,
+                    name,
+                    path,
+                    seen.size,
+                    Some(seen.sha256.as_str()),
+                    expected_size,
+                    expected_hash,
+                ))
+            }
+        }
+    }
+}
+
 pub fn verify_package(options: &VerificationOptions) -> Result<VerificationReport> {
     let prepared = PreparedPackage::new(&options.package_root)?;
     let manifest = read_manifest(prepared.package_root())?;
-    verify_prepared_package(prepared.package_root(), &manifest, options)
+    verify_prepared_package(
+        prepared.package_root(),
+        &manifest,
+        options,
+        PackageFiles::OnDisk,
+        &|| false,
+    )
+}
+
+/// Check a finished installer as whoever runs it will find it. The whole of what is on the disk is
+/// read back and compared with its footer, then everything in the package is unpacked to nowhere,
+/// and what comes out is compared with what its manifest recorded as it went in.
+pub fn verify_installer(installer: &Path, monitor: &BuildMonitor) -> Result<VerificationReport> {
+    let package =
+        EmbeddedPackage::open_unless(installer, &|| monitor.is_cancelled())?.ok_or_else(|| {
+            WinAppMigratorError::Archive(format!("{} has no package in it", installer.display()))
+        })?;
+    monitor.checkpoint()?;
+    let manifest = read_embedded_manifest(&package)?;
+    let digests = package.digests(&|| monitor.is_cancelled())?;
+    // It writes nothing: only the installer stays in the folder it went to.
+    check_package(
+        installer,
+        &manifest,
+        &VerificationOptions {
+            package_root: installer.to_path_buf(),
+            target_root: None,
+            output_dir: None,
+            restore_user_data: false,
+            restore_license: false,
+        },
+        PackageFiles::Seen(&digests),
+        &|| false,
+    )
+}
+
+/// Check what was just unpacked from an installer, by what was seen as it came out, reading nothing.
+pub fn verify_unpacked_package(
+    package: &EmbeddedPackage,
+    options: &VerificationOptions,
+) -> Result<VerificationReport> {
+    let manifest = read_embedded_manifest(package)?;
+    let digests = package
+        .digests_of_unpacked(&options.package_root)
+        .ok_or_else(|| {
+            WinAppMigratorError::InvalidInput(format!(
+                "this installer's package was not unpacked to {}",
+                options.package_root.display()
+            ))
+        })?;
+    verify_prepared_package(
+        &options.package_root,
+        &manifest,
+        options,
+        PackageFiles::Seen(&digests),
+        &|| false,
+    )
 }
 
 /// Verify a package that is already unpacked, against a manifest that was already read.
-/// Restoring goes through here, so it checks the same manifest it acts on.
+/// Restoring goes through here, so it checks the same manifest it acts on. What was installed is
+/// always read back: `files` only says how the package's own files are checked.
 pub(crate) fn verify_prepared_package(
     package_root: &Path,
     manifest: &PackageManifest,
     options: &VerificationOptions,
+    files: PackageFiles<'_>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<VerificationReport> {
+    let mut report = check_package(package_root, manifest, options, files, is_cancelled)?;
+    let (json_path, markdown_path) = verification_artifact_paths(options, package_root);
+    if let (Some(json_path), Some(markdown_path)) = (json_path, markdown_path) {
+        report.report_json = Some(json_path.clone());
+        report.report_markdown = Some(markdown_path.clone());
+        write_verification_reports(&json_path, &markdown_path, &report)?;
+    }
+    Ok(report)
+}
+
+fn check_package(
+    package_root: &Path,
+    manifest: &PackageManifest,
+    options: &VerificationOptions,
+    files: PackageFiles<'_>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<VerificationReport> {
     let mut items = Vec::new();
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
 
     verify_manifest(manifest, &mut items, &mut errors);
-    verify_package_files(package_root, manifest, &mut items, &mut errors);
-    verify_packaged_license(package_root, manifest, &mut items, &mut errors);
-    verify_packaged_prerequisites(package_root, manifest, &mut items, &mut errors);
-    verify_packaged_drivers(package_root, manifest, &mut items, &mut errors);
+    verify_package_files(package_root, manifest, files, &mut items, &mut errors);
+    verify_packaged_license(package_root, manifest, files, &mut items, &mut errors);
+    verify_packaged_prerequisites(package_root, manifest, files, &mut items, &mut errors);
+    verify_packaged_drivers(package_root, manifest, files, &mut items, &mut errors);
 
     let restore_valid = if let Some(target_root) = options.target_root.as_ref() {
         verify_restored_target(
@@ -68,6 +199,7 @@ pub(crate) fn verify_prepared_package(
             manifest,
             options.restore_user_data,
             options.restore_license,
+            is_cancelled,
             &mut items,
             &mut warnings,
             &mut errors,
@@ -87,8 +219,7 @@ pub(crate) fn verify_prepared_package(
         })
         .any(|item| item.status == VerificationStatus::Failed);
 
-    let (report_json, report_markdown) = verification_artifact_paths(options, package_root);
-    let mut report = VerificationReport {
+    Ok(VerificationReport {
         schema_version: VERIFICATION_SCHEMA_VERSION.to_owned(),
         verified_at_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,
         package_root: package_root.to_path_buf(),
@@ -98,17 +229,9 @@ pub(crate) fn verify_prepared_package(
         items,
         warnings,
         errors,
-        report_json: report_json.clone(),
-        report_markdown: report_markdown.clone(),
-    };
-
-    if let (Some(json_path), Some(markdown_path)) = (report_json, report_markdown) {
-        write_verification_reports(&json_path, &markdown_path, &report)?;
-        report.report_json = Some(json_path);
-        report.report_markdown = Some(markdown_path);
-    }
-
-    Ok(report)
+        report_json: None,
+        report_markdown: None,
+    })
 }
 
 fn restored_items_are_valid(items: &[VerificationItem]) -> bool {
@@ -178,6 +301,7 @@ fn verify_manifest(
 fn verify_package_files(
     package_root: &Path,
     manifest: &PackageManifest,
+    files: PackageFiles<'_>,
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) {
@@ -186,7 +310,7 @@ fn verify_package_files(
         .iter()
         .filter(|entry| entry.should_copy)
     {
-        match verify_one_package_file(package_root, file) {
+        match verify_one_package_file(package_root, file, files) {
             Ok(item) => {
                 if item.status == VerificationStatus::Failed {
                     errors.push(Warning::new(
@@ -217,7 +341,11 @@ fn verify_package_files(
     }
 }
 
-fn verify_one_package_file(package_root: &Path, file: &FileEntry) -> Result<VerificationItem> {
+fn verify_one_package_file(
+    package_root: &Path,
+    file: &FileEntry,
+    files: PackageFiles<'_>,
+) -> Result<VerificationItem> {
     let Some(relative) = file.package_relative_path.as_ref() else {
         return Ok(failed_item(
             VerificationCategory::PackageFile,
@@ -227,7 +355,7 @@ fn verify_one_package_file(package_root: &Path, file: &FileEntry) -> Result<Veri
         ));
     };
     let packaged = package_destination_path(package_root, relative)?;
-    if !packaged.is_file() {
+    if !files.has(&packaged, relative) {
         return Ok(failed_item(
             VerificationCategory::PackageFile,
             relative.display().to_string(),
@@ -235,19 +363,22 @@ fn verify_one_package_file(package_root: &Path, file: &FileEntry) -> Result<Veri
             Some(packaged.display().to_string()),
         ));
     }
-    verify_file_size_and_hash(
-        VerificationCategory::PackageFile,
+    files.verify(
         relative.display().to_string(),
         &packaged,
-        file,
+        relative,
+        file.size_bytes,
+        file.hash_sha256.as_deref(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_restored_target(
     target_root: &Path,
     manifest: &PackageManifest,
     restore_user_data: bool,
     restore_license: bool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
     items: &mut Vec<VerificationItem>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
@@ -263,7 +394,7 @@ fn verify_restored_target(
             source: None,
         });
     }
-    verify_restored_files(&review, items, errors)?;
+    verify_restored_files(&review, is_cancelled, items, errors)?;
     verify_prerequisites(manifest, items);
     verify_license_restored(&review.license, items, errors)?;
     verify_registry_entries(
@@ -282,11 +413,22 @@ fn verify_restored_target(
     Ok(())
 }
 
+/// Read back every file that was installed, from where it now is. This is what "Reinstall hashes
+/// valid" goes by, and nothing that was read earlier stands in for it.
 fn verify_restored_files(
     review: &ReviewedPackage<'_>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) -> Result<()> {
+    let installed: Vec<PathBuf> = review
+        .files
+        .iter()
+        .filter_map(|file| review.map.destination_of(&file.original_path))
+        .filter(|destination| destination.is_file())
+        .map(Path::to_path_buf)
+        .collect();
+    let mut read_back = read_back_files(&installed, is_cancelled)?;
     for file in &review.files {
         let (Some(relative), Some(destination)) = (
             file.package_relative_path.as_ref(),
@@ -294,20 +436,25 @@ fn verify_restored_files(
         ) else {
             continue;
         };
-        let item = if destination.is_file() {
-            verify_file_size_and_hash(
-                VerificationCategory::RestoredFile,
-                relative.display().to_string(),
-                destination,
-                file,
-            )?
-        } else {
-            failed_item(
+        let item = match read_back.remove(destination) {
+            Some(read) => {
+                let ReadBack { size, sha256 } = read?;
+                compare_with_expected(
+                    VerificationCategory::RestoredFile,
+                    relative.display().to_string(),
+                    destination,
+                    size,
+                    Some(&sha256),
+                    file.size_bytes,
+                    file.hash_sha256.as_deref(),
+                )
+            }
+            None => failed_item(
                 VerificationCategory::RestoredFile,
                 relative.display().to_string(),
                 "Restored file is missing.",
                 Some(destination.display().to_string()),
-            )
+            ),
         };
         if item.status == VerificationStatus::Failed {
             errors.push(Warning::new(
@@ -322,21 +469,6 @@ fn verify_restored_files(
     Ok(())
 }
 
-fn verify_file_size_and_hash(
-    category: VerificationCategory,
-    name: String,
-    path: &Path,
-    file: &FileEntry,
-) -> Result<VerificationItem> {
-    verify_hash(
-        category,
-        name,
-        path,
-        file.size_bytes,
-        file.hash_sha256.as_deref(),
-    )
-}
-
 /// Verify a file on disk against an expected size and SHA-256.
 fn verify_hash(
     category: VerificationCategory,
@@ -346,45 +478,72 @@ fn verify_hash(
     expected_hash: Option<&str>,
 ) -> Result<VerificationItem> {
     let metadata = fs::metadata(path).map_err(|source| WinAppMigratorError::io(path, source))?;
-    if let Some(expected_size) = expected_size
-        && metadata.len() != expected_size
+    // Only read it if that can tell anything.
+    let actual_hash = if expected_hash.is_none()
+        || expected_size.is_some_and(|expected| expected != metadata.len())
     {
-        return Ok(failed_item(
+        None
+    } else {
+        Some(sha256_file(path)?)
+    };
+    Ok(compare_with_expected(
+        category,
+        name,
+        path,
+        metadata.len(),
+        actual_hash.as_deref(),
+        expected_size,
+        expected_hash,
+    ))
+}
+
+/// Say whether what was read of a file is what was expected of it.
+fn compare_with_expected(
+    category: VerificationCategory,
+    name: String,
+    path: &Path,
+    actual_size: u64,
+    actual_hash: Option<&str>,
+    expected_size: Option<u64>,
+    expected_hash: Option<&str>,
+) -> VerificationItem {
+    if let Some(expected_size) = expected_size
+        && actual_size != expected_size
+    {
+        return failed_item(
             category,
             name,
             format!(
-                "File size mismatch. Expected {expected_size} bytes, found {} bytes.",
-                metadata.len()
+                "File size mismatch. Expected {expected_size} bytes, found {actual_size} bytes."
             ),
             Some(path.display().to_string()),
-        ));
+        );
     }
     // A missing hash is a failure, not a pass. Every copied file gets one when it is
     // packaged, so there is nothing else to check it by, and saying it passed would be
     // claiming a check that never happened.
     let Some(expected_hash) = expected_hash else {
-        return Ok(failed_item(
+        return failed_item(
             category,
             name,
             "The manifest records no hash for this file, so it cannot be checked.",
             Some(path.display().to_string()),
-        ));
+        );
     };
-    let actual_hash = sha256_file(path)?;
-    if !actual_hash.eq_ignore_ascii_case(expected_hash) {
-        return Ok(failed_item(
+    if !actual_hash.is_some_and(|actual| actual.eq_ignore_ascii_case(expected_hash)) {
+        return failed_item(
             category,
             name,
             "SHA-256 hash mismatch.",
             Some(path.display().to_string()),
-        ));
+        );
     }
-    Ok(passed_item(
+    passed_item(
         category,
         name,
         "File size and hash match manifest.",
         Some(path.display().to_string()),
-    ))
+    )
 }
 
 /// Verify the license payloads embedded in the package (hash of each copied
@@ -392,6 +551,7 @@ fn verify_hash(
 fn verify_packaged_license(
     package_root: &Path,
     manifest: &PackageManifest,
+    files: PackageFiles<'_>,
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) {
@@ -406,22 +566,23 @@ fn verify_packaged_license(
             continue;
         };
         if artifact.store_files.is_empty() {
-            let item = if packaged.is_file() {
-                verify_hash(
-                    VerificationCategory::PackageFile,
-                    relative.display().to_string(),
-                    &packaged,
-                    artifact.size_bytes,
-                    artifact.hash_sha256.as_deref(),
-                )
-                .unwrap_or_else(|error| {
-                    failed_item(
-                        VerificationCategory::PackageFile,
+            let item = if files.has(&packaged, relative) {
+                files
+                    .verify(
                         relative.display().to_string(),
-                        format!("License payload verification failed: {error}"),
-                        Some(packaged.display().to_string()),
+                        &packaged,
+                        relative,
+                        artifact.size_bytes,
+                        artifact.hash_sha256.as_deref(),
                     )
-                })
+                    .unwrap_or_else(|error| {
+                        failed_item(
+                            VerificationCategory::PackageFile,
+                            relative.display().to_string(),
+                            format!("License payload verification failed: {error}"),
+                            Some(packaged.display().to_string()),
+                        )
+                    })
             } else {
                 failed_item(
                     VerificationCategory::PackageFile,
@@ -435,22 +596,24 @@ fn verify_packaged_license(
         }
         for file in &artifact.store_files {
             let name = relative.join(&file.relative_path).display().to_string();
+            let in_package = relative.join(safe_relative_path(&file.relative_path));
             let item = match store_file_path(&packaged, file) {
-                Ok(path) if path.is_file() => verify_hash(
-                    VerificationCategory::PackageFile,
-                    name.clone(),
-                    &path,
-                    Some(file.size_bytes),
-                    Some(&file.hash_sha256),
-                )
-                .unwrap_or_else(|error| {
-                    failed_item(
-                        VerificationCategory::PackageFile,
-                        name,
-                        format!("License store verification failed: {error}"),
-                        None,
+                Ok(path) if files.has(&path, &in_package) => files
+                    .verify(
+                        name.clone(),
+                        &path,
+                        &in_package,
+                        Some(file.size_bytes),
+                        Some(&file.hash_sha256),
                     )
-                }),
+                    .unwrap_or_else(|error| {
+                        failed_item(
+                            VerificationCategory::PackageFile,
+                            name,
+                            format!("License store verification failed: {error}"),
+                            None,
+                        )
+                    }),
                 Ok(path) => failed_item(
                     VerificationCategory::PackageFile,
                     name,
@@ -490,6 +653,7 @@ fn push_license_payload_item(
 fn verify_packaged_prerequisites(
     package_root: &Path,
     manifest: &PackageManifest,
+    files: PackageFiles<'_>,
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) {
@@ -503,22 +667,23 @@ fn verify_packaged_prerequisites(
         let Ok(packaged) = package_destination_path(package_root, relative) else {
             continue;
         };
-        let item = if packaged.is_file() {
-            verify_hash(
-                VerificationCategory::PackageFile,
-                relative.display().to_string(),
-                &packaged,
-                bundle.size_bytes,
-                bundle.hash_sha256.as_deref(),
-            )
-            .unwrap_or_else(|error| {
-                failed_item(
-                    VerificationCategory::PackageFile,
+        let item = if files.has(&packaged, relative) {
+            files
+                .verify(
                     relative.display().to_string(),
-                    format!("Prerequisite payload verification failed: {error}"),
-                    Some(packaged.display().to_string()),
+                    &packaged,
+                    relative,
+                    bundle.size_bytes,
+                    bundle.hash_sha256.as_deref(),
                 )
-            })
+                .unwrap_or_else(|error| {
+                    failed_item(
+                        VerificationCategory::PackageFile,
+                        relative.display().to_string(),
+                        format!("Prerequisite payload verification failed: {error}"),
+                        Some(packaged.display().to_string()),
+                    )
+                })
         } else {
             failed_item(
                 VerificationCategory::PackageFile,
@@ -544,6 +709,7 @@ fn verify_packaged_prerequisites(
 fn verify_packaged_drivers(
     package_root: &Path,
     manifest: &PackageManifest,
+    files: PackageFiles<'_>,
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) {
@@ -552,21 +718,22 @@ fn verify_packaged_drivers(
             continue;
         };
         let item = match package_destination_path(package_root, relative) {
-            Ok(packaged) if packaged.is_file() => verify_hash(
-                VerificationCategory::PackageFile,
-                relative.display().to_string(),
-                &packaged,
-                None,
-                driver.hash_sha256.as_deref(),
-            )
-            .unwrap_or_else(|error| {
-                failed_item(
-                    VerificationCategory::PackageFile,
+            Ok(packaged) if files.has(&packaged, relative) => files
+                .verify(
                     relative.display().to_string(),
-                    format!("Driver image verification failed: {error}"),
-                    Some(packaged.display().to_string()),
+                    &packaged,
+                    relative,
+                    None,
+                    driver.hash_sha256.as_deref(),
                 )
-            }),
+                .unwrap_or_else(|error| {
+                    failed_item(
+                        VerificationCategory::PackageFile,
+                        relative.display().to_string(),
+                        format!("Driver image verification failed: {error}"),
+                        Some(packaged.display().to_string()),
+                    )
+                }),
             Ok(packaged) => failed_item(
                 VerificationCategory::PackageFile,
                 relative.display().to_string(),

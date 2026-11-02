@@ -65,7 +65,7 @@ use crate::rollback::{
 };
 use crate::service_scan::DELAYED_AUTOMATIC_START_LABEL;
 use crate::task_scan::live_task_xml;
-use crate::verify::{verify_prepared_package, without_what_was_refused};
+use crate::verify::{PackageFiles, verify_prepared_package, without_what_was_refused};
 
 pub(crate) const POWERSHELL_EXE: &str = "powershell.exe";
 pub(crate) const SC_EXE: &str = "sc.exe";
@@ -238,10 +238,17 @@ pub fn restore_package_monitored(
             )
         })
         .collect();
+    // Unpacked from an installer, each file was hashed as it came out, and is in a folder only an
+    // administrator can write to. Reading it all again a moment later could not tell anything more.
+    let digests =
+        installer.and_then(|package| package.digests_of_unpacked(&effective_options.package_root));
+    let package_files = digests
+        .as_deref()
+        .map_or(PackageFiles::OnDisk, PackageFiles::Seen);
     let mut busy_lock = None;
     if options.apply {
         monitor.report(InstallStep::new(InstallPhase::CheckingPackage, 0, 0));
-        refuse_damaged_package(&effective_options, &manifest)?;
+        refuse_damaged_package(&effective_options, &manifest, package_files)?;
         // There is nowhere safe to keep a record without this, so nothing goes ahead, and held
         // until the end, so that no other install can change what this one is changing.
         busy_lock = Some(lock_state(&options.state_root).map_err(nowhere_to_keep_a_record)?);
@@ -403,6 +410,7 @@ pub fn restore_package_monitored(
         cancelled: false,
         app_name: &app_name,
         manifest: &manifest,
+        package_files,
     };
     run.apply_steps();
     let verification = run.verify_result();
@@ -696,6 +704,8 @@ struct Run<'a, 'p> {
     /// this install put anything in them.
     data_folders_already_here: Vec<PathBuf>,
     cancelled: bool,
+    /// How the package's own files are checked.
+    package_files: PackageFiles<'a>,
 }
 
 impl Run<'_, '_> {
@@ -801,6 +811,7 @@ impl Run<'_, '_> {
         }
         self.progress(InstallPhase::Verifying, 0, 0);
         let options = self.options;
+        let monitor = self.monitor;
         match verify_prepared_package(
             &options.package_root,
             self.manifest,
@@ -811,6 +822,8 @@ impl Run<'_, '_> {
                 restore_user_data: options.restore_user_data,
                 restore_license: options.restore_license,
             },
+            self.package_files,
+            &|| monitor.is_cancelled(),
         ) {
             Ok(report) => {
                 let refused: Vec<&str> = self
@@ -824,6 +837,10 @@ impl Run<'_, '_> {
                     self.errors.extend(report.errors.clone());
                 }
                 Some(report)
+            }
+            Err(WinAppMigratorError::Cancelled) => {
+                self.stopped();
+                None
             }
             Err(error) => {
                 self.errors.push(Warning::new(
@@ -2109,7 +2126,11 @@ fn driver_sc_type(kind: &DriverKind) -> &'static str {
 
 /// Hash-check the package before anything is written, so a truncated or damaged
 /// copy is refused instead of running prerequisites and overwriting the app first.
-fn refuse_damaged_package(options: &RestoreOptions, manifest: &PackageManifest) -> Result<()> {
+fn refuse_damaged_package(
+    options: &RestoreOptions,
+    manifest: &PackageManifest,
+    package_files: PackageFiles<'_>,
+) -> Result<()> {
     let report = verify_prepared_package(
         &options.package_root,
         manifest,
@@ -2120,6 +2141,8 @@ fn refuse_damaged_package(options: &RestoreOptions, manifest: &PackageManifest) 
             restore_user_data: options.restore_user_data,
             restore_license: options.restore_license,
         },
+        package_files,
+        &|| false,
     )?;
     if report.package_valid {
         return Ok(());

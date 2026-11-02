@@ -16,8 +16,9 @@ use winappmigrator_core::rollback::report_lines;
 use winappmigrator_core::{
     EmbeddedPackage, InstallMonitor, PackageManifest, RestoreOptions, Result, VerificationOptions,
     WinAppMigratorError, default_install_location, has_embedded_self_archive,
-    install_location_problem, read_embedded_manifest, refuse_what_cannot_run_here,
-    restore_package_monitored, system_changes_restoring, verify_package,
+    install_location_problem, install_places, preview_needs, read_embedded_manifest,
+    refuse_what_cannot_run_here, refuse_without_room_to_install, restore_package_monitored,
+    system_changes_restoring, verify_unpacked_package,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -138,12 +139,34 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     // Stage the extracted package on the install destination's drive (falling
     // back to the installer's own drive, then the system temp drive) so a large
     // package never fails to extract for lack of space on the system drive.
-    let temp_dir = crate::cleanup::create_staging_dir(Some(&target_root), executable)
-        .map_err(|source| WinAppMigratorError::io("staging extraction directory", source))?;
-    package.extract_to(temp_dir.path())?;
+    let unpacked_bytes = package.unpacked_bytes()?;
+    let temp_dir =
+        crate::cleanup::create_staging_dir(Some(&target_root), executable, unpacked_bytes)
+            .map_err(|source| WinAppMigratorError::io("staging extraction directory", source))?;
 
     let applied = cli.apply;
     let restore_license = !cli.no_restore_license;
+    let places = if applied {
+        install_places(
+            &manifest,
+            &target_root,
+            cli.restore_user_data,
+            restore_license,
+            temp_dir.path(),
+            unpacked_bytes,
+            &state_root,
+            package.stub_bytes(),
+        )?
+    } else {
+        preview_needs(temp_dir.path(), unpacked_bytes)
+    };
+    let room = refuse_without_room_to_install(&places)?;
+    println!("Room: {}", room.summary());
+    for note in room.could_not_tell() {
+        println!("  Note: {note}");
+    }
+    package.extract_to(temp_dir.path())?;
+
     // The same list the window asks about, before any of it, so that a script can see what it
     // agreed to.
     if let Ok(changes) = system_changes_restoring(&manifest, restore_license) {
@@ -208,13 +231,16 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     // preview changed nothing, so only the package itself has anything to check.
     let verification = match result.verification.as_ref() {
         Some(report) => report.clone(),
-        None => verify_package(&VerificationOptions {
-            package_root: temp_dir.path().to_path_buf(),
-            target_root: None,
-            output_dir: None,
-            restore_user_data: cli.restore_user_data,
-            restore_license,
-        })?,
+        None => verify_unpacked_package(
+            &package,
+            &VerificationOptions {
+                package_root: temp_dir.path().to_path_buf(),
+                target_root: None,
+                output_dir: None,
+                restore_user_data: cli.restore_user_data,
+                restore_license,
+            },
+        )?,
     };
     println!("Package hashes valid: {}", verification.package_valid);
     let restore_ok = match verification.restore_valid {

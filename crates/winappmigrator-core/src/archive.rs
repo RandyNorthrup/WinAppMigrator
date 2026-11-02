@@ -1,29 +1,50 @@
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
-use std::os::windows::fs::OpenOptionsExt;
-use std::path::{Component, Path};
+use std::os::windows::fs::{FileExt, OpenOptionsExt};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
-use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipArchive, ZipWriter};
+use zip::ZipArchive;
 
-use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::reject_unsafe_components;
+use crate::errors::{Result, WinAppMigratorError, panic_text};
+use crate::file_discovery::{reject_unsafe_components, safe_relative_path};
+use crate::hashing::hex_lower;
 use crate::models::InstallerStub;
-use crate::progress::{BuildMonitor, BuildStep, InstallMonitor, InstallPhase, InstallStep};
+use crate::packer::{PackItem, Packer, SourceRules};
+use crate::progress::{BuildMonitor, InstallMonitor, InstallPhase, InstallStep};
+use crate::space::MOST_INSTALLER_BYTES;
+use crate::zip_stream::FinishedZip;
 
-const ZIP_BUFFER_SIZE: usize = 1024 * 1024;
 const SFX_MAGIC: &[u8] = b"WINAPPMIGRATOR_SFX_V2";
+/// In the same place and of the same length, for a loader, whose package is the data file beside
+/// it. The hash and the length before it are that file's, so what signs the loader signs them.
+const LOADER_MAGIC: &[u8] = b"WINAPPMIGRATOR_LDR_V3";
+const _: () = assert!(SFX_MAGIC.len() == LOADER_MAGIC.len());
 const SFX_HASH_BYTES: usize = 32;
 const SFX_LENGTH_BYTES: usize = 8;
 /// After the package: its SHA-256, its length, then the magic. The stub and its package
 /// always ship together, so the layout can change freely between versions.
 const SFX_FOOTER_LEN: u64 = (SFX_HASH_BYTES + SFX_LENGTH_BYTES + SFX_MAGIC.len()) as u64;
+/// What the data file of a loader is called, beside it, and with its name.
+pub const DATA_FILE_EXTENSION: &str = "wamdata";
+/// A data file on its way, until it is known whether it is one.
+const PARTIAL_DATA_EXTENSION: &str = "wamdata.partial";
+const PARTIAL_EXTENSION: &str = "partial";
+/// An earlier build's data file, for as long as it takes to put a new one in place.
+const EARLIER_DATA_EXTENSION: &str = "wamdata.earlier";
 /// Lets other programs read an installer while it is in use, but not change, rename, or
 /// delete it.
 const FILE_SHARE_READ: u32 = 0x0000_0001;
+/// Opens whatever has the name, rather than what a link with that name points at.
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
+/// Unpacking is mostly waiting for the disk, and past this it mostly waits for itself.
+const MOST_UNPACKING_THREADS: usize = 8;
 
 const PE_HEADER_OFFSET_FIELD: u64 = 0x3C;
 const PE_SIGNATURE: &[u8] = b"PE\0\0";
@@ -48,8 +69,75 @@ const PE32_PLUS_SECURITY_DIRECTORY: u64 = 144;
 const MAX_SIGNATURE_PADDING: u64 = 7;
 /// Upper bound for a single file read out of a package into memory (the manifest).
 const MAX_EMBEDDED_FILE_BYTES: u64 = 1024 * 1024 * 1024;
-const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-const MAX_INSTALLER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// What the hash and size of everything in a package came out as, seen as it was read.
+#[derive(Debug, Default)]
+pub struct PackageDigests {
+    by_name: HashMap<String, EntryDigest>,
+}
+
+/// One entry's part of [`PackageDigests`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryDigest {
+    pub sha256: String,
+    pub size: u64,
+}
+
+impl PackageDigests {
+    /// What was seen of the file a manifest calls by this path, as it would be placed.
+    pub fn get(&self, relative: &Path) -> Option<&EntryDigest> {
+        self.by_name.get(&zip_name_of(relative).to_lowercase())
+    }
+}
+
+/// The name in a zip of a path relative to a package's root.
+pub(crate) fn zip_name_of(relative: &Path) -> String {
+    let safe = safe_relative_path(relative);
+    let parts: Vec<String> = safe
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.join("/")
+}
+
+/// What is in a package folder, for putting in a zip. `expected` says what those that were copied
+/// in earlier have to hash to, by their lowercased names.
+pub(crate) fn package_folder_items(
+    package_root: &Path,
+    expected: &HashMap<String, String>,
+) -> Result<Vec<PackItem>> {
+    let mut items = Vec::new();
+    for entry in WalkDir::new(package_root).follow_links(false) {
+        let entry = entry.map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+        if entry.path() == package_root || entry.file_type().is_dir() {
+            continue;
+        }
+        let name = zip_entry_name(package_root, entry.path())?;
+        let size_hint = entry
+            .metadata()
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?
+            .len();
+        items.push(PackItem {
+            expected_sha256: expected.get(&name.to_lowercase()).cloned(),
+            name,
+            source: entry.path().to_path_buf(),
+            size_hint,
+        });
+    }
+    Ok(items)
+}
+
+fn nothing_to_ask(_: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// The rules for what is already in a package's own folder, which nothing else writes to.
+pub(crate) const HELD_FILES: SourceRules<'static> = SourceRules {
+    before: &nothing_to_ask,
+    after: &nothing_to_ask,
+    connected_drive: false,
+    spool: None,
+};
 
 pub fn create_zip_archive(
     package_root: &Path,
@@ -59,58 +147,23 @@ pub fn create_zip_archive(
     if let Some(parent) = archive_path.parent() {
         fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
     }
-
     let file =
         File::create(archive_path).map_err(|error| WinAppMigratorError::io(archive_path, error))?;
-    let mut writer = ZipWriter::new(file);
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    let mut buffer = vec![0_u8; ZIP_BUFFER_SIZE];
-
-    let mut entries = Vec::new();
-    for entry in WalkDir::new(package_root).follow_links(false) {
-        let entry = entry.map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
-        if entry.path() != package_root && !entry.file_type().is_dir() {
-            entries.push(entry);
-        }
+    let written = pack_folder(package_root, file, monitor);
+    if written.is_err() {
+        let _ = fs::remove_file(archive_path);
     }
-    let total = entries.len();
-    monitor.report(BuildStep::Compressing { done: 0, total });
+    written
+}
 
-    for (done, entry) in entries.iter().enumerate() {
-        monitor.checkpoint()?;
-        let path = entry.path();
-        let name = zip_entry_name(package_root, path)?;
-        let size = entry
-            .metadata()
-            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?
-            .len();
-        // Without ZIP64 a file over 4 GiB fails the build after all the copying
-        // has already been done.
-        let options = options.large_file(size >= u64::from(u32::MAX));
-        writer
-            .start_file(name, options)
-            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
-        let mut source = File::open(path).map_err(|error| WinAppMigratorError::io(path, error))?;
-        loop {
-            let read = source
-                .read(&mut buffer)
-                .map_err(|error| WinAppMigratorError::io(path, error))?;
-            if read == 0 {
-                break;
-            }
-            writer
-                .write_all(&buffer[..read])
-                .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
-        }
-        monitor.report(BuildStep::Compressing {
-            done: done + 1,
-            total,
-        });
+fn pack_folder(package_root: &Path, file: File, monitor: &BuildMonitor) -> Result<()> {
+    let items = package_folder_items(package_root, &HashMap::new())?;
+    let mut packer = Packer::new(file, 0, monitor.clone());
+    packer.expect(&items);
+    for outcome in packer.pack(&items, &HELD_FILES)? {
+        outcome.map_err(WinAppMigratorError::Archive)?;
     }
-
-    writer
-        .finish()
-        .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+    packer.finish()?;
     Ok(())
 }
 
@@ -119,62 +172,204 @@ pub fn extract_zip_archive(archive_path: &Path, destination_root: &Path) -> Resu
         .map_err(|error| WinAppMigratorError::io(destination_root, error))?;
     let file =
         File::open(archive_path).map_err(|error| WinAppMigratorError::io(archive_path, error))?;
-    extract_zip_reader(file, destination_root, &InstallMonitor::default())
+    let len = file
+        .metadata()
+        .map_err(|error| WinAppMigratorError::io(archive_path, error))?
+        .len();
+    extract_zip_reader(
+        ArchiveSection::new(Arc::new(file), 0, len),
+        destination_root,
+        &InstallMonitor::default(),
+    )?;
+    Ok(())
 }
 
-fn extract_zip_reader<R: Read + Seek>(
+/// Unpack a zip, reporting each file, and hashing each as it goes by. Only plain names below the
+/// destination get through.
+fn extract_zip_reader<R: Read + Seek + Clone + Send>(
     reader: R,
     destination_root: &Path,
     monitor: &InstallMonitor,
-) -> Result<()> {
-    let mut archive =
-        ZipArchive::new(reader).map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+) -> Result<PackageDigests> {
+    monitor.checkpoint()?;
+    read_every_entry(
+        reader,
+        Some(destination_root),
+        &|done, total| {
+            monitor.report(InstallStep::new(InstallPhase::Unpacking, done, total));
+        },
+        &|| monitor.is_cancelled(),
+    )
+}
 
+/// Read everything in a zip on as many threads as make sense, each with its own place in it and a
+/// buffer of its own, hashing what comes out as it comes out. With `destination`, that is also what
+/// is written there, and without, it goes nowhere. It stops at the first thing that fails.
+fn read_every_entry<R: Read + Seek + Clone + Send>(
+    reader: R,
+    destination: Option<&Path>,
+    progress: &(dyn Fn(usize, usize) + Sync),
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<PackageDigests> {
+    let archive =
+        ZipArchive::new(reader).map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
     let total = archive.len();
-    for index in 0..total {
-        monitor.checkpoint()?;
-        monitor.report(InstallStep::new(InstallPhase::Unpacking, index, total));
-        let mut file = archive
-            .by_index(index)
-            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
-        // Not `enclosed_name`, which up to at least zip 9.2.2 panics when a name's third byte
-        // falls inside a character, as in `Größe.txt`. It also refuses `aux.h`, which a scan
-        // rightly copies, so one such file would stop the whole install. These checks are
-        // what it was for: only plain names below the destination get through.
-        let name = file
-            .name()
-            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?
-            .into_owned();
-        if name.contains('\0') {
+    // Under its lock, so that what is said comes in order.
+    let done = Mutex::new(0_usize);
+    progress(0, total);
+    let next = AtomicUsize::new(0);
+    let stopping = AtomicBool::new(false);
+    let digests = Mutex::new(HashMap::with_capacity(total));
+    let failure: Mutex<Option<WinAppMigratorError>> = Mutex::new(None);
+    let threads = crate::packer::worker_count()
+        .min(MOST_UNPACKING_THREADS)
+        .min(total.max(1));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            let mut archive = archive.clone();
+            let (next, stopping, digests, failure, done) =
+                (&next, &stopping, &digests, &failure, &done);
+            scope.spawn(move || {
+                while !stopping.load(Ordering::Relaxed) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= total {
+                        return;
+                    }
+                    // A panic in reading a package someone else made goes no further than this. It
+                    // would take the thread with it, and a window would wait for that thread forever.
+                    let outcome = catch_unwind(AssertUnwindSafe(|| {
+                        read_one_entry(&mut archive, index, destination, is_cancelled)
+                    }))
+                    .unwrap_or_else(|panic| {
+                        Err(WinAppMigratorError::Archive(format!(
+                            "entry {index} of the package could not be read: {}",
+                            panic_text(panic.as_ref())
+                        )))
+                    });
+                    match outcome {
+                        Ok(Some((name, digest))) => {
+                            if let Ok(mut digests) = digests.lock() {
+                                digests.insert(name, digest);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            stopping.store(true, Ordering::Relaxed);
+                            if let Ok(mut failure) = failure.lock() {
+                                failure.get_or_insert(error);
+                            }
+                            return;
+                        }
+                    }
+                    if let Ok(mut done) = done.lock() {
+                        *done += 1;
+                        progress(*done, total);
+                    }
+                }
+            });
+        }
+    });
+    if let Some(error) = failure
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
+        return Err(error);
+    }
+    Ok(PackageDigests {
+        by_name: digests
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    })
+}
+
+fn read_one_entry<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    index: usize,
+    destination_root: Option<&Path>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<(String, EntryDigest)>> {
+    let mut file = archive
+        .by_index(index)
+        .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+    // Not `enclosed_name`, which up to at least zip 9.2.2 panics when a name's third byte
+    // falls inside a character, as in `Größe.txt`. It also refuses `aux.h`, which a scan
+    // rightly copies, so one such file would stop the whole install. These checks are
+    // what it was for: only plain names below the destination get through.
+    let name = file
+        .name()
+        .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?
+        .into_owned();
+    if name.contains('\0') {
+        return Err(WinAppMigratorError::Archive(format!(
+            "zip entry has unsafe path: {name}"
+        )));
+    }
+    let relative = Path::new(&name);
+    reject_unsafe_components(relative)
+        .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+    let destination = destination_root.map(|root| root.join(relative));
+
+    if file.is_dir() {
+        if let Some(destination) = destination.as_deref() {
+            fs::create_dir_all(destination)
+                .map_err(|error| WinAppMigratorError::io(destination, error))?;
+        }
+        return Ok(None);
+    }
+    let mut output = match destination.as_deref() {
+        Some(destination) => {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| WinAppMigratorError::io(parent, error))?;
+            }
+            // Extraction goes into a new, empty folder, so anything already at this path was
+            // not put there by this package, and opening it could follow a link.
+            Some(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(destination)
+                    .map_err(|error| WinAppMigratorError::io(destination, error))?,
+            )
+        }
+        None => None,
+    };
+    // What the room for this was worked out from is what the entry says it holds, and a package
+    // can say anything.
+    let declared = file.size();
+    let mut hasher = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    loop {
+        if is_cancelled() {
+            return Err(WinAppMigratorError::Cancelled);
+        }
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| WinAppMigratorError::Archive(format!("{name}: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        size += read as u64;
+        if size > declared {
             return Err(WinAppMigratorError::Archive(format!(
-                "zip entry has unsafe path: {name}"
+                "{name} holds more than it says it does"
             )));
         }
-        let relative = Path::new(&name);
-        reject_unsafe_components(relative)
-            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
-        let destination = destination_root.join(relative);
-
-        if file.is_dir() {
-            fs::create_dir_all(&destination)
-                .map_err(|error| WinAppMigratorError::io(&destination, error))?;
-            continue;
+        hasher.update(&buffer[..read]);
+        if let (Some(output), Some(destination)) = (output.as_mut(), destination.as_deref()) {
+            output
+                .write_all(&buffer[..read])
+                .map_err(|error| WinAppMigratorError::io(destination, error))?;
         }
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
-        }
-        // Extraction goes into a new, empty folder, so anything already at this path was
-        // not put there by this package, and opening it could follow a link.
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .map_err(|error| WinAppMigratorError::io(&destination, error))?;
-        io::copy(&mut file, &mut output)
-            .map_err(|error| WinAppMigratorError::io(&destination, error))?;
     }
-    monitor.report(InstallStep::new(InstallPhase::Unpacking, total, total));
-    Ok(())
+    Ok(Some((
+        name.to_lowercase(),
+        EntryDigest {
+            sha256: hex_lower(&hasher.finalize()),
+            size,
+        },
+    )))
 }
 
 pub fn create_self_extracting_archive(
@@ -192,7 +387,7 @@ pub fn create_self_extracting_archive(
     }
     // Build beside the destination and rename on success, so a failed build never
     // destroys an installer from an earlier run.
-    let partial_path = output_path.with_extension("partial");
+    let partial_path = output_path.with_extension(PARTIAL_EXTENSION);
     let result = write_installer(stub, archive_path, &partial_path).and_then(|()| {
         fs::rename(&partial_path, output_path)
             .map_err(|error| WinAppMigratorError::io(output_path, error))
@@ -203,44 +398,81 @@ pub fn create_self_extracting_archive(
     result
 }
 
-fn write_installer(stub: &InstallerStub, archive_path: &Path, output_path: &Path) -> Result<()> {
-    match stub {
-        InstallerStub::File(path) => {
-            fs::copy(path, output_path)
-                .map_err(|error| WinAppMigratorError::io(output_path, error))?;
-        }
-        InstallerStub::Embedded(bytes) => {
-            fs::write(output_path, bytes)
-                .map_err(|error| WinAppMigratorError::io(output_path, error))?;
-        }
+/// [`create_self_extracting_archive`], as a small loader and a data file beside it, whatever the
+/// size. A build does this by itself when a package has to go that way. Returns the data file.
+pub fn create_installer_with_data_file(
+    stub: &InstallerStub,
+    archive_path: &Path,
+    output_path: &Path,
+) -> Result<PathBuf> {
+    refuse_signed_stub(stub)?;
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
     }
-    let mut output = OpenOptions::new()
-        .append(true)
-        .open(output_path)
-        .map_err(|error| WinAppMigratorError::io(output_path, error))?;
+    let data_path = data_file_beside(output_path);
+    fs::copy(archive_path, &data_path)
+        .map_err(|error| WinAppMigratorError::io(&data_path, error))?;
     let mut archive =
-        File::open(archive_path).map_err(|error| WinAppMigratorError::io(archive_path, error))?;
+        File::open(&data_path).map_err(|error| WinAppMigratorError::io(&data_path, error))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
-    let mut archive_len = 0_u64;
+    let mut len = 0_u64;
     loop {
         let read = archive
             .read(&mut buffer)
-            .map_err(|error| WinAppMigratorError::io(archive_path, error))?;
+            .map_err(|error| WinAppMigratorError::io(&data_path, error))?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
-        output
-            .write_all(&buffer[..read])
-            .map_err(|error| WinAppMigratorError::io(output_path, error))?;
-        archive_len += read as u64;
+        len += read as u64;
     }
-    for part in [
-        hasher.finalize().as_slice(),
-        &archive_len.to_le_bytes(),
-        SFX_MAGIC,
-    ] {
+    let mut hash = [0_u8; SFX_HASH_BYTES];
+    hash.copy_from_slice(hasher.finalize().as_slice());
+    let partial_path = output_path.with_extension(PARTIAL_EXTENSION);
+    let _ = fs::remove_file(&partial_path);
+    let result = write_loader(stub, &hash, len, &partial_path).and_then(|()| {
+        fs::rename(&partial_path, output_path)
+            .map_err(|error| WinAppMigratorError::io(output_path, error))
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(&partial_path);
+        let _ = fs::remove_file(&data_path);
+    }
+    result?;
+    Ok(data_path)
+}
+
+/// Where a loader looks for its data file. Only ever here: beside it, with its name.
+pub fn data_file_beside(installer: &Path) -> PathBuf {
+    installer.with_extension(DATA_FILE_EXTENSION)
+}
+
+fn write_stub_to(stub: &InstallerStub, output: &mut File, output_path: &Path) -> Result<()> {
+    match stub {
+        InstallerStub::File(path) => {
+            let mut source =
+                File::open(path).map_err(|error| WinAppMigratorError::io(path, error))?;
+            io::copy(&mut source, output)
+                .map_err(|error| WinAppMigratorError::io(output_path, error))?;
+        }
+        InstallerStub::Embedded(bytes) => {
+            output
+                .write_all(bytes)
+                .map_err(|error| WinAppMigratorError::io(output_path, error))?;
+        }
+    }
+    Ok(())
+}
+
+fn write_footer(
+    output: &mut File,
+    output_path: &Path,
+    hash: &[u8; SFX_HASH_BYTES],
+    len: u64,
+    magic: &[u8],
+) -> Result<()> {
+    for part in [hash.as_slice(), &len.to_le_bytes(), magic] {
         output
             .write_all(part)
             .map_err(|error| WinAppMigratorError::io(output_path, error))?;
@@ -248,24 +480,287 @@ fn write_installer(stub: &InstallerStub, archive_path: &Path, output_path: &Path
     Ok(())
 }
 
-/// The package inside an installer: found, checked against the hash in its footer before
-/// any of it is parsed, and held open. While this exists no other process can change,
-/// rename, or replace the installer file, so what is read later is what was checked. An
-/// installer usually sits in a folder anyone can write to, and it runs elevated.
+/// A new file nothing else can get at while it is being written. Anything left at that name by a
+/// run that died goes first, and a link there goes as a link.
+fn new_partial_file(path: &Path) -> Result<File> {
+    let _ = fs::remove_file(path);
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .open(path)
+        .map_err(|error| WinAppMigratorError::io(path, error))
+}
+
+fn write_loader(
+    stub: &InstallerStub,
+    hash: &[u8; SFX_HASH_BYTES],
+    len: u64,
+    output_path: &Path,
+) -> Result<()> {
+    let mut output = new_partial_file(output_path)?;
+    write_stub_to(stub, &mut output, output_path)?;
+    write_footer(&mut output, output_path, hash, len, LOADER_MAGIC)
+}
+
+fn write_installer(stub: &InstallerStub, archive_path: &Path, output_path: &Path) -> Result<()> {
+    let mut output = new_partial_file(output_path)?;
+    write_stub_to(stub, &mut output, output_path)?;
+    let mut archive =
+        File::open(archive_path).map_err(|error| WinAppMigratorError::io(archive_path, error))?;
+    let (hash, archive_len) = copy_hashing(
+        &mut archive,
+        &mut output,
+        archive_path,
+        output_path,
+        &|| false,
+    )?;
+    write_footer(&mut output, output_path, &hash, archive_len, SFX_MAGIC)
+}
+
+/// Copy all that is left of one file to another, saying what it hashed to and how long it was.
+fn copy_hashing(
+    source: &mut File,
+    output: &mut File,
+    source_path: &Path,
+    output_path: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<([u8; SFX_HASH_BYTES], u64)> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    let mut len = 0_u64;
+    loop {
+        if is_cancelled() {
+            return Err(WinAppMigratorError::Cancelled);
+        }
+        let read = source
+            .read(&mut buffer)
+            .map_err(|error| WinAppMigratorError::io(source_path, error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        output
+            .write_all(&buffer[..read])
+            .map_err(|error| WinAppMigratorError::io(output_path, error))?;
+        len += read as u64;
+    }
+    let mut hash = [0_u8; SFX_HASH_BYTES];
+    hash.copy_from_slice(hasher.finalize().as_slice());
+    Ok((hash, len))
+}
+
+/// An installer on its way out, whichever form it ends up in. What is being written is beside where
+/// it goes, under a name of its own, and goes if this does. So a failed or cancelled build leaves
+/// nothing behind, and an installer from an earlier run stays until there is one to replace it.
+pub(crate) struct PendingInstaller {
+    output_path: PathBuf,
+    partial_path: PathBuf,
+    /// Whether what is being written starts with the stub.
+    stub_first: bool,
+    stub_bytes: u64,
+    /// Nothing is left to clear up once this is false.
+    armed: bool,
+    also_remove: Option<PathBuf>,
+}
+
+/// What a finished build came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WrittenInstaller {
+    pub installer: PathBuf,
+    pub data_file: Option<PathBuf>,
+}
+
+impl PendingInstaller {
+    /// Start writing. A package sure to fit in one executable goes straight after the stub. One
+    /// that may not is written by itself, since a file cannot lose what it starts with. Returns
+    /// the file to write the package to and how much is in it already.
+    pub(crate) fn start(
+        stub: &InstallerStub,
+        output_path: &Path,
+        surely_one_file: bool,
+    ) -> Result<(Self, File, u64)> {
+        refuse_signed_stub(stub)?;
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
+        }
+        let partial_path = output_path.with_extension(if surely_one_file {
+            PARTIAL_EXTENSION
+        } else {
+            PARTIAL_DATA_EXTENSION
+        });
+        let mut pending = Self {
+            output_path: output_path.to_path_buf(),
+            partial_path: partial_path.clone(),
+            stub_first: surely_one_file,
+            stub_bytes: stub_len(stub)?,
+            armed: true,
+            also_remove: None,
+        };
+        let mut file = new_partial_file(&partial_path)?;
+        let mut base = 0;
+        if surely_one_file {
+            write_stub_to(stub, &mut file, &partial_path)?;
+            base = pending.stub_bytes;
+        }
+        pending.armed = true;
+        Ok((pending, file, base))
+    }
+
+    /// Finish it, in whichever form it fits.
+    pub(crate) fn complete(
+        mut self,
+        stub: &InstallerStub,
+        finished: FinishedZip,
+        monitor: &BuildMonitor,
+    ) -> Result<WrittenInstaller> {
+        let FinishedZip {
+            mut file,
+            len,
+            sha256,
+        } = finished;
+        let total = self
+            .stub_bytes
+            .saturating_add(len)
+            .saturating_add(SFX_FOOTER_LEN);
+        let data_path = data_file_beside(&self.output_path);
+        if self.stub_first {
+            refuse_oversized_installer(total)?;
+            write_footer(&mut file, &self.partial_path, &sha256, len, SFX_MAGIC)?;
+            drop(file);
+            self.put_in_place(&self.partial_path.clone())?;
+            remove_earlier_data_files(&data_path);
+            return Ok(self.written(None));
+        }
+        let exe_partial = self.output_path.with_extension(PARTIAL_EXTENSION);
+        self.also_remove = Some(exe_partial.clone());
+        let mut exe = new_partial_file(&exe_partial)?;
+        write_stub_to(stub, &mut exe, &exe_partial)?;
+        if fits_in_one_file(total) {
+            // It came down far enough after all, so it goes after the stub, as usual.
+            file.seek(SeekFrom::Start(0))
+                .map_err(|error| WinAppMigratorError::io(&self.partial_path, error))?;
+            let (copied, copied_len) = copy_hashing(
+                &mut file,
+                &mut exe,
+                &self.partial_path,
+                &exe_partial,
+                &|| monitor.is_cancelled(),
+            )?;
+            if copied != sha256 || copied_len != len {
+                return Err(WinAppMigratorError::Archive(
+                    "the package changed while it was being put after the stub, so no installer \
+                     was written"
+                        .to_owned(),
+                ));
+            }
+            write_footer(&mut exe, &exe_partial, &sha256, len, SFX_MAGIC)?;
+            drop(exe);
+            drop(file);
+            self.put_in_place(&exe_partial)?;
+            let _ = fs::remove_file(&self.partial_path);
+            remove_earlier_data_files(&data_path);
+            return Ok(self.written(None));
+        }
+        write_footer(&mut exe, &exe_partial, &sha256, len, LOADER_MAGIC)?;
+        drop(exe);
+        drop(file);
+        self.put_both_in_place(&exe_partial, &data_path)?;
+        Ok(self.written(Some(data_path)))
+    }
+
+    /// Put a loader and its data file where they go. An earlier data file stays, under another name,
+    /// until the new loader is in place, and comes back if it cannot be, so a build that fails here
+    /// does not leave an earlier loader with nothing to load. A run that dies in between can leave it
+    /// under that other name, and the next build of this name clears it.
+    fn put_both_in_place(&self, exe_partial: &Path, data_path: &Path) -> Result<()> {
+        let earlier = data_path.with_extension(EARLIER_DATA_EXTENSION);
+        let _ = fs::remove_file(&earlier);
+        let has_earlier = fs::symlink_metadata(data_path).is_ok();
+        if has_earlier {
+            fs::rename(data_path, &earlier)
+                .map_err(|error| WinAppMigratorError::io(data_path, error))?;
+        }
+        let put_back = |error: WinAppMigratorError| {
+            if has_earlier {
+                let _ = fs::rename(&earlier, data_path);
+            }
+            error
+        };
+        fs::rename(&self.partial_path, data_path)
+            .map_err(|error| put_back(WinAppMigratorError::io(data_path, error)))?;
+        if let Err(error) = self.put_in_place(exe_partial) {
+            let _ = fs::remove_file(data_path);
+            return Err(put_back(error));
+        }
+        if has_earlier {
+            let _ = fs::remove_file(&earlier);
+        }
+        Ok(())
+    }
+
+    fn put_in_place(&self, partial: &Path) -> Result<()> {
+        fs::rename(partial, &self.output_path)
+            .map_err(|error| WinAppMigratorError::io(&self.output_path, error))
+    }
+
+    fn written(&mut self, data_file: Option<PathBuf>) -> WrittenInstaller {
+        self.armed = false;
+        WrittenInstaller {
+            installer: self.output_path.clone(),
+            data_file,
+        }
+    }
+}
+
+/// What is left of an earlier build of this name, which would only say this installer needs it.
+fn remove_earlier_data_files(data_path: &Path) {
+    let _ = fs::remove_file(data_path);
+    let _ = fs::remove_file(data_path.with_extension(EARLIER_DATA_EXTENSION));
+}
+
+impl Drop for PendingInstaller {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.partial_path);
+            if let Some(path) = self.also_remove.take() {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
+/// The package inside an installer, or in the data file beside it: found, checked against the hash
+/// in the installer's footer before any of it is parsed, and held open. While this exists no other
+/// process can change, rename, or replace either file, so what is read later is what was checked.
+/// An installer usually sits in a folder anyone can write to, and it runs elevated.
 ///
 /// The hash catches a truncated copy or an edited manifest. It does not prove who made
 /// the package, since whoever edits one can also update its footer. Only signing the
-/// finished installer does that.
+/// finished installer does that. It covers the footer, so it covers a data file through its hash.
 #[derive(Debug)]
 pub struct EmbeddedPackage {
     file: File,
+    /// The data file beside a loader. Without one, the package is in `file`.
+    data_file: Option<File>,
     location: ArchiveLocation,
+    /// What was seen of each file, as it was last unpacked to the folder named.
+    unpacked: Mutex<Option<(PathBuf, Arc<PackageDigests>)>>,
 }
 
 impl EmbeddedPackage {
     /// Open an installer's package. `Ok(None)` for a bare stub, which carries none. This
     /// reads the whole package, so a large installer takes a moment.
     pub fn open(sfx_executable: &Path) -> Result<Option<Self>> {
+        Self::open_unless(sfx_executable, &|| false)
+    }
+
+    /// [`Self::open`], giving up with [`WinAppMigratorError::Cancelled`] if asked to.
+    pub fn open_unless(
+        sfx_executable: &Path,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Self>> {
         let mut file = OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ)
@@ -276,18 +771,63 @@ impl EmbeddedPackage {
         else {
             return Ok(None);
         };
-        check_package_hash(&mut file, location)
-            .map_err(|error| WinAppMigratorError::io(sfx_executable, error))??;
-        Ok(Some(Self { file, location }))
+        let data_file = match location.form {
+            PackageForm::InTheInstaller => {
+                check_package_hash(&mut file, location, is_cancelled)
+                    .map_err(|error| WinAppMigratorError::io(sfx_executable, error))??;
+                None
+            }
+            PackageForm::BesideTheInstaller => Some(open_data_file(
+                &data_file_beside(sfx_executable),
+                location,
+                is_cancelled,
+            )?),
+        };
+        Ok(Some(Self {
+            file,
+            data_file,
+            location,
+            unpacked: Mutex::new(None),
+        }))
     }
 
     fn section(&self) -> Result<ArchiveSection> {
         let file = self
-            .file
+            .data_file
+            .as_ref()
+            .unwrap_or(&self.file)
             .try_clone()
             .map_err(|error| WinAppMigratorError::io("installer package", error))?;
-        ArchiveSection::new(file, self.location)
-            .map_err(|error| WinAppMigratorError::io("installer package", error))
+        Ok(ArchiveSection::new(
+            Arc::new(file),
+            self.location.start,
+            self.location.len,
+        ))
+    }
+
+    /// Whether this package is in a data file beside the installer.
+    pub fn has_data_file(&self) -> bool {
+        self.data_file.is_some()
+    }
+
+    /// How much room everything in the package takes once unpacked, by what its entries say. An
+    /// entry can only hold as much as it says: see [`read_one_entry`].
+    pub fn unpacked_bytes(&self) -> Result<u64> {
+        let archive = ZipArchive::new(BufReader::new(self.section()?))
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+        let mut total = 0_u64;
+        for index in 0..archive.len() {
+            let entry = archive
+                .by_index_data(index)
+                .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+            total = total.saturating_add(entry.size());
+        }
+        Ok(total)
+    }
+
+    /// How big the stub in this installer is, for the copy of it an install keeps.
+    pub fn stub_bytes(&self) -> u64 {
+        self.location.stub_len
     }
 
     /// Unpack the package into `destination_root`.
@@ -296,7 +836,8 @@ impl EmbeddedPackage {
     }
 
     /// Unpack the package, reporting each file and stopping with
-    /// [`WinAppMigratorError::Cancelled`] if it is cancelled.
+    /// [`WinAppMigratorError::Cancelled`] if it is cancelled. What each file hashed to is seen as
+    /// it comes out, and kept, so that an install does not have to read them again to check them.
     pub fn extract_monitored(
         &self,
         destination_root: &Path,
@@ -304,7 +845,23 @@ impl EmbeddedPackage {
     ) -> Result<()> {
         fs::create_dir_all(destination_root)
             .map_err(|error| WinAppMigratorError::io(destination_root, error))?;
-        extract_zip_reader(BufReader::new(self.section()?), destination_root, monitor)
+        let digests = extract_zip_reader(self.section()?, destination_root, monitor)?;
+        if let Ok(mut unpacked) = self.unpacked.lock() {
+            *unpacked = Some((destination_root.to_path_buf(), Arc::new(digests)));
+        }
+        Ok(())
+    }
+
+    /// What was seen of each file when the package was unpacked to this folder, if it was.
+    pub fn digests_of_unpacked(&self, package_root: &Path) -> Option<Arc<PackageDigests>> {
+        let unpacked = self.unpacked.lock().ok()?;
+        let (folder, digests) = unpacked.as_ref()?;
+        (folder == package_root).then(|| Arc::clone(digests))
+    }
+
+    /// Read everything in the package and write it nowhere, saying what each file hashed to.
+    pub fn digests(&self, is_cancelled: &(dyn Fn() -> bool + Sync)) -> Result<PackageDigests> {
+        read_every_entry(self.section()?, None, &|_, _| {}, is_cancelled)
     }
 
     /// Write the stub this installer was built from, with no package and no signature, to a
@@ -314,7 +871,7 @@ impl EmbeddedPackage {
             .file
             .try_clone()
             .map_err(|error| WinAppMigratorError::io("installer package", error))?;
-        let image = read_stub_image(&mut file, self.location.start)
+        let image = read_stub_image(&mut file, self.location.stub_len)
             .map_err(|error| WinAppMigratorError::io("installer package", error))?;
         let image = bare_stub_image(image)
             .map_err(|error| WinAppMigratorError::io("installer package", error))??;
@@ -431,12 +988,16 @@ pub fn has_certificate_table(path: &Path) -> Result<bool> {
 fn check_package_hash<F: Read + Seek>(
     file: &mut F,
     location: ArchiveLocation,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> io::Result<Result<()>> {
     file.seek(SeekFrom::Start(location.start))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     let mut remaining = location.len;
     while remaining > 0 {
+        if is_cancelled() {
+            return Ok(Err(WinAppMigratorError::Cancelled));
+        }
         let want = usize::try_from(remaining).map_or(buffer.len(), |left| left.min(buffer.len()));
         let read = file.read(&mut buffer[..want])?;
         if read == 0 {
@@ -458,6 +1019,63 @@ fn damaged_installer() -> WinAppMigratorError {
          its package. Copy it again from where it was built."
             .to_owned(),
     )
+}
+
+/// Open a loader's data file and check it against the loader's footer, before anything in it is
+/// parsed. It is looked for in one place, by one name, and whatever has that name is what gets
+/// opened, not what a link there leads to. From here on it cannot be changed, renamed, or deleted,
+/// and everything read from it goes through this one handle.
+fn open_data_file(
+    path: &Path,
+    location: ArchiveLocation,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<File> {
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let mut file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => WinAppMigratorError::Archive(format!(
+                "this installer keeps its package in a file named {name}, in the same folder, and \
+                 that file is not there. The two files have to stay together: copy {name} here \
+                 from where the installer was built, then run this again."
+            )),
+            _ => WinAppMigratorError::Archive(format!(
+                "this installer's data file, {name}, could not be opened: {error}. The two files \
+                 have to stay together, in a folder this PC can read."
+            )),
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| WinAppMigratorError::io(path, error))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(WinAppMigratorError::Archive(format!(
+            "{name} is a link or a folder, and this installer's data file has to be a file of its \
+             own, right beside it, so nothing was read from it. Copy the real file here."
+        )));
+    }
+    let wrong_file = || {
+        WinAppMigratorError::Archive(format!(
+            "{name} is not this installer's data file, or it is damaged or was changed after it \
+             was built, so nothing was read from it. Copy both files again from where they were \
+             built."
+        ))
+    };
+    if metadata.len() != location.len {
+        return Err(wrong_file());
+    }
+    match check_package_hash(&mut file, location, is_cancelled)
+        .map_err(|error| WinAppMigratorError::io(path, error))?
+    {
+        Ok(()) => Ok(file),
+        Err(WinAppMigratorError::Cancelled) => Err(WinAppMigratorError::Cancelled),
+        Err(_) => Err(wrong_file()),
+    }
 }
 
 /// A signed stub must never become an installer. Windows does not hash its own
@@ -501,31 +1119,52 @@ fn stub_len(stub: &InstallerStub) -> Result<u64> {
     }
 }
 
+/// Whether an installer of this size can be one executable, with room left to sign it.
+fn fits_in_one_file(size: u64) -> bool {
+    size <= MOST_INSTALLER_BYTES
+}
+
 /// Windows will not start an executable of 4 GiB or more ("not a valid Win32
 /// application"). Reporting success for a file that can never run would only be
-/// discovered on the target PC, possibly after the source is gone.
+/// discovered on the target PC, possibly after the source is gone. A build goes past this with
+/// a loader and a data file, so this is only for a package given to this already zipped, or
+/// one that was sure to fit and has grown since it was scanned.
 fn refuse_oversized_installer(size: u64) -> Result<()> {
-    if size < MAX_INSTALLER_BYTES {
+    if fits_in_one_file(size) {
         return Ok(());
     }
     Err(WinAppMigratorError::InvalidInput(format!(
-        "the installer would be {:.1} GiB, and Windows cannot run an executable of 4 GiB or \
-         more; nothing was written",
-        size as f64 / GIB
+        "the installer would be {}, and Windows cannot run an executable of 4 GiB or more; \
+         nothing was written",
+        crate::space::size_text(size)
     )))
 }
 
-/// Where a package sits inside an installer executable.
+/// Which file a package is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackageForm {
+    /// Right after the stub, in one executable.
+    InTheInstaller,
+    /// The data file beside a loader, all of it.
+    BesideTheInstaller,
+}
+
+/// Where a package is, and what is said of it in its installer's footer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ArchiveLocation {
+    /// Where it starts in the file it is in.
     start: u64,
     len: u64,
     sha256: [u8; SFX_HASH_BYTES],
+    /// How much of the installer comes before anything added to the stub.
+    stub_len: u64,
+    form: PackageForm,
 }
 
 /// Find the embedded package. A signed installer keeps its package directly
 /// before the certificate table, which is the only place a signature covers.
-/// Bytes inside the table are never read, and bytes after it are refused.
+/// Bytes inside the table are never read, and bytes after it are refused. A loader keeps its
+/// footer in the same place, and so the same goes for that.
 fn locate_embedded_archive<F: Read + Seek>(
     file: &mut F,
 ) -> io::Result<Result<Option<ArchiveLocation>>> {
@@ -552,29 +1191,46 @@ fn locate_embedded_archive<F: Read + Seek>(
     file.read_exact(&mut footer)?;
     let (sha256, rest) = footer.split_at(SFX_HASH_BYTES);
     let (length_bytes, magic) = rest.split_at(SFX_LENGTH_BYTES);
-    if magic != SFX_MAGIC {
+    let form = if magic == SFX_MAGIC {
+        PackageForm::InTheInstaller
+    } else if magic == LOADER_MAGIC {
+        PackageForm::BesideTheInstaller
+    } else {
         // Data past the program with no footer means a package whose end was cut off, a
         // common result of an interrupted copy. Calling that a bare stub would be wrong.
         if pe_image_end(file, file_len)?.is_some_and(|image_end| end > image_end) {
             return Ok(Err(damaged_installer()));
         }
         return Ok(Ok(None));
-    }
+    };
 
     let mut len = [0_u8; SFX_LENGTH_BYTES];
     len.copy_from_slice(length_bytes);
     let len = u64::from_le_bytes(len);
-    if len > footer_start {
-        return Ok(Err(WinAppMigratorError::Archive(
-            "self-extracting archive footer length is invalid".to_owned(),
-        )));
-    }
     let mut hash = [0_u8; SFX_HASH_BYTES];
     hash.copy_from_slice(sha256);
-    Ok(Ok(Some(ArchiveLocation {
-        start: footer_start - len,
-        len,
-        sha256: hash,
+    Ok(Ok(Some(match form {
+        PackageForm::InTheInstaller => {
+            if len > footer_start {
+                return Ok(Err(WinAppMigratorError::Archive(
+                    "self-extracting archive footer length is invalid".to_owned(),
+                )));
+            }
+            ArchiveLocation {
+                start: footer_start - len,
+                len,
+                sha256: hash,
+                stub_len: footer_start - len,
+                form,
+            }
+        }
+        PackageForm::BesideTheInstaller => ArchiveLocation {
+            start: 0,
+            len,
+            sha256: hash,
+            stub_len: footer_start,
+            form,
+        },
     })))
 }
 
@@ -699,33 +1355,39 @@ fn trailing_zero_padding<F: Read + Seek>(file: &mut F, end: u64) -> io::Result<u
     Ok(bytes.iter().rev().take_while(|byte| **byte == 0).count() as u64)
 }
 
-/// A bounded view of the package inside an installer, so it is read in place
-/// rather than buffered in memory or copied out to a second file first.
+/// A bounded view of the package inside a file, so it is read in place rather than buffered in
+/// memory or copied out to a second file first. Each clone keeps its own place, and reads by where
+/// that is, so any number can read the one open file at once.
+#[derive(Clone)]
 struct ArchiveSection {
-    file: File,
-    location: ArchiveLocation,
+    file: Arc<File>,
+    start: u64,
+    len: u64,
     position: u64,
 }
 
 impl ArchiveSection {
-    fn new(mut file: File, location: ArchiveLocation) -> io::Result<Self> {
-        file.seek(SeekFrom::Start(location.start))?;
-        Ok(Self {
+    fn new(file: Arc<File>, start: u64, len: u64) -> Self {
+        Self {
             file,
-            location,
+            start,
+            len,
             position: 0,
-        })
+        }
     }
 }
 
 impl Read for ArchiveSection {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let remaining = self.location.len.saturating_sub(self.position);
+        let remaining = self.len.saturating_sub(self.position);
         let limit = usize::try_from(remaining).map_or(buffer.len(), |left| left.min(buffer.len()));
         if limit == 0 {
             return Ok(0);
         }
-        let read = self.file.read(&mut buffer[..limit])?;
+        let read = self.file.seek_read(
+            &mut buffer[..limit],
+            self.start.saturating_add(self.position),
+        )?;
         self.position += read as u64;
         Ok(read)
     }
@@ -736,12 +1398,9 @@ impl Seek for ArchiveSection {
         let position = match target {
             SeekFrom::Start(offset) => Some(offset),
             SeekFrom::Current(delta) => self.position.checked_add_signed(delta),
-            SeekFrom::End(delta) => self.location.len.checked_add_signed(delta),
+            SeekFrom::End(delta) => self.len.checked_add_signed(delta),
         }
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek outside the package"))?;
-        self.file.seek(SeekFrom::Start(
-            self.location.start.saturating_add(position),
-        ))?;
         self.position = position;
         Ok(position)
     }
@@ -776,8 +1435,10 @@ fn zip_entry_name(root: &Path, path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use crate::zip_stream::{WholeEntry, ZipMethod, ZipStream};
     use time::OffsetDateTime;
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     #[test]
     fn zip_round_trip_rejects_traversal_by_construction() -> Result<()> {
@@ -958,6 +1619,8 @@ mod tests {
                 start,
                 len: payload.len() as u64,
                 sha256: sha256_of(payload),
+                stub_len: start,
+                form: PackageForm::InTheInstaller,
             })
         );
         Ok(())
@@ -987,6 +1650,8 @@ mod tests {
                 start: image_len,
                 len: payload.len() as u64,
                 sha256: sha256_of(payload),
+                stub_len: image_len,
+                form: PackageForm::InTheInstaller,
             })
         );
         Ok(())
@@ -1012,7 +1677,7 @@ mod tests {
         let location = locate_embedded_archive(&mut file)
             .map_err(|error| WinAppMigratorError::Archive(error.to_string()))??
             .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
-        check_package_hash(&mut file, location)
+        check_package_hash(&mut file, location, &|| false)
             .map_err(|error| WinAppMigratorError::Archive(error.to_string()))??;
         Ok(())
     }
@@ -1027,7 +1692,7 @@ mod tests {
         let location = locate_embedded_archive(&mut file)
             .map_err(|error| WinAppMigratorError::Archive(error.to_string()))??
             .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
-        let checked = check_package_hash(&mut file, location)
+        let checked = check_package_hash(&mut file, location, &|| false)
             .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
         assert!(checked.is_err());
         Ok(())
@@ -1394,8 +2059,645 @@ mod tests {
 
     #[test]
     fn an_installer_windows_cannot_start_is_refused() {
-        assert!(refuse_oversized_installer(MAX_INSTALLER_BYTES - 1).is_ok());
-        assert!(refuse_oversized_installer(MAX_INSTALLER_BYTES).is_err());
+        assert!(refuse_oversized_installer(MOST_INSTALLER_BYTES).is_ok());
+        assert!(refuse_oversized_installer(MOST_INSTALLER_BYTES + 1).is_err());
+        assert!(
+            refuse_oversized_installer(4 * 1024 * 1024 * 1024 - 1).is_err(),
+            "one that Windows could start, and signing it would then take past that"
+        );
+    }
+
+    /// A folder with a stub and a zip in it that says what it has.
+    struct Parts {
+        stub: PathBuf,
+        zip: PathBuf,
+        output: PathBuf,
+        root: tempfile::TempDir,
+    }
+
+    fn parts() -> Result<Parts> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let package = root.path().join("package");
+        fs::create_dir_all(package.join("files"))
+            .map_err(|error| WinAppMigratorError::io(&package, error))?;
+        fs::write(package.join("manifest.json"), "{\"name\":\"app\"}")
+            .map_err(|error| WinAppMigratorError::io(&package, error))?;
+        fs::write(package.join("files").join("a.txt"), "the app")
+            .map_err(|error| WinAppMigratorError::io(&package, error))?;
+        let zip = root.path().join("package.zip");
+        create_zip_archive(&package, &zip, &BuildMonitor::default())?;
+        let stub = root.path().join("stub.exe");
+        fs::write(&stub, fake_pe_with_section(0x800))
+            .map_err(|error| WinAppMigratorError::io(&stub, error))?;
+        Ok(Parts {
+            stub,
+            zip,
+            output: root.path().join("App_installer.exe"),
+            root,
+        })
+    }
+
+    #[test]
+    fn a_loader_is_its_stub_and_a_footer_and_finds_what_is_beside_it() -> Result<()> {
+        let parts = parts()?;
+        let data = create_installer_with_data_file(
+            &InstallerStub::File(parts.stub.clone()),
+            &parts.zip,
+            &parts.output,
+        )?;
+        assert_eq!(data, parts.root.path().join("App_installer.wamdata"));
+
+        // It stays small: the stub, and the footer.
+        let loader = fs::read(&parts.output).map_err(|error| WinAppMigratorError::io("", error))?;
+        let stub = fs::read(&parts.stub).map_err(|error| WinAppMigratorError::io("", error))?;
+        assert_eq!(loader.len() as u64, stub.len() as u64 + SFX_FOOTER_LEN);
+        assert_eq!(loader[..stub.len()], stub);
+
+        // The footer is what the data file really is.
+        let bytes = fs::read(&data).map_err(|error| WinAppMigratorError::io("", error))?;
+        let footer = &loader[stub.len()..];
+        assert_eq!(footer[..SFX_HASH_BYTES], *Sha256::digest(&bytes));
+        assert_eq!(
+            footer[SFX_HASH_BYTES..SFX_HASH_BYTES + SFX_LENGTH_BYTES],
+            (bytes.len() as u64).to_le_bytes()
+        );
+        assert_eq!(footer[SFX_HASH_BYTES + SFX_LENGTH_BYTES..], *LOADER_MAGIC);
+
+        assert!(has_embedded_self_archive(&parts.output)?);
+        let package = EmbeddedPackage::open(&parts.output)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        assert!(package.has_data_file());
+        assert_eq!(package.stub_bytes(), stub.len() as u64);
+        assert_eq!(package.read_file("manifest.json")?, b"{\"name\":\"app\"}");
+
+        let unpacked = parts.root.path().join("unpacked");
+        package.extract_to(&unpacked)?;
+        assert_eq!(
+            fs::read(unpacked.join(r"files\a.txt"))
+                .map_err(|error| WinAppMigratorError::io("", error))?,
+            b"the app"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_data_file_says_what_to_do() -> Result<()> {
+        let parts = parts()?;
+        let data = create_installer_with_data_file(
+            &InstallerStub::File(parts.stub.clone()),
+            &parts.zip,
+            &parts.output,
+        )?;
+        fs::remove_file(&data).map_err(|error| WinAppMigratorError::io(&data, error))?;
+        let refused = EmbeddedPackage::open(&parts.output);
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::Archive(message))
+                if message.contains("App_installer.wamdata")
+                    && message.contains("stay together")
+                    && message.contains("same folder")),
+            "{refused:?}"
+        );
+        // Knowing it has a package does not take reading any of it.
+        assert!(has_embedded_self_archive(&parts.output)?);
+        Ok(())
+    }
+
+    /// Everything in a file except one byte, or with a little more or less of it, is not it.
+    #[test]
+    fn a_data_file_that_is_not_the_one_it_was_built_with_is_refused() -> Result<()> {
+        let parts = parts()?;
+        let data = create_installer_with_data_file(
+            &InstallerStub::File(parts.stub.clone()),
+            &parts.zip,
+            &parts.output,
+        )?;
+        let good = fs::read(&data).map_err(|error| WinAppMigratorError::io(&data, error))?;
+        let mut one_byte = good.clone();
+        one_byte[good.len() / 2] ^= 0x01;
+        let mut longer = good.clone();
+        longer.push(0);
+        let shorter = good[..good.len() - 1].to_vec();
+        // Another package altogether, with its own hash right, for a different installer.
+        let other_root = parts.root.path().join("other");
+        fs::create_dir_all(&other_root)
+            .map_err(|error| WinAppMigratorError::io(&other_root, error))?;
+        fs::write(other_root.join("manifest.json"), "{\"name\":\"another\"}")
+            .map_err(|error| WinAppMigratorError::io(&other_root, error))?;
+        let other_zip = parts.root.path().join("other.zip");
+        create_zip_archive(&other_root, &other_zip, &BuildMonitor::default())?;
+        let other = fs::read(&other_zip).map_err(|error| WinAppMigratorError::io("", error))?;
+        for (what, bytes) in [
+            ("one byte changed", one_byte),
+            ("longer", longer),
+            ("shorter", shorter),
+            ("another package", other),
+            ("empty", Vec::new()),
+        ] {
+            fs::write(&data, &bytes).map_err(|error| WinAppMigratorError::io(&data, error))?;
+            let refused = EmbeddedPackage::open(&parts.output);
+            assert!(
+                matches!(&refused, Err(WinAppMigratorError::Archive(message))
+                    if message.contains("App_installer.wamdata")
+                        && message.contains("nothing was read from it")),
+                "{what}: {refused:?}"
+            );
+        }
+        fs::write(&data, &good).map_err(|error| WinAppMigratorError::io(&data, error))?;
+        assert!(EmbeddedPackage::open(&parts.output)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn a_data_file_is_not_looked_for_through_a_link() -> Result<()> {
+        let parts = parts()?;
+        let data = create_installer_with_data_file(
+            &InstallerStub::File(parts.stub.clone()),
+            &parts.zip,
+            &parts.output,
+        )?;
+        // The real, right file is what the link would lead to.
+        let elsewhere = parts.root.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).map_err(|error| WinAppMigratorError::io("", error))?;
+        let real = elsewhere.join("App_installer.wamdata");
+        fs::rename(&data, &real).map_err(|error| WinAppMigratorError::io(&data, error))?;
+        let linked = crate::path_utils::hidden_command("cmd")
+            .args(["/D", "/C", "mklink"])
+            .arg(&data)
+            .arg(&real)
+            .output()
+            .map_err(|error| WinAppMigratorError::io("mklink", error))?;
+        if !linked.status.success() {
+            // A symbolic link to a file takes a right most accounts do not have, and a folder is
+            // the only kind of link they can make, which the test below covers.
+            println!("skipping: {}", String::from_utf8_lossy(&linked.stderr));
+            return Ok(());
+        }
+        let refused = EmbeddedPackage::open(&parts.output);
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::Archive(message))
+                if message.contains("is a link")),
+            "{refused:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_folder_by_the_data_files_name_is_not_it() -> Result<()> {
+        let parts = parts()?;
+        let data = create_installer_with_data_file(
+            &InstallerStub::File(parts.stub.clone()),
+            &parts.zip,
+            &parts.output,
+        )?;
+        let good = fs::read(&data).map_err(|error| WinAppMigratorError::io(&data, error))?;
+        fs::remove_file(&data).map_err(|error| WinAppMigratorError::io(&data, error))?;
+        fs::create_dir(&data).map_err(|error| WinAppMigratorError::io(&data, error))?;
+        fs::write(data.join("manifest.json"), good)
+            .map_err(|error| WinAppMigratorError::io(&data, error))?;
+        assert!(EmbeddedPackage::open(&parts.output).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn nothing_can_change_a_data_file_while_it_is_held_open() -> Result<()> {
+        let parts = parts()?;
+        let data = create_installer_with_data_file(
+            &InstallerStub::File(parts.stub.clone()),
+            &parts.zip,
+            &parts.output,
+        )?;
+        let package = EmbeddedPackage::open(&parts.output)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+
+        assert!(OpenOptions::new().write(true).open(&data).is_err());
+        assert!(fs::rename(&data, parts.root.path().join("moved")).is_err());
+        assert!(fs::remove_file(&data).is_err());
+        assert!(File::open(&data).is_ok(), "others may still read it");
+        assert_eq!(package.read_file("manifest.json")?, b"{\"name\":\"app\"}");
+
+        drop(package);
+        assert!(OpenOptions::new().write(true).open(&data).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn a_bare_stub_carved_from_each_form_is_the_stub_it_was_built_from() -> Result<()> {
+        // One executable, a signed one, a loader, and a signed loader.
+        let stub = fake_pe_with_section(0x800);
+        let (signed, signed_start) = signed_installer_from(&stub);
+        let signed_carved = carve(
+            read_stub_image(&mut io::Cursor::new(&signed), signed_start)
+                .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?,
+        )?;
+        assert_eq!(signed_carved, stub);
+
+        let parts = parts()?;
+        let data = create_installer_with_data_file(
+            &InstallerStub::File(parts.stub.clone()),
+            &parts.zip,
+            &parts.output,
+        )?;
+        let package = EmbeddedPackage::open(&parts.output)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        let carved = parts.root.path().join("uninstall.exe");
+        package.write_bare_stub(&carved)?;
+        assert_eq!(
+            fs::read(&carved).map_err(|error| WinAppMigratorError::io("", error))?,
+            stub
+        );
+        assert!(!has_certificate_table(&carved)?);
+        assert!(
+            EmbeddedPackage::open(&carved)?.is_none(),
+            "it reads as a bare stub"
+        );
+        drop(package);
+
+        // Signing a loader puts padding and a table after its footer, and it still works, and
+        // what is carved from it is still the stub.
+        let mut loader =
+            fs::read(&parts.output).map_err(|error| WinAppMigratorError::io("", error))?;
+        const PE_OFFSET: usize = 0x80;
+        let padding = (8 - loader.len() as u64 % 8) % 8;
+        loader.resize(loader.len() + padding as usize, 0);
+        let offset = loader.len() as u32;
+        let optional = PE_OFFSET + (PE_SIGNATURE_LEN + COFF_HEADER_LEN) as usize;
+        let directory = optional + PE32_PLUS_SECURITY_DIRECTORY as usize;
+        loader[directory..directory + 4].copy_from_slice(&offset.to_le_bytes());
+        loader[directory + 4..directory + 8].copy_from_slice(&64_u32.to_le_bytes());
+        let checksum = optional + PE_CHECKSUM_FIELD as usize;
+        loader[checksum..checksum + 4].copy_from_slice(&0x1234_5678_u32.to_le_bytes());
+        loader.resize(loader.len() + 64, 0xAB);
+        fs::write(&parts.output, &loader).map_err(|error| WinAppMigratorError::io("", error))?;
+        let package = EmbeddedPackage::open(&parts.output)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        assert_eq!(package.read_file("manifest.json")?, b"{\"name\":\"app\"}");
+        let carved_again = parts.root.path().join("uninstall2.exe");
+        package.write_bare_stub(&carved_again)?;
+        assert_eq!(
+            fs::read(&carved_again).map_err(|error| WinAppMigratorError::io("", error))?,
+            stub
+        );
+        assert!(!has_certificate_table(&carved_again)?);
+        drop(package);
+        // And the data file is what it is, signature or not.
+        let good = fs::read(&data).map_err(|error| WinAppMigratorError::io("", error))?;
+        let mut bad = good.clone();
+        bad[0] ^= 1;
+        fs::write(&data, &bad).map_err(|error| WinAppMigratorError::io("", error))?;
+        assert!(EmbeddedPackage::open(&parts.output).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_loaders_footer_in_a_certificate_table_is_ignored_and_after_one_is_refused() -> Result<()> {
+        let image_len = fake_pe(None).len() as u64;
+        let mut hidden = vec![0xAB_u8; 64];
+        hidden.extend_from_slice(&sha256_of(b"x"));
+        hidden.extend_from_slice(&1_u64.to_le_bytes());
+        hidden.extend_from_slice(LOADER_MAGIC);
+        let mut inside = fake_pe(Some(CertificateTable {
+            offset: image_len,
+            size: hidden.len() as u64,
+        }));
+        inside.extend_from_slice(&hidden);
+        assert_eq!(locate(inside)?, None);
+
+        let mut after = fake_pe(Some(CertificateTable {
+            offset: image_len,
+            size: 64,
+        }));
+        after.resize(after.len() + 64, 0xAB);
+        after.extend_from_slice(&sha256_of(b"x"));
+        after.extend_from_slice(&1_u64.to_le_bytes());
+        after.extend_from_slice(LOADER_MAGIC);
+        assert!(locate(after).is_err());
+        Ok(())
+    }
+
+    fn zip_of(parts: &Parts, name: &str, content: &[u8]) -> Result<FinishedZip> {
+        let file = new_partial_file(&parts.root.path().join(name))?;
+        let mut stream = ZipStream::new(file, 0);
+        stream
+            .add_whole(&WholeEntry {
+                name: "manifest.json",
+                method: ZipMethod::Stored,
+                crc32: crc32fast::hash(content),
+                uncompressed_bytes: content.len() as u64,
+                data: content,
+            })
+            .map_err(|error| WinAppMigratorError::io("zip", error))?;
+        stream
+            .finish()
+            .map_err(|error| WinAppMigratorError::io("zip", error))
+    }
+
+    #[test]
+    fn a_package_sure_to_fit_goes_after_the_stub_and_leaves_nothing_else() -> Result<()> {
+        let parts = parts()?;
+        let stub = InstallerStub::File(parts.stub.clone());
+        // One from an earlier build of this name, which has to go.
+        let stale = data_file_beside(&parts.output);
+        fs::write(&stale, b"old").map_err(|error| WinAppMigratorError::io(&stale, error))?;
+        let (pending, file, base) = PendingInstaller::start(&stub, &parts.output, true)?;
+        assert_eq!(base, 0x800);
+        let mut stream = ZipStream::new(file, base);
+        stream
+            .add_whole(&WholeEntry {
+                name: "manifest.json",
+                method: ZipMethod::Stored,
+                crc32: crc32fast::hash(b"{}"),
+                uncompressed_bytes: 2,
+                data: b"{}",
+            })
+            .map_err(|error| WinAppMigratorError::io("zip", error))?;
+        let finished = stream
+            .finish()
+            .map_err(|error| WinAppMigratorError::io("zip", error))?;
+        let written = pending.complete(&stub, finished, &BuildMonitor::default())?;
+        assert_eq!(written.installer, parts.output);
+        assert_eq!(written.data_file, None);
+        assert!(!stale.exists());
+        assert!(!parts.output.with_extension("partial").exists());
+        let package = EmbeddedPackage::open(&parts.output)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        assert!(!package.has_data_file());
+        assert_eq!(package.read_file("manifest.json")?, b"{}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_package_that_might_not_fit_and_does_ends_up_after_the_stub_all_the_same() -> Result<()> {
+        let parts = parts()?;
+        let stub = InstallerStub::File(parts.stub.clone());
+        let (pending, file, base) = PendingInstaller::start(&stub, &parts.output, false)?;
+        assert_eq!(base, 0, "it starts by itself, not knowing");
+        let partial = parts.output.with_extension(PARTIAL_DATA_EXTENSION);
+        assert!(partial.is_file());
+        let mut stream = ZipStream::new(file, base);
+        stream
+            .add_whole(&WholeEntry {
+                name: "manifest.json",
+                method: ZipMethod::Stored,
+                crc32: crc32fast::hash(b"{}"),
+                uncompressed_bytes: 2,
+                data: b"{}",
+            })
+            .map_err(|error| WinAppMigratorError::io("zip", error))?;
+        let finished = stream
+            .finish()
+            .map_err(|error| WinAppMigratorError::io("zip", error))?;
+        let written = pending.complete(&stub, finished, &BuildMonitor::default())?;
+        assert_eq!(written.data_file, None);
+        assert!(!partial.exists());
+        assert!(!parts.output.with_extension(PARTIAL_EXTENSION).exists());
+        assert!(!data_file_beside(&parts.output).exists());
+        let package = EmbeddedPackage::open(&parts.output)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        assert!(!package.has_data_file());
+        assert_eq!(package.read_file("manifest.json")?, b"{}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_cancel_while_a_package_goes_after_the_stub_leaves_nothing_behind() -> Result<()> {
+        let parts = parts()?;
+        let stub = InstallerStub::File(parts.stub.clone());
+        let (pending, file, base) = PendingInstaller::start(&stub, &parts.output, false)?;
+        let mut stream = ZipStream::new(file, base);
+        stream
+            .add_whole(&WholeEntry {
+                name: "manifest.json",
+                method: ZipMethod::Stored,
+                crc32: crc32fast::hash(b"{}"),
+                uncompressed_bytes: 2,
+                data: b"{}",
+            })
+            .map_err(|error| WinAppMigratorError::io("zip", error))?;
+        let finished = stream
+            .finish()
+            .map_err(|error| WinAppMigratorError::io("zip", error))?;
+        let monitor = BuildMonitor::default();
+        monitor.cancel();
+        assert!(matches!(
+            pending.complete(&stub, finished, &monitor),
+            Err(WinAppMigratorError::Cancelled)
+        ));
+        for extension in [
+            "exe",
+            PARTIAL_EXTENSION,
+            PARTIAL_DATA_EXTENSION,
+            DATA_FILE_EXTENSION,
+        ] {
+            assert!(
+                !parts.output.with_extension(extension).exists(),
+                "{extension}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Two builds of the same name: it goes from one to the other, or it stays as it was.
+    #[test]
+    fn a_loader_and_its_data_file_go_in_together_or_not_at_all() -> Result<()> {
+        let parts = parts()?;
+        let stub = InstallerStub::File(parts.stub.clone());
+        let data = data_file_beside(&parts.output);
+        fs::write(&parts.output, b"an earlier loader")
+            .map_err(|error| WinAppMigratorError::io("", error))?;
+        fs::write(&data, b"an earlier data file")
+            .map_err(|error| WinAppMigratorError::io("", error))?;
+
+        let (pending, file, _) = PendingInstaller::start(&stub, &parts.output, false)?;
+        drop(file);
+        let exe_partial = parts.output.with_extension(PARTIAL_EXTENSION);
+        // The loader cannot go in: something holds what is at its name.
+        fs::write(&exe_partial, b"the new loader")
+            .map_err(|error| WinAppMigratorError::io("", error))?;
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&parts.output)
+            .map_err(|error| WinAppMigratorError::io("", error))?;
+        assert!(pending.put_both_in_place(&exe_partial, &data).is_err());
+        drop(held);
+        assert_eq!(
+            fs::read(&data).map_err(|error| WinAppMigratorError::io("", error))?,
+            b"an earlier data file"
+        );
+        assert_eq!(
+            fs::read(&parts.output).map_err(|error| WinAppMigratorError::io("", error))?,
+            b"an earlier loader"
+        );
+
+        // With nothing in the way, both change.
+        let partial = parts.output.with_extension(PARTIAL_DATA_EXTENSION);
+        fs::write(&partial, b"the new data file")
+            .map_err(|error| WinAppMigratorError::io("", error))?;
+        pending.put_both_in_place(&exe_partial, &data)?;
+        assert_eq!(
+            fs::read(&data).map_err(|error| WinAppMigratorError::io("", error))?,
+            b"the new data file"
+        );
+        assert_eq!(
+            fs::read(&parts.output).map_err(|error| WinAppMigratorError::io("", error))?,
+            b"the new loader"
+        );
+        assert!(!data.with_extension(EARLIER_DATA_EXTENSION).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_build_that_stops_leaves_nothing_behind_and_keeps_an_earlier_installer() -> Result<()> {
+        let parts = parts()?;
+        let stub = InstallerStub::File(parts.stub.clone());
+        fs::write(&parts.output, b"from an earlier run")
+            .map_err(|error| WinAppMigratorError::io("", error))?;
+        for surely_one_file in [true, false] {
+            let (pending, file, base) =
+                PendingInstaller::start(&stub, &parts.output, surely_one_file)?;
+            let mut stream = ZipStream::new(file, base);
+            stream
+                .add_whole(&WholeEntry {
+                    name: "a.txt",
+                    method: ZipMethod::Stored,
+                    crc32: crc32fast::hash(b"a"),
+                    uncompressed_bytes: 1,
+                    data: b"a",
+                })
+                .map_err(|error| WinAppMigratorError::io("zip", error))?;
+            drop(stream);
+            drop(pending);
+        }
+        let mut left: Vec<String> = fs::read_dir(parts.root.path())
+            .map_err(|error| WinAppMigratorError::io("", error))?
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("App_installer"))
+            .collect();
+        left.sort();
+        assert_eq!(left, ["App_installer.exe"]);
+        assert_eq!(
+            fs::read(&parts.output).map_err(|error| WinAppMigratorError::io("", error))?,
+            b"from an earlier run"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_signed_stub_cannot_start_any_form() -> Result<()> {
+        let parts = parts()?;
+        let image_len = fake_pe(None).len() as u64;
+        let mut signed = fake_pe(Some(CertificateTable {
+            offset: image_len,
+            size: 64,
+        }));
+        signed.resize(signed.len() + 64, 0xAB);
+        fs::write(&parts.stub, signed).map_err(|error| WinAppMigratorError::io("", error))?;
+        let stub = InstallerStub::File(parts.stub.clone());
+        for surely_one_file in [true, false] {
+            assert!(matches!(
+                PendingInstaller::start(&stub, &parts.output, surely_one_file),
+                Err(WinAppMigratorError::InvalidInput(_))
+            ));
+        }
+        assert!(matches!(
+            create_installer_with_data_file(&stub, &parts.zip, &parts.output),
+            Err(WinAppMigratorError::InvalidInput(_))
+        ));
+        assert!(!parts.output.exists());
+        assert!(!data_file_beside(&parts.output).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_partial_in_the_way_is_replaced_and_not_written_through() -> Result<()> {
+        let parts = parts()?;
+        let partial = parts.output.with_extension(PARTIAL_EXTENSION);
+        fs::write(&partial, b"left by a run that died")
+            .map_err(|error| WinAppMigratorError::io("", error))?;
+        let finished = zip_of(&parts, "a.zip", b"{}")?;
+        drop(finished.file);
+        let stub = InstallerStub::File(parts.stub.clone());
+        let (pending, file, base) = PendingInstaller::start(&stub, &parts.output, true)?;
+        assert_eq!(
+            fs::metadata(&partial)
+                .map_err(|error| WinAppMigratorError::io("", error))?
+                .len(),
+            base
+        );
+        drop(file);
+        drop(pending);
+        assert!(!partial.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn unpacking_hashes_what_comes_out_and_reports_it_by_name() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let zip = zip_holding(&["files/one.txt", "files/Sub/Two.txt"])?;
+        let digests = extract_zip_reader(
+            io::Cursor::new(&zip),
+            root.path(),
+            &InstallMonitor::default(),
+        )?;
+        let one = digests
+            .get(Path::new(r"files\one.txt"))
+            .ok_or_else(|| WinAppMigratorError::Archive("no digest".to_owned()))?;
+        assert_eq!(one.size, 1);
+        assert_eq!(one.sha256, hex_lower(&Sha256::digest(b"x")));
+        assert!(
+            digests.get(Path::new(r"FILES\SUB\two.txt")).is_some(),
+            "by Windows' rules"
+        );
+        assert!(digests.get(Path::new(r"files\three.txt")).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn an_entry_that_holds_more_than_it_says_is_stopped_at_what_it_says() -> Result<()> {
+        // A real zip, with what its central directory says of the size cut down.
+        let mut zip = zip_holding(&["files/a.txt"])?;
+        let central = zip
+            .windows(4)
+            .position(|window| window == b"PK\x01\x02")
+            .ok_or_else(|| WinAppMigratorError::Archive("no central directory".to_owned()))?;
+        // The uncompressed size, 24 bytes into a central header, from one byte to none.
+        zip[central + 24] = 0;
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        assert!(
+            extract_zip_reader(
+                io::Cursor::new(&zip),
+                root.path(),
+                &InstallMonitor::default()
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_folder_goes_in_a_zip_in_order_by_name() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let package = root.path().join("package");
+        for name in ["z.txt", "a.txt", r"m\b.txt", r"m\a.txt", "files.txt"] {
+            let path = package.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io("", error))?;
+            }
+            fs::write(&path, name).map_err(|error| WinAppMigratorError::io("", error))?;
+        }
+        let zip = root.path().join("out.zip");
+        create_zip_archive(&package, &zip, &BuildMonitor::default())?;
+        let archive =
+            ZipArchive::new(File::open(&zip).map_err(|error| WinAppMigratorError::io("", error))?)
+                .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+        let names: Vec<String> = archive
+            .file_names()
+            .filter_map(std::result::Result::ok)
+            .map(|name| name.into_owned())
+            .collect();
+        assert_eq!(names, ["a.txt", "files.txt", "m/a.txt", "m/b.txt", "z.txt"]);
+        Ok(())
     }
 
     #[test]

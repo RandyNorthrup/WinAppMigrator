@@ -18,7 +18,12 @@ publish = false
 [workspace.dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "wgpu_no_default_features"] }
+crc32fast = "1.5.0"
 filetime = "0.2.29"
+# The same one `zip` uses, for compressing a file's parts on many threads.
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+# How much room a drive has, which takes a Windows call this project cannot make itself.
+fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
 pelite = { version = "0.10.0", default-features = false, features = ["std"] }
 rfd = { version = "0.17.2", default-features = false }
 roxmltree = "0.21.2"

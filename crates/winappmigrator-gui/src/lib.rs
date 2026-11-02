@@ -6,6 +6,7 @@ mod views;
 #[cfg(test)]
 mod ui_tests;
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -19,10 +20,10 @@ use winappmigrator_core::path_utils::{signed_in_user, system_root};
 use winappmigrator_core::privilege::ProtectedFolder;
 use winappmigrator_core::{
     AppSelection, BuildMonitor, BuildStep, InstalledApp, InstallerStub, PackageOptions,
-    PackageResult, ProfileChoice, ProfilePicker, ProfileSurvey, ScanSource, SystemContext,
-    VerificationOptions, VerificationReport, WinAppMigratorError, create_package_monitored,
-    hidden_command, list_installed_apps_from, looks_like_a_windows_drive, survey_of,
-    survey_profiles, sweep_leaked_hive_mounts, verify_package,
+    PackageResult, ProfileChoice, ProfilePicker, ProfileSurvey, RoomCheck, ScanSource,
+    SystemContext, VerificationReport, WinAppMigratorError, create_package_monitored,
+    hidden_command, list_installed_apps_from, looks_like_a_windows_drive, panic_text, survey_of,
+    survey_profiles, sweep_leaked_hive_mounts, verify_installer,
 };
 use winappmigrator_ui::theme::{self, Theme, ThemeMode};
 use winappmigrator_ui::widgets;
@@ -130,7 +131,7 @@ pub(crate) enum SortColumn {
 }
 
 /// Where a running build has got to.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum BuildProgress {
     Build(BuildStep),
     Verifying,
@@ -172,6 +173,8 @@ pub struct WinAppMigratorApp {
     migrate_receiver: Option<Receiver<MigrateMessage>>,
     monitor: Option<BuildMonitor>,
     build_progress: Option<BuildProgress>,
+    /// How much room this build needs and where, once its scan has found out.
+    build_room: Option<RoomCheck>,
     build_started: Option<Instant>,
     last_outcome: Option<MigrationOutcome>,
     last_error: Option<String>,
@@ -208,6 +211,7 @@ impl WinAppMigratorApp {
             migrate_receiver: None,
             monitor: None,
             build_progress: None,
+            build_room: None,
             build_started: None,
             last_outcome: None,
             last_error: None,
@@ -376,13 +380,24 @@ impl WinAppMigratorApp {
         self.migrate_state = OperationState::Running;
         self.monitor = Some(monitor.clone());
         self.build_progress = Some(BuildProgress::Build(BuildStep::Scanning));
+        self.build_room = None;
         self.build_started = Some(Instant::now());
         self.last_error = None;
         self.last_outcome = None;
 
         let ctx = self.ctx.clone();
         thread::spawn(move || {
-            let message = run_build(job, &monitor, &sender);
+            // What goes wrong in a way nothing was ready for still has to end in something a person
+            // can read, or this window would say it was building forever.
+            let message = catch_unwind(AssertUnwindSafe(|| run_build(job, &monitor, &sender)))
+                .unwrap_or_else(|panic| {
+                    let reason = panic_text(panic.as_ref());
+                    tracing::error!(%reason, "a build stopped unexpectedly");
+                    MigrateMessage::Failed(format!(
+                        "The build stopped unexpectedly: {reason}. If it left an installer in the \
+                         output folder, do not use it."
+                    ))
+                });
             let _send_result = sender.send(message);
             ctx.request_repaint();
         });
@@ -448,6 +463,9 @@ impl WinAppMigratorApp {
             loop {
                 match receiver.try_recv() {
                     Ok(MigrateMessage::Progress(progress)) => {
+                        if let BuildProgress::Build(BuildStep::RoomChecked(room)) = &progress {
+                            self.build_room = Some(room.clone());
+                        }
                         self.build_progress = Some(progress);
                     }
                     Ok(MigrateMessage::Completed(outcome)) => {
@@ -565,8 +583,6 @@ fn run_build(
         selection: AppSelection::InstalledApp(Box::new(job.app)),
         output_dir: staging.clone(),
         current_directory: std::env::current_dir().ok(),
-        // The deliverable is a single self-contained .exe; no loose zip.
-        archive_format: None,
         create_self_extracting_archive: true,
         self_extracting_stub: Some(job.stub),
         installer_dir: Some(job.installer_dir),
@@ -595,28 +611,32 @@ fn run_build(
 
     tracing::info!(files = package.files_copied, "the package was built");
     let _send_result = progress.send(MigrateMessage::Progress(BuildProgress::Verifying));
-    let verify_options = VerificationOptions {
-        package_root: package.package_root.clone(),
-        target_root: None,
-        // Keep the verification report in staging (discarded) so only the installer
-        // remains in the chosen folder.
-        output_dir: Some(staging),
-        restore_user_data: false,
-        restore_license: job.include_license_data,
+    let Some(installer) = package.self_extracting_archive_path.clone() else {
+        return MigrateMessage::Failed("The build finished with no installer.".to_owned());
     };
-    match verify_package(&verify_options) {
+    // Read what was written, as whoever runs it will find it.
+    match verify_installer(&installer, monitor) {
         Ok(verification) => {
-            let installer_bytes = package
-                .self_extracting_archive_path
-                .as_deref()
-                .and_then(|path| std::fs::metadata(path).ok())
-                .map_or(0, |metadata| metadata.len());
+            let installer_bytes = [Some(installer.as_path()), package.data_file_path.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter_map(|path| std::fs::metadata(path).ok())
+                .map(|metadata| metadata.len())
+                .sum();
             MigrateMessage::Completed(Box::new(MigrationOutcome {
                 app_name: job.app_name,
                 package,
                 verification,
                 installer_bytes,
             }))
+        }
+        // Nothing is left of a build that was cancelled, even one this far along.
+        Err(WinAppMigratorError::Cancelled) => {
+            let _ = std::fs::remove_file(&installer);
+            if let Some(data_file) = package.data_file_path.as_deref() {
+                let _ = std::fs::remove_file(data_file);
+            }
+            MigrateMessage::Cancelled
         }
         Err(error) => MigrateMessage::Failed(format!(
             "The installer was written, but its hash check could not run: {error}. Do not use it."

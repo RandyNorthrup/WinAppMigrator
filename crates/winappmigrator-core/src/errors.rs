@@ -50,3 +50,25 @@ impl WinAppMigratorError {
         }
     }
 }
+
+/// What a panic said, for saying so instead of losing it. A panic takes a thread with it, and a window
+/// waiting on that thread would wait forever, so what runs a long job on one catches it.
+pub fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no reason was given".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_a_panic_said_can_be_told() {
+        assert_eq!(panic_text(&"plain"), "plain");
+        assert_eq!(panic_text(&"built".to_owned()), "built");
+        assert_eq!(panic_text(&7_u32), "no reason was given");
+    }
+}

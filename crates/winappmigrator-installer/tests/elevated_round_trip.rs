@@ -2256,7 +2256,6 @@ fn round_trip_of_a_real_app() -> TestResult {
         selection: AppSelection::InstalledApp(Box::new(app)),
         output_dir: work.path().join(APP_NAME),
         current_directory: None,
-        archive_format: None,
         create_self_extracting_archive: true,
         self_extracting_stub: Some(InstallerStub::File(stub_binary())),
         installer_dir: None,
@@ -4110,7 +4109,7 @@ fn staging_folder_is_locked_down_and_fails_closed() -> TestResult {
     drop(on_fat32);
     let fat32_target = format!(r"{FAT32_DRIVE}WAM E2E App");
     let beside = work.path().join("installer.exe");
-    let fallback = create_staging_dir(Some(Path::new(&fat32_target)), &beside)?;
+    let fallback = create_staging_dir(Some(Path::new(&fat32_target)), &beside, 0)?;
     checks.that(
         "the installer stages somewhere it can protect instead",
         !fallback
@@ -6427,7 +6426,6 @@ fn integrations_come_and_go_and_take_nothing_else() -> TestResult {
         selection: AppSelection::InstalledApp(Box::new(app.clone())),
         output_dir: output,
         current_directory: None,
-        archive_format: None,
         create_self_extracting_archive: true,
         self_extracting_stub: Some(InstallerStub::File(stub_binary())),
         installer_dir: None,
@@ -6498,17 +6496,22 @@ fn integrations_come_and_go_and_take_nothing_else() -> TestResult {
         .self_extracting_archive_path
         .clone()
         .ok_or("no installer was built")?;
+    let unpacked_on = work.path().join("unpacked on");
+    fs::create_dir_all(&unpacked_on)?;
+    EmbeddedPackage::open(&installer_with_license)?
+        .ok_or("the installer has no package")?
+        .extract_to(&unpacked_on)?;
     for canary in LICENSES {
         checks.that(
             &format!("Select-String: {canary} is in the package"),
-            !holding_canary(&on.package_root, canary)?.is_empty(),
+            !holding_canary(&unpacked_on, canary)?.is_empty(),
             "it is not",
         );
     }
     for canary in CREDENTIALS {
         checks.same(
             &format!("Select-String: no {canary}, with the option on either"),
-            holding_canary(&on.package_root, canary)?,
+            holding_canary(&unpacked_on, canary)?,
             Vec::new(),
         );
     }

@@ -8,9 +8,10 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 
+use winappmigrator_core::space::DriveRoom;
 use winappmigrator_core::{
     AppArchitecture, BuildStep, InstallScope, InstalledApp, PackageResult, ProfileChoice,
-    ProfilePicker, ProfileRow, VerificationReport, Warning, WarningSeverity,
+    ProfilePicker, ProfileRow, RoomCheck, VerificationReport, Warning, WarningSeverity,
 };
 
 use crate::theme::{Role, ThemeMode};
@@ -81,10 +82,10 @@ fn sample_outcome(warnings: Vec<Warning>, package_valid: bool) -> MigrationOutco
             reports_dir: PathBuf::from(r"C:\staging\reports"),
             files_copied: 1284,
             warnings,
-            archive_path: None,
             self_extracting_archive_path: Some(PathBuf::from(
                 r"C:\Users\You\WinAppMigrator\Fabrikam Data Sync\Fabrikam_Data_Sync_installer.exe",
             )),
+            data_file_path: None,
         },
         verification: VerificationReport {
             schema_version: String::new(),
@@ -100,6 +101,17 @@ fn sample_outcome(warnings: Vec<Warning>, package_valid: bool) -> MigrationOutco
             report_markdown: None,
         },
         installer_bytes: 412 * 1024 * 1024,
+    }
+}
+
+fn sample_room() -> RoomCheck {
+    RoomCheck {
+        drives: vec![DriveRoom {
+            drive: "C:".to_owned(),
+            needed_bytes: 412 * 1024 * 1024,
+            free_bytes: Some(356 * 1024 * 1024 * 1024),
+            what_for: vec!["the installer"],
+        }],
     }
 }
 
@@ -324,13 +336,27 @@ fn a_running_build_locks_the_selection() {
     let mut harness = harness_with(ThemeMode::Dark, |app| {
         select_first(app);
         app.migrate_state = OperationState::Running;
-        app.build_progress = Some(BuildProgress::Build(BuildStep::Copying {
+        app.build_progress = Some(BuildProgress::Build(BuildStep::Packing {
             done: 412,
             total: 1284,
+            bytes_done: 90 * 1024 * 1024,
+            bytes_total: 410 * 1024 * 1024,
         }));
+        app.build_room = Some(sample_room());
     });
     assert!(harness.query_by_label("Create installer").is_none());
     assert!(harness.query_by_label("Cancel").is_some());
+    assert!(
+        harness
+            .query_by_label_contains("Reading and compressing files: 412 of 1284")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Needs up to 412.0 MiB on C:")
+            .is_some(),
+        "the estimate is in the window, using what is already there"
+    );
     preview(&mut harness, "building-dark");
 
     harness.state_mut().select_app(0);
@@ -387,6 +413,49 @@ fn a_clean_build_reads_as_success() {
         assert!(harness.query_by_label_contains("Installer ready").is_some());
         preview(&mut harness, &format!("done-{name}"));
     }
+}
+
+#[test]
+fn a_build_too_big_for_one_file_says_its_two_files_must_stay_together() {
+    let two_files = || {
+        let mut outcome = sample_outcome(Vec::new(), true);
+        outcome.package.data_file_path = Some(PathBuf::from(
+            r"C:\Users\You\WinAppMigrator\Fabrikam Data Sync\Fabrikam_Data_Sync_installer.wamdata",
+        ));
+        outcome.installer_bytes = 6 * 1024 * 1024 * 1024;
+        outcome
+    };
+    for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        let mut harness = harness_with(mode, |app| {
+            select_first(app);
+            app.migrate_state = OperationState::Completed;
+            app.last_outcome = Some(two_files());
+        });
+        assert!(
+            harness
+                .query_by_label_contains("have to stay together")
+                .is_some()
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label_contains("Fabrikam_Data_Sync_installer.wamdata")
+                .count(),
+            2,
+            "in what it says, and as a path of its own"
+        );
+        preview(&mut harness, &format!("done-two-files-{name}"));
+    }
+    // And a build of one file does not bring it up.
+    let harness = harness_with(ThemeMode::Dark, |app| {
+        select_first(app);
+        app.migrate_state = OperationState::Completed;
+        app.last_outcome = Some(sample_outcome(Vec::new(), true));
+    });
+    assert!(
+        harness
+            .query_by_label_contains("have to stay together")
+            .is_none()
+    );
 }
 
 #[test]

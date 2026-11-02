@@ -1,25 +1,30 @@
-use std::fs;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use filetime::{FileTime, set_file_times};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::archive::{
-    EmbeddedPackage, create_self_extracting_archive, create_zip_archive, extract_zip_archive,
+    EmbeddedPackage, HELD_FILES, PendingInstaller, extract_zip_archive, package_folder_items,
+    zip_name_of,
 };
 use crate::authenticode::check_microsoft_signature;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
     has_reserved_device_name, package_destination_path, safe_relative_path,
 };
-use crate::hashing::sha256_file;
+use crate::hashing::{hex_lower, sha256_file};
 use crate::models::{
-    AppArchitecture, DriverEntry, FileEntry, LicenseArtifact, LicenseStoreFile,
-    PACKAGE_SCHEMA_VERSION, PackageArchiveFormat, PackageManifest, PackageOptions, PackageResult,
-    RegistryEntry, RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions, ScanReport,
+    AppArchitecture, DriverEntry, FileEntry, InstallerStub, LicenseArtifact, LicenseStoreFile,
+    PACKAGE_SCHEMA_VERSION, PackageManifest, PackageOptions, PackageResult, RegistryEntry,
+    RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions, ScanReport,
     ScheduledTaskEntry, Warning, WarningSeverity,
 };
+use crate::packer::{PackItem, PackOutcome, PackedFile, Packer, SourceRules};
 use crate::path_utils::{
     DEEPEST_WALK, hidden_command, is_on_a_local_disk, sanitize_filename, walk_asking,
 };
@@ -27,6 +32,7 @@ use crate::prerequisites::PREREQUISITES_DIR;
 use crate::privilege::ProtectedFolder;
 use crate::progress::{BuildMonitor, BuildStep};
 use crate::scan::scan_and_write_reports;
+use crate::space::{BuildInputs, PlaceNeed, RoomCheck, build_needs};
 use crate::system_context::{OtherAccountsFolders, VolumeMap};
 
 const FILES_DIR: &str = "files";
@@ -52,6 +58,12 @@ const DRIVERS_FILE: &str = "drivers.json";
 const SCHEDULED_TASKS_FILE: &str = "scheduled_tasks.json";
 const SHORTCUTS_FILE: &str = "shortcuts.json";
 const ENVIRONMENT_FILE: &str = "environment_variables.json";
+/// Where a file only a backup-mode copy can read goes while it is read, in the protected folder.
+const SPOOL_DIR: &str = ".spool";
+const COPY_BUFFER_BYTES: usize = 1024 * 1024;
+/// How often to look at whether a backup-mode copy has finished, or the build was cancelled.
+const BACKUP_COPY_FIRST_LOOK: std::time::Duration = std::time::Duration::from_millis(1);
+const BACKUP_COPY_LONGEST_LOOK: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
     create_package_monitored(options, &BuildMonitor::default())
@@ -59,6 +71,11 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
 
 /// [`create_package`], reporting progress to `monitor` and stopping with
 /// [`WinAppMigratorError::Cancelled`] if it is cancelled.
+///
+/// With an installer to build, an app's files go straight from where they are into the package:
+/// each is read once, and hashed and compressed from what that read returned. Only what has to be
+/// looked at or kept as a file is put in the staging folder first. Without one, the same files are
+/// copied to the staging folder, hashed as they go, and that folder is the package.
 pub fn create_package_monitored(
     options: &PackageOptions,
     monitor: &BuildMonitor,
@@ -72,7 +89,7 @@ pub fn create_package_monitored(
         output_dir: reports_dir.clone(),
         current_directory: options.current_directory.clone(),
         recursive_dependencies: true,
-        // What goes in the package is hashed as it is copied below. A hash of the original
+        // What goes in the package is hashed as it is read below. A hash of the original
         // could not be checked anyway when reading it needed a backup-mode copy, and it
         // would be wrong for a file that changes in between.
         include_hashes: false,
@@ -85,57 +102,100 @@ pub fn create_package_monitored(
     let report = scan_and_write_reports(&scan_options)?;
     monitor.checkpoint()?;
     let mut warnings = report.warnings.clone();
-    let mut files_copied = 0_usize;
-    let mut failed_copies: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let mut staged: std::collections::HashMap<PathBuf, (String, u64)> =
-        std::collections::HashMap::new();
 
+    let stub = if options.create_self_extracting_archive {
+        Some(options.self_extracting_stub.as_ref().ok_or_else(|| {
+            WinAppMigratorError::InvalidInput(
+                "a self-extracting archive requires an installer stub".to_owned(),
+            )
+        })?)
+    } else {
+        None
+    };
+    let installer_path = stub.map(|_| installer_output_path(options));
     // The scan looked before anything was read, and this looks again just before, as anything
     // read from here on goes in the package.
     let reader = SourceReader::new(&report);
-    let total_files = report
+    let inputs = build_inputs(options, &report, stub, &reader)?;
+    let needs = build_needs(&inputs);
+    let room = RoomCheck::on_this_pc(&build_places(
+        &options.output_dir,
+        installer_path.as_deref(),
+        &inputs,
+    ));
+    monitor.report(BuildStep::RoomChecked(room.clone()));
+    refuse_without_room(&room)?;
+    for note in room.could_not_tell() {
+        warnings.push(Warning::new(
+            "free_space_unknown",
+            WarningSeverity::Warning,
+            note,
+            None,
+        ));
+    }
+
+    monitor.report(BuildStep::Bundling);
+    let license_artifacts_detected = package_license_artifacts(
+        &options.output_dir,
+        &report.license_artifacts,
+        &reader,
+        &mut warnings,
+    );
+    // Make runtime prerequisites installable on the target: download and embed
+    // the redistributables when requested, recording a winget/URL fallback when a
+    // download fails. Bundle application-owned driver images for automatic
+    // re-registration.
+    let runtime_prerequisites = bundle_prerequisites(
+        options,
+        &report.architecture,
+        &report.runtime_prerequisites,
+        &mut warnings,
+    );
+    let drivers_detected =
+        package_drivers(&options.output_dir, &report.drivers, &reader, &mut warnings);
+    monitor.checkpoint()?;
+
+    let (items, not_packable) = files_to_pack(options, &report, &mut warnings)?;
+    let spool = options.output_dir.join(SPOOL_DIR);
+    let mut building = None;
+    let outcomes = match (stub, installer_path.as_deref()) {
+        (Some(stub), Some(installer_path)) => {
+            let (pending, file, base) =
+                PendingInstaller::start(stub, installer_path, needs.surely_one_file)?;
+            let mut packer = Packer::new(file, base, monitor.clone());
+            packer.expect(&items);
+            let check_before = |path: &Path| reader.check(path);
+            let check_after = |path: &Path| reader.check_after_copying(path);
+            let rules = SourceRules {
+                before: &check_before,
+                after: &check_after,
+                connected_drive: report.source_volume.is_some(),
+                spool: Some(&spool),
+            };
+            let outcomes = packer.pack(&items, &rules)?;
+            building = Some(BuildingInstaller { packer, pending });
+            outcomes
+        }
+        _ => copy_to_package_folder(options, &items, &reader, monitor)?,
+    };
+    let _ = fs::remove_dir_all(&spool);
+
+    let mut files_copied = 0_usize;
+    let mut failed_copies = not_packable;
+    let mut packed: HashMap<&Path, &PackedFile> = HashMap::new();
+    let copyable: Vec<&FileEntry> = report
         .file_inventory
         .iter()
-        .filter(|entry| entry.should_copy)
-        .count();
-    for (done, file) in report
-        .file_inventory
-        .iter()
-        .filter(|entry| entry.should_copy)
-        .enumerate()
-    {
-        monitor.checkpoint()?;
-        monitor.report(BuildStep::Copying {
-            done,
-            total: total_files,
-        });
-        let Some(relative) = file.package_relative_path.as_ref() else {
-            warnings.push(Warning::new(
-                "package_relative_path_missing",
-                WarningSeverity::Warning,
-                "Copyable file had no package relative path.",
-                Some(file.original_path.display().to_string()),
-            ));
-            continue;
-        };
-        let destination = package_destination_path(&options.output_dir, relative)?;
-        // A single locked or access-denied file (a running app's binary, an
-        // AppData installer cache entry, etc.) must not abort the whole package.
-        // Record it as a warning, mark it not-copied in the manifest so
-        // verification stays consistent, and continue.
-        match reader
-            .check(&file.path)
-            .and_then(|()| copy_file_preserving_basic_metadata(&file.path, &destination))
-            .and_then(|()| reader.check_after_copying(&file.path))
-            .and_then(|()| staged_fingerprint(&destination))
-        {
-            Ok(fingerprint) => {
-                staged.insert(file.original_path.clone(), fingerprint);
+        .filter(|entry| entry.should_copy && entry.package_relative_path.is_some())
+        .collect();
+    for (file, outcome) in copyable.iter().zip(&outcomes) {
+        match outcome {
+            Ok(done) => {
+                packed.insert(file.original_path.as_path(), done);
                 files_copied += 1;
             }
             Err(error) => {
                 // Nothing goes into a package without a hash to check it by.
-                let _ = fs::remove_file(&destination);
                 warnings.push(Warning::new(
                     "file_copy_failed",
                     WarningSeverity::Warning,
@@ -155,37 +215,15 @@ pub fn create_package_monitored(
             if failed_copies.contains(&entry.original_path) {
                 entry.should_copy = false;
             }
-            if let Some((hash, size)) = staged.get(&entry.original_path) {
-                entry.hash_sha256 = Some(hash.clone());
-                entry.size_bytes = Some(*size);
+            if let Some(done) = packed.get(entry.original_path.as_path()) {
+                entry.hash_sha256 = Some(done.sha256.clone());
+                entry.size_bytes = Some(done.size);
             }
             // Where it could be read during this build means nothing to an installer.
             entry.path = entry.original_path.clone();
             entry
         })
         .collect();
-
-    monitor.checkpoint()?;
-    monitor.report(BuildStep::Bundling);
-    let license_artifacts_detected = package_license_artifacts(
-        &options.output_dir,
-        &report.license_artifacts,
-        &reader,
-        &mut warnings,
-    );
-
-    // Make runtime prerequisites installable on the target: download and embed
-    // the redistributables when requested, recording a winget/URL fallback when a
-    // download fails. Bundle application-owned driver images for automatic
-    // re-registration.
-    let runtime_prerequisites = bundle_prerequisites(
-        options,
-        &report.architecture,
-        &report.runtime_prerequisites,
-        &mut warnings,
-    );
-    let drivers_detected =
-        package_drivers(&options.output_dir, &report.drivers, &reader, &mut warnings);
 
     let manifest = PackageManifest {
         schema_version: PACKAGE_SCHEMA_VERSION.to_owned(),
@@ -227,39 +265,36 @@ pub fn create_package_monitored(
     write_integration_artifacts(&options.output_dir, &manifest)?;
     write_restore_plan(&options.output_dir.join(RESTORE_PLAN_FILE), &manifest)?;
 
-    let zip_path = options.output_dir.with_extension("zip");
-    let mut archive_path = None;
-    if matches!(options.archive_format, Some(PackageArchiveFormat::Zip))
-        || options.create_self_extracting_archive
-    {
-        monitor.checkpoint()?;
-        create_zip_archive(&options.output_dir, &zip_path, monitor)?;
-        archive_path = Some(zip_path.clone());
-    }
-
     let mut self_extracting_archive_path = None;
-    if options.create_self_extracting_archive {
-        let stub = options.self_extracting_stub.as_ref().ok_or_else(|| {
-            WinAppMigratorError::InvalidInput(
-                "a self-extracting archive requires an installer stub".to_owned(),
-            )
-        })?;
-        let installer_path = installer_output_path(options);
-        if let Some(parent) = installer_path.parent() {
-            fs::create_dir_all(parent).map_err(|source| WinAppMigratorError::io(parent, source))?;
+    let mut data_file_path = None;
+    if let (Some(building), Some(stub)) = (building, stub) {
+        // In this order, so that if anything goes wrong below, the file is closed before what clears
+        // it up goes. The last one named goes first.
+        let BuildingInstaller {
+            pending,
+            mut packer,
+        } = building;
+        monitor.checkpoint()?;
+        // What is in the staging folder goes in after what it describes, which is why the manifest
+        // can say what those files came out as. Anything that does not hash as it did when it was
+        // put there stops the build.
+        let mut held = package_folder_items(&options.output_dir, &held_hashes(&manifest))?;
+        // Whatever could not be removed of it, none of it is the package's.
+        held.retain(|item| !item.name.starts_with(SPOOL_DIR));
+        packer.expect(&held);
+        for outcome in packer.pack(&held, &HELD_FILES)? {
+            outcome.map_err(|reason| {
+                WinAppMigratorError::Archive(format!(
+                    "a file in the staging folder could not go in the package: {reason}"
+                ))
+            })?;
         }
         monitor.checkpoint()?;
         monitor.report(BuildStep::WritingInstaller);
-        create_self_extracting_archive(stub, &zip_path, &installer_path)?;
-        self_extracting_archive_path = Some(installer_path);
-
-        // The standalone zip is only an intermediate for the installer. Unless a
-        // zip artifact was explicitly requested, drop it so the deliverable is a
-        // single self-contained executable.
-        if !matches!(options.archive_format, Some(PackageArchiveFormat::Zip)) {
-            let _ = fs::remove_file(&zip_path);
-            archive_path = None;
-        }
+        let finished = packer.finish()?;
+        let written = pending.complete(stub, finished, monitor)?;
+        self_extracting_archive_path = Some(written.installer);
+        data_file_path = written.data_file;
     }
 
     Ok(PackageResult {
@@ -268,9 +303,225 @@ pub fn create_package_monitored(
         reports_dir,
         files_copied,
         warnings,
-        archive_path,
         self_extracting_archive_path,
+        data_file_path,
     })
+}
+
+/// An installer on its way out, with the package going into it. In this order, so that the file is
+/// closed before what clears it up goes.
+struct BuildingInstaller {
+    packer: Packer,
+    pending: PendingInstaller,
+}
+
+/// What can be known of a build before anything is read for it.
+fn build_inputs(
+    options: &PackageOptions,
+    report: &ScanReport,
+    stub: Option<&InstallerStub>,
+    reader: &SourceReader,
+) -> Result<BuildInputs> {
+    let copyable: Vec<&FileEntry> = report
+        .file_inventory
+        .iter()
+        .filter(|file| file.should_copy)
+        .collect();
+    let stub_bytes = match stub {
+        Some(InstallerStub::File(path)) => fs::metadata(path)
+            .map_err(|error| WinAppMigratorError::io(path, error))?
+            .len(),
+        Some(InstallerStub::Embedded(bytes)) => bytes.len() as u64,
+        None => 0,
+    };
+    // A drive can say what it likes about how big a file is, and adding that up must not come back
+    // around to something that fits.
+    let adding = |total: u64, size: u64| total.saturating_add(size);
+    let held_license = report
+        .license_artifacts
+        .iter()
+        .filter(|artifact| artifact.should_copy)
+        .filter_map(|artifact| artifact.size_bytes)
+        .fold(0, adding);
+    let held_drivers = report
+        .drivers
+        .iter()
+        .filter(|driver| driver.app_owned)
+        .filter_map(|driver| reader.locate(&driver.image_path).ok())
+        .filter_map(|image| fs::metadata(image).ok())
+        .map(|metadata| metadata.len())
+        .fold(0, adding);
+    Ok(BuildInputs {
+        payload_bytes: copyable
+            .iter()
+            .filter_map(|file| file.size_bytes)
+            .fold(0, adding),
+        payload_files: copyable.len(),
+        largest_file_bytes: copyable
+            .iter()
+            .filter_map(|file| file.size_bytes)
+            .max()
+            .unwrap_or(0),
+        held_bytes: held_license.saturating_add(held_drivers),
+        prerequisites: if options.bundle_prerequisites {
+            report.runtime_prerequisites.len()
+        } else {
+            0
+        },
+        stub_bytes,
+        connected_drive: report.source_volume.is_some(),
+    })
+}
+
+/// Where a build writes, and how much it writes there at the most.
+fn build_places(staging: &Path, installer: Option<&Path>, inputs: &BuildInputs) -> Vec<PlaceNeed> {
+    let needs = build_needs(inputs);
+    match installer {
+        Some(installer) => vec![
+            PlaceNeed {
+                place: staging.to_path_buf(),
+                bytes: needs.staging_bytes,
+                what: "what a build works with",
+            },
+            PlaceNeed {
+                place: installer.to_path_buf(),
+                bytes: needs.output_bytes,
+                what: "the installer",
+            },
+        ],
+        // A package that stays a folder is all in that folder, and is the size of what is read.
+        None => vec![PlaceNeed {
+            place: staging.to_path_buf(),
+            bytes: needs.staging_bytes.saturating_add(inputs.payload_bytes),
+            what: "the package",
+        }],
+    }
+}
+
+fn refuse_without_room(room: &RoomCheck) -> Result<()> {
+    let shortfalls = room.shortfalls();
+    if shortfalls.is_empty() {
+        return Ok(());
+    }
+    Err(WinAppMigratorError::InvalidInput(format!(
+        "there is not enough room to build this installer, so nothing was read or written. {}. \
+         Free up some space there, or choose an output folder on another drive.",
+        shortfalls.join(". ")
+    )))
+}
+
+/// What is to go in the package from where the app is, and the files that have nowhere to go.
+fn files_to_pack(
+    options: &PackageOptions,
+    report: &ScanReport,
+    warnings: &mut Vec<Warning>,
+) -> Result<(Vec<PackItem>, HashSet<PathBuf>)> {
+    let mut items = Vec::new();
+    let mut not_packable = HashSet::new();
+    for file in report.file_inventory.iter().filter(|file| file.should_copy) {
+        let Some(relative) = file.package_relative_path.as_ref() else {
+            warnings.push(Warning::new(
+                "package_relative_path_missing",
+                WarningSeverity::Warning,
+                "Copyable file had no package relative path.",
+                Some(file.original_path.display().to_string()),
+            ));
+            not_packable.insert(file.original_path.clone());
+            continue;
+        };
+        // Whether a name can be written at all, on this PC, before anything is read for it.
+        package_destination_path(&options.output_dir, relative)?;
+        items.push(PackItem {
+            name: zip_name_of(relative),
+            source: file.path.clone(),
+            size_hint: file.size_bytes.unwrap_or(0),
+            expected_sha256: None,
+        });
+    }
+    Ok((items, not_packable))
+}
+
+/// A package that stays a folder: each file copied there, hashed as it goes. A single locked or
+/// access-denied file must not abort the whole package, so it says so and the rest go on.
+fn copy_to_package_folder(
+    options: &PackageOptions,
+    items: &[PackItem],
+    reader: &SourceReader,
+    monitor: &BuildMonitor,
+) -> Result<Vec<PackOutcome>> {
+    let bytes_total = items
+        .iter()
+        .fold(0_u64, |total, item| total.saturating_add(item.size_hint));
+    let mut bytes_done = 0_u64;
+    let mut outcomes = Vec::with_capacity(items.len());
+    for (done, item) in items.iter().enumerate() {
+        monitor.checkpoint()?;
+        monitor.report(BuildStep::Packing {
+            done,
+            total: items.len(),
+            bytes_done,
+            bytes_total,
+        });
+        let destination = options.output_dir.join(&item.name);
+        let copied = reader
+            .check(&item.source)
+            .and_then(|()| copy_hashing_into_package(&item.source, &destination))
+            .and_then(|fingerprint| {
+                reader.check_after_copying(&item.source)?;
+                Ok(fingerprint)
+            });
+        outcomes.push(match copied {
+            Ok((sha256, size)) => {
+                bytes_done = bytes_done.saturating_add(size);
+                Ok(PackedFile { sha256, size })
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&destination);
+                Err(error.to_string())
+            }
+        });
+    }
+    Ok(outcomes)
+}
+
+/// What everything in the staging folder that a manifest gives a hash for has to hash to.
+fn held_hashes(manifest: &PackageManifest) -> HashMap<String, String> {
+    let mut hashes = HashMap::new();
+    let mut note = |relative: &Path, hash: &str| {
+        hashes.insert(zip_name_of(relative).to_lowercase(), hash.to_owned());
+    };
+    for artifact in &manifest.license_artifacts_detected {
+        let Some(relative) = artifact.package_relative_path.as_deref() else {
+            continue;
+        };
+        if let Some(hash) = artifact.hash_sha256.as_deref() {
+            note(relative, hash);
+        }
+        for file in &artifact.store_files {
+            note(
+                &relative.join(safe_relative_path(&file.relative_path)),
+                &file.hash_sha256,
+            );
+        }
+    }
+    for driver in &manifest.drivers_detected {
+        if let (Some(relative), Some(hash)) = (
+            driver.package_relative_path.as_deref(),
+            driver.hash_sha256.as_deref(),
+        ) {
+            note(relative, hash);
+        }
+    }
+    for prerequisite in &manifest.runtime_prerequisites {
+        let bundle = prerequisite.bundle.as_ref();
+        if let (Some(relative), Some(hash)) = (
+            bundle.and_then(|bundle| bundle.package_relative_path.as_deref()),
+            bundle.and_then(|bundle| bundle.hash_sha256.as_deref()),
+        ) {
+            note(relative, hash);
+        }
+    }
+    hashes
 }
 
 /// Finds, for anything a build copies, where it can be read now and whether it may be. On this PC
@@ -501,30 +752,21 @@ fn package_drivers(
             let unique = format!("{}_{}", sanitize_artifact_name(&driver.service_name), leaf);
             let relative = PathBuf::from(DRIVERS_DIR).join(safe_relative_path(Path::new(&unique)));
             match package_destination_path(output_dir, &relative).and_then(|destination| {
-                copy_file_preserving_basic_metadata(image, &destination)
-                    .and_then(|()| reader.check_after_copying(image))
-                    .map(|()| destination)
+                let copied = copy_hashing_into_package(image, &destination).and_then(|copied| {
+                    reader.check_after_copying(image)?;
+                    Ok(copied)
+                });
+                if copied.is_err() {
+                    let _ = fs::remove_file(&destination);
+                }
+                copied
             }) {
-                Ok(destination) => match sha256_file(&destination) {
-                    // Only mark as bundled when we have an integrity hash, so
-                    // verification cannot trivially pass on a bad image.
-                    Ok(hash) => {
-                        driver.hash_sha256 = Some(hash);
-                        driver.package_relative_path = Some(relative);
-                    }
-                    Err(error) => {
-                        let _ = fs::remove_file(&destination);
-                        warnings.push(Warning::new(
-                            "driver_hash_failed",
-                            WarningSeverity::Warning,
-                            format!(
-                                "Bundled driver image for '{}' but could not hash it ({error}); reporting it for manual reinstall instead.",
-                                driver.service_name
-                            ),
-                            Some(driver.image_path.display().to_string()),
-                        ));
-                    }
-                },
+                // Only mark as bundled when we have an integrity hash, so
+                // verification cannot trivially pass on a bad image.
+                Ok((hash, _)) => {
+                    driver.hash_sha256 = Some(hash);
+                    driver.package_relative_path = Some(relative);
+                }
                 Err(error) => {
                     warnings.push(Warning::new(
                         "driver_copy_failed",
@@ -596,9 +838,10 @@ fn package_one_license_artifact(
         return false;
     };
     if source.is_file() {
-        let staged = copy_file_preserving_basic_metadata(&source, &destination)
-            .and_then(|()| reader.check_after_copying(&source))
-            .and_then(|()| staged_fingerprint(&destination));
+        let staged = copy_hashing_into_package(&source, &destination).and_then(|copied| {
+            reader.check_after_copying(&source)?;
+            Ok(copied)
+        });
         let Ok((hash, size)) = staged else {
             let _ = fs::remove_file(&destination);
             return false;
@@ -667,10 +910,10 @@ fn copy_license_store(
             continue;
         }
         let target = destination.join(safe_relative_path(relative));
-        match copy_file_preserving_basic_metadata(&entry.path, &target)
-            .and_then(|()| reader.check_after_copying(&entry.path))
-            .and_then(|()| staged_fingerprint(&target))
-        {
+        match copy_hashing_into_package(&entry.path, &target).and_then(|copied| {
+            reader.check_after_copying(&entry.path)?;
+            Ok(copied)
+        }) {
             Ok((hash_sha256, size_bytes)) => copied.push(LicenseStoreFile {
                 relative_path: relative.to_path_buf(),
                 size_bytes,
@@ -698,15 +941,6 @@ fn read_small_file(path: &Path) -> Option<Vec<u8>> {
         .and_then(|_| fs::read(path).ok())
 }
 
-/// The SHA-256 and size of a file as it now sits in the package.
-fn staged_fingerprint(path: &Path) -> Result<(String, u64)> {
-    let hash = sha256_file(path)?;
-    let size = fs::metadata(path)
-        .map_err(|source| WinAppMigratorError::io(path, source))?
-        .len();
-    Ok((hash, size))
-}
-
 fn create_package_dirs(root: &Path) -> Result<()> {
     for directory in [
         root.to_path_buf(),
@@ -728,32 +962,63 @@ fn create_package_dirs(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_file_preserving_basic_metadata(source: &Path, destination: &Path) -> Result<()> {
+/// Copy a file into the package's folder, and say what the bytes that were copied hash to and how
+/// many there were. Those and nothing else: the file changing while it is read cannot make the hash
+/// describe anything but what was written.
+fn copy_hashing_into_package(source: &Path, destination: &Path) -> Result<(String, u64)> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|source| WinAppMigratorError::io(parent, source))?;
     }
     // A plain in-process copy fails on files whose NTFS ACL denies this process —
     // common for a foreign disk owned by another PC's SIDs. Fall back to a
     // backup-semantics copy (robocopy /B) that reads through SeBackupPrivilege
-    // without modifying the source, then apply metadata. `fs::copy` is tried
-    // first so the common (accessible) case stays fast and dependency-free.
-    match fs::copy(source, destination) {
-        Ok(_) => {}
+    // without modifying the source, then apply metadata, which has to be read to be hashed.
+    // The plain copy is tried first so the common (accessible) case stays fast and
+    // dependency-free.
+    let fingerprint = match copy_and_hash(source, destination) {
+        Ok(fingerprint) => fingerprint,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            let _ = fs::remove_file(destination);
             copy_file_backup_mode(source, destination)?;
+            let size = fs::metadata(destination)
+                .map_err(|error| WinAppMigratorError::io(destination, error))?
+                .len();
+            (sha256_file(destination)?, size)
         }
         Err(error) => return Err(WinAppMigratorError::io(destination, error)),
-    }
+    };
     let Ok(metadata) = fs::metadata(source) else {
         // Source metadata may be unreadable even when a backup-mode copy
         // succeeded; the bytes are what matter, so keep the copied file as-is.
-        return Ok(());
+        return Ok(fingerprint);
     };
     let _ = fs::set_permissions(destination, metadata.permissions());
     let accessed = FileTime::from_last_access_time(&metadata);
     let modified = FileTime::from_last_modification_time(&metadata);
     let _ = set_file_times(destination, accessed, modified);
-    Ok(())
+    Ok(fingerprint)
+}
+
+fn copy_and_hash(source: &Path, destination: &Path) -> std::io::Result<(String, u64)> {
+    let mut input = File::open(source)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(destination)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    let mut size = 0_u64;
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        output.write_all(&buffer[..read])?;
+        size += read as u64;
+    }
+    Ok((hex_lower(&hasher.finalize()), size))
 }
 
 /// Copy a single file using `robocopy /B` (backup mode), which reads through the
@@ -763,6 +1028,16 @@ fn copy_file_preserving_basic_metadata(source: &Path, destination: &Path) -> Res
 /// and destination file names must match; the caller passes a destination whose
 /// name equals the source's.
 pub(crate) fn copy_file_backup_mode(source: &Path, destination: &Path) -> Result<()> {
+    copy_file_backup_mode_unless(source, destination, &|| false)
+}
+
+/// [`copy_file_backup_mode`], giving up with [`WinAppMigratorError::Cancelled`] if asked to. A large
+/// file on a failing drive can take as long as anything in a build.
+pub(crate) fn copy_file_backup_mode_unless(
+    source: &Path,
+    destination: &Path,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<()> {
     let (Some(source_dir), Some(file_name)) = (source.parent(), source.file_name()) else {
         return Err(WinAppMigratorError::InvalidInput(format!(
             "cannot backup-copy a file without a parent directory: {}",
@@ -775,7 +1050,7 @@ pub(crate) fn copy_file_backup_mode(source: &Path, destination: &Path) -> Result
             destination.display()
         )));
     };
-    let status = hidden_command("robocopy")
+    let mut robocopy = hidden_command("robocopy")
         .arg(source_dir)
         .arg(destination_dir)
         .arg(file_name)
@@ -784,8 +1059,30 @@ pub(crate) fn copy_file_backup_mode(source: &Path, destination: &Path) -> Result
         .args([
             "/B", "/XJ", "/NJH", "/NJS", "/NP", "/NDL", "/NC", "/NS", "/R:1", "/W:1",
         ])
-        .status()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .map_err(|error| WinAppMigratorError::io(source, error))?;
+    // Quickly at first, since a small file takes it no time and there can be thousands of them.
+    let mut look = BACKUP_COPY_FIRST_LOOK;
+    let status = loop {
+        let waited = robocopy.try_wait();
+        let cancelled = is_cancelled();
+        if cancelled || waited.is_err() {
+            let _ = robocopy.kill();
+            let _ = robocopy.wait();
+        }
+        if cancelled {
+            return Err(WinAppMigratorError::Cancelled);
+        }
+        match waited.map_err(|error| WinAppMigratorError::io(source, error))? {
+            Some(status) => break status,
+            None => {
+                std::thread::sleep(look);
+                look = (look * 2).min(BACKUP_COPY_LONGEST_LOOK);
+            }
+        }
+    };
     // robocopy encodes success in exit codes 0-7 (bit 3+ are failures).
     let copied_ok = status.code().is_some_and(|code| code < 8);
     if !copied_ok {
@@ -1092,6 +1389,262 @@ mod tests {
             OffsetDateTime::now_utc().unix_timestamp_nanos()
         ));
         Ok(dir)
+    }
+
+    /// A real scan of a program in a folder, read-only, with something beside it to pack.
+    fn app_in(root: &Path) -> Result<PathBuf> {
+        let app = root.join("app");
+        fs::create_dir_all(app.join("data"))
+            .map_err(|error| WinAppMigratorError::io(&app, error))?;
+        let exe = app.join("fixture.exe");
+        fs::copy(
+            std::env::current_exe().map_err(|error| WinAppMigratorError::io("exe", error))?,
+            &exe,
+        )
+        .map_err(|error| WinAppMigratorError::io(&exe, error))?;
+        fs::write(app.join(r"data\a.txt"), "hello hello hello hello")
+            .map_err(|error| WinAppMigratorError::io(&app, error))?;
+        Ok(exe)
+    }
+
+    fn installer_options(root: &Path, exe: &Path, stub: &Path) -> PackageOptions {
+        PackageOptions {
+            create_self_extracting_archive: true,
+            self_extracting_stub: Some(InstallerStub::File(stub.to_path_buf())),
+            installer_dir: Some(root.join("out")),
+            include_user_data: false,
+            include_program_data: false,
+            ..PackageOptions::for_executable(exe, root.join("staging").join("App"))
+        }
+    }
+
+    fn plain_stub(root: &Path) -> Result<PathBuf> {
+        let stub = root.join("stub.bin");
+        // Not a program, so it has no signature to refuse. Nothing here runs it.
+        fs::write(&stub, b"a stub").map_err(|error| WinAppMigratorError::io(&stub, error))?;
+        Ok(stub)
+    }
+
+    #[test]
+    fn an_apps_files_go_straight_into_the_installer_with_what_was_read_recorded() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let result = create_package(&installer_options(root.path(), &exe, &stub))?;
+        let installer = result
+            .self_extracting_archive_path
+            .clone()
+            .ok_or_else(|| WinAppMigratorError::Archive("no installer".to_owned()))?;
+        assert_eq!(result.data_file_path, None);
+
+        // Nothing of the app was copied anywhere on the way.
+        let staged_files = result.package_root.join(FILES_DIR);
+        assert_eq!(
+            fs::read_dir(&staged_files)
+                .map_err(|error| WinAppMigratorError::io(&staged_files, error))?
+                .count(),
+            0
+        );
+
+        // What the manifest recorded is what comes out, and what is really there.
+        let package = EmbeddedPackage::open(&installer)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        let manifest = read_embedded_manifest(&package)?;
+        let digests = package.digests(&|| false)?;
+        let copied: Vec<&FileEntry> = manifest
+            .file_inventory
+            .iter()
+            .filter(|file| file.should_copy)
+            .collect();
+        assert!(copied.len() >= 2);
+        for file in copied {
+            let relative = file
+                .package_relative_path
+                .as_deref()
+                .unwrap_or(Path::new(""));
+            let seen = digests
+                .get(relative)
+                .ok_or_else(|| WinAppMigratorError::Archive(relative.display().to_string()))?;
+            assert_eq!(Some(&seen.sha256), file.hash_sha256.as_ref());
+            assert_eq!(Some(seen.size), file.size_bytes);
+            assert_eq!(seen.sha256, sha256_file(&file.original_path)?);
+            assert_eq!(file.path, file.original_path);
+        }
+        assert!(digests.get(Path::new(MANIFEST_FILE)).is_some());
+        assert!(
+            digests.get(Path::new(r"reports\warnings.md")).is_some()
+                || !manifest.warnings.is_empty()
+        );
+        assert!(manifest.source_platform.is_some());
+        let main = manifest
+            .program_needs
+            .iter()
+            .find(|program| program.role == crate::models::ProgramRole::Main)
+            .ok_or_else(|| WinAppMigratorError::Archive("no main program".to_owned()))?;
+        assert_eq!(main.machine, crate::restore_policy::MACHINE_X64);
+        drop(package);
+
+        let report = crate::verify::verify_installer(&installer, &BuildMonitor::default())?;
+        assert!(report.package_valid, "{:?}", report.errors);
+        assert!(report.restore_valid.is_none());
+        let out = root.path().join("out");
+        assert_eq!(
+            fs::read_dir(&out)
+                .map_err(|error| WinAppMigratorError::io(&out, error))?
+                .count(),
+            1,
+            "only the installer is in the folder it went to, even after checking it"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_named_twice_in_a_package_only_goes_in_once() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let package = root.path().join("package");
+        fs::create_dir_all(&package).map_err(|error| WinAppMigratorError::io(&package, error))?;
+        let path = package.join("a.txt");
+        fs::write(&path, b"x").map_err(|error| WinAppMigratorError::io(&path, error))?;
+        let item = PackItem {
+            name: "a.txt".to_owned(),
+            source: path,
+            size_hint: 1,
+            expected_sha256: None,
+        };
+        let output = root.path().join("out.zip");
+        let file =
+            File::create(&output).map_err(|error| WinAppMigratorError::io(&output, error))?;
+        let mut packer = Packer::new(file, 0, BuildMonitor::default());
+        let first = packer.pack(std::slice::from_ref(&item), &HELD_FILES)?;
+        let second = packer.pack(std::slice::from_ref(&item), &HELD_FILES)?;
+        assert!(first[0].is_ok());
+        assert!(
+            second[0].is_err(),
+            "whichever part of a build it comes from"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_cancelled_build_leaves_nothing_where_the_installer_goes() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let out = root.path().join("out");
+        let earlier = create_package(&options)?
+            .self_extracting_archive_path
+            .ok_or_else(|| WinAppMigratorError::Archive("no installer".to_owned()))?;
+        let earlier_hash = sha256_file(&earlier)?;
+
+        // Cancelled by what it reports, part-way through packing, as a person pressing the button.
+        let slot: std::sync::Arc<std::sync::Mutex<Option<BuildMonitor>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let canceller = std::sync::Arc::clone(&slot);
+        let monitor = BuildMonitor::new(move |step| {
+            if matches!(step, BuildStep::Packing { .. })
+                && let Ok(canceller) = canceller.lock()
+                && let Some(monitor) = canceller.as_ref()
+            {
+                monitor.cancel();
+            }
+        });
+        *slot
+            .lock()
+            .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))? =
+            Some(monitor.clone());
+        let staging = root.path().join("staging");
+        fs::remove_dir_all(&staging).map_err(|error| WinAppMigratorError::io(&staging, error))?;
+        let cancelled = create_package_monitored(&options, &monitor);
+        assert!(matches!(cancelled, Err(WinAppMigratorError::Cancelled)));
+
+        let names: Vec<String> = fs::read_dir(&out)
+            .map_err(|error| WinAppMigratorError::io(&out, error))?
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["App_installer.exe"],
+            "and nothing partial beside it"
+        );
+        assert_eq!(
+            sha256_file(&earlier)?,
+            earlier_hash,
+            "and the earlier one is as it was"
+        );
+        Ok(())
+    }
+
+    /// As late as a cancel can come, with what is left of the package still to go in.
+    #[test]
+    fn a_build_cancelled_at_the_last_moment_leaves_nothing_either() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let slot: std::sync::Arc<std::sync::Mutex<Option<BuildMonitor>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let canceller = std::sync::Arc::clone(&slot);
+        let first_total = std::sync::Mutex::new(None);
+        let monitor = BuildMonitor::new(move |step| {
+            // The count goes up when what is in the staging folder starts going in.
+            if let BuildStep::Packing { total, .. } = step
+                && let Ok(mut first_total) = first_total.lock()
+                && *first_total.get_or_insert(total) < total
+                && let Ok(canceller) = canceller.lock()
+                && let Some(monitor) = canceller.as_ref()
+            {
+                monitor.cancel();
+            }
+        });
+        *slot
+            .lock()
+            .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))? =
+            Some(monitor.clone());
+        let cancelled = create_package_monitored(&options, &monitor);
+        assert!(
+            matches!(cancelled, Err(WinAppMigratorError::Cancelled)),
+            "{cancelled:?}"
+        );
+        let out = root.path().join("out");
+        let names: Vec<String> = fs::read_dir(&out)
+            .map_err(|error| WinAppMigratorError::io(&out, error))?
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, Vec::<String>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn a_backup_mode_copy_can_be_called_off() {
+        let source = Path::new(r"C:\Windows\System32\notepad.exe");
+        let destination = std::env::temp_dir().join("not written").join("notepad.exe");
+        let called_off = copy_file_backup_mode_unless(source, &destination, &|| true);
+        assert!(matches!(called_off, Err(WinAppMigratorError::Cancelled)));
+    }
+
+    #[test]
+    fn a_build_without_room_says_how_much_and_where_and_reads_nothing() {
+        let room = RoomCheck {
+            drives: vec![crate::space::DriveRoom {
+                drive: "D:".to_owned(),
+                needed_bytes: 10 * 1024 * 1024 * 1024,
+                free_bytes: Some(2 * 1024 * 1024 * 1024),
+                what_for: vec!["the installer"],
+            }],
+        };
+        let refused = refuse_without_room(&room);
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::InvalidInput(message))
+                if message.contains("D:")
+                    && message.contains("10.0 GiB")
+                    && message.contains("2.0 GiB")
+                    && message.contains("another drive")),
+            "{refused:?}"
+        );
+        assert!(refuse_without_room(&RoomCheck::default()).is_ok());
     }
 
     #[test]

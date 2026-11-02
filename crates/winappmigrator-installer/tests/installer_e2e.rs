@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use winappmigrator_core::{
-    AppSelection, EmbeddedPackage, InstallerStub, PackageArchiveFormat, PackageOptions,
-    create_package, read_embedded_manifest,
+    AppSelection, EmbeddedPackage, InstallerStub, PackageOptions, create_package,
+    read_embedded_manifest,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -61,7 +61,6 @@ fn build_installer_then_reinstall_and_verify_on_clean_target() -> TestResult {
         selection: AppSelection::ExecutablePath(app_exe.clone()),
         output_dir: out_dir.clone(),
         current_directory: Some(source_dir.clone()),
-        archive_format: Some(PackageArchiveFormat::Zip),
         create_self_extracting_archive: true,
         self_extracting_stub: Some(InstallerStub::File(stub.clone())),
         installer_dir: None,

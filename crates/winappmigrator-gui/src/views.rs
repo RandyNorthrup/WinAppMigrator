@@ -554,7 +554,7 @@ impl WinAppMigratorApp {
 
     fn draw_actions(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         if self.is_building() {
-            let (label, fraction) = progress_label(self.build_progress);
+            let (label, fraction) = progress_label(self.build_progress.as_ref());
             let label = if self.is_cancelling() {
                 "Cancelling after the current step…".to_owned()
             } else {
@@ -575,6 +575,13 @@ impl WinAppMigratorApp {
             });
             ui.add_space(SPACE_SM);
             widgets::progress_bar(ui, theme, fraction);
+            if let Some(room) = self.build_room.as_ref() {
+                ui.add_space(SPACE_XS);
+                widgets::hint(ui, theme, &format!("Needs {}", room.summary()));
+                for note in room.could_not_tell() {
+                    widgets::hint(ui, theme, &note);
+                }
+            }
             ui.add_space(SPACE_MD);
             let cancelling = self.is_cancelling();
             if widgets::wide_button(ui, theme, ButtonKind::Secondary, "Cancel", !cancelling)
@@ -690,8 +697,16 @@ impl WinAppMigratorApp {
 
         let mut folder_error = None;
         if let Some(path) = package.self_extracting_archive_path.as_ref() {
+            if let Some(data_file) = package.data_file_path.as_ref() {
+                ui.add_space(SPACE_SM);
+                widgets::notice(ui, theme, Role::Warning, &two_files_text(path, data_file));
+            }
             ui.add_space(SPACE_SM);
             widgets::mono_path(ui, theme, "Installer", &path.display().to_string());
+            if let Some(data_file) = package.data_file_path.as_ref() {
+                ui.add_space(SPACE_XS);
+                widgets::mono_path(ui, theme, "Data file", &data_file.display().to_string());
+            }
             ui.add_space(SPACE_SM);
             widgets::control_row(ui, |ui| {
                 if widgets::icon_text_button(
@@ -842,6 +857,21 @@ pub(crate) fn outcome_summary(outcome: &MigrationOutcome) -> (Role, String) {
     }
 }
 
+/// What someone with a build too big for one executable has to know, first.
+fn two_files_text(installer: &std::path::Path, data_file: &std::path::Path) -> String {
+    let name = |path: &std::path::Path| {
+        path.file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+    };
+    format!(
+        "This app is too big for one executable, so its installer is two files, {} and {}. They \
+         have to stay together: copy both to the other PC, into the same folder, with these names. \
+         If you sign the installer, that signature also covers the data file.",
+        name(installer),
+        name(data_file)
+    )
+}
+
 fn warning_list(ui: &mut egui::Ui, theme: &Theme, title: &str, warnings: &[Warning], open: bool) {
     if warnings.is_empty() {
         return;
@@ -895,28 +925,26 @@ fn warning_row(ui: &mut egui::Ui, theme: &Theme, warning: &Warning) {
     ui.add_space(SPACE_XS);
 }
 
-fn progress_label(progress: Option<BuildProgress>) -> (String, Option<f32>) {
-    let share = |done: usize, total: usize| {
-        if total == 0 {
-            None
-        } else {
-            Some(done as f32 / total as f32)
-        }
-    };
+fn progress_label(progress: Option<&BuildProgress>) -> (String, Option<f32>) {
     match progress {
         None | Some(BuildProgress::Build(BuildStep::Scanning)) => {
             ("Reverse-engineering the app…".to_owned(), None)
         }
-        Some(BuildProgress::Build(BuildStep::Copying { done, total })) => (
-            format!("Copying files: {done} of {total}"),
-            share(done, total),
-        ),
+        Some(BuildProgress::Build(BuildStep::RoomChecked(_))) => {
+            ("Checking there is room…".to_owned(), None)
+        }
         Some(BuildProgress::Build(BuildStep::Bundling)) => {
             ("Bundling runtimes and drivers…".to_owned(), None)
         }
-        Some(BuildProgress::Build(BuildStep::Compressing { done, total })) => (
-            format!("Compressing: {done} of {total}"),
-            share(done, total),
+        // By how much, since one large file can be most of the time and only one of the files.
+        Some(BuildProgress::Build(BuildStep::Packing {
+            done,
+            total,
+            bytes_done,
+            bytes_total,
+        })) => (
+            format!("Reading and compressing files: {done} of {total}"),
+            (*bytes_total > 0).then(|| *bytes_done as f32 / *bytes_total as f32),
         ),
         Some(BuildProgress::Build(BuildStep::WritingInstaller)) => {
             ("Writing the installer…".to_owned(), None)

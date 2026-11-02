@@ -4,20 +4,27 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::errors::{Result, WinAppMigratorError};
+use crate::space::RoomCheck;
 
 /// The step an installer build has reached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildStep {
     /// Reverse-engineering the application's footprint. Not cancellable part-way,
     /// so a cancel takes effect when this step ends.
     Scanning,
-    /// Copying the application's files into the package.
-    Copying { done: usize, total: usize },
+    /// How much room this build will need and where, now that it is known. It carries on after
+    /// this only if it fits.
+    RoomChecked(RoomCheck),
     /// Downloading runtime prerequisites and bundling drivers.
     Bundling,
-    /// Compressing the package.
-    Compressing { done: usize, total: usize },
-    /// Combining the installer stub and the package into the final executable.
+    /// Reading the application's files into the package, hashing and compressing them as they go.
+    Packing {
+        done: usize,
+        total: usize,
+        bytes_done: u64,
+        bytes_total: u64,
+    },
+    /// Finishing the executable, and the data file if there is one.
     WritingInstaller,
 }
 
@@ -160,18 +167,12 @@ mod tests {
         });
 
         monitor.report(BuildStep::Scanning);
-        monitor.report(BuildStep::Copying { done: 1, total: 2 });
+        monitor.report(BuildStep::Bundling);
 
         let steps = seen
             .lock()
             .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))?;
-        assert_eq!(
-            *steps,
-            vec![
-                BuildStep::Scanning,
-                BuildStep::Copying { done: 1, total: 2 }
-            ]
-        );
+        assert_eq!(*steps, vec![BuildStep::Scanning, BuildStep::Bundling]);
         Ok(())
     }
 

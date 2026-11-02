@@ -45,7 +45,6 @@ fn main() {
         selection: AppSelection::ExecutablePath(PathBuf::from(&source)),
         output_dir: staging.clone(),
         current_directory: std::env::current_dir().ok(),
-        archive_format: None,
         create_self_extracting_archive: true,
         self_extracting_stub: Some(InstallerStub::File(PathBuf::from(&stub))),
         installer_dir: Some(installer_dir.clone()),
