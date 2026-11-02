@@ -974,9 +974,7 @@ fn files_no_install_put_there(folder: &Path) -> Option<String> {
     let on_record = machine_state_root()
         .is_some_and(|state_root| install_on_record_at(&state_root, folder, None));
     (folder_has_files(folder) && !on_record).then(|| {
-        "it already has files that no install here put there, so use an empty folder, or \
-         uninstall what is there first"
-            .to_owned()
+        "it already has files, and no install is on record here, so use an empty folder".to_owned()
     })
 }
 

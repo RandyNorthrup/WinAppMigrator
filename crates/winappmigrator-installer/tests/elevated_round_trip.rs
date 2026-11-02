@@ -5819,6 +5819,16 @@ fn hostile_integration_state() -> TestResult<BTreeMap<String, String>> {
             Some("Hostile"),
         ),
         (
+            "how a second app is uninstalled",
+            format!(r"{UNINSTALL_KEY_PREFIX}\{HOSTILE_SAME_ROW}"),
+            Some("UninstallString"),
+        ),
+        (
+            "how a third app is uninstalled",
+            format!(r"{UNINSTALL_KEY_PREFIX}\{HOSTILE_QUIET_ROW}"),
+            Some("UninstallString"),
+        ),
+        (
             "another app's name in Settings",
             format!(r"{UNINSTALL_KEY_PREFIX}\{HOSTILE_OTHER_APP}"),
             Some("DisplayName"),
@@ -5891,6 +5901,9 @@ const HOSTILE_CLASS_THERE: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0007}";
 const HOSTILE_TARGET: &str = r"C:\Program Files\WAM E2E Taking";
 const HOSTILE_SERVICE_THERE: &str = "WamHostileThere";
 const HOSTILE_OTHER_APP: &str = "WamHostileOtherApp";
+const HOSTILE_SAME_ROW: &str = "WamHostileSameRow";
+const HOSTILE_QUIET_ROW: &str = "WamHostileQuietRow";
+const HOSTILE_THEIR_FOLDER: &str = r"C:\ProgramData\WAM Hostile Other";
 const UNINSTALL_KEY_PREFIX: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall";
 
 /// What can only be refused at the moment it would be done, since it depends on what is here.
@@ -5967,6 +5980,22 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         "REG_SZ",
         &format!("\"{other}\" /uninstall"),
     )?;
+    // A second app's row, of which a package says what it says, and a third, of which it only says
+    // how to remove it.
+    let same_row = format!(r"{UNINSTALL_KEY_PREFIX}\{HOSTILE_SAME_ROW}");
+    let quiet_row = format!(r"{UNINSTALL_KEY_PREFIX}\{HOSTILE_QUIET_ROW}");
+    for row in [&same_row, &quiet_row] {
+        reg_add(row, Some("DisplayName"), "REG_SZ", "Someone's Too")?;
+        reg_add(
+            row,
+            Some("UninstallString"),
+            "REG_SZ",
+            &format!("\"{other}\" /uninstall"),
+        )?;
+    }
+    // A program of another app's, in a folder a package's data can go to.
+    fs::create_dir_all(HOSTILE_THEIR_FOLDER)?;
+    fs::write(format!(r"{HOSTILE_THEIR_FOLDER}\svc.exe"), b"theirs")?;
     must(
         "sc.exe",
         &[
@@ -5994,6 +6023,21 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
     let own = package.program.clone();
     let command = format!("\"{own}\" \"%1\"");
     let (machine, sz) = (RegistryHive::LocalMachine, RegistryValueKind::String);
+    let relative = r"files\_external\theirs\svc.exe";
+    let (hash, size) = package.add_file(relative, &fake_app_program()?)?;
+    let their_program = PathBuf::from(format!(r"{HOSTILE_THEIR_FOLDER}\svc.exe"));
+    package.manifest.file_inventory.push(FileEntry {
+        path: their_program.clone(),
+        original_path: their_program.clone(),
+        package_relative_path: Some(PathBuf::from(relative)),
+        suggested_destination_path: None,
+        size_bytes: Some(size),
+        hash_sha256: Some(hash),
+        classification: FileClassification::UserData,
+        should_copy: true,
+        reason: String::new(),
+        user_folder: None,
+    });
     // A service of another's in that folder, and a setting of it, as it came in by the way.
     package
         .manifest
@@ -6012,6 +6056,20 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
             &format!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{HOSTILE_OTHER_APP}"),
             Some("DisplayName"),
             "Taken",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            &format!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{HOSTILE_SAME_ROW}"),
+            Some("DisplayName"),
+            "Someone's Too",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            &format!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{HOSTILE_QUIET_ROW}"),
+            Some("UninstallString"),
+            "whatever",
             sz.clone(),
         ),
         // `http` and every other one, each running the package's own file, which it may not.
@@ -6165,8 +6223,19 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
     let target = HOSTILE_TARGET.to_owned();
     let run = run_installer(
         &installer,
-        &["--target-root", &target, "--apply", "--force"],
+        &[
+            "--target-root",
+            &target,
+            "--apply",
+            "--force",
+            "--restore-user-data",
+        ],
     )?;
+    checks.same(
+        "on disk: another app's program is as it was",
+        fs::read(&their_program)?,
+        b"theirs".to_vec(),
+    );
     checks.that(
         "refusing those does not fail the install",
         run.success,
@@ -6190,6 +6259,8 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         r"Applications\WAM E2E Taking Source.exe",
         HOSTILE_SERVICE_THERE,
         HOSTILE_OTHER_APP,
+        HOSTILE_SAME_ROW,
+        r"WAM Hostile Other\svc.exe",
     ] {
         checks.that(
             &format!("reported as left out: {wanted}"),
@@ -6239,6 +6310,9 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
     reg_delete_key(&format!(r"{classes}\CLSID\{HOSTILE_EXISTING_CLASS}"));
     let _ = tool("sc.exe", &["delete", HOSTILE_SERVICE_THERE]);
     reg_delete_key(&other_row);
+    reg_delete_key(&same_row);
+    reg_delete_key(&quiet_row);
+    fs::remove_dir_all(HOSTILE_THEIR_FOLDER)?;
     reg_delete_key(&format!(r"{classes}\CLSID\{HOSTILE_SERVICE_CLASS}"));
     reg_delete_key(&format!(r"{classes}\CLSID\{HOSTILE_CLASS_THERE}"));
     reg_delete_key(&format!(

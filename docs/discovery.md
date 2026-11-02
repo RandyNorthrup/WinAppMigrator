@@ -429,7 +429,7 @@ led to the host's files, and per-user classes are read from `UsrClass.dat`.
 | **ProgID** | What opening it runs is the app, or with no command to go by, its `CLSID` is. A class naming a ProgID does not make it the app's unless that names the class back |
 | **Type library** | A `win32`, `win64`, or `arm64` file is the app's. A class naming one does not make it so |
 | **Interface** | Its `ProxyStubClsid32` is a class of the app's, or its `TypeLib` is a library of the app's |
-| **AppID** | A class of the app's names it, or `AppID\<its server>` names one of those |
+| **AppID** | A class of the app's names it, or `AppID\<its server>` names one of those, and what hosts it, if anything, is the app. Windows' own that every preview handler names stays out |
 | **URL protocol, file type** | What it opens is the app, which goes for `http` only if it is the browser that has it. Anything else only has the verbs and handlers the app added to it |
 | **`OpenWithProgids`, `OpenWithList`** | Only the app's own line in a list that is the type's, not the rest of it |
 | **Shell extensions** | `shellex` handlers, icon overlays, the `Approved` list, and Explorer namespaces, that name a class of the app's |
@@ -673,9 +673,11 @@ apps entry. A verb the package only adds to a type goes by that verb alone. They
 `--force` does not change it.
 
 **An earlier install here** means a record in the admin-only folder says one was at this location. A package suggests the location
-itself, so what is on this PC does not count as the package's for naming it. Services, drivers, and tasks go by the same. Files
-do not, when `--force` is asked for on a command line. The installer's window will not use a folder with files in it without
-such a record.
+itself, so what is on this PC does not count as the package's for naming it. Services, drivers, and tasks go by the same, and an
+app's row in Settings, which is left alone if it is there at all, and the install gets its own. In the install location, files
+do not go by this when `--force` is asked for on a command line, but the installer's window will not use a folder with files in
+it without such a record. Outside the install location a program already there is left alone without one, and a data file
+is replaced.
 
 An install record that names a key is not taken at its word for a file type's lists and verbs, which have other apps' lines in
 them, so `integration_scan.rs` goes through those. A verb that runs another app's program does not come along with its type, and

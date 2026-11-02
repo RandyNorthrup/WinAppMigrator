@@ -52,8 +52,8 @@ use crate::restore_policy::{
     COM_SERVER_KEYS, EVENT_LOG_PREFIX, Registration, SERVICES_PREFIX, ServiceAccount,
     com_class_key, com_server_refusal, existing_service_refusal, existing_task_refusal,
     firewall_fingerprint, firewall_identity, is_autostart_entry, is_uninstall_entry_key,
-    netsh_add_rule_arguments, registration_of, registration_unit_of, restored_value_bytes,
-    restored_value_name, restored_value_text, service_image_path_value,
+    netsh_add_rule_arguments, registration_of, registration_unit_of, replacing_refusal,
+    restored_value_bytes, restored_value_name, restored_value_text, service_image_path_value,
     stored_firewall_rule_matches,
 };
 use crate::restore_review::{
@@ -92,7 +92,8 @@ const INSTALL_LOCATION_VALUE: &str = "InstallLocation";
 /// Failures found at the moment of installing that are the rules refusing something, and so
 /// are left out like any other refusal rather than failing the install. They depend on what
 /// is on this PC at that moment, so the review before the install could not see them.
-const REFUSALS_FOUND_WHEN_INSTALLING: [&str; 6] = [
+const REFUSALS_FOUND_WHEN_INSTALLING: [&str; 7] = [
+    FILE_EXISTS_ELSEWHERE_CODE,
     COM_CLASS_EXISTS_CODE,
     REGISTRATION_EXISTS_CODE,
     FIREWALL_RULE_EXISTS_CODE,
@@ -100,6 +101,7 @@ const REFUSALS_FOUND_WHEN_INSTALLING: [&str; 6] = [
     "service_exists_elsewhere",
     "driver_exists_elsewhere",
 ];
+const FILE_EXISTS_ELSEWHERE_CODE: &str = "file_exists_elsewhere";
 const COM_CLASS_EXISTS_CODE: &str = "registry_com_class_exists";
 const REGISTRATION_EXISTS_CODE: &str = "registration_exists_elsewhere";
 const CLASS_IS_SOMEONES: &str = "this COM class is already on this PC, as something else's";
@@ -366,13 +368,11 @@ pub fn restore_package_monitored(
         ));
     }
 
-    let earlier_install_here = journal.as_ref().is_some_and(|journal| {
-        install_on_record_at(
-            &effective_options.state_root,
-            &effective_options.target_root,
-            Some(journal.folder()),
-        )
-    });
+    let earlier_install_here = install_on_record_at(
+        &effective_options.state_root,
+        &effective_options.target_root,
+        journal.as_ref().map(Journal::folder),
+    );
     let mut run = Run {
         options: &effective_options,
         review: &review,
@@ -812,6 +812,25 @@ impl Run<'_, '_> {
                 }
             };
 
+            if let Some(refusal) = destination
+                .exists()
+                .then(|| {
+                    replacing_refusal(
+                        destination,
+                        &self.options.target_root,
+                        self.earlier_install_here,
+                    )
+                })
+                .flatten()
+            {
+                self.record_failure(Warning::new(
+                    FILE_EXISTS_ELSEWHERE_CODE,
+                    WarningSeverity::Warning,
+                    refusal,
+                    Some(destination.display().to_string()),
+                ));
+                continue;
+            }
             if destination.exists() && !self.options.force {
                 let warning = Warning::new(
                     "restore_destination_exists",
@@ -909,6 +928,24 @@ impl Run<'_, '_> {
             self.com_classes_left_alone = com_classes_to_leave_alone(&entries, on_this_pc);
             self.registrations_left_alone =
                 registrations_to_leave_alone(&entries, on_this_pc, &self.com_classes_left_alone);
+            // An app's row in Settings is that app's. There is nothing to compare: an install always
+            // writes how to remove it to its row, which the package does not have to say.
+            if !self.earlier_install_here {
+                for row in &review.uninstall_keys {
+                    let key = plain_key(&row.key_path);
+                    let is_there = hives_it_counts_for(&row.hive).into_iter().any(|hive| {
+                        views_of_unit(&key).iter().any(|view| {
+                            registry_root(hive)
+                                .and_then(|root| root.open_subkey(view))
+                                .is_ok()
+                        })
+                    });
+                    if is_there {
+                        self.registrations_left_alone
+                            .push(LeftAlone { key, value: None });
+                    }
+                }
+            }
             // A service or driver left out just now takes what would have gone under it along.
             self.registrations_left_alone
                 .extend(self.refused.iter().filter_map(|refused| {
@@ -1324,6 +1361,25 @@ impl Run<'_, '_> {
                     "license_requires_admin",
                     WarningSeverity::Error,
                     "Restoring license data to a protected location requires elevation.",
+                    Some(destination.display().to_string()),
+                ));
+                continue;
+            }
+            if let Some(refusal) = destination
+                .exists()
+                .then(|| {
+                    replacing_refusal(
+                        destination,
+                        &self.options.target_root,
+                        self.earlier_install_here,
+                    )
+                })
+                .flatten()
+            {
+                self.record_failure(Warning::new(
+                    FILE_EXISTS_ELSEWHERE_CODE,
+                    WarningSeverity::Warning,
+                    refusal,
                     Some(destination.display().to_string()),
                 ));
                 continue;

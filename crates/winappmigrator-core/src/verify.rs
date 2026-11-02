@@ -132,7 +132,8 @@ pub(crate) fn without_what_was_refused(
 ) -> VerificationReport {
     let is_refused = |name: &str| refused.contains(&name);
     for item in &mut report.items {
-        if is_refused(&item.name) {
+        // A file goes by where it is in the package, and was refused by where it would have gone.
+        if is_refused(&item.name) || item.source.as_deref().is_some_and(is_refused) {
             item.status = VerificationStatus::Skipped;
         }
     }

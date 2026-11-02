@@ -71,10 +71,14 @@ installer is about to trust, and an honest package reaching too far:
     home was another app's folder could otherwise call everything of that app's its own. What is on this PC only counts
     as an earlier install there if a record in the admin-only folder says one was, of any app. That goes for services,
     drivers, and tasks too, and a service left out takes what would have gone under its key along.
-  - **Files are the exception, and only if you ask.** `--force` on a command line replaces a file of the same name wherever
-    it is put, and an uninstall puts it back. If that file is a program another app's service runs, the next start of
-    that service runs the package's, which no rule above sees. So only use `--force` for a folder you know is this
-    app's. The installer's window will not use a folder with files in it unless a record says an install was there.
+  - **Replacing a file is limited, and is the exception to all of that.** In the install location, `--force` on a command
+    line replaces a file of the same name, and an uninstall puts it back. If that file is a program another app's service
+    runs, the next start of that service runs the package's, which no rule above sees. So only use `--force` for a folder
+    you know is this app's. The installer's window will not use a folder with files in it unless a record says an install
+    was there. Outside the install location a program already there is never replaced without such a record, with
+    `--force` or not. A data file there is replaced, by the window as well, since restoring a person's data is what that
+    is for, and it comes back on uninstall. A package could use that to change another app's settings, and that is not
+    on the list.
 - **The rules do not make a package safe.** A package may still run its own files, as a service
   with full rights if it asks to. That is what installing an app is. Before anything happens, the
   installer's window lists the services, drivers, scheduled tasks, autostart entries, shortcuts,

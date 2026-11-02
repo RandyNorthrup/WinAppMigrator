@@ -543,6 +543,11 @@ const WINDOWS_FILE_HOSTS: &[&str] = &[
     "wscript.exe",
 ];
 const COM_LOCAL_SERVER_KEY: &str = "localserver32";
+/// Files that run, or that what runs loads.
+const RUNNABLE_EXTENSIONS: &[&str] = &[
+    "bat", "cmd", "com", "cpl", "dll", "drv", "exe", "hta", "jar", "js", "jse", "lnk", "msc",
+    "msi", "ocx", "pif", "ps1", "py", "reg", "scr", "sys", "vbe", "vbs", "wsf", "wsh",
+];
 const COM_INPROC_SERVER_KEY: &str = "inprocserver32";
 /// What is run or loaded for a class besides what its server's default value says.
 const COM_SERVER_PROGRAM_VALUE: &str = "ServerExecutable";
@@ -2445,6 +2450,29 @@ pub fn is_com_server_entry(entry: &RegistryEntry) -> bool {
         && is_default_value(entry.value_name.as_deref())
 }
 
+/// Why a file already on this PC must not be replaced, if so. Outside the install location a
+/// package says where a file goes, and there is nothing on the list a person agrees to for that. So
+/// a program of another app's cannot be replaced by the package's, which would run in its place, as
+/// that app's service perhaps. A person's data is what is meant to go in those folders, and it can
+/// be replaced, and comes back on uninstall. Nor does this go for a place on record as this app's.
+pub fn replacing_refusal(
+    destination: &Path,
+    target_root: &Path,
+    earlier_install_here: bool,
+) -> Option<String> {
+    let runs = destination
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            RUNNABLE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        });
+    (runs && !earlier_install_here && !path_is_strictly_inside(destination, target_root)).then(|| {
+        "a program of that name is already there, outside the install location, and nothing says \
+         it is this app's"
+            .to_owned()
+    })
+}
+
 /// Why an environment variable must not be restored, if so.
 pub fn environment_refusal(name: &str) -> Option<String> {
     if name.is_empty() || name.contains('=') || name.chars().any(char::is_control) {
@@ -4323,6 +4351,35 @@ mod tests {
                 on: "Directory".to_owned(),
                 verb: "acme".to_owned()
             })
+        );
+    }
+
+    #[test]
+    fn a_program_of_someone_elses_is_not_replaced_from_outside_the_install_location() {
+        let target = Path::new(r"C:\Program Files\Acme");
+        let elsewhere = Path::new(r"C:\ProgramData\Other\svc.exe");
+        assert!(replacing_refusal(elsewhere, target, false).is_some());
+        assert!(
+            replacing_refusal(Path::new(r"C:\ProgramData\Other\A.DLL"), target, false).is_some()
+        );
+        assert_eq!(
+            replacing_refusal(elsewhere, target, true),
+            None,
+            "a record says it is what an install here put there"
+        );
+        assert_eq!(
+            replacing_refusal(Path::new(r"C:\Program Files\Acme\a.exe"), target, false),
+            None,
+            "the install location is asked about by itself"
+        );
+        assert_eq!(
+            replacing_refusal(
+                Path::new(r"C:\ProgramData\Other\settings.ini"),
+                target,
+                false
+            ),
+            None,
+            "that is a person's data, which is what goes there"
         );
     }
 
