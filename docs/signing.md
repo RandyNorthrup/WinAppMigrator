@@ -78,7 +78,12 @@ name, so both executables also:
 - link the C runtime statically, removing `VCRUNTIME140.dll` from the search entirely;
 - run Windows tools by absolute path, with the Windows directory read from the admin-only
   registry rather than from an environment variable the user controls. winget is not a
-  Windows tool, so it is found through `PATH`, skipping the executable's own folder;
+  Windows tool. `PATH` only holds a shortcut to it in a folder the user can write to, so the
+  installer asks Windows where its package is installed and checks that file's signature;
+- start PowerShell with its module path set to the Windows folder's, and without .NET
+  profiling, because both are otherwise taken from the user's environment;
+- check that a prerequisite's installer is validly signed by Microsoft when it is downloaded
+  and again just before running it;
 - write the embedded stub straight into the installer, never through `%TEMP%`.
 
 [cve]: https://msrc.microsoft.com/update-guide/vulnerability/CVE-2013-3900

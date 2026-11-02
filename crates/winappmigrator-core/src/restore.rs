@@ -28,7 +28,9 @@ use crate::path_utils::{
     escape_powershell_single, hidden_command, sanitize_filename, strip_prefix_ignore_case,
     system_root,
 };
-use crate::prerequisites::{PrerequisiteInstallOutcome, install_bundle, is_present};
+use crate::prerequisites::{
+    PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
+};
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
 use crate::registry_target::{
     app_path_entries, environment_registry_target, is_path_variable, merge_path_entries,
@@ -449,12 +451,21 @@ fn restore_prerequisites(
         let Some(bundle) = prerequisite.bundle.as_ref() else {
             continue;
         };
-        if prerequisite
-            .presence_probe
-            .as_ref()
-            .map(is_present)
-            .unwrap_or(false)
-        {
+        // Everything about how this installs comes from the compiled spec, not the
+        // manifest. A kind with no spec has nothing that could run.
+        let Some(spec) = spec_for_bundle(&prerequisite.kind, bundle) else {
+            warnings.push(Warning::new(
+                "prerequisite_skipped",
+                WarningSeverity::Info,
+                format!(
+                    "{}: there is no known installer for this runtime.",
+                    prerequisite.name
+                ),
+                None,
+            ));
+            continue;
+        };
+        if spec.probe.as_ref().is_some_and(is_present) {
             changes_logged.push(format!(
                 "prerequisite already present: {}",
                 prerequisite.name
@@ -462,7 +473,9 @@ fn restore_prerequisites(
             continue;
         }
         if !options.apply {
-            let via = if bundle.package_relative_path.is_some() {
+            let via = if spec.windows_feature.is_some() {
+                "Windows feature"
+            } else if spec.bundleable && bundle.package_relative_path.is_some() {
                 "bundled installer"
             } else {
                 "winget"
@@ -473,7 +486,7 @@ fn restore_prerequisites(
             ));
             continue;
         }
-        if bundle.requires_admin && !is_elevated() {
+        if spec.requires_admin && !is_elevated() {
             errors.push(Warning::new(
                 "prerequisite_requires_admin",
                 WarningSeverity::Error,
@@ -485,10 +498,10 @@ fn restore_prerequisites(
             ));
             continue;
         }
-        match install_bundle(bundle, &options.package_root) {
+        match install_bundle(&prerequisite.kind, bundle, &options.package_root) {
             PrerequisiteInstallOutcome::Installed => {
                 changes_logged.push(format!("installed prerequisite {}", prerequisite.name));
-                confirm_prerequisite(prerequisite, false, warnings, errors);
+                confirm_prerequisite(prerequisite, &spec, false, warnings, errors);
             }
             PrerequisiteInstallOutcome::InstalledNeedsReboot => {
                 changes_logged.push(format!(
@@ -504,7 +517,7 @@ fn restore_prerequisites(
                     ),
                     None,
                 ));
-                confirm_prerequisite(prerequisite, true, warnings, errors);
+                confirm_prerequisite(prerequisite, &spec, true, warnings, errors);
             }
             PrerequisiteInstallOutcome::Skipped(reason) => {
                 warnings.push(Warning::new(
@@ -520,7 +533,7 @@ fn restore_prerequisites(
                     WarningSeverity::Error,
                     format!(
                         "Could not install {}: {reason}. Acquire it from {}.",
-                        prerequisite.name, bundle.download_url
+                        prerequisite.name, spec.download_url
                     ),
                     None,
                 ));
@@ -533,11 +546,12 @@ fn restore_prerequisites(
 /// error, unless a reboot is pending (then it is only a warning).
 fn confirm_prerequisite(
     prerequisite: &RuntimePrerequisite,
+    spec: &PrerequisiteSpec,
     reboot_pending: bool,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
-    let Some(probe) = prerequisite.presence_probe.as_ref() else {
+    let Some(probe) = spec.probe.as_ref() else {
         return;
     };
     if is_present(probe) {

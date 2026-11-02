@@ -10,6 +10,7 @@ use tempfile::TempDir;
 use crate::archive::{
     create_self_extracting_archive, create_zip_archive, extract_zip_archive, read_embedded_file,
 };
+use crate::authenticode::check_microsoft_signature;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{package_destination_path, safe_relative_path};
 use crate::hashing::sha256_file;
@@ -20,6 +21,7 @@ use crate::models::{
     WarningSeverity,
 };
 use crate::path_utils::{hidden_command, sanitize_filename};
+use crate::prerequisites::PREREQUISITES_DIR;
 use crate::privilege::protect_staging_folder;
 use crate::progress::{BuildMonitor, BuildStep};
 use crate::scan::scan_and_write_reports;
@@ -32,7 +34,6 @@ const DRIVERS_DIR: &str = "drivers";
 const SCHEDULED_TASKS_DIR: &str = "scheduled_tasks";
 const ENVIRONMENT_DIR: &str = "environment";
 const LICENSE_DIR: &str = "license";
-const PREREQUISITES_DIR: &str = "prerequisites";
 const MANIFESTS_DIR: &str = "manifests";
 const REPORTS_DIR: &str = "reports";
 const MANIFEST_FILE: &str = "manifest.json";
@@ -284,6 +285,7 @@ fn bundle_prerequisites(
                 options,
                 &prerequisite,
                 &spec,
+                architecture,
                 warnings,
             ));
         }
@@ -296,11 +298,14 @@ fn plan_one_prerequisite(
     options: &PackageOptions,
     prerequisite: &RuntimePrerequisite,
     spec: &crate::prerequisites::PrerequisiteSpec,
+    architecture: &AppArchitecture,
     warnings: &mut Vec<Warning>,
 ) -> crate::models::PrerequisiteBundle {
+    // With no payload, the installer takes the spec's other route: winget or a Windows
+    // feature (e.g. the .NET runtime).
+    let without_payload = crate::prerequisites::bundle_record(architecture, None, None, None);
     if !spec.bundleable {
-        // winget/URL acquisition on the target (e.g. .NET runtime).
-        return crate::prerequisites::bundle_from_spec(spec, None, None, None);
+        return without_payload;
     }
     let relative = PathBuf::from(PREREQUISITES_DIR).join(spec.file_name);
     let destination = match package_destination_path(&options.output_dir, &relative) {
@@ -315,42 +320,54 @@ fn plan_one_prerequisite(
                 ),
                 None,
             ));
-            return crate::prerequisites::bundle_from_spec(spec, None, None, None);
+            return without_payload;
         }
     };
-    match crate::prerequisites::download(&spec.download_url, &destination) {
-        Ok(()) => match sha256_file(&destination) {
-            // A bundled payload must carry an integrity hash, otherwise
-            // verification would trivially pass on a corrupt/missing payload.
-            Ok(hash) => {
-                let size = fs::metadata(&destination).ok().map(|meta| meta.len());
-                crate::prerequisites::bundle_from_spec(spec, Some(relative), Some(hash), size)
-            }
-            Err(error) => {
-                warnings.push(Warning::new(
-                    "prerequisite_hash_failed",
-                    WarningSeverity::Warning,
-                    format!(
-                        "Downloaded {} but could not hash it ({error}); the installer will try winget on the target instead.",
-                        prerequisite.name
-                    ),
-                    Some(destination.display().to_string()),
-                ));
-                let _ = fs::remove_file(&destination);
-                crate::prerequisites::bundle_from_spec(spec, None, None, None)
-            }
-        },
+    if let Err(error) = crate::prerequisites::download(&spec.download_url, &destination) {
+        warnings.push(Warning::new(
+            "prerequisite_download_failed",
+            WarningSeverity::Warning,
+            format!(
+                "Could not download {} ({error}); the installer will try winget on the target.",
+                prerequisite.name
+            ),
+            Some(spec.download_url.clone()),
+        ));
+        return without_payload;
+    }
+    if let Err(reason) = check_microsoft_signature(&destination) {
+        warnings.push(Warning::new(
+            "prerequisite_signature_failed",
+            WarningSeverity::Warning,
+            format!(
+                "The download of {} failed its signature check, so it was not bundled: {reason}. \
+                 The installer will try winget on the target.",
+                prerequisite.name
+            ),
+            Some(spec.download_url.clone()),
+        ));
+        let _ = fs::remove_file(&destination);
+        return without_payload;
+    }
+    match sha256_file(&destination) {
+        // A bundled payload must carry an integrity hash, otherwise
+        // verification would trivially pass on a corrupt/missing payload.
+        Ok(hash) => {
+            let size = fs::metadata(&destination).ok().map(|meta| meta.len());
+            crate::prerequisites::bundle_record(architecture, Some(relative), Some(hash), size)
+        }
         Err(error) => {
             warnings.push(Warning::new(
-                "prerequisite_download_failed",
+                "prerequisite_hash_failed",
                 WarningSeverity::Warning,
                 format!(
-                    "Could not download {} ({error}); the installer will try winget on the target.",
+                    "Downloaded {} but could not hash it ({error}); the installer will try winget on the target instead.",
                     prerequisite.name
                 ),
-                Some(spec.download_url.clone()),
+                Some(destination.display().to_string()),
             ));
-            crate::prerequisites::bundle_from_spec(spec, None, None, None)
+            let _ = fs::remove_file(&destination);
+            without_payload
         }
     }
 }

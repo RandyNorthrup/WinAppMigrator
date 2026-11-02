@@ -7,9 +7,14 @@
 //! silently and offline on the target and confirms the result with a registry
 //! probe. When a redistributable cannot be bundled it falls back to a documented
 //! winget/URL install on the target. Every step is best-effort and reported.
+//!
+//! Everything that decides what runs elevated is compiled in here and looked up by the
+//! prerequisite's kind. The manifest can say which kind, which build, and where in the
+//! package the payload is. A payload has to carry a valid Microsoft signature both when it
+//! is downloaded and just before it runs, or it does not run.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,6 +22,7 @@ use std::time::{Duration, Instant};
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
+use crate::authenticode::check_microsoft_signature;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::package_destination_path;
 use crate::models::{
@@ -24,9 +30,21 @@ use crate::models::{
 };
 use crate::path_utils::hidden_command;
 
-const WINGET_EXE: &str = "winget";
+const WINGET_EXE: &str = "winget.exe";
 const DISM_EXE: &str = "dism";
+const POWERSHELL_EXE: &str = "powershell.exe";
+/// Where the package keeps prerequisite payloads, and the only place one can be run from.
+pub const PREREQUISITES_DIR: &str = "prerequisites";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+/// A Microsoft download goes through a short link, and sometimes a mirror.
+const MAX_DOWNLOAD_REDIRECTS: u32 = 5;
+/// Far more than any redistributable, and small enough that a bad server cannot fill a disk.
+const MAX_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+const HTTPS_PREFIX: &str = "https://";
+/// Asks Windows where winget is installed. That location is only writable by Windows,
+/// unlike the folder on `PATH` holding the shortcut to it, where anyone can plant a file.
+const WINGET_LOCATION_SCRIPT: &str = "(Get-AppxPackage -Name Microsoft.DesktopAppInstaller | \
+     Sort-Object Version -Descending | Select-Object -First 1).InstallLocation";
 /// Hard cap on a single prerequisite install so a hung or interactive installer
 /// cannot wedge the whole restore. Large runtimes (.NET, winget) can be slow, so
 /// this is generous.
@@ -104,36 +122,46 @@ pub fn is_present(probe: &PrerequisiteRegistryProbe) -> bool {
     false
 }
 
-/// Build the bundle record for a spec, given the embedded payload (when one was
-/// downloaded). A `package_relative_path` of `None` means winget/URL fallback.
-pub fn bundle_from_spec(
-    spec: &PrerequisiteSpec,
-    package_relative_path: Option<std::path::PathBuf>,
+/// The bundle record for a prerequisite: which build it is, and its embedded payload when
+/// one was downloaded. A `package_relative_path` of `None` means another route is used.
+pub fn bundle_record(
+    architecture: &AppArchitecture,
+    package_relative_path: Option<PathBuf>,
     hash_sha256: Option<String>,
     size_bytes: Option<u64>,
 ) -> PrerequisiteBundle {
     PrerequisiteBundle {
+        architecture: architecture.clone(),
         package_relative_path,
-        download_url: spec.download_url.clone(),
         hash_sha256,
         size_bytes,
-        silent_install_args: spec.silent_install_args.clone(),
-        success_exit_codes: spec.success_exit_codes.clone(),
-        reboot_exit_codes: spec.reboot_exit_codes.clone(),
-        winget_id: spec.winget_id.clone(),
-        windows_feature: spec.windows_feature.clone(),
-        requires_admin: spec.requires_admin,
     }
 }
 
-/// Download `url` to `dest` over HTTPS (SChannel via native-tls), following
-/// redirects. Used at package time only.
+/// The compiled spec for a prerequisite that has a bundle record.
+pub fn spec_for_bundle(
+    kind: &RuntimePrerequisiteKind,
+    bundle: &PrerequisiteBundle,
+) -> Option<PrerequisiteSpec> {
+    spec(kind, &bundle.architecture)
+}
+
+/// Download `url` to `dest` over HTTPS (SChannel via native-tls), following a few
+/// redirects, all of which must be HTTPS too. Used at package time only.
 pub fn download(url: &str, dest: &Path) -> Result<()> {
+    if !is_https(url) {
+        return Err(WinAppMigratorError::Network(format!(
+            "refusing to download {url}: it is not HTTPS"
+        )));
+    }
     let connector = native_tls::TlsConnector::new()
         .map_err(|error| WinAppMigratorError::Network(format!("TLS init failed: {error}")))?;
     let agent = ureq::AgentBuilder::new()
         .tls_connector(Arc::new(connector))
-        .redirects(10)
+        // This one also covers each redirect, which is where a download would be led off
+        // HTTPS.
+        .https_only(true)
+        .redirects(MAX_DOWNLOAD_REDIRECTS)
         .timeout_connect(Duration::from_secs(30))
         .timeout_read(DOWNLOAD_TIMEOUT)
         .build();
@@ -145,9 +173,10 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
     }
-    let mut reader = response.into_reader();
     let mut bytes = Vec::new();
-    reader
+    response
+        .into_reader()
+        .take(MAX_DOWNLOAD_BYTES)
         .read_to_end(&mut bytes)
         .map_err(|error| WinAppMigratorError::Network(format!("reading {url} failed: {error}")))?;
     if bytes.is_empty() {
@@ -159,47 +188,86 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Install a bundled (or winget-fallback) prerequisite on the target. Best-effort
-/// and non-panicking; the caller decides how to surface the outcome.
+fn is_https(url: &str) -> bool {
+    url.get(..HTTPS_PREFIX.len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case(HTTPS_PREFIX))
+}
+
+/// Install a prerequisite on the target, by the route its compiled spec gives.
+/// Best-effort and non-panicking; the caller decides how to surface the outcome.
 pub fn install_bundle(
+    kind: &RuntimePrerequisiteKind,
     bundle: &PrerequisiteBundle,
     package_root: &Path,
 ) -> PrerequisiteInstallOutcome {
+    let Some(spec) = spec_for_bundle(kind, bundle) else {
+        return PrerequisiteInstallOutcome::Skipped(
+            "there is no known installer for this runtime".to_owned(),
+        );
+    };
     // A Windows optional feature (e.g. NetFx3) is enabled via DISM, never a
     // payload or winget, so it takes precedence over the other mechanisms.
-    if let Some(feature) = bundle.windows_feature.as_deref() {
+    if let Some(feature) = spec.windows_feature.as_deref() {
         return run_windows_feature(feature);
     }
-    if let Some(relative) = bundle.package_relative_path.as_ref() {
-        match package_destination_path(package_root, relative) {
-            Ok(payload) if payload.is_file() => return run_payload(&payload, bundle),
-            Ok(payload) => {
-                return PrerequisiteInstallOutcome::Failed(format!(
-                    "bundled installer is missing: {}",
-                    payload.display()
-                ));
-            }
-            Err(error) => {
-                return PrerequisiteInstallOutcome::Failed(format!(
-                    "bundled installer path is invalid: {error}"
-                ));
-            }
+    if spec.bundleable
+        && let Some(relative) = bundle.package_relative_path.as_ref()
+    {
+        if !is_expected_payload_path(relative, &spec) {
+            return PrerequisiteInstallOutcome::Failed(format!(
+                "the package names {} as this runtime's installer, which is not where it \
+                 belongs, so it was not run",
+                relative.display()
+            ));
         }
+        return match package_destination_path(package_root, relative) {
+            Ok(payload) if payload.is_file() => run_payload(&payload, &spec),
+            Ok(payload) => PrerequisiteInstallOutcome::Failed(format!(
+                "bundled installer is missing: {}",
+                payload.display()
+            )),
+            Err(error) => PrerequisiteInstallOutcome::Failed(format!(
+                "bundled installer path is invalid: {error}"
+            )),
+        };
     }
-    if let Some(winget_id) = bundle.winget_id.as_deref() {
+    if let Some(winget_id) = spec.winget_id.as_deref() {
         return run_winget(winget_id);
     }
     PrerequisiteInstallOutcome::Skipped(format!(
         "no bundled installer or winget id; acquire it from {}",
-        bundle.download_url
+        spec.download_url
     ))
 }
 
-fn run_payload(payload: &Path, bundle: &PrerequisiteBundle) -> PrerequisiteInstallOutcome {
+/// A payload belongs at `prerequisites\<the spec's own file name>`, so a manifest cannot
+/// point this at some other file it carries.
+fn is_expected_payload_path(relative: &Path, spec: &PrerequisiteSpec) -> bool {
+    let expected = Path::new(PREREQUISITES_DIR).join(spec.file_name);
+    let mut actual = relative.components();
+    let mut wanted = expected.components();
+    loop {
+        match (actual.next(), wanted.next()) {
+            (None, None) => return true,
+            (Some(left), Some(right))
+                if left.as_os_str().eq_ignore_ascii_case(right.as_os_str()) => {}
+            _ => return false,
+        }
+    }
+}
+
+fn run_payload(payload: &Path, spec: &PrerequisiteSpec) -> PrerequisiteInstallOutcome {
+    // Checked again here, just before it runs elevated. The check at build time is on
+    // another PC, and nothing authenticates the package in between.
+    if let Err(reason) = check_microsoft_signature(payload) {
+        return PrerequisiteInstallOutcome::Failed(format!(
+            "the bundled installer failed its signature check and was not run: {reason}"
+        ));
+    }
     let mut command = hidden_command(payload);
-    command.args(&bundle.silent_install_args);
+    command.args(&spec.silent_install_args);
     match wait_with_timeout(command, INSTALL_TIMEOUT) {
-        WaitOutcome::Exited(code) => classify_exit_code(code, bundle),
+        WaitOutcome::Exited(code) => classify_exit_code(code, spec),
         WaitOutcome::TimedOut => PrerequisiteInstallOutcome::Failed(
             "bundled installer did not finish within the timeout and was terminated".to_owned(),
         ),
@@ -243,8 +311,42 @@ fn run_windows_feature(feature: &str) -> PrerequisiteInstallOutcome {
     }
 }
 
+/// Where winget really is, checked the same way as a payload. The `winget` on `PATH` is a
+/// shortcut in a folder the user can write to, so it could be anything.
+fn trusted_winget_path() -> std::result::Result<PathBuf, String> {
+    let output = hidden_command(POWERSHELL_EXE)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            WINGET_LOCATION_SCRIPT,
+        ])
+        .output()
+        .map_err(|error| format!("could not look for winget: {error}"))?;
+    let location = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || location.is_empty() {
+        return Err("winget is not installed".to_owned());
+    }
+    let winget = Path::new(&location).join(WINGET_EXE);
+    check_microsoft_signature(&winget).map_err(|reason| {
+        format!(
+            "{} failed its signature check and was not run: {reason}",
+            winget.display()
+        )
+    })?;
+    Ok(winget)
+}
+
 fn run_winget(winget_id: &str) -> PrerequisiteInstallOutcome {
-    let mut command = hidden_command(WINGET_EXE);
+    let winget = match trusted_winget_path() {
+        Ok(winget) => winget,
+        Err(reason) => {
+            return PrerequisiteInstallOutcome::Failed(format!(
+                "could not use winget to install {winget_id}: {reason}"
+            ));
+        }
+    };
+    let mut command = hidden_command(winget);
     command.args([
         "install",
         "--id",
@@ -304,18 +406,15 @@ fn wait_with_timeout(mut command: Command, timeout: Duration) -> WaitOutcome {
     }
 }
 
-fn classify_exit_code(
-    code: Option<i32>,
-    bundle: &PrerequisiteBundle,
-) -> PrerequisiteInstallOutcome {
+fn classify_exit_code(code: Option<i32>, spec: &PrerequisiteSpec) -> PrerequisiteInstallOutcome {
     let Some(code) = code else {
         return PrerequisiteInstallOutcome::Failed(
             "installer was terminated without an exit code".to_owned(),
         );
     };
-    if bundle.reboot_exit_codes.contains(&code) {
+    if spec.reboot_exit_codes.contains(&code) {
         PrerequisiteInstallOutcome::InstalledNeedsReboot
-    } else if bundle.success_exit_codes.contains(&code) {
+    } else if spec.success_exit_codes.contains(&code) {
         PrerequisiteInstallOutcome::Installed
     } else {
         PrerequisiteInstallOutcome::Failed(format!("installer exited with code {code}"))
@@ -452,24 +551,151 @@ mod tests {
 
     #[test]
     fn reboot_exit_code_maps_to_needs_reboot() {
-        let bundle = bundle_from_spec(
-            &visual_cpp_spec(&AppArchitecture::X64),
-            Some(std::path::PathBuf::from("prerequisites/vc_redist.x64.exe")),
-            None,
-            None,
-        );
+        let spec = visual_cpp_spec(&AppArchitecture::X64);
         assert_eq!(
-            classify_exit_code(Some(3010), &bundle),
+            classify_exit_code(Some(3010), &spec),
             PrerequisiteInstallOutcome::InstalledNeedsReboot
         );
         assert_eq!(
-            classify_exit_code(Some(0), &bundle),
+            classify_exit_code(Some(0), &spec),
             PrerequisiteInstallOutcome::Installed
         );
         assert_eq!(
-            classify_exit_code(Some(1603), &bundle),
+            classify_exit_code(Some(1603), &spec),
             PrerequisiteInstallOutcome::Failed("installer exited with code 1603".to_owned())
         );
+    }
+
+    #[test]
+    fn only_https_can_be_downloaded() {
+        assert!(is_https("https://aka.ms/vs/17/release/vc_redist.x64.exe"));
+        assert!(is_https("HTTPS://aka.ms/x"));
+        for url in [
+            "http://aka.ms/x",
+            "file:///C:/x.exe",
+            "ftp://x/y",
+            "",
+            "https",
+        ] {
+            assert!(!is_https(url), "{url}");
+        }
+        let folder = std::env::temp_dir().join("wam-never-written.exe");
+        let refused = download("http://127.0.0.1:9/x.exe", &folder);
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::Network(message)) if message.contains("not HTTPS")),
+            "{refused:?}"
+        );
+        assert!(!folder.exists());
+    }
+
+    /// The compiled specs are the only source of what runs, and all of them use HTTPS.
+    #[test]
+    fn every_compiled_download_is_https() {
+        for spec in [
+            visual_cpp_spec(&AppArchitecture::X64),
+            visual_cpp_spec(&AppArchitecture::X86),
+            visual_cpp_spec(&AppArchitecture::Arm64),
+            dotnet_desktop_spec(),
+            dotnet_framework35_spec(),
+            dotnet_framework4x_spec(),
+        ] {
+            assert!(is_https(&spec.download_url), "{}", spec.download_url);
+        }
+    }
+
+    #[test]
+    fn a_payload_must_be_where_its_spec_says() {
+        let spec = visual_cpp_spec(&AppArchitecture::X64);
+        for good in [
+            r"prerequisites\vc_redist.x64.exe",
+            "prerequisites/vc_redist.x64.exe",
+            r"Prerequisites\VC_REDIST.X64.EXE",
+        ] {
+            assert!(is_expected_payload_path(Path::new(good), &spec), "{good}");
+        }
+        for bad in [
+            r"files\evil.exe",
+            "vc_redist.x64.exe",
+            r"prerequisites\evil.exe",
+            r"prerequisites\vc_redist.x86.exe",
+            r"prerequisites\sub\vc_redist.x64.exe",
+            r"prerequisites\..\files\vc_redist.x64.exe",
+        ] {
+            assert!(!is_expected_payload_path(Path::new(bad), &spec), "{bad}");
+        }
+    }
+
+    fn visual_cpp_bundle(path: &str) -> PrerequisiteBundle {
+        bundle_record(&AppArchitecture::X64, Some(PathBuf::from(path)), None, None)
+    }
+
+    fn failure_reason(outcome: PrerequisiteInstallOutcome) -> String {
+        match outcome {
+            PrerequisiteInstallOutcome::Failed(reason) => reason,
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    }
+
+    /// The file is not a program at all, so the test could not run it even by mistake, and
+    /// the outcome shows the signature check stopped it first.
+    #[test]
+    fn an_unsigned_payload_is_not_run_and_says_why() -> std::io::Result<()> {
+        let package = tempfile::tempdir()?;
+        let payload = package.path().join(r"prerequisites\vc_redist.x64.exe");
+        std::fs::create_dir_all(package.path().join(PREREQUISITES_DIR))?;
+        std::fs::write(&payload, b"not signed")?;
+
+        let reason = failure_reason(install_bundle(
+            &RuntimePrerequisiteKind::VisualCppRedistributable,
+            &visual_cpp_bundle(r"prerequisites\vc_redist.x64.exe"),
+            package.path(),
+        ));
+
+        assert!(reason.contains("signature"), "{reason}");
+        assert!(reason.contains("not run"), "{reason}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_manifest_cannot_choose_which_file_runs() -> std::io::Result<()> {
+        let package = tempfile::tempdir()?;
+        std::fs::write(package.path().join("evil.exe"), b"x")?;
+
+        let reason = failure_reason(install_bundle(
+            &RuntimePrerequisiteKind::VisualCppRedistributable,
+            &visual_cpp_bundle("evil.exe"),
+            package.path(),
+        ));
+
+        assert!(reason.contains("evil.exe"), "{reason}");
+        assert!(reason.contains("not run"), "{reason}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_runtime_with_no_spec_is_skipped() {
+        let outcome = install_bundle(
+            &RuntimePrerequisiteKind::JavaRuntime,
+            &visual_cpp_bundle(r"prerequisites\vc_redist.x64.exe"),
+            Path::new(r"C:\Nowhere"),
+        );
+        assert!(matches!(outcome, PrerequisiteInstallOutcome::Skipped(_)));
+    }
+
+    /// Only asks, and runs `--version` at most. Skips on a PC without winget.
+    #[test]
+    fn winget_is_found_where_windows_installed_it_and_not_on_path() {
+        match trusted_winget_path() {
+            Ok(winget) => {
+                let text = winget.to_string_lossy().to_ascii_lowercase();
+                assert!(
+                    text.contains(r"\windowsapps\microsoft.desktopappinstaller"),
+                    "{text}"
+                );
+                assert!(!text.contains(r"\appdata\"), "{text}");
+            }
+            Err(reason) => eprintln!("skipping: {reason}"),
+        }
     }
 
     #[test]
@@ -518,9 +744,49 @@ mod tests {
     }
 
     #[test]
-    fn framework35_bundle_carries_the_windows_feature() {
-        let bundle = bundle_from_spec(&dotnet_framework35_spec(), None, None, None);
-        assert_eq!(bundle.windows_feature.as_deref(), Some("NetFx3"));
-        assert!(bundle.package_relative_path.is_none());
+    fn a_bundle_reaches_its_compiled_spec_by_kind_and_build() {
+        let bundle = bundle_record(&AppArchitecture::X86, None, None, None);
+        let framework = spec_for_bundle(&RuntimePrerequisiteKind::DotNetFramework35, &bundle);
+        assert_eq!(
+            framework.and_then(|spec| spec.windows_feature),
+            Some("NetFx3".to_owned())
+        );
+        let visual_cpp =
+            spec_for_bundle(&RuntimePrerequisiteKind::VisualCppRedistributable, &bundle);
+        assert_eq!(
+            visual_cpp.map(|spec| spec.file_name),
+            Some("vc_redist.x86.exe")
+        );
+    }
+
+    /// An old or hostile manifest can carry anything. These keys are simply not read.
+    #[test]
+    fn what_to_run_cannot_come_from_a_manifest() -> serde_json::Result<()> {
+        let bundle: PrerequisiteBundle = serde_json::from_str(
+            r#"{
+                "package_relative_path": null,
+                "hash_sha256": null,
+                "size_bytes": null,
+                "download_url": "http://evil.example/x.exe",
+                "silent_install_args": ["/c", "calc"],
+                "winget_id": "Evil.Package",
+                "windows_feature": "TelnetClient",
+                "success_exit_codes": [1],
+                "requires_admin": false
+            }"#,
+        )?;
+        assert_eq!(bundle.architecture, AppArchitecture::Unknown);
+        let spec = spec_for_bundle(&RuntimePrerequisiteKind::VisualCppRedistributable, &bundle);
+        let spec = spec.ok_or_else(|| serde::de::Error::custom("no spec"))?;
+        assert_eq!(
+            spec.winget_id.as_deref(),
+            Some("Microsoft.VCRedist.2015+.x64")
+        );
+        assert_eq!(spec.windows_feature, None);
+        assert_eq!(
+            spec.silent_install_args,
+            ["/install", "/quiet", "/norestart"]
+        );
+        Ok(())
     }
 }

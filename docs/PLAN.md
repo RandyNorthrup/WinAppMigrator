@@ -85,32 +85,30 @@ From the audit of 2026-11-01. Items are removed from this list as they are fixed
    to run. Hashes sit in the same archive they protect. Enforce app-scoped allowlists when
    restoring, take prerequisite details from compiled specs, and show persistence items in
    the preview.
-5. **Prerequisite downloads and payloads** are not checked by signature, and HTTPS is not
-   enforced on redirects.
-6. **No rollback.** The first copy failure stops the install part-way, and existing files
+5. **No rollback.** The first copy failure stops the install part-way, and existing files
    are overwritten with no backup.
-7. **Secrets.** All values under an app's registry keys and license files in its install
+6. **Secrets.** All values under an app's registry keys and license files in its install
    folder are captured even with the license option off. Apply the license classifiers
    when opted out, and redact secret-named values.
 
 **Performance**
 
-8. Every byte is read about five times to build and four times to install. Hash while
+7. Every byte is read about five times to build and four times to install. Hash while
     copying, in parallel.
-9. Compression is single-threaded, and recompresses formats that are already compressed.
-10. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
+8. Compression is single-threaded, and recompresses formats that are already compressed.
+9. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
     lost if one contains a character that breaks the JSON. The offline XML reader could
     serve live scans too.
 
 **Features**
 
-11. Footprint preview with include and exclude before building, offering folders that nearly
+10. Footprint preview with include and exclude before building, offering folders that nearly
     match the product's name, which are now left out.
-12. Size and free-space check before building.
-13. A way past the 4 GiB limit: a small loader plus a data file beside it.
-14. Installer progress, persistent logs, and a change journal enabling rollback and a
+11. Size and free-space check before building.
+12. A way past the 4 GiB limit: a small loader plus a data file beside it.
+13. Installer progress, persistent logs, and a change journal enabling rollback and a
     generated uninstaller.
-15. Target OS and architecture check.
+14. Target OS and architecture check.
 
 ## Not in scope for this release line
 

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Margin, RichText};
 
 use winappmigrator_core::path_utils::system_root;
+use winappmigrator_core::prerequisites::spec_for_bundle;
 use winappmigrator_core::{
     PackageManifest, RestoreOptions, RestoreResult, RuntimePrerequisite, RuntimePrerequisiteKind,
     WarningSeverity, extract_embedded_self_archive, hidden_command, read_embedded_manifest,
@@ -753,11 +754,14 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome) {
 
 fn prereq_row(prereq: &RuntimePrerequisite) -> PrereqRow {
     let (handling, role) = if let Some(bundle) = prereq.bundle.as_ref() {
-        if let Some(feature) = bundle.windows_feature.as_deref() {
+        let spec = spec_for_bundle(&prereq.kind, bundle);
+        let spec = spec.as_ref();
+        if let Some(feature) = spec.and_then(|spec| spec.windows_feature.as_deref()) {
             (format!("Windows feature: {feature}"), Role::Accent)
-        } else if bundle.package_relative_path.is_some() {
+        } else if spec.is_some_and(|spec| spec.bundleable) && bundle.package_relative_path.is_some()
+        {
             ("Included".to_owned(), Role::Accent)
-        } else if let Some(id) = bundle.winget_id.as_deref() {
+        } else if let Some(id) = spec.and_then(|spec| spec.winget_id.as_deref()) {
             (format!("Installed with winget: {id}"), Role::Accent)
         } else {
             ("Install manually".to_owned(), Role::Warning)

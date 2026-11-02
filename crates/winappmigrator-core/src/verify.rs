@@ -18,7 +18,7 @@ use crate::models::{
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{escape_powershell_single, hidden_command, system_root};
-use crate::prerequisites::is_present;
+use crate::prerequisites::{is_present, spec_for_bundle};
 use crate::registry_target::{
     app_path_entries, environment_registry_target, is_path_variable, path_contains_entry,
     registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
@@ -482,10 +482,11 @@ fn verify_packaged_prerequisites(
 /// non-reboot install failure as an error.
 fn verify_prerequisites(manifest: &PackageManifest, items: &mut Vec<VerificationItem>) {
     for prerequisite in &manifest.runtime_prerequisites {
-        if prerequisite.bundle.is_none() {
+        let Some(bundle) = prerequisite.bundle.as_ref() else {
             continue;
-        }
-        let item = match prerequisite.presence_probe.as_ref() {
+        };
+        let probe = spec_for_bundle(&prerequisite.kind, bundle).and_then(|spec| spec.probe);
+        let item = match probe.as_ref() {
             Some(probe) if is_present(probe) => passed_item(
                 VerificationCategory::Prerequisite,
                 prerequisite.name.clone(),

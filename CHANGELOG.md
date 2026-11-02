@@ -4,6 +4,18 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **A package no longer chooses what runs elevated for a prerequisite.** The URL, arguments,
+  winget id, Windows feature, and registry probe come from specs compiled into the installer, looked
+  up by the prerequisite's kind. A manifest can only say which kind and build, and supply the
+  payload's path, which must be `prerequisites\<the spec's file name>`, and its hash.
+- **Prerequisite installers are checked by signature.** A payload must be validly signed by Microsoft
+  when it is downloaded and again just before it runs, and one that fails is not run and is
+  reported as an error. Downloads are HTTPS only, including on redirects, with at most five redirects.
+- **winget is no longer found through `PATH`.** The folder holding its shortcut is one the user can
+  write to, so a planted `winget.exe` would have run elevated. The installer now asks Windows where
+  winget is installed, and checks that file's signature before running it.
+- **Elevated PowerShell ignores the user's module folders and profilers,** either of which could
+  have replaced the commands it runs, the signature check among them.
 - **Services come back as they were.** A service's path is now stored quoted, so that
   `C:\My Apps\Foo Bar\svc.exe` cannot be hijacked by `C:\My Apps\Foo.exe`. A code comment
   claimed the quoting was handled, but what reached `sc.exe` was unquoted. Arguments are kept, and

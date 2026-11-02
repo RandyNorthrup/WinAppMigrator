@@ -1,5 +1,6 @@
 pub mod app_inventory;
 pub mod archive;
+pub mod authenticode;
 pub mod dll_resolver;
 pub mod env_scan;
 pub mod errors;

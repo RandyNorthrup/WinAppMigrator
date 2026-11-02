@@ -375,7 +375,9 @@ rules, fonts, certificates, ODBC sources, and event log sources.
 `scan::runtime_prerequisites_from_signals` infers the runtimes an app needs from
 its imports, app-local DLLs, and footprint, and `prerequisites.rs` resolves each
 to a concrete on-target plan (bundled installer, winget, or a Windows optional
-feature), verified by a registry probe where one exists.
+feature), verified by a registry probe where one exists. A package records which kind and
+build it needs and any payload it bundled. Everything that decides what runs comes from the
+specs compiled into `prerequisites.rs`, and a payload must be signed by Microsoft.
 
 The Visual C++ redistributable is downloaded at build time and embedded. If that download
 fails, the build warns and the installer tries winget on the target. The detection is

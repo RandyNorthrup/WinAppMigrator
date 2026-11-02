@@ -37,7 +37,7 @@ the installer stub must never be signed.
 ## Known gaps
 
 [docs/PLAN.md](docs/PLAN.md#open-issues-most-important-first) lists open issues, including
-restore-time allowlists and prerequisite signature checks.
+restore-time allowlists.
 
 An install location outside a protected folder, such as `D:\Apps`, stays writable by other
 programs on the PC. Links are checked just before each file is written, but a program running

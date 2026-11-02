@@ -786,35 +786,27 @@ pub enum RuntimePrerequisiteKind {
     Unknown,
 }
 
-/// How the installer can make a runtime prerequisite available on the target.
-/// Resolved at package time so the installer needs no network when a payload was
-/// bundled.
+/// How the installer makes a runtime prerequisite available on the target.
+///
+/// A package is not authenticated, and this runs elevated, so it does not say what to run
+/// or how. The URL, arguments, winget id, Windows feature, and registry probe all come from
+/// the compiled spec for the prerequisite's kind (see `prerequisites::spec`). All this adds
+/// is which build of it, and the payload that was bundled, if one was.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrerequisiteBundle {
+    /// Which build of the runtime the app needs, which picks among the compiled specs.
+    #[serde(default = "default_prerequisite_architecture")]
+    pub architecture: AppArchitecture,
     /// Path inside the package (e.g. `prerequisites/vc_redist.x64.exe`) when the
     /// installer payload was downloaded and embedded. `None` means the payload
-    /// could not be bundled and the target must acquire it via `winget_id`/
-    /// `download_url`.
+    /// could not be bundled and the target must acquire it another way.
     pub package_relative_path: Option<PathBuf>,
-    pub download_url: String,
     pub hash_sha256: Option<String>,
     pub size_bytes: Option<u64>,
-    /// Arguments for a silent, unattended install of the bundled payload.
-    pub silent_install_args: Vec<String>,
-    /// Process exit codes that indicate the install succeeded.
-    pub success_exit_codes: Vec<i32>,
-    /// Exit codes that indicate success but require a reboot to complete.
-    pub reboot_exit_codes: Vec<i32>,
-    /// winget package id used as the on-target acquisition fallback.
-    pub winget_id: Option<String>,
-    /// Windows optional feature to enable on the target (e.g. `NetFx3` for .NET
-    /// Framework 3.5) via DISM. When set, the installer enables this feature
-    /// instead of running a payload or winget. `None` for ordinary runtimes.
-    #[serde(default)]
-    pub windows_feature: Option<String>,
-    /// True when installing this runtime modifies a machine-wide location and
-    /// therefore needs elevation.
-    pub requires_admin: bool,
+}
+
+fn default_prerequisite_architecture() -> AppArchitecture {
+    AppArchitecture::Unknown
 }
 
 /// A registry presence check for a runtime prerequisite. The runtime is

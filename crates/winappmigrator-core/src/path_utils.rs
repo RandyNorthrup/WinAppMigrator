@@ -10,13 +10,29 @@ const EXE_EXTENSION: &str = "exe";
 const WINDOWS_VERSION_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
 const SYSTEM_ROOT_VALUE: &str = "SystemRoot";
 const DEFAULT_SYSTEM_ROOT: &str = r"C:\Windows";
+const POWERSHELL_EXE: &str = "powershell.exe";
 
 /// Build a `Command` that does not pop up a console window for the child
 /// process. Every external tool WinAppMigrator runs (sc.exe, PowerShell, winget,
 /// bundled installers, cmd) must use this so building or installing never flashes
 /// terminal windows over the GUI/app.
 pub fn hidden_command(program: impl AsRef<OsStr>) -> Command {
-    let mut command = Command::new(resolve_tool(program.as_ref()));
+    let tool = resolve_tool(program.as_ref());
+    let is_powershell = tool
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(POWERSHELL_EXE));
+    let mut command = Command::new(tool);
+    if is_powershell {
+        // Both come from the user's environment, which a process that is not elevated can
+        // change. A module folder could replace the commands the scripts use, signature
+        // checks included, and a profiler is loaded into every .NET program.
+        command.env(
+            "PSModulePath",
+            system_root().join(r"System32\WindowsPowerShell\v1.0\Modules"),
+        );
+        command.env_remove("COR_ENABLE_PROFILING");
+        command.env_remove("CORECLR_ENABLE_PROFILING");
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -42,7 +58,8 @@ pub fn system_root() -> &'static Path {
 
 /// Turn a bare tool name into an absolute path. Windows searches the running
 /// executable's own folder first, so `sc.exe` planted beside an elevated installer
-/// in Downloads would otherwise run instead of the real one. Paths are kept as given.
+/// in Downloads would otherwise run instead of the real one. `PATH` is no better, since a
+/// user can add to it. Only the Windows folder is used, and paths are kept as given.
 fn resolve_tool(program: &OsStr) -> PathBuf {
     let path = Path::new(program);
     if path.is_absolute() || path.components().count() != 1 {
@@ -61,23 +78,9 @@ fn resolve_tool(program: &OsStr) -> PathBuf {
     ]
     .into_iter()
     .find(|candidate| candidate.is_file())
-    .or_else(|| find_on_path_outside_app_dir(&file_name))
     // An absolute path that does not exist fails cleanly instead of falling back
     // to the search order this function exists to avoid.
     .unwrap_or_else(|| system32.join(&file_name))
-}
-
-/// Find a tool that lives outside the Windows directory (winget). App execution
-/// aliases are reparse points that cannot be opened as files, so only the link
-/// itself is checked.
-fn find_on_path_outside_app_dir(file_name: &Path) -> Option<PathBuf> {
-    let app_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .filter(|dir| dir.is_absolute() && Some(dir) != app_dir.as_ref())
-        .map(|dir| dir.join(file_name))
-        .find(|candidate| std::fs::symlink_metadata(candidate).is_ok())
 }
 
 /// Escape a value for a single-quoted PowerShell string. PowerShell also ends those
@@ -297,6 +300,29 @@ mod tests {
     fn unknown_tool_never_falls_back_to_the_search_order() {
         let command = hidden_command("winappmigrator-no-such-tool");
         assert!(Path::new(command.get_program()).is_absolute());
+    }
+
+    #[test]
+    fn a_tool_on_path_is_not_found() {
+        // Cargo is on `PATH` for any test run, and has no business being run elevated.
+        let command = hidden_command("cargo");
+        assert!(
+            Path::new(command.get_program()).starts_with(system_root()),
+            "{:?}",
+            command.get_program()
+        );
+    }
+
+    #[test]
+    fn powershell_ignores_the_users_module_folders_and_profilers() {
+        let command = hidden_command("powershell.exe");
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(envs.iter().any(|(name, value)| {
+            *name == "PSModulePath"
+                && value.is_some_and(|value| Path::new(value).starts_with(system_root()))
+        }));
+        assert!(envs.contains(&(OsStr::new("COR_ENABLE_PROFILING"), None)));
+        assert!(hidden_command("sc.exe").get_envs().next().is_none());
     }
 
     #[test]
