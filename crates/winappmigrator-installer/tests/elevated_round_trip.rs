@@ -3369,6 +3369,7 @@ fn ask_for_a_runtime_that_fails(
                 size_bytes: Some(size),
             }),
             presence_probe: None,
+            architecture: None,
         });
     Ok(())
 }

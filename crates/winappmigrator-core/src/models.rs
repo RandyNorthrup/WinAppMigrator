@@ -241,6 +241,11 @@ pub struct ExecutableMetadata {
     /// or the metadata root could not be read.
     #[serde(default)]
     pub dotnet_runtime_version: Option<String>,
+    /// What a managed image says it was built for, from its own metadata, such as
+    /// `.NETFramework,Version=v4.8` or `.NETCoreApp,Version=v8.0`. `v4.0.30319` above is said by
+    /// both of those, so this is what tells them apart.
+    #[serde(default)]
+    pub dotnet_target_framework: Option<String>,
     /// True when an application manifest is embedded as an `RT_MANIFEST`
     /// resource (distinct from an external `<exe>.manifest` file).
     #[serde(default)]
@@ -826,14 +831,31 @@ pub struct RuntimePrerequisite {
     /// before and after installing it. `None` when no reliable probe is known.
     #[serde(default)]
     pub presence_probe: Option<PrerequisiteRegistryProbe>,
+    /// Which build of it this is for. An app can have a 32-bit program beside its 64-bit one,
+    /// each needing its own. `None` means whichever build the app's main program is.
+    #[serde(default)]
+    pub architecture: Option<AppArchitecture>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimePrerequisiteKind {
+    /// The Visual C++ 2015 to 2022 redistributable, which all of those share.
     VisualCppRedistributable,
-    /// Modern .NET (Core) desktop runtime, acquired via winget/download.
+    VisualCpp2005,
+    VisualCpp2008,
+    VisualCpp2010,
+    VisualCpp2012,
+    VisualCpp2013,
+    /// A .NET the app ships itself, or that it was built for and whose version could not be told.
+    /// Either way there is nothing to pick an installer by.
     DotNetDesktopRuntime,
+    /// A version of .NET (Core) that has to be on the PC. `prerequisites::spec` knows which
+    /// versions it has an installer for, and a manifest cannot add to them.
+    DotNetRuntime {
+        flavor: DotNetFlavor,
+        major: u32,
+    },
     /// Classic .NET Framework 2.0/3.0/3.5 (CLR v2.0.50727). Installed on the
     /// target by enabling the `NetFx3` Windows optional feature.
     DotNetFramework35,
@@ -844,6 +866,18 @@ pub enum RuntimePrerequisiteKind {
     PythonRuntime,
     ElectronNodeRuntime,
     Unknown,
+}
+
+/// Which of .NET's shared runtimes an app runs on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum DotNetFlavor {
+    /// `Microsoft.NETCore.App`
+    Core,
+    /// `Microsoft.WindowsDesktop.App`
+    Desktop,
+    /// `Microsoft.AspNetCore.App`
+    AspNetCore,
 }
 
 /// How the installer makes a runtime prerequisite available on the target.

@@ -20,8 +20,22 @@ const SYSTEM32_DIR: &str = "System32";
 const SYSWOW64_DIR: &str = "SysWOW64";
 
 const API_SET_PREFIXES: &[&str] = &["api-ms-win-", "ext-ms-"];
-const VC_RUNTIME_PREFIXES: &[&str] =
-    &["msvcp", "msvcr", "vccorlib", "vcomp", "vcruntime", "concrt"];
+/// The start of each Visual C++ runtime DLL's name, longest first where one starts another. The
+/// digits after it say which Visual Studio it came with, so `msvcrt.dll`, which is Windows' own,
+/// is not one of them, and neither is `mfc42.dll`.
+const VC_RUNTIME_STEMS: &[&str] = &[
+    "vcruntime",
+    "vccorlib",
+    "concrt",
+    "msvcp",
+    "msvcr",
+    "msvcm",
+    "vcomp",
+    "vcamp",
+    "mfcm",
+    "mfc",
+    "atl",
+];
 const KNOWN_DLLS: &[&str] = &[
     "advapi32.dll",
     "bcrypt.dll",
@@ -178,10 +192,55 @@ pub fn find_app_local_dlls(
 }
 
 pub fn is_runtime_prerequisite_dll(name: &str) -> bool {
+    visual_cpp_dll(name).is_some()
+}
+
+/// Which Visual C++ runtime a DLL is part of, going by its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VisualCppRuntime {
+    Vs2002,
+    Vs2003,
+    Vs2005,
+    Vs2008,
+    Vs2010,
+    Vs2012,
+    Vs2013,
+    /// 2015 to 2022 are one redistributable, and their DLLs are all named for `140`.
+    Vs2015Plus,
+}
+
+/// A DLL of a Visual C++ runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualCppDll {
+    pub runtime: VisualCppRuntime,
+    /// A debug build, such as `msvcp140d.dll`, which no redistributable has.
+    pub debug: bool,
+}
+
+/// What a DLL's name says about which Visual C++ runtime it belongs to, if any.
+pub fn visual_cpp_dll(name: &str) -> Option<VisualCppDll> {
     let lower = name.to_ascii_lowercase();
-    VC_RUNTIME_PREFIXES
+    let stem = lower.strip_suffix(".dll").unwrap_or(&lower);
+    let rest = VC_RUNTIME_STEMS
         .iter()
-        .any(|prefix| lower.starts_with(prefix))
+        .find_map(|known| stem.strip_prefix(known))?;
+    let digits = rest
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let (version, suffix) = rest.split_at(digits);
+    let runtime = match version {
+        "70" => VisualCppRuntime::Vs2002,
+        "71" => VisualCppRuntime::Vs2003,
+        "80" => VisualCppRuntime::Vs2005,
+        "90" => VisualCppRuntime::Vs2008,
+        "100" => VisualCppRuntime::Vs2010,
+        "110" => VisualCppRuntime::Vs2012,
+        "120" => VisualCppRuntime::Vs2013,
+        "140" => VisualCppRuntime::Vs2015Plus,
+        _ => return None,
+    };
+    let debug = matches!(suffix, "d" | "ud") || (suffix.starts_with('_') && suffix.ends_with('d'));
+    Some(VisualCppDll { runtime, debug })
 }
 
 fn resolve_one_import(
@@ -485,6 +544,63 @@ fn read_architecture_with_warning(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dll_is_the_runtime_its_name_says_and_windows_own_are_none() {
+        for (name, runtime) in [
+            ("msvcr80.dll", VisualCppRuntime::Vs2005),
+            ("MSVCP90.DLL", VisualCppRuntime::Vs2008),
+            ("msvcm90.dll", VisualCppRuntime::Vs2008),
+            ("msvcr100.dll", VisualCppRuntime::Vs2010),
+            ("mfc100u.dll", VisualCppRuntime::Vs2010),
+            ("vcomp110.dll", VisualCppRuntime::Vs2012),
+            ("atl110.dll", VisualCppRuntime::Vs2012),
+            ("msvcr120.dll", VisualCppRuntime::Vs2013),
+            ("vccorlib120.dll", VisualCppRuntime::Vs2013),
+            ("msvcp140.dll", VisualCppRuntime::Vs2015Plus),
+            ("msvcp140_1.dll", VisualCppRuntime::Vs2015Plus),
+            ("msvcp140_codecvt_ids.dll", VisualCppRuntime::Vs2015Plus),
+            ("vcruntime140.dll", VisualCppRuntime::Vs2015Plus),
+            ("vcruntime140_1.dll", VisualCppRuntime::Vs2015Plus),
+            ("concrt140.dll", VisualCppRuntime::Vs2015Plus),
+            ("mfc140u.dll", VisualCppRuntime::Vs2015Plus),
+            ("msvcr71.dll", VisualCppRuntime::Vs2003),
+        ] {
+            let found = visual_cpp_dll(name);
+            assert_eq!(found.map(|dll| dll.runtime), Some(runtime), "{name}");
+            assert_eq!(found.map(|dll| dll.debug), Some(false), "{name}");
+        }
+        for name in [
+            "msvcp140d.dll",
+            "vcruntime140d.dll",
+            "vcruntime140_1d.dll",
+            "msvcr120d.dll",
+            "mfc140ud.dll",
+        ] {
+            assert_eq!(
+                visual_cpp_dll(name).map(|dll| dll.debug),
+                Some(true),
+                "{name}"
+            );
+        }
+        // Windows' own, whatever they start with.
+        for name in [
+            "msvcrt.dll",
+            "msvcrt20.dll",
+            "msvcrt40.dll",
+            "msvcirt.dll",
+            "msvcp60.dll",
+            "mfc42.dll",
+            "mfc42u.dll",
+            "atl.dll",
+            "ucrtbase.dll",
+            "kernel32.dll",
+            "vcomp.dll",
+        ] {
+            assert_eq!(visual_cpp_dll(name), None, "{name}");
+            assert!(!is_runtime_prerequisite_dll(name), "{name}");
+        }
+    }
 
     #[test]
     fn classifies_api_set_as_system_provided() {

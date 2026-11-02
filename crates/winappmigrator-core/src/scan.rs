@@ -6,7 +6,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::dll_resolver::{
-    DllResolutionContext, find_app_local_dlls, is_runtime_prerequisite_dll, resolve_imports,
+    DllResolutionContext, VisualCppRuntime, find_app_local_dlls, resolve_imports,
 };
 use crate::env_scan::{EnvironmentScanContext, scan_environment};
 use crate::errors::{Result, WinAppMigratorError};
@@ -17,9 +17,10 @@ use crate::install_source::{
 };
 use crate::license_scan::{LicenseScanContext, scan_license_artifacts};
 use crate::models::{
-    AppSelection, DependencyEntry, DriverEntry, FileEntry, InstallScope, InstalledApp,
-    RuntimePrerequisite, RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport,
-    ScheduledTaskEntry, ServiceEntry, ShortcutEntry, Warning, WarningSeverity,
+    AppArchitecture, AppSelection, DependencyEntry, DotNetFlavor, DriverEntry, FileEntry,
+    InstallScope, InstalledApp, RuntimePrerequisite, RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION,
+    ScanOptions, ScanReport, ScheduledTaskEntry, ServiceEntry, ShortcutEntry, Warning,
+    WarningSeverity,
 };
 use crate::path_utils::{
     is_drive_root, is_really_within, looks_like_executable, path_is_within, resolved_location,
@@ -29,6 +30,7 @@ use crate::registry_scan::{
     RegistryScanContext, recorded_keys_of_one_account, scan_registry_artifacts,
 };
 use crate::reporting::{artifact_paths, write_scan_reports};
+use crate::runtime_detection::{AppRuntimes, ArchitectureKey, DotNetNeed, inspect_app_runtimes};
 use crate::service_scan::{ServiceScanContext, scan_drivers, scan_services};
 use crate::shortcut_scan::{ShortcutScanContext, scan_shortcuts};
 use crate::system_context::SystemContext;
@@ -331,12 +333,18 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         &system,
     );
 
-    let runtime_prerequisites = runtime_prerequisites(
+    let app_runtimes = inspect_app_runtimes(
+        &file_inventory,
+        &executable_path,
+        install_location.as_deref(),
+        &pe_scan.architecture,
+        &system,
+    );
+    let (runtime_prerequisites, runtime_warnings) = runtime_prerequisites(
+        &app_runtimes,
         &dependencies,
         &app_local_dlls,
         &file_inventory,
-        pe_scan.metadata.is_dotnet,
-        pe_scan.metadata.dotnet_runtime_version.as_deref(),
         &pe_scan.architecture,
         system.is_offline(),
     );
@@ -359,6 +367,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     warnings.extend(task_warnings);
     warnings.extend(shortcut_warnings);
     warnings.extend(environment_warnings);
+    warnings.extend(runtime_warnings);
     warnings.extend(missing_dependency_warnings(&dependencies));
     warnings.extend(driver_component_warnings(&drivers));
     warnings.extend(license_warnings);
@@ -575,41 +584,76 @@ fn push_parent_dir(roots: &mut Vec<PathBuf>, path: &Path) {
     }
 }
 
+/// What the app's programs were found to need, as what an installer can act on, with a warning
+/// naming each one nothing can be done about here.
 fn runtime_prerequisites(
+    runtimes: &AppRuntimes,
     dependencies: &[DependencyEntry],
     app_local_dlls: &[FileEntry],
     file_inventory: &[FileEntry],
-    is_dotnet: bool,
-    dotnet_runtime_version: Option<&str>,
-    architecture: &crate::models::AppArchitecture,
+    app_architecture: &AppArchitecture,
     offline: bool,
-) -> Vec<RuntimePrerequisite> {
+) -> (Vec<RuntimePrerequisite>, Vec<Warning>) {
     let signals = collect_runtime_signal_names(dependencies, app_local_dlls, file_inventory);
-    let vc_dependency = dependencies
-        .iter()
-        .find(|dependency| is_runtime_prerequisite_dll(&dependency.name))
-        .map(|dependency| dependency.name.clone());
-    let mut prerequisites = runtime_prerequisites_from_signals(
-        &signals,
-        vc_dependency.as_deref(),
-        is_dotnet,
-        dotnet_runtime_version,
-    );
+    let mut prerequisites = runtime_prerequisites_from_signals(&signals, runtimes);
+    let mut warnings = Vec::new();
+    for dll in &runtimes.debug_dlls {
+        warnings.push(Warning::new(
+            "runtime_is_a_debug_build",
+            WarningSeverity::Warning,
+            format!(
+                "A program needs {dll}, a debug build of the Visual C++ runtime. Microsoft has no \
+                 installer for those, and may not let them be passed on, so it will not run on a \
+                 PC without Visual Studio."
+            ),
+            Some(dll.clone()),
+        ));
+    }
+    if runtimes.programs_left_out > 0 {
+        warnings.push(Warning::new(
+            "runtime_inspection_limited",
+            WarningSeverity::Info,
+            format!(
+                "{} of the app's programs were not looked at for the runtimes they need, as it has \
+                 so many or they are so large.",
+                runtimes.programs_left_out
+            ),
+            None,
+        ));
+    }
     // Attach a presence probe and a source-presence reading where one is known,
     // so packaging and the installer can confirm the runtime before and after
     // installing it. `is_present` reads the *live* registry, so it only reflects
     // the source when scanning the live machine; for an offline disk we leave
     // the source presence unknown rather than reporting this PC's runtimes.
     for prerequisite in &mut prerequisites {
-        if let Some(probe) = crate::prerequisites::presence_probe(&prerequisite.kind, architecture)
+        let architecture = prerequisite
+            .architecture
+            .clone()
+            .unwrap_or_else(|| app_architecture.clone());
+        if let Some(probe) = crate::prerequisites::presence_probe(&prerequisite.kind, &architecture)
         {
             if !offline {
                 prerequisite.present_on_source = Some(crate::prerequisites::is_present(&probe));
             }
             prerequisite.presence_probe = Some(probe);
         }
+        if prerequisite.install_manually
+            && crate::prerequisites::spec(&prerequisite.kind, &architecture).is_none()
+        {
+            warnings.push(Warning::new(
+                "runtime_has_no_installer",
+                WarningSeverity::Warning,
+                format!(
+                    "The app needs {}, and there is no installer for it here, so none is run. \
+                     Install it yourself on the other PC.",
+                    prerequisite.name
+                ),
+                Some(prerequisite.evidence.clone()),
+            ));
+        }
     }
-    prerequisites
+    (prerequisites, warnings)
 }
 
 /// Lowercased leaf file names that signal a bundled or required runtime:
@@ -635,42 +679,145 @@ fn collect_runtime_signal_names(
     names
 }
 
-/// Derive runtime prerequisites from collected signal names. Pure so the
-/// detection rules can be unit-tested with crafted inputs. `install_manually`
-/// is false when the runtime ships with the app (bundled app-local) and true
-/// when it must be installed on the target system.
+fn build_label(key: ArchitectureKey) -> &'static str {
+    match key {
+        ArchitectureKey::X86 => "x86",
+        ArchitectureKey::X64 => "x64",
+        ArchitectureKey::Arm64 => "Arm64",
+        ArchitectureKey::Unknown => "any build",
+    }
+}
+
+/// A Visual C++ runtime as a prerequisite. Those from before 2005 have no redistributable anyone
+/// can still get, so they are `Unknown`, which nothing installs.
+fn visual_cpp_prerequisite(
+    runtime: VisualCppRuntime,
+    build: ArchitectureKey,
+    evidence: &str,
+) -> RuntimePrerequisite {
+    let (year, kind) = match runtime {
+        VisualCppRuntime::Vs2002 => ("2002", RuntimePrerequisiteKind::Unknown),
+        VisualCppRuntime::Vs2003 => ("2003", RuntimePrerequisiteKind::Unknown),
+        VisualCppRuntime::Vs2005 => ("2005", RuntimePrerequisiteKind::VisualCpp2005),
+        VisualCppRuntime::Vs2008 => ("2008", RuntimePrerequisiteKind::VisualCpp2008),
+        VisualCppRuntime::Vs2010 => ("2010", RuntimePrerequisiteKind::VisualCpp2010),
+        VisualCppRuntime::Vs2012 => ("2012", RuntimePrerequisiteKind::VisualCpp2012),
+        VisualCppRuntime::Vs2013 => ("2013", RuntimePrerequisiteKind::VisualCpp2013),
+        VisualCppRuntime::Vs2015Plus => {
+            ("2015+", RuntimePrerequisiteKind::VisualCppRedistributable)
+        }
+    };
+    RuntimePrerequisite {
+        name: format!(
+            "Microsoft Visual C++ {year} Redistributable ({})",
+            build_label(build)
+        ),
+        kind,
+        evidence: evidence.to_owned(),
+        install_manually: true,
+        present_on_source: None,
+        bundle: None,
+        presence_probe: None,
+        architecture: Some(build.architecture()),
+    }
+}
+
+/// A .NET as a prerequisite.
+fn dotnet_prerequisite(
+    need: DotNetNeed,
+    build: ArchitectureKey,
+    evidence: &str,
+) -> RuntimePrerequisite {
+    let of_a_build = |name: String| format!("{name} ({})", build_label(build));
+    let (name, kind, install_manually) = match need {
+        DotNetNeed::Framework35 => (
+            "Microsoft .NET Framework 3.5".to_owned(),
+            RuntimePrerequisiteKind::DotNetFramework35,
+            true,
+        ),
+        DotNetNeed::Framework4x => (
+            "Microsoft .NET Framework 4.x".to_owned(),
+            RuntimePrerequisiteKind::DotNetFramework4x,
+            false,
+        ),
+        DotNetNeed::Modern { flavor, major } => {
+            let label = match flavor {
+                DotNetFlavor::Core => format!(".NET {major} Runtime"),
+                DotNetFlavor::Desktop => format!(".NET {major} Desktop Runtime"),
+                DotNetFlavor::AspNetCore => format!("ASP.NET Core {major} Runtime"),
+            };
+            (
+                of_a_build(label),
+                RuntimePrerequisiteKind::DotNetRuntime { flavor, major },
+                true,
+            )
+        }
+        DotNetNeed::ModernOfNoKnownVersion => (
+            ".NET, of a version the app does not say".to_owned(),
+            RuntimePrerequisiteKind::DotNetDesktopRuntime,
+            true,
+        ),
+        DotNetNeed::SelfContained => (
+            ".NET runtime (bundled)".to_owned(),
+            RuntimePrerequisiteKind::DotNetDesktopRuntime,
+            false,
+        ),
+    };
+    RuntimePrerequisite {
+        name,
+        kind,
+        evidence: evidence.to_owned(),
+        install_manually,
+        present_on_source: None,
+        bundle: None,
+        presence_probe: None,
+        architecture: Some(build.architecture()),
+    }
+}
+
+/// Derive runtime prerequisites from what the app's programs need and the names of its files.
+/// Pure so the detection rules can be unit-tested with crafted inputs. `install_manually` is false
+/// when the runtime ships with the app and true when it must be installed on the target system.
 fn runtime_prerequisites_from_signals(
     names: &BTreeSet<String>,
-    vc_dependency: Option<&str>,
-    is_dotnet: bool,
-    dotnet_runtime_version: Option<&str>,
+    runtimes: &AppRuntimes,
 ) -> Vec<RuntimePrerequisite> {
     let mut prerequisites = Vec::new();
     let has = |needle: &str| names.contains(needle);
     let any = |needles: &[&str]| needles.iter().any(|needle| names.contains(*needle));
 
-    if let Some(name) = vc_dependency {
-        prerequisites.push(RuntimePrerequisite {
-            name: "Microsoft Visual C++ Redistributable".to_owned(),
-            kind: RuntimePrerequisiteKind::VisualCppRedistributable,
-            evidence: format!("Imported runtime DLL: {name}"),
-            install_manually: true,
-            present_on_source: None,
-            bundle: None,
-            presence_probe: None,
-        });
+    for ((runtime, build), evidence) in &runtimes.visual_cpp {
+        prerequisites.push(visual_cpp_prerequisite(*runtime, *build, evidence));
     }
 
-    let dotnet_core = any(&["coreclr.dll", "hostfxr.dll", "hostpolicy.dll", "clrjit.dll"]);
-    // `mscoree`/`clr` is the .NET *Framework* shim; modern .NET (Core) apps host
-    // through `hostfxr`/`coreclr` instead.
-    let dotnet_framework = any(&["mscoree.dll", "mscoreei.dll", "clr.dll"]);
-    if is_dotnet || dotnet_core || dotnet_framework {
-        prerequisites.push(dotnet_prerequisite(
-            dotnet_core,
-            dotnet_framework,
-            dotnet_runtime_version,
-        ));
+    let mut dotnet = runtimes.dotnet.clone();
+    // A program of its own can be native and find .NET at run time, so what it ships counts too.
+    if any(&["coreclr.dll", "hostfxr.dll", "hostpolicy.dll", "clrjit.dll"]) {
+        dotnet
+            .entry((DotNetNeed::SelfContained, ArchitectureKey::Unknown))
+            .or_insert_with(|| "Self-contained .NET host present (coreclr/hostfxr)".to_owned());
+    }
+    if dotnet.is_empty() && any(&["mscoree.dll", "mscoreei.dll", "clr.dll"]) {
+        dotnet.insert(
+            (DotNetNeed::Framework4x, ArchitectureKey::Unknown),
+            ".NET Framework CLR host (mscoree)".to_owned(),
+        );
+    }
+    let mut said_of_any_build = BTreeSet::new();
+    for ((need, build), evidence) in &dotnet {
+        // What is part of Windows, or ships with the app, is one thing to say, whichever of its
+        // programs said it and whatever build each is.
+        let is_of_any_build = matches!(
+            need,
+            DotNetNeed::SelfContained
+                | DotNetNeed::Framework35
+                | DotNetNeed::Framework4x
+                | DotNetNeed::ModernOfNoKnownVersion
+        );
+        if is_of_any_build && !said_of_any_build.insert(*need) {
+            continue;
+        }
+        prerequisites.push(dotnet_prerequisite(*need, *build, evidence));
     }
 
     if any(&["jvm.dll", "java.dll", "jli.dll", "javaw.exe", "java.exe"]) {
@@ -682,6 +829,7 @@ fn runtime_prerequisites_from_signals(
             present_on_source: None,
             bundle: None,
             presence_probe: None,
+            architecture: None,
         });
     }
 
@@ -698,6 +846,7 @@ fn runtime_prerequisites_from_signals(
             present_on_source: None,
             bundle: None,
             presence_probe: None,
+            architecture: None,
         });
     }
 
@@ -713,78 +862,11 @@ fn runtime_prerequisites_from_signals(
             present_on_source: None,
             bundle: None,
             presence_probe: None,
+            architecture: None,
         });
     }
 
     prerequisites
-}
-
-/// Pick the correct .NET prerequisite for a managed image. The distinguishing
-/// signals are the host shim (`mscoree` = .NET Framework, `hostfxr`/`coreclr` =
-/// modern self-contained .NET) and the CLR metadata version: `v1.x`/`v2.0`
-/// requires the .NET Framework 3.5 Windows feature (NetFx3), while `v4.0` is the
-/// in-box .NET Framework 4.x on Windows 10/11.
-fn dotnet_prerequisite(
-    dotnet_core: bool,
-    dotnet_framework: bool,
-    dotnet_runtime_version: Option<&str>,
-) -> RuntimePrerequisite {
-    let version = dotnet_runtime_version.unwrap_or_default();
-    let needs_netfx3 = version.starts_with("v1.") || version.starts_with("v2.");
-    let (name, kind, evidence, install_manually) = if dotnet_core {
-        (
-            ".NET runtime (bundled)",
-            RuntimePrerequisiteKind::DotNetDesktopRuntime,
-            "Self-contained .NET host present (coreclr/hostfxr)".to_owned(),
-            false,
-        )
-    } else if dotnet_framework && needs_netfx3 {
-        (
-            "Microsoft .NET Framework 3.5",
-            RuntimePrerequisiteKind::DotNetFramework35,
-            format!(".NET Framework CLR host (mscoree) with CLR {version}; needs NetFx3"),
-            true,
-        )
-    } else if dotnet_framework {
-        (
-            "Microsoft .NET Framework 4.x",
-            RuntimePrerequisiteKind::DotNetFramework4x,
-            format!(
-                ".NET Framework CLR host (mscoree){}; ships with Windows 10/11",
-                if version.is_empty() {
-                    String::new()
-                } else {
-                    format!(" with CLR {version}")
-                }
-            ),
-            false,
-        )
-    } else if needs_netfx3 {
-        // Managed image (COR20) with no host-shim import but an old CLR metadata
-        // version: still the legacy Framework, so NetFx3 is the right runtime.
-        (
-            "Microsoft .NET Framework 3.5",
-            RuntimePrerequisiteKind::DotNetFramework35,
-            format!("Managed (.NET) image with CLR {version}; needs NetFx3"),
-            true,
-        )
-    } else {
-        (
-            "Microsoft .NET Desktop Runtime",
-            RuntimePrerequisiteKind::DotNetDesktopRuntime,
-            "Managed (.NET) image: CLR/COR20 header present".to_owned(),
-            true,
-        )
-    };
-    RuntimePrerequisite {
-        name: name.to_owned(),
-        kind,
-        evidence,
-        install_manually,
-        present_on_source: None,
-        bundle: None,
-        presence_probe: None,
-    }
 }
 
 fn missing_dependency_warnings(dependencies: &[DependencyEntry]) -> Vec<Warning> {
@@ -857,7 +939,7 @@ fn calculate_confidence_score(inputs: ConfidenceInputs<'_>) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use crate::models::{AppArchitecture, DependencySourceCategory};
+    use crate::models::DependencySourceCategory;
 
     use super::*;
 
@@ -937,11 +1019,22 @@ mod tests {
         names.iter().map(|name| name.to_string()).collect()
     }
 
+    fn kinds_of(prerequisites: &[RuntimePrerequisite]) -> Vec<&RuntimePrerequisiteKind> {
+        prerequisites.iter().map(|found| &found.kind).collect()
+    }
+
+    fn needs_dotnet(need: DotNetNeed) -> AppRuntimes {
+        let mut runtimes = AppRuntimes::default();
+        runtimes
+            .dotnet
+            .insert((need, ArchitectureKey::X64), "app.exe".to_owned());
+        runtimes
+    }
+
     #[test]
     fn detects_bundled_dotnet_and_electron_runtimes() {
         let names = name_set(&["coreclr.dll", "hostfxr.dll", "ffmpeg.dll", "app.asar"]);
-        let prerequisites =
-            runtime_prerequisites_from_signals(&names, None, true, Some("v4.0.30319"));
+        let prerequisites = runtime_prerequisites_from_signals(&names, &AppRuntimes::default());
 
         assert!(
             prerequisites.iter().any(|prerequisite| {
@@ -961,53 +1054,159 @@ mod tests {
 
     #[test]
     fn dotnet_framework_2_0_maps_to_netfx3() {
-        // mscoree + CLR v2.0.50727 is the YDIS case: it needs the .NET Framework
-        // 3.5 Windows feature, not the modern .NET desktop runtime.
-        let names = name_set(&["mscoree.dll"]);
-        let prerequisites =
-            runtime_prerequisites_from_signals(&names, None, true, Some("v2.0.50727"));
+        // CLR v2.0.50727 is the YDIS case: it needs the .NET Framework 3.5 Windows feature, not
+        // the modern .NET desktop runtime.
+        let prerequisites = runtime_prerequisites_from_signals(
+            &name_set(&["mscoree.dll"]),
+            &needs_dotnet(DotNetNeed::Framework35),
+        );
+        assert_eq!(
+            kinds_of(&prerequisites),
+            [&RuntimePrerequisiteKind::DotNetFramework35]
+        );
+        assert!(prerequisites[0].install_manually);
+    }
 
+    #[test]
+    fn dotnet_framework_4_x_is_inbox_and_modern_dotnet_is_the_version_it_says() {
+        let framework = runtime_prerequisites_from_signals(
+            &name_set(&["mscoree.dll"]),
+            &needs_dotnet(DotNetNeed::Framework4x),
+        );
+        assert_eq!(
+            kinds_of(&framework),
+            [&RuntimePrerequisiteKind::DotNetFramework4x]
+        );
+        assert!(!framework[0].install_manually);
+
+        for major in [6, 8, 10] {
+            let modern = runtime_prerequisites_from_signals(
+                &BTreeSet::new(),
+                &needs_dotnet(DotNetNeed::Modern {
+                    flavor: DotNetFlavor::Desktop,
+                    major,
+                }),
+            );
+            assert_eq!(
+                kinds_of(&modern),
+                [&RuntimePrerequisiteKind::DotNetRuntime {
+                    flavor: DotNetFlavor::Desktop,
+                    major
+                }],
+                "{major}"
+            );
+            assert!(modern[0].install_manually);
+            assert!(
+                modern[0].name.contains(&major.to_string()),
+                "{}",
+                modern[0].name
+            );
+        }
+    }
+
+    #[test]
+    fn a_dotnet_of_no_known_version_has_nothing_installed_for_it_and_is_named() {
+        let runtimes = needs_dotnet(DotNetNeed::ModernOfNoKnownVersion);
+        let (prerequisites, warnings) =
+            runtime_prerequisites(&runtimes, &[], &[], &[], &AppArchitecture::X64, true);
+        assert_eq!(
+            kinds_of(&prerequisites),
+            [&RuntimePrerequisiteKind::DotNetDesktopRuntime]
+        );
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.code == "runtime_has_no_installer");
         assert!(
-            prerequisites.iter().any(|prerequisite| {
-                prerequisite.kind == RuntimePrerequisiteKind::DotNetFramework35
-                    && prerequisite.install_manually
-            }),
-            "CLR v2.0 must map to .NET Framework 3.5, got {:?}",
-            prerequisites.iter().map(|p| &p.kind).collect::<Vec<_>>()
+            warning.is_some_and(|warning| warning.message.contains(&prerequisites[0].name)),
+            "{warnings:?}"
         );
     }
 
     #[test]
-    fn dotnet_framework_4_x_is_inbox_not_dotnet_8() {
-        let names = name_set(&["mscoree.dll"]);
-        let prerequisites =
-            runtime_prerequisites_from_signals(&names, None, true, Some("v4.0.30319"));
+    fn each_visual_cpp_runtime_is_its_own_for_its_own_build() {
+        let mut runtimes = AppRuntimes::default();
+        for (runtime, build) in [
+            (VisualCppRuntime::Vs2010, ArchitectureKey::X86),
+            (VisualCppRuntime::Vs2013, ArchitectureKey::X64),
+            (VisualCppRuntime::Vs2015Plus, ArchitectureKey::X64),
+            (VisualCppRuntime::Vs2015Plus, ArchitectureKey::X86),
+        ] {
+            runtimes
+                .visual_cpp
+                .insert((runtime, build), "a.exe imports it".to_owned());
+        }
+        let prerequisites = runtime_prerequisites_from_signals(&BTreeSet::new(), &runtimes);
+        let shown: Vec<(RuntimePrerequisiteKind, Option<AppArchitecture>)> = prerequisites
+            .iter()
+            .map(|found| (found.kind.clone(), found.architecture.clone()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    RuntimePrerequisiteKind::VisualCpp2010,
+                    Some(AppArchitecture::X86)
+                ),
+                (
+                    RuntimePrerequisiteKind::VisualCpp2013,
+                    Some(AppArchitecture::X64)
+                ),
+                (
+                    RuntimePrerequisiteKind::VisualCppRedistributable,
+                    Some(AppArchitecture::X86)
+                ),
+                (
+                    RuntimePrerequisiteKind::VisualCppRedistributable,
+                    Some(AppArchitecture::X64)
+                ),
+            ]
+        );
+    }
 
-        assert!(
-            prerequisites.iter().any(|prerequisite| {
-                prerequisite.kind == RuntimePrerequisiteKind::DotNetFramework4x
-                    && !prerequisite.install_manually
-            }),
-            "CLR v4.0 with mscoree must be listed as in-box 4.x, not a runtime install"
+    #[test]
+    fn a_runtime_no_one_can_install_is_named_rather_than_replaced_with_another() {
+        let mut runtimes = AppRuntimes::default();
+        runtimes.visual_cpp.insert(
+            (VisualCppRuntime::Vs2003, ArchitectureKey::X86),
+            "old.exe imports msvcr71.dll".to_owned(),
         );
-        assert!(
-            !prerequisites
-                .iter()
-                .any(|prerequisite| prerequisite.kind
-                    == RuntimePrerequisiteKind::DotNetDesktopRuntime),
-            ".NET Framework must never be reported as the modern .NET desktop runtime"
+        runtimes.visual_cpp.insert(
+            (VisualCppRuntime::Vs2013, ArchitectureKey::Arm64),
+            "arm.exe imports msvcr120.dll".to_owned(),
         );
+        runtimes.debug_dlls.insert("msvcp140d.dll".to_owned());
+        runtimes.programs_left_out = 3;
+        let (prerequisites, warnings) =
+            runtime_prerequisites(&runtimes, &[], &[], &[], &AppArchitecture::X64, true);
+        assert_eq!(prerequisites.len(), 2);
+        let named: Vec<&str> = warnings
+            .iter()
+            .filter(|warning| warning.code == "runtime_has_no_installer")
+            .map(|warning| warning.message.as_str())
+            .collect();
+        assert_eq!(named.len(), 2, "{warnings:?}");
+        assert!(named.iter().any(|message| message.contains("2003")));
+        assert!(named.iter().any(|message| message.contains("2013")));
+        for code in ["runtime_is_a_debug_build", "runtime_inspection_limited"] {
+            assert!(
+                warnings.iter().any(|warning| warning.code == code),
+                "{code}"
+            );
+        }
     }
 
     #[test]
     fn detects_java_and_python_runtimes() {
-        let java = runtime_prerequisites_from_signals(&name_set(&["jvm.dll"]), None, false, None);
+        let java =
+            runtime_prerequisites_from_signals(&name_set(&["jvm.dll"]), &AppRuntimes::default());
         assert!(
             java.iter()
                 .any(|prerequisite| prerequisite.kind == RuntimePrerequisiteKind::JavaRuntime)
         );
-        let python =
-            runtime_prerequisites_from_signals(&name_set(&["python311.dll"]), None, false, None);
+        let python = runtime_prerequisites_from_signals(
+            &name_set(&["python311.dll"]),
+            &AppRuntimes::default(),
+        );
         assert!(
             python
                 .iter()

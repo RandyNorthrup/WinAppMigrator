@@ -27,6 +27,7 @@ pub mod restore;
 pub mod restore_policy;
 pub mod restore_review;
 pub mod rollback;
+mod runtime_detection;
 pub mod scan;
 pub mod service_scan;
 pub mod shortcut_scan;

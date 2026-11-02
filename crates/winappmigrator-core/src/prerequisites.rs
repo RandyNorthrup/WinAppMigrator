@@ -26,7 +26,8 @@ use crate::authenticode::check_microsoft_signature;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::package_destination_path;
 use crate::models::{
-    AppArchitecture, PrerequisiteBundle, PrerequisiteRegistryProbe, RuntimePrerequisiteKind,
+    AppArchitecture, DotNetFlavor, PrerequisiteBundle, PrerequisiteRegistryProbe,
+    RuntimePrerequisiteKind,
 };
 use crate::path_utils::{POWERSHELL_IMPORT_APPX, POWERSHELL_IMPORT_UTILITY, hidden_command};
 
@@ -58,7 +59,7 @@ pub struct PrerequisiteSpec {
     /// time. When false, the target acquires it via `winget_id`/`download_url`.
     pub bundleable: bool,
     /// File name for the embedded payload (e.g. `vc_redist.x64.exe`).
-    pub file_name: &'static str,
+    pub file_name: String,
     pub download_url: String,
     pub silent_install_args: Vec<String>,
     pub success_exit_codes: Vec<i32>,
@@ -80,20 +81,69 @@ pub enum PrerequisiteInstallOutcome {
     Failed(String),
 }
 
+/// The versions of .NET there is an installer for. Others are named and left to whoever is
+/// installing, rather than given one of these, which an app built for another would not run on.
+const DOTNET_MAJOR_VERSIONS: [u32; 5] = [6, 7, 8, 9, 10];
+
 /// Resolve the known redistributable for a prerequisite kind and architecture.
-/// Returns `None` for runtimes WinAppMigrator has no installer plan for (these
-/// are typically shipped app-local and need no separate install).
+/// Returns `None` for runtimes WinAppMigrator has no installer plan for: those shipped app-local
+/// need no separate install, and anything else is named for whoever is installing to deal with.
 pub fn spec(
     kind: &RuntimePrerequisiteKind,
     architecture: &AppArchitecture,
 ) -> Option<PrerequisiteSpec> {
     match kind {
         RuntimePrerequisiteKind::VisualCppRedistributable => Some(visual_cpp_spec(architecture)),
-        RuntimePrerequisiteKind::DotNetDesktopRuntime => Some(dotnet_desktop_spec()),
+        RuntimePrerequisiteKind::VisualCpp2005
+        | RuntimePrerequisiteKind::VisualCpp2008
+        | RuntimePrerequisiteKind::VisualCpp2010
+        | RuntimePrerequisiteKind::VisualCpp2012
+        | RuntimePrerequisiteKind::VisualCpp2013 => older_visual_cpp_spec(kind, architecture),
+        RuntimePrerequisiteKind::DotNetRuntime { flavor, major } => {
+            dotnet_runtime_spec(*flavor, *major, architecture)
+        }
         RuntimePrerequisiteKind::DotNetFramework35 => Some(dotnet_framework35_spec()),
         RuntimePrerequisiteKind::DotNetFramework4x => Some(dotnet_framework4x_spec()),
         _ => None,
     }
+}
+
+/// Every kind and build there is an installer for, with what to call it, so that a test can try
+/// each of their downloads for real.
+pub fn compiled_specs() -> Vec<(String, PrerequisiteSpec)> {
+    let builds = [
+        AppArchitecture::X64,
+        AppArchitecture::X86,
+        AppArchitecture::Arm64,
+    ];
+    let mut kinds = vec![
+        RuntimePrerequisiteKind::VisualCppRedistributable,
+        RuntimePrerequisiteKind::VisualCpp2005,
+        RuntimePrerequisiteKind::VisualCpp2008,
+        RuntimePrerequisiteKind::VisualCpp2010,
+        RuntimePrerequisiteKind::VisualCpp2012,
+        RuntimePrerequisiteKind::VisualCpp2013,
+        RuntimePrerequisiteKind::DotNetFramework35,
+        RuntimePrerequisiteKind::DotNetFramework4x,
+    ];
+    for major in DOTNET_MAJOR_VERSIONS {
+        for flavor in [
+            DotNetFlavor::Core,
+            DotNetFlavor::Desktop,
+            DotNetFlavor::AspNetCore,
+        ] {
+            kinds.push(RuntimePrerequisiteKind::DotNetRuntime { flavor, major });
+        }
+    }
+    let mut specs = Vec::new();
+    for kind in &kinds {
+        for build in &builds {
+            if let Some(found) = spec(kind, build) {
+                specs.push((format!("{kind:?} {build:?}"), found));
+            }
+        }
+    }
+    specs
 }
 
 /// The presence probe for a prerequisite, if one is known.
@@ -244,7 +294,7 @@ pub fn install_bundle(
 /// A payload belongs at `prerequisites\<the spec's own file name>`, so a manifest cannot
 /// point this at some other file it carries.
 fn is_expected_payload_path(relative: &Path, spec: &PrerequisiteSpec) -> bool {
-    let expected = Path::new(PREREQUISITES_DIR).join(spec.file_name);
+    let expected = Path::new(PREREQUISITES_DIR).join(&spec.file_name);
     let mut actual = relative.components();
     let mut wanted = expected.components();
     loop {
@@ -432,7 +482,7 @@ fn visual_cpp_spec(architecture: &AppArchitecture) -> PrerequisiteSpec {
     };
     PrerequisiteSpec {
         bundleable: true,
-        file_name: vc_redist_file_name(suffix),
+        file_name: format!("vc_redist.{suffix}.exe"),
         download_url: format!("https://aka.ms/vs/17/release/vc_redist.{suffix}.exe"),
         silent_install_args: ["/install", "/quiet", "/norestart"]
             .iter()
@@ -456,6 +506,124 @@ fn visual_cpp_spec(architecture: &AppArchitecture) -> PrerequisiteSpec {
     }
 }
 
+/// The Visual C++ runtimes from before 2015, which each have a redistributable of their own and
+/// are not replaced by a later one. None of them was made for Arm64 on Windows 10 or 11, so that
+/// has no spec. Visual Studio 2013 and later say they are there in the same key as 2015 does.
+/// 2005 and 2008 say so only by their MSI product, so those have no probe, and run each time.
+fn older_visual_cpp_spec(
+    kind: &RuntimePrerequisiteKind,
+    architecture: &AppArchitecture,
+) -> Option<PrerequisiteSpec> {
+    let suffix = match architecture {
+        AppArchitecture::X86 => "x86",
+        AppArchitecture::X64 | AppArchitecture::Unknown => "x64",
+        AppArchitecture::Arm64 => return None,
+    };
+    let quiet: &[&str] = &["/q"];
+    let quiet_no_restart: &[&str] = &["/q", "/norestart"];
+    let install_quiet: &[&str] = &["/install", "/quiet", "/norestart"];
+    let (year, url, args, probe_key) = match kind {
+        RuntimePrerequisiteKind::VisualCpp2005 => (
+            "2005",
+            format!(
+                "https://download.microsoft.com/download/8/B/4/8B42259F-5D70-43F4-AC2E-4B208FD8D66A/vcredist_{suffix}.EXE"
+            ),
+            quiet,
+            None,
+        ),
+        RuntimePrerequisiteKind::VisualCpp2008 => (
+            "2008",
+            format!(
+                "https://download.microsoft.com/download/5/D/8/5D8C65CB-C849-4025-8E95-C3966CAFD8AE/vcredist_{suffix}.exe"
+            ),
+            quiet,
+            None,
+        ),
+        RuntimePrerequisiteKind::VisualCpp2010 => (
+            "2010",
+            format!(
+                "https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_{suffix}.exe"
+            ),
+            quiet_no_restart,
+            Some(format!(r"Microsoft\VisualStudio\10.0\VC\VCRedist\{suffix}")),
+        ),
+        RuntimePrerequisiteKind::VisualCpp2012 => (
+            "2012",
+            format!(
+                "https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU_4/vcredist_{suffix}.exe"
+            ),
+            install_quiet,
+            Some(format!(r"Microsoft\VisualStudio\11.0\VC\Runtimes\{suffix}")),
+        ),
+        RuntimePrerequisiteKind::VisualCpp2013 => (
+            "2013",
+            format!("https://aka.ms/highdpimfc2013{suffix}enu"),
+            install_quiet,
+            Some(format!(r"Microsoft\VisualStudio\12.0\VC\Runtimes\{suffix}")),
+        ),
+        _ => return None,
+    };
+    Some(PrerequisiteSpec {
+        bundleable: true,
+        file_name: format!("vcredist{year}.{suffix}.exe"),
+        download_url: url,
+        silent_install_args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        // 0 = success, 1638 = a newer version is already installed.
+        success_exit_codes: vec![0, 1638],
+        reboot_exit_codes: vec![3010],
+        winget_id: Some(format!("Microsoft.VCRedist.{year}.{suffix}")),
+        windows_feature: None,
+        requires_admin: true,
+        probe: probe_key.map(|key| PrerequisiteRegistryProbe {
+            key_paths: vec![
+                format!(r"SOFTWARE\{key}"),
+                format!(r"SOFTWARE\WOW6432Node\{key}"),
+            ],
+            value_name: "Installed".to_owned(),
+            min_value: 1,
+        }),
+    })
+}
+
+/// A version of .NET's shared runtime, from the link Microsoft keeps for that version's latest
+/// build. It is bundled like a Visual C++ runtime is, and signed like one, with winget as what is
+/// left if the download fails. Its versions are values named after each build, so no one DWORD says
+/// it is there, and an installer run on top of itself just exits.
+fn dotnet_runtime_spec(
+    flavor: DotNetFlavor,
+    major: u32,
+    architecture: &AppArchitecture,
+) -> Option<PrerequisiteSpec> {
+    if !DOTNET_MAJOR_VERSIONS.contains(&major) {
+        return None;
+    }
+    let suffix = match architecture {
+        AppArchitecture::X86 => "x86",
+        AppArchitecture::Arm64 => "arm64",
+        AppArchitecture::X64 | AppArchitecture::Unknown => "x64",
+    };
+    let (product, winget) = match flavor {
+        DotNetFlavor::Core => ("dotnet-runtime", "Runtime"),
+        DotNetFlavor::Desktop => ("windowsdesktop-runtime", "DesktopRuntime"),
+        DotNetFlavor::AspNetCore => ("aspnetcore-runtime", "AspNetCore"),
+    };
+    Some(PrerequisiteSpec {
+        bundleable: true,
+        file_name: format!("{product}-{major}.0-win-{suffix}.exe"),
+        download_url: format!("https://aka.ms/dotnet/{major}.0/{product}-win-{suffix}.exe"),
+        silent_install_args: ["/install", "/quiet", "/norestart"]
+            .iter()
+            .map(|arg| (*arg).to_owned())
+            .collect(),
+        success_exit_codes: vec![0, 1638],
+        reboot_exit_codes: vec![3010],
+        winget_id: Some(format!("Microsoft.DotNet.{winget}.{major}")),
+        windows_feature: None,
+        requires_admin: true,
+        probe: None,
+    })
+}
+
 /// .NET Framework 3.5 (CLR v2.0). On Windows 10/11 it is an on-demand Windows
 /// feature (`NetFx3`) whose payload comes from Windows Update or install media,
 /// so it is enabled via DISM rather than a downloadable installer. Presence is
@@ -463,7 +631,7 @@ fn visual_cpp_spec(architecture: &AppArchitecture) -> PrerequisiteSpec {
 fn dotnet_framework35_spec() -> PrerequisiteSpec {
     PrerequisiteSpec {
         bundleable: false,
-        file_name: "netfx3-windows-feature",
+        file_name: "netfx3-windows-feature".to_owned(),
         download_url: "https://learn.microsoft.com/dotnet/framework/install/dotnet-35-windows"
             .to_owned(),
         silent_install_args: Vec::new(),
@@ -486,7 +654,7 @@ fn dotnet_framework35_spec() -> PrerequisiteSpec {
 fn dotnet_framework4x_spec() -> PrerequisiteSpec {
     PrerequisiteSpec {
         bundleable: false,
-        file_name: "dotnet-framework-4x-inbox",
+        file_name: "dotnet-framework-4x-inbox".to_owned(),
         download_url: "https://dotnet.microsoft.com/download/dotnet-framework".to_owned(),
         silent_install_args: Vec::new(),
         success_exit_codes: vec![0],
@@ -499,35 +667,6 @@ fn dotnet_framework4x_spec() -> PrerequisiteSpec {
             value_name: "Release".to_owned(),
             min_value: 528_040,
         }),
-    }
-}
-
-fn vc_redist_file_name(suffix: &str) -> &'static str {
-    match suffix {
-        "x86" => "vc_redist.x86.exe",
-        "arm64" => "vc_redist.arm64.exe",
-        _ => "vc_redist.x64.exe",
-    }
-}
-
-fn dotnet_desktop_spec() -> PrerequisiteSpec {
-    // .NET runtime download URLs are version-pinned and rotate, so it is not
-    // bundled; the target acquires it via winget. Its presence is not probed via
-    // a single DWORD key, so restore/verify treat it as best-effort.
-    PrerequisiteSpec {
-        bundleable: false,
-        file_name: "windowsdesktop-runtime.exe",
-        download_url: "https://dotnet.microsoft.com/download/dotnet".to_owned(),
-        silent_install_args: ["/install", "/quiet", "/norestart"]
-            .iter()
-            .map(|arg| (*arg).to_owned())
-            .collect(),
-        success_exit_codes: vec![0, 1638],
-        reboot_exit_codes: vec![3010],
-        winget_id: Some("Microsoft.DotNet.DesktopRuntime.8".to_owned()),
-        windows_feature: None,
-        requires_admin: true,
-        probe: None,
     }
 }
 
@@ -589,18 +728,92 @@ mod tests {
         assert!(!folder.exists());
     }
 
-    /// The compiled specs are the only source of what runs, and all of them use HTTPS.
+    /// The compiled specs are the only source of what runs, and all of them come from Microsoft
+    /// over HTTPS. Whether each is really there and signed is tried for real on CI.
     #[test]
-    fn every_compiled_download_is_https() {
-        for spec in [
-            visual_cpp_spec(&AppArchitecture::X64),
-            visual_cpp_spec(&AppArchitecture::X86),
-            visual_cpp_spec(&AppArchitecture::Arm64),
-            dotnet_desktop_spec(),
-            dotnet_framework35_spec(),
-            dotnet_framework4x_spec(),
+    fn every_compiled_download_is_https_and_microsofts() {
+        const MICROSOFT_HOSTS: [&str; 4] = [
+            "aka.ms",
+            "download.microsoft.com",
+            "dotnet.microsoft.com",
+            "learn.microsoft.com",
+        ];
+        let specs = compiled_specs();
+        assert!(specs.len() > 40, "{}", specs.len());
+        for (name, spec) in specs {
+            assert!(
+                is_https(&spec.download_url),
+                "{name}: {}",
+                spec.download_url
+            );
+            let host = spec.download_url[HTTPS_PREFIX.len()..]
+                .split('/')
+                .next()
+                .unwrap_or_default();
+            assert!(MICROSOFT_HOSTS.contains(&host), "{name}: {host}");
+        }
+    }
+
+    #[test]
+    fn each_kind_and_build_has_its_own_installer_and_no_two_share_a_file() {
+        let specs = compiled_specs();
+        let mut names: Vec<&str> = specs
+            .iter()
+            .filter(|(_, spec)| spec.bundleable)
+            .map(|(_, spec)| spec.file_name.as_str())
+            .collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "{names:?}");
+    }
+
+    #[test]
+    fn a_runtime_is_only_ever_what_it_says_and_a_version_there_is_no_spec_for_gets_none() {
+        let net = |major| RuntimePrerequisiteKind::DotNetRuntime {
+            flavor: DotNetFlavor::Desktop,
+            major,
+        };
+        let eight = spec(&net(8), &AppArchitecture::X64);
+        assert_eq!(
+            eight.as_ref().and_then(|spec| spec.winget_id.as_deref()),
+            Some("Microsoft.DotNet.DesktopRuntime.8")
+        );
+        assert_eq!(
+            eight.map(|spec| spec.download_url),
+            Some("https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe".to_owned())
+        );
+        assert_eq!(
+            spec(&net(9), &AppArchitecture::Arm64).map(|spec| spec.file_name),
+            Some("windowsdesktop-runtime-9.0-win-arm64.exe".to_owned())
+        );
+        for major in [0, 3, 5, 11, 999] {
+            assert!(
+                spec(&net(major), &AppArchitecture::X64).is_none(),
+                "{major}"
+            );
+        }
+        assert!(
+            spec(
+                &RuntimePrerequisiteKind::DotNetDesktopRuntime,
+                &AppArchitecture::X64
+            )
+            .is_none(),
+            "a .NET that is unknown or ships with the app has no installer, and is not .NET 8"
+        );
+        for kind in [
+            RuntimePrerequisiteKind::VisualCpp2005,
+            RuntimePrerequisiteKind::VisualCpp2008,
+            RuntimePrerequisiteKind::VisualCpp2010,
+            RuntimePrerequisiteKind::VisualCpp2012,
+            RuntimePrerequisiteKind::VisualCpp2013,
         ] {
-            assert!(is_https(&spec.download_url), "{}", spec.download_url);
+            let x86 = spec(&kind, &AppArchitecture::X86).map(|spec| spec.file_name);
+            assert!(
+                x86.is_some_and(|name| name.ends_with(".x86.exe")),
+                "{kind:?}"
+            );
+            assert!(spec(&kind, &AppArchitecture::Arm64).is_none(), "{kind:?}");
         }
     }
 
@@ -702,14 +915,6 @@ mod tests {
     }
 
     #[test]
-    fn dotnet_is_winget_only() {
-        let spec = dotnet_desktop_spec();
-        assert!(!spec.bundleable);
-        assert!(spec.winget_id.is_some());
-        assert!(spec.probe.is_none());
-    }
-
-    #[test]
     fn dotnet_framework35_is_a_windows_feature() {
         let spec = dotnet_framework35_spec();
         assert!(!spec.bundleable);
@@ -758,7 +963,7 @@ mod tests {
             spec_for_bundle(&RuntimePrerequisiteKind::VisualCppRedistributable, &bundle);
         assert_eq!(
             visual_cpp.map(|spec| spec.file_name),
-            Some("vc_redist.x86.exe")
+            Some("vc_redist.x86.exe".to_owned())
         );
     }
 

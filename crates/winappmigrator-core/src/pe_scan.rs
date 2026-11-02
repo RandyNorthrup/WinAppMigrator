@@ -101,6 +101,41 @@ fn read_program(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).map_err(|source| WinAppMigratorError::io(path, source))
 }
 
+/// What a program needs in order to run, read from nothing but its own file.
+#[derive(Debug, Clone)]
+pub(crate) struct ProgramNeeds {
+    pub architecture: AppArchitecture,
+    pub imports: Vec<ImportedDll>,
+    /// Only for a managed image.
+    pub clr_version: Option<String>,
+    pub is_managed: bool,
+    pub managed: ManagedImageFacts,
+}
+
+/// Read what a program needs, leaving out everything a scan of the main program also looks at.
+pub(crate) fn read_program_needs(path: &Path) -> Result<ProgramNeeds> {
+    let bytes = read_program(path)?;
+    let pe = PeFile::from_bytes(&bytes)
+        .map_err(|source| WinAppMigratorError::pe(path, source.to_string()))?;
+    let mut warnings = Vec::new();
+    let mut imports = read_imports(path, &pe, &mut warnings);
+    merge_delay_imports(&mut imports, read_delay_imports(&pe, &bytes, &mut warnings));
+    let is_managed = is_dotnet_image(&pe);
+    Ok(ProgramNeeds {
+        architecture: architecture_from_machine(pe.file_header().Machine),
+        imports,
+        clr_version: is_managed
+            .then(|| dotnet_metadata_version(&bytes))
+            .flatten(),
+        is_managed,
+        managed: if is_managed {
+            managed_image_facts(&bytes)
+        } else {
+            ManagedImageFacts::default()
+        },
+    })
+}
+
 pub fn read_pe_architecture(path: &Path) -> Result<AppArchitecture> {
     let bytes = read_program(path)?;
     let pe = PeFile::from_bytes(&bytes)
@@ -135,6 +170,9 @@ fn file_metadata(path: &Path, pe: &PeFile<'_>, bytes: &[u8]) -> Result<Executabl
         is_dotnet: is_dotnet_image(pe),
         dotnet_runtime_version: is_dotnet_image(pe)
             .then(|| dotnet_metadata_version(bytes))
+            .flatten(),
+        dotnet_target_framework: is_dotnet_image(pe)
+            .then(|| managed_image_facts(bytes).target_framework)
             .flatten(),
         embedded_manifest: embedded_manifest_xml.is_some(),
         requested_execution_level,
@@ -431,6 +469,107 @@ fn is_dotnet_image(pe: &PeFile<'_>) -> bool {
         .is_some_and(|directory| directory.VirtualAddress != 0 && directory.Size != 0)
 }
 
+/// What a managed image's metadata says about which .NET it was built for. `v4.0.30319` is the
+/// metadata version of .NET Framework 4.x and of modern .NET alike, so it takes this to tell them
+/// apart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ManagedImageFacts {
+    /// The `TargetFramework` attribute's text, such as `.NETCoreApp,Version=v8.0`.
+    pub target_framework: Option<String>,
+    /// It refers to `mscorlib`, which only .NET Framework has as its core library.
+    pub refers_to_mscorlib: bool,
+    /// It refers to WPF or Windows Forms, which take the Windows Desktop runtime.
+    pub refers_to_desktop: bool,
+    /// It refers to ASP.NET Core.
+    pub refers_to_asp_net: bool,
+}
+
+const TARGET_FRAMEWORK_PREFIXES: &[&[u8]] = &[b".NETCoreApp,Version=v", b".NETFramework,Version=v"];
+const DESKTOP_ASSEMBLIES: &[&[u8]] = &[
+    b"\0PresentationFramework\0",
+    b"\0PresentationCore\0",
+    b"\0System.Windows.Forms\0",
+];
+const ASP_NET_ASSEMBLY_PREFIX: &[u8] = b"\0Microsoft.AspNetCore";
+const MSCORLIB_ASSEMBLY: &[u8] = b"\0mscorlib\0";
+/// More than the longest text there is any reason for.
+const MAX_TARGET_FRAMEWORK_CHARS: usize = 64;
+
+/// Read a managed image's metadata streams. Offsets in a file can say anything, so all of it is
+/// checked, and what does not hold together says nothing.
+pub(crate) fn managed_image_facts(bytes: &[u8]) -> ManagedImageFacts {
+    let Some((strings, blob)) = metadata_streams(bytes) else {
+        return ManagedImageFacts::default();
+    };
+    let target_framework = TARGET_FRAMEWORK_PREFIXES.iter().find_map(|prefix| {
+        let start = find_bytes(blob, prefix)?;
+        let text: Vec<u8> = blob[start..]
+            .iter()
+            .copied()
+            .take(MAX_TARGET_FRAMEWORK_CHARS)
+            .take_while(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b',' | b'=' | b'-')
+            })
+            .collect();
+        String::from_utf8(text).ok()
+    });
+    ManagedImageFacts {
+        target_framework,
+        refers_to_mscorlib: find_bytes(strings, MSCORLIB_ASSEMBLY).is_some(),
+        refers_to_desktop: DESKTOP_ASSEMBLIES
+            .iter()
+            .any(|name| find_bytes(strings, name).is_some()),
+        refers_to_asp_net: find_bytes(strings, ASP_NET_ASSEMBLY_PREFIX).is_some(),
+    }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// The `#Strings` and `#Blob` streams of the metadata root.
+fn metadata_streams(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    const HEADER_PREFIX: usize = 12;
+    const MAX_STREAMS: u16 = 16;
+    const MAX_STREAM_NAME: usize = 32;
+    let u32_at = |offset: usize| -> Option<usize> {
+        let field = bytes.get(offset..offset.checked_add(4)?)?;
+        Some(u32::from_le_bytes([field[0], field[1], field[2], field[3]]) as usize)
+    };
+    let root = find_bytes(bytes, b"BSJB")?;
+    let version_length = u32_at(root + HEADER_PREFIX)?;
+    // The version string, then a `u16` of flags, and a `u16` count of streams.
+    let count_at = root
+        .checked_add(HEADER_PREFIX + 4)?
+        .checked_add(version_length)?
+        .checked_add(2)?;
+    let count_field = bytes.get(count_at..count_at.checked_add(2)?)?;
+    let count = u16::from_le_bytes([count_field[0], count_field[1]]).min(MAX_STREAMS);
+    let mut at = count_at + 2;
+    let mut strings: &[u8] = &[];
+    let mut blob: &[u8] = &[];
+    for _ in 0..count {
+        let start = root.checked_add(u32_at(at)?)?;
+        let size = u32_at(at + 4)?;
+        let name_at = at + 8;
+        let name = bytes.get(name_at..name_at.checked_add(MAX_STREAM_NAME)?.min(bytes.len()))?;
+        let name_length = name.iter().position(|byte| *byte == 0)?;
+        let stream = bytes
+            .get(start..start.checked_add(size)?)
+            .unwrap_or_default();
+        match &name[..name_length] {
+            b"#Strings" => strings = stream,
+            b"#Blob" => blob = stream,
+            _ => {}
+        }
+        // A stream's name is padded to four bytes, ending in at least one NUL.
+        at = name_at + (name_length + 4) / 4 * 4;
+    }
+    Some((strings, blob))
+}
+
 /// The version string in a managed image's CLI metadata root, e.g. `v2.0.50727`
 /// or `v4.0.30319`. The metadata root begins with the `BSJB` signature followed
 /// by two `u16` version fields, a reserved `u32`, a `u32` length, then the
@@ -565,6 +704,71 @@ mod tests {
         bytes.extend_from_slice(&(version_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&version_bytes);
         bytes
+    }
+
+    /// A metadata root with these streams, laid out as a real one is.
+    fn metadata_with_streams(strings: &[u8], blob: &[u8]) -> Vec<u8> {
+        let mut root = metadata_root("v4.0.30319");
+        root.extend_from_slice(&0u16.to_le_bytes());
+        root.extend_from_slice(&2u16.to_le_bytes());
+        let header_at = root.len();
+        let headers = 8 + b"#Strings\0\0\0\0".len() + 8 + b"#Blob\0\0\0".len();
+        let strings_at = header_at + headers;
+        let blob_at = strings_at + strings.len();
+        for (offset, size, name) in [
+            (strings_at, strings.len(), &b"#Strings\0\0\0\0"[..]),
+            (blob_at, blob.len(), &b"#Blob\0\0\0"[..]),
+        ] {
+            root.extend_from_slice(&(offset as u32).to_le_bytes());
+            root.extend_from_slice(&(size as u32).to_le_bytes());
+            root.extend_from_slice(name);
+        }
+        root.extend_from_slice(strings);
+        root.extend_from_slice(blob);
+        root
+    }
+
+    #[test]
+    fn a_managed_image_says_which_dotnet_it_was_built_for() {
+        let modern = metadata_with_streams(
+            b"\0System.Runtime\0PresentationFramework\0",
+            b"\x1a.NETCoreApp,Version=v8.0\x01",
+        );
+        let facts = managed_image_facts(&modern);
+        assert_eq!(
+            facts.target_framework.as_deref(),
+            Some(".NETCoreApp,Version=v8.0")
+        );
+        assert!(!facts.refers_to_mscorlib);
+        assert!(facts.refers_to_desktop);
+        assert!(!facts.refers_to_asp_net);
+
+        let framework =
+            metadata_with_streams(b"\0mscorlib\0", b"\x1c.NETFramework,Version=v4.7.2\x01");
+        let facts = managed_image_facts(&framework);
+        assert_eq!(
+            facts.target_framework.as_deref(),
+            Some(".NETFramework,Version=v4.7.2")
+        );
+        assert!(facts.refers_to_mscorlib);
+        assert!(!facts.refers_to_desktop);
+
+        let web = metadata_with_streams(b"\0Microsoft.AspNetCore.Hosting\0", b"");
+        assert!(managed_image_facts(&web).refers_to_asp_net);
+    }
+
+    #[test]
+    fn metadata_that_does_not_hold_together_says_nothing() {
+        assert_eq!(managed_image_facts(b""), ManagedImageFacts::default());
+        assert_eq!(managed_image_facts(b"BSJB"), ManagedImageFacts::default());
+        // Claims more streams than are there, and streams that go past the end of the file.
+        let mut lies = metadata_root("v4.0.30319");
+        lies.extend_from_slice(&0u16.to_le_bytes());
+        lies.extend_from_slice(&u16::MAX.to_le_bytes());
+        lies.extend_from_slice(&u32::MAX.to_le_bytes());
+        lies.extend_from_slice(&u32::MAX.to_le_bytes());
+        lies.extend_from_slice(b"#Blob\0\0\0");
+        assert_eq!(managed_image_facts(&lies), ManagedImageFacts::default());
     }
 
     #[test]

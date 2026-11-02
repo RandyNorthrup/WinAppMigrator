@@ -371,6 +371,8 @@ fn bundle_prerequisites(
     let mut planned = Vec::with_capacity(prerequisites.len());
     for prerequisite in prerequisites {
         let mut prerequisite = prerequisite.clone();
+        // One of the app's programs can be another build than its main one.
+        let architecture = prerequisite.architecture.as_ref().unwrap_or(architecture);
         if options.bundle_prerequisites
             && prerequisite.install_manually
             && let Some(spec) = crate::prerequisites::spec(&prerequisite.kind, architecture)
@@ -401,7 +403,7 @@ fn plan_one_prerequisite(
     if !spec.bundleable {
         return without_payload;
     }
-    let relative = PathBuf::from(PREREQUISITES_DIR).join(spec.file_name);
+    let relative = PathBuf::from(PREREQUISITES_DIR).join(&spec.file_name);
     let destination = match package_destination_path(&options.output_dir, &relative) {
         Ok(path) => path,
         Err(error) => {
