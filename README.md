@@ -1,282 +1,210 @@
-# WinAppMigrator
+<p align="center">
+  <img src="crates/winappmigrator-ui/assets/winappmigrator.png" alt="" width="64" height="64">
+</p>
 
-WinAppMigrator is a Windows 10/11 desktop app that backs up an installed
-application into a single **self-extracting installer**. You pick an installed
-app — on this PC **or on a drive from another (often failing) PC** — optionally
-include its license and its user data, and the app reverse-engineers the
-application's full on-disk footprint and Windows integrations and writes one
-`.exe`. Run that `.exe` on another machine and it reinstalls the app (plus the
-bundled license/user data), then hash-verifies every file.
+<h1 align="center">WinAppMigrator</h1>
 
-Author: **Randy Northrup**.
+<p align="center">
+  <strong>Turn an installed Windows app into one installer you can run on another PC.</strong><br>
+  Even when the app came from a drive pulled out of a dying machine, and the original installer is long gone.
+</p>
 
-## Screenshots
+<p align="center">
+  <a href="https://github.com/RandyNorthrup/WinAppMigrator/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/RandyNorthrup/WinAppMigrator?style=flat-square&color=2d63e0"></a>
+  <a href="https://github.com/RandyNorthrup/WinAppMigrator/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/RandyNorthrup/WinAppMigrator/total?style=flat-square&color=2d63e0"></a>
+  <a href="https://github.com/RandyNorthrup/WinAppMigrator/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/RandyNorthrup/WinAppMigrator?style=flat-square&color=2d63e0"></a>
+  <a href="https://github.com/RandyNorthrup/WinAppMigrator/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/RandyNorthrup/WinAppMigrator/ci.yml?branch=main&style=flat-square&label=CI"></a>
+  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?style=flat-square">
+  <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-b7410e?style=flat-square">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/RandyNorthrup/WinAppMigrator?style=flat-square"></a>
+</p>
 
-Turn an installed app into one self-extracting installer in three steps —
-**pick → build → install**. _(Shown with a sample “DemoApp”.)_
+<p align="center">
+  <a href="https://github.com/RandyNorthrup/WinAppMigrator/releases/latest"><strong>Download</strong></a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#what-gets-captured">What gets captured</a> ·
+  <a href="#limitations">Limitations</a> ·
+  <a href="#documentation">Docs</a>
+</p>
 
-**1. Pick an installed app** — on this PC or a drive from another PC.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/app-pick-dark.png">
+    <img alt="WinAppMigrator with an application selected, showing its details and the options to include in the installer" src="docs/images/app-pick-light.png" width="860">
+  </picture>
+</p>
 
-![WinAppMigrator listing installed applications](docs/images/winappmigrator-start.png)
+## Why
 
-**2. Choose what to back up and build the installer** — optionally include the
-app's license and user data, then produce a single `.exe`.
+Reinstalling software on a new PC usually means hunting down installers, license files, and
+settings. Sometimes the installer no longer exists, the vendor is gone, or the old PC will not boot.
+WinAppMigrator works backward from what is installed: it finds the app's files, registry entries,
+services, and runtimes, and packs them into a single `.exe`.
 
-![WinAppMigrator building a self-extracting installer for a selected app](docs/images/winappmigrator-app.png)
-
-**3. Run the installer on the target PC** — it reinstalls the app (in the same
-theme it was built with), restores the captured data, and hash-verifies every file.
-
-![The produced WinAppMigrator installer](docs/images/winappmigrator-installer.png)
-
-## Two binaries, one job each
-
-- **`winappmigrator-gui` — the app** (binary `winappmigrator.exe`). Runs on the
-  source machine. Lists installed apps and builds the installer. It **never
-  restores** anything.
-- **`winappmigrator-installer` — the installer stub** (binary
-  `winappmigrator-installer.exe`). Compiled once and **embedded inside the app**
-  (`include_bytes!`), so WinAppMigrator ships as a single portable executable.
-  Each installer the app produces is this stub with the application's package
-  appended. It runs on the target machine and performs the reinstall + hash
-  verification. **Restore lives only here.**
-
-Both binaries **always run elevated**: each embeds a `requireAdministrator`
-manifest, so Windows prompts once via UAC at launch and the whole session is
-elevated — there is no mid-task elevation prompt.
+- **One file.** The app is one portable `.exe`, and so is every installer it builds.
+- **Works from a pulled drive.** Connect the disk from a failed PC and pick an app from it.
+- **Brings the runtimes along.** The Visual C++ runtime is downloaded when you build and embedded, so it
+  installs without internet.
+- **Checks its work.** The installer checks its package's hashes before writing anything, then checks
+  the files it installed.
+- **Previews first.** See what would change before installing.
 
 ## How it works
 
-**Footprint discovery is layered.** It detects *how* an app was installed and
-reads the authoritative installed paths where Windows records them (Windows
-Installer/MSI component database; Inno Setup `unins*.dat`; NSIS `uninstall.log`;
-App Paths), then completes the picture with a conservative scan of `Program
-Files`, `Program Files (x86)`, `ProgramData`, per-user `AppData`
-(Roaming/Local/LocalLow), `Documents`/`Saved Games` (following OneDrive/folder
-redirection), and shared `Public\Documents`, including nested `Vendor\App`
-layouts. It also captures registry keys, services, drivers, scheduled tasks,
-shortcuts, environment variables, COM/file associations, and runtime
-prerequisites. See [docs/discovery.md](docs/discovery.md).
+Download `WinAppMigrator-<version>.exe` from the
+[latest release](https://github.com/RandyNorthrup/WinAppMigrator/releases/latest) and run it. There
+is nothing to install. Windows asks for administrator approval, because reading another drive and
+installing services both need it.
 
-**Scan source: this PC or a connected drive.** Every scanner reads state through
-one `SystemContext` seam (`ScanSource::{Live, OfflineVolume}`). For a disk pulled
-from another PC and mounted here (e.g. `E:\`), the app mounts that disk's registry
-hives read-only (`reg load`, using backup privilege so ACL-locked hives read
-non-destructively), reads scheduled tasks straight from the on-disk Task XML, and
-re-roots recorded paths (`C:\…` → `E:\…`). Reading a foreign disk is strictly
-non-destructive — the source is only ever read (backup-mode reads; never
-`takeown`/`icacls`).
+### 1. Pick an app
 
-**The GUI** is an `eframe`/`egui` single-screen app with a light/dark design
-system; see [docs/gui.md](docs/gui.md).
+Choose **This PC** or **Connected drive…**, then search or sort the list. Optionally include the
+app's license data and user data.
 
-## Workspace
+### 2. Build the installer
 
-Rust workspace, edition 2024, current stable toolchain:
+Follow the progress, or cancel. You get one file, named after what it contains, such as
+`Fabrikam_Data_Sync_userdata_license_installer.exe`.
 
-- **`winappmigrator-core`** — shared domain logic: inventory, install-source
-  reverse-engineering, footprint discovery, packaging, restore, verification, and
-  the `SystemContext` live/offline seam.
-- **`winappmigrator-ui`** — shared `egui` design system (`theme`) and widgets,
-  reused by both the app and the produced installer so they render identically.
-- **`winappmigrator-gui`** — the app (binary `winappmigrator`).
-- **`winappmigrator-installer`** — the self-extracting installer stub, embedded
-  into the app.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/app-done-dark.png">
+    <img alt="A finished build, showing the file count, installer size, and the installer's path" src="docs/images/app-done-light.png" width="860">
+  </picture>
+</p>
 
-Key dependencies: `winreg` (uninstall inventory, MSI component database, App
-Paths, offline hive access), `pelite` (PE metadata/imports), `roxmltree` (offline
-scheduled-task XML), `walkdir` (bounded discovery), `sha2` (streaming SHA-256),
-`filetime` (timestamp preservation), `zip` (package archives + self-extraction),
-`tempfile`, `serde`/`serde_json` (reports), `ureq`/`native-tls` (prerequisite
-downloads), `eframe`/`rfd` (GUI), `tracing` (diagnostics).
+### 3. Run it on the other PC
 
-## Requirements
+Copy the installer over and run it. Check the install location, preview the changes if you like, then
+click **Install**.
 
-- Windows 10 or Windows 11
-- Rust stable toolchain with the MSVC target
-- Optional local security tools this repo supports: `cargo audit`, `cargo deny`
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/installer-dark.png">
+    <img alt="The installer, showing the install location, restore options, and dependencies" src="docs/images/installer-light.png" width="600">
+  </picture>
+</p>
 
-Building requires no elevation. **Running** the app or a produced installer
-triggers a UAC prompt (both embed a `requireAdministrator` manifest). No
-environment variables are required.
+<sub>Screenshots use sample data, and follow your GitHub theme. The app has light and dark modes, and an
+installer opens in the theme it was built with.</sub>
 
-## Building an installer (the app)
+## What gets captured
 
-Launch the app on the source machine (a UAC prompt appears — the app runs
-elevated):
+| | Included | Notes |
+| --- | --- | --- |
+| **Program files** | Always | Found through MSI and Inno Setup records, NSIS logs, App Paths, and folder matching |
+| **Registry** | Always | The app's keys, plus COM and file associations pointing at it |
+| **Services and drivers** | Always | Drivers the app owns are re-registered. Vendor and inbox drivers are reported instead, because they cannot be redistributed |
+| **Scheduled tasks, shortcuts, environment variables** | Always | A captured `Path` is merged into the target's, never replaced |
+| **Runtimes** | Always | Visual C++ is embedded, or comes through winget if its download failed at build time. .NET comes through winget or a Windows feature, or is part of Windows already, so it can need internet on the target |
+| **User data** | Your choice | AppData, ProgramData, Documents, and Saved Games. Online-only OneDrive files are skipped |
+| **License data** | Your choice | License files and stores. Reports whether each is likely tied to the machine. [Never bypasses activation](SECURITY.md#licensing-data) |
 
-```powershell
-cargo run -p winappmigrator-gui
-```
+## Limitations
 
-The app is a single screen:
+Please read these before relying on it, especially on a one-way trip from a failing PC.
 
-1. **Pick a scan source** — *This PC* (default) or *Connected drive…* (the root
-   of a disk from another machine).
-2. **Pick an installed app** from the searchable table (filter by All / Per-user
-   / Per-machine). Selecting a row detects its install method, reverse-engineers
-   its footprint, and prefills a default output folder.
-3. **Optionally include** the app's license/activation data and/or its user data
-   (settings, Documents, Saved Games, ProgramData) with two toggles. Program
-   files are always included.
-4. **Create the self-extracting installer.** Building reverse-engineers the app,
-   copies its files and the selected data, embeds everything in one `.exe`, and
-   hash-verifies the package. The result card shows the installer path and a
-   "Hashes confirmed" status.
+- **It can capture too much.** Folder matching uses app, publisher, and folder names as substrings, so an
+  app can pull in other products: VS Code picked up all of Visual Studio on one test PC. Check the file
+  count and size on the result. If they look wrong, don't rely on that installer.
+- **An installer cannot reach 4 GiB.** Windows cannot start an executable that large, so the build fails
+  and says so. Large apps may not fit.
+- **Installs have no rollback, and no uninstaller is created.** A failure can leave an install part-way,
+  and files with the same names are replaced. The window warns you if the folder already has files.
+- **Building from a connected drive captures less than building from the running PC.** COM, file
+  associations, Run keys, and environment variables often do not match, shortcuts are not recreated, and
+  the default install location keeps the drive's letter, so change it. Windows may also write to a
+  drive's registry files while loading them, so **image a failing drive first** and scan the image.
+- **Some things are not captured:** URL protocols, shell extensions, firewall rules, fonts, certificates,
+  and ODBC sources. Microsoft Store apps are not listed.
+- **Documents and Saved Games** restore under the install folder, not your user folders. AppData and
+  ProgramData go to their real locations.
+- **Hash checks have limits.** Driver images and license stores are only checked for presence, and a file
+  that could not be read during the scan is checked by size only. A preview checks no hashes, and its
+  window lists the first 300 changes, with files first, so on a larger app the registry, service, and task
+  changes are not listed.
+- **Some licenses will not move.** Anything tied to the old machine may need reactivating.
+- **It is only for software you are licensed to move.** That part is up to you.
 
-The produced installer is **named after the application** (not the output
-folder), with a suffix encoding what it carries — e.g.
-`YAMAHA DIAGNOSTIC SYSTEM2_userdata_license_installer.exe`. The app never restores
-anything; it only builds and confirms the package's own hashes.
+The full list, with planned fixes, is in the [plan](docs/PLAN.md#open-issues-most-important-first).
 
-Release binaries are written to `target\release\winappmigrator.exe` (the app,
-with the stub embedded) and `target\release\winappmigrator-installer.exe` (the
-bare stub).
+## Security and signing
 
-## Running a produced installer (the target)
+- **Only run installers you trust.** An installer runs elevated and does what its package says. Its hash
+  checks catch damage, not tampering.
+- **An installer can contain secrets.** It copies what the app keeps in its folders and registry keys,
+  which can include license keys and tokens, even with the License option off. Share one accordingly.
+- **Signing.** Starting with the next release, the app is signed (publisher: Randy Northrup), and each
+  release records build provenance you can check with `gh attestation verify`. Current downloads are
+  unsigned. Installers you build are not signed unless you sign them, so Windows shows "Unknown
+  publisher" for them. [Why, and how to sign one](docs/signing.md).
 
-Copy the produced `<App>…_installer.exe` to the target machine and run it (it
-elevates via UAC). Double-clicked, it opens a window showing the app, an editable
-**install location**, **Restore user data** / **Restore license** checkboxes
-(shown only when those were captured at build time), and a **Dependencies** plan,
-then installs with live progress and post-install hash verification.
+More in [SECURITY.md](SECURITY.md).
 
-Given command-line arguments it runs **headlessly** instead — the flow used by
-automation and the end-to-end test:
+## Automating the installer
+
+Run with any argument, an installer skips its window. With `--target-root` it previews unless you pass
+`--apply`, and exits non-zero if anything fails to verify. Without `--target-root` it prints usage.
 
 ```powershell
-# Preview the reinstall (default):
+# Preview
 .\App_installer.exe --target-root "C:\Program Files\App"
 
-# Reinstall:
+# Install
 .\App_installer.exe --target-root "C:\Program Files\App" --apply --force
 ```
 
-Headless flags: `--target-root <DIR>`, `--dry-run`, `--apply`, `--force`,
-`--restore-user-data`, `--no-restore-license`.
+| Flag | Effect |
+| --- | --- |
+| `--target-root <DIR>` | Where to install. Must be a full path |
+| `--apply` | Actually install. Without it nothing is installed: the package is unpacked to a temporary folder, which is then removed |
+| `--dry-run` | Preview, stated explicitly |
+| `--force` | Replace existing files, registry values, services, tasks, shortcuts, and environment variables |
+| `--restore-user-data` | Put user data in the real AppData and ProgramData folders, not under the target |
+| `--no-restore-license` | Skip captured license data, which is otherwise restored |
 
-By default, packaged per-user/ProgramData data is staged under the target root
-(`<target-root>\…`). Add `--restore-user-data` to instead reinstall it into the
-target machine's real `%AppData%`/`%LocalAppData%`/LocalLow/`%ProgramData%`
-locations. License restore is on by default; opt out with `--no-restore-license`.
-The installer **verifies as part of installing** — it hash-checks its package and
-the reinstalled files and exits non-zero on any mismatch.
+Pipe the output somewhere to read it, for example `| Out-String`. The installer is a windowed program, so
+it does not write to an interactive console. Automation still needs an elevated shell, because the
+installer demands elevation.
 
-Package contents (inside the embedded payload): `manifest.json`,
-`restore_plan.md`, `reports\*`, `files\*`,
-registry/service/driver/task/shortcut/environment artifacts, and optional
-`license\*`. The installer writes `verification_report.json` / `.md` during its
-hash check.
+## Building from source
 
-## Development
+You need Windows 10 or 11, the [Rust](https://rustup.rs) stable toolchain (1.96 or newer), and the Visual
+Studio C++ build tools. The app carries the installer inside itself, so build the installer first:
 
 ```powershell
-cargo fmt
-cargo fmt --check
-cargo check --workspace --all-targets --all-features   # alias: cargo typecheck
-cargo test --workspace --all-targets --all-features    # alias: cargo quality
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo build --workspace --release
-cargo audit
-cargo deny check
+cargo build --release -p winappmigrator-installer
+$env:WINAPPMIGRATOR_INSTALLER_STUB = "$PWD\target\release\winappmigrator-installer.exe"
+cargo build --release -p winappmigrator-gui
+.\target\release\winappmigrator.exe
 ```
 
-The whole pipeline is exercised end-to-end by
-[`crates/winappmigrator-installer/tests/installer_e2e.rs`](crates/winappmigrator-installer/tests/installer_e2e.rs):
-it reverse-engineers a real executable, builds the self-extracting installer with
-the actual stub, runs that installer against a clean target directory, and asserts
-the reinstall plus hash verification pass. Because the installer requires
-elevation, that reinstall step runs from an **elevated shell** (CI runs elevated);
-on a non-elevated host it skips cleanly. The `winappmigrator-core` suite covers
-footprint discovery, packaging, self-extraction, restore, and verification at unit
-level.
+| Crate | What it is |
+| --- | --- |
+| [`winappmigrator-core`](crates/winappmigrator-core) | Discovery, packaging, restore, and verification |
+| [`winappmigrator-ui`](crates/winappmigrator-ui) | Shared design system, widgets, and process hardening |
+| [`winappmigrator-gui`](crates/winappmigrator-gui) | The app, built as `winappmigrator.exe`. Never restores anything |
+| [`winappmigrator-installer`](crates/winappmigrator-installer) | The stub inside every installer. Restore lives only here |
 
-## CI and releases
-
-- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs on
-  `windows-latest` for every push/PR to `main`: format check, typecheck, tests,
-  clippy with warnings denied, `cargo audit`, `cargo deny check`, and a release
-  build.
-- **Releases** ([.github/workflows/release.yml](.github/workflows/release.yml))
-  run when a `v*` tag is pushed (or via manual dispatch). They build the installer
-  stub then the app (so the app embeds the fresh stub) and publish a GitHub
-  Release with `winappmigrator.exe`, a portable `.zip`, and `SHA256SUMS.txt`.
-
-The current version is `0.4.2` (latest release `v0.4.2.1`). Builds are **unsigned**
-— the app and its installers are not Authenticode-signed.
-
-## Project structure
-
-```text
-Cargo.toml
-crates/
-  winappmigrator-core/       # domain logic + SystemContext (live/offline)
-    src/
-      app_inventory.rs       # installed-app inventory from the uninstall registry
-      system_context.rs      # the live/offline scan seam
-      install_source.rs      # install-method detection + MSI/Inno/NSIS paths
-      file_discovery.rs      # footprint roots, walk, classification
-      scan.rs                # scan orchestration
-      package.rs / restore.rs / verify.rs / reporting.rs / models.rs ...
-  winappmigrator-ui/         # shared egui theme + widgets
-  winappmigrator-gui/        # the app (binary `winappmigrator`)
-  winappmigrator-installer/  # the embedded installer stub
-docs/
-```
-
-## Security notes
-
-- Discovery is **read-only**: it reads the registry (uninstall keys, MSI component
-  database, App Paths), parses install logs, and walks install/data directories
-  without writing. Scanning a connected drive is strictly non-destructive — its
-  hives are mounted read-only and files are read through backup semantics; the
-  source disk is never modified (no `takeown`/`icacls`).
-- Genuine per-user data (Roaming/Local/LocalLow AppData, Documents incl.
-  `My Games`, Saved Games) is treated separately from machine-wide `ProgramData`;
-  the app's "User data" toggle controls both. `Documents`/`Saved Games` follow
-  OneDrive/folder redirection; cache/temp/log directories are pruned; and
-  online-only cloud placeholders (OneDrive Files On-Demand) are reported but never
-  copied.
-- The app never restores. **Restore lives only in the installer**, defaults to
-  dry-run, and writes only with `--apply` (or the installer's Install button).
-  Restoring user data to real `%AppData%`/`%ProgramData%` locations is opt-in
-  (`--restore-user-data`), bounded to each known base, and (like per-machine
-  registry, services, tasks, and protected locations) needs the elevation the
-  installer already holds.
-- Package/restore verification checks file hashes, rewritten registry values,
-  environment variables, services, scheduled tasks, shortcuts, restored license
-  files, bundled-prerequisite presence, and re-registered drivers.
-- Detected runtime prerequisites (Visual C++ runtime, .NET, etc.) are downloaded
-  and embedded at build time, then installed silently and verified on the target
-  (with a winget/URL fallback). Application-owned drivers (a `.sys` inside the
-  app's footprint) are bundled and re-registered (`sc create`), then verified;
-  vendor/inbox drivers are not redistributed and are reported with named reinstall
-  guidance.
-- Secrets and credentials are not collected. License data is detected only to help
-  an owner migrate their own license: it is opt-in, reports
-  transferability/machine-binding, and is restored by the installer (license files
-  to their real locations, user-scoped HKCU values, non-machine-bound framework
-  stores). DPAPI-encrypted blobs are restored best-effort and flagged
-  machine-bound; machine-wide (HKLM) license values are reported as metadata only.
-  WinAppMigrator never decrypts license data, bypasses or emulates activation, or
-  emulates a hardware dongle.
+Run the checks with the commands in [CONTRIBUTING.md](CONTRIBUTING.md). Releases are built by
+[GitHub Actions](.github/workflows/release.yml) when a `v*` tag is pushed.
 
 ## Documentation
 
-- [docs/discovery.md](docs/discovery.md) — footprint discovery, install-source
-  reverse-engineering, and the offline-volume model.
-- [docs/gui.md](docs/gui.md) — GUI architecture.
-- [docs/PLAN.md](docs/PLAN.md) — product scope and status.
+| | |
+| --- | --- |
+| [Discovery](docs/discovery.md) | How an app's footprint is found, and from a connected drive |
+| [Interface](docs/gui.md) | How the screens are built, and the design conventions |
+| [Signing](docs/signing.md) | What is signed, what must never be, and how |
+| [Plan](docs/PLAN.md) | Scope, and open issues in priority order |
+| [Security](SECURITY.md) | The trust model, and how to report a vulnerability |
+| [Contributing](CONTRIBUTING.md) | The project's rules and checks |
+| [Changelog](CHANGELOG.md) | What changed in each release |
 
-## License
+## License and support
 
-Licensed under the [MIT License](LICENSE) © 2026 Randy Northrup.
+[MIT](LICENSE) © 2026 Randy Northrup. Third-party attributions are in
+[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
 
-All dependencies are permissively licensed (MIT / Apache-2.0 / BSD / Zlib / ISC
-and similar).
-
-## Support this project
-
-If this project saves you time, you can
-[buy me a coffee](https://www.paypal.com/donate/?hosted_button_id=Q9VC7B42R7K82)
-via PayPal. Thank you!
+If this saves you time, you can [buy me a coffee](https://www.paypal.com/donate/?hosted_button_id=Q9VC7B42R7K82)
+or [sponsor on GitHub](https://github.com/sponsors/RandyNorthrup). Thank you!

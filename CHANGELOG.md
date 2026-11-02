@@ -4,6 +4,73 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **The app is now signed.** Releases sign `winappmigrator.exe` with Azure Artifact
+  Signing through GitHub's OIDC token, with no stored secret, and record build
+  provenance. See `docs/signing.md`. The installer stub deliberately stays unsigned:
+  a signed stub could be given someone else's package hidden in its certificate table
+  while keeping a valid signature (CVE-2013-3900). Building refuses a signed stub, and
+  the stub ignores anything inside a certificate table and refuses anything after it. A finished installer
+  can be signed with `scripts/sign.ps1`, which previously made it report "no package".
+- **Redesigned interface.** The app is now a master-detail screen: the list fills the
+  left, and the selected app, options, build, and result sit on the right, with no
+  nested scrolling. Native Segoe UI with a real semibold weight, plus Korean, Japanese,
+  and Chinese fallback fonts when an app or publisher name needs them. Painter-drawn icons, a window
+  and file icon, and file details for Explorer and the UAC prompt. All colors meet WCAG
+  AA contrast, enforced by a test. Sortable columns that sort versions by number,
+  arrow-key navigation, Ctrl+F, screen-reader support, and the theme is remembered and
+  follows Windows on first run.
+- **The list shows real applications.** Entries marked `SystemComponent=1` are left out,
+  as in Windows' own installed-apps list. They are parts of other products: on one test
+  PC they were 481 of the 641 rows.
+- **Build progress and cancel.** Builds report each step with a progress bar and elapsed
+  time, and can be cancelled. The window stays light while a build runs, because it no
+  longer repaints continuously or touches the disk on every frame.
+- **The installer opens instantly.** It reads only the manifest at startup and unpacks
+  after you click, reading the package in place. Previously it read the whole package
+  into memory twice before showing a window, and left it on disk while the window sat
+  idle. It also warns before replacing files in a folder that has some, lists planned
+  changes in a preview, and offers Close and Open install folder when done.
+- **Security.**
+  - PowerShell escaping now covers typographic quotes, which PowerShell also treats as
+    string delimiters. A crafted file name or task name on a scanned drive could
+    otherwise run as code in the elevated app.
+  - System tools run by absolute path, and DLLs load from System32 only. A planted
+    `sc.exe` or `dwmapi.dll` beside an elevated executable would otherwise run instead.
+  - The C runtime is linked statically, so an installer can start on a clean PC.
+  - The embedded stub is written straight into the installer, never through a
+    predictable folder in `%TEMP%`, and staging folders have random names.
+  - Upgraded `zip` to 9.2, `eframe` to 0.37, and `roxmltree` to 0.21, clearing the six
+    `cargo audit` advisories. The zip advisories were not reachable from this code,
+    which writes symlink entries as plain files.
+- **Fixes.**
+  - Restoring a captured `Path` no longer replaces the target machine's `Path`. Only the
+    app's own entries are added.
+  - A package is hash-checked before anything is written, so a damaged copy is refused
+    instead of partly installing.
+  - Clicking another app during a build no longer starts a second build that deleted the
+    first one's staging folder.
+  - A build that lost files no longer reads as a clean success, and one that fails its
+    hash check says not to use the installer.
+  - An installer of 4 GiB or more fails the build with a clear reason. Windows cannot
+    start one, and it previously reported success.
+  - A single file over 4 GiB no longer fails the build at the very end.
+  - A failed build no longer destroys the installer from an earlier run.
+  - An empty or relative install location is refused, and headless `--apply` without
+    `--target-root` now fails instead of doing nothing and exiting 0.
+  - `cargo test --workspace` now works without elevation. The executables' tests could
+    not start under their `requireAdministrator` manifests, so the logic moved to
+    libraries.
+- **Tests.** The app and installer screens now have headless tests that drive the real
+  UI (`egui_kittest`). Set `WAM_UI_PREVIEW_DIR` to also write PNGs of the main states. The
+  end-to-end test can no longer skip its reinstall step on CI.
+- **Documentation.** Rewrote the README with badges and theme-aware screenshots, added
+  `SECURITY.md`, `CONTRIBUTING.md`, and `docs/signing.md`, and put the audit's open issues
+  in `docs/PLAN.md`. Corrected claims that were not true: that no secrets are collected,
+  that hives are mounted read-only, that shortcuts are recreated after a build from a
+  connected drive, that the GUI has a hash toggle, that the Inno Setup reader is robust,
+  and that folder matching is one-directional. The app's own text about offline
+  shortcuts, driver handling, and restoring was corrected too.
+
 ## 0.4.2.1 — 2026-07-02
 
 - **Licensing.** Added an MIT `LICENSE` (© 2026 Randy Northrup) and declared
