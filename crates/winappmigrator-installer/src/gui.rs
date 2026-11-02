@@ -1,12 +1,14 @@
 //! The graphical installer shown when a produced installer is double-clicked.
 //!
-//! It reads only the manifest of the application package embedded in its own
-//! executable, so the window opens at once however large the package is. It presents
+//! The window opens at once however large the package is. Behind it, the package is
+//! hash-checked and its manifest read, without unpacking anything, and the installer's
+//! own file is held open so it cannot be swapped from then on. It then presents
 //! the app, the install location, and — only when they were captured at build time —
 //! checkboxes to restore user data and license data, lists the runtime dependencies
 //! it will install, then unpacks, reinstalls, and hash-verifies on click.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,8 +18,8 @@ use eframe::egui::{self, Margin, RichText};
 use winappmigrator_core::path_utils::system_root;
 use winappmigrator_core::prerequisites::spec_for_bundle;
 use winappmigrator_core::{
-    PackageManifest, RestoreOptions, RestoreResult, RuntimePrerequisite, RuntimePrerequisiteKind,
-    WarningSeverity, extract_embedded_self_archive, hidden_command, read_embedded_manifest,
+    EmbeddedPackage, PackageManifest, RestoreOptions, RestoreResult, RuntimePrerequisite,
+    RuntimePrerequisiteKind, WarningSeverity, hidden_command, read_embedded_manifest,
     restore_package,
 };
 use winappmigrator_ui::theme::{
@@ -32,8 +34,6 @@ const BUSY_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_LISTED_CHANGES: usize = 300;
 
 pub fn run() -> eframe::Result {
-    let app = InstallerApp::new();
-    let title = app.window_title();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([760.0, 720.0])
         .with_min_inner_size([620.0, 520.0])
@@ -46,23 +46,21 @@ pub fn run() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        &title,
+        WINDOW_TITLE,
         native_options,
         Box::new(move |cc| {
-            let fonts_dir = system_root().join("Fonts");
-            theme::install_fonts(&cc.egui_ctx, &fonts_dir);
-            theme::add_fallback_fonts(
-                &cc.egui_ctx,
-                &fonts_dir,
-                [app.title.as_str(), app.publisher.as_str()],
-            );
+            theme::install_fonts(&cc.egui_ctx, &system_root().join("Fonts"));
+            let mut app = InstallerApp::blank();
             app.theme.apply(&cc.egui_ctx);
+            app.start_load(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     )
 }
 
 enum Screen {
+    /// The package is being hash-checked, which reads all of it.
+    Checking,
     /// A bare stub with no embedded package (only ever the template the app
     /// copies when building an installer).
     NoPackage,
@@ -105,6 +103,13 @@ impl Outcome {
     }
 }
 
+/// What the check behind the window found.
+enum Loaded {
+    Ready(Arc<EmbeddedPackage>, Box<PackageManifest>),
+    NoPackage,
+    Failed(String),
+}
+
 enum Msg {
     Status(&'static str),
     Done(Box<RestoreResult>),
@@ -114,6 +119,9 @@ enum Msg {
 struct InstallerApp {
     theme: Theme,
     screen: Screen,
+    /// The package, checked and held open. Every read goes through this.
+    package: Option<Arc<EmbeddedPackage>>,
+    load_receiver: Option<Receiver<Loaded>>,
 
     title: String,
     publisher: String,
@@ -137,16 +145,12 @@ struct InstallerApp {
 }
 
 impl InstallerApp {
-    fn new() -> Self {
-        let mut app = Self::blank();
-        app.load();
-        app
-    }
-
     fn blank() -> Self {
         Self {
             theme: Theme::new(ThemeMode::Dark),
-            screen: Screen::NoPackage,
+            screen: Screen::Checking,
+            package: None,
+            load_receiver: None,
             title: String::new(),
             publisher: String::new(),
             version: String::new(),
@@ -167,31 +171,53 @@ impl InstallerApp {
         }
     }
 
-    fn window_title(&self) -> String {
-        if self.title.is_empty() {
-            WINDOW_TITLE.to_owned()
-        } else {
-            format!("Install {}", self.title)
+    /// Check the package behind the window, which stays responsive however large it is.
+    fn start_load(&mut self, ctx: &egui::Context) {
+        let (sender, receiver) = mpsc::channel();
+        self.load_receiver = Some(receiver);
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let _ = sender.send(load_package());
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_load(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.load_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(loaded) => {
+                self.load_receiver = None;
+                self.finish_load(loaded, ctx);
+            }
+            Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(BUSY_REPAINT_INTERVAL),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.load_receiver = None;
+                self.screen = Screen::Failed("The check of the installer stopped.".to_owned());
+            }
         }
     }
 
-    fn load(&mut self) {
-        let exe = match std::env::current_exe() {
-            Ok(exe) => exe,
-            Err(error) => {
-                self.screen = Screen::Failed(format!("Could not locate the installer: {error}"));
-                return;
-            }
-        };
-        match read_embedded_manifest(&exe) {
-            Ok(Some(manifest)) => {
+    fn finish_load(&mut self, loaded: Loaded, ctx: &egui::Context) {
+        match loaded {
+            Loaded::Ready(package, manifest) => {
+                self.package = Some(package);
                 self.apply_manifest(&manifest);
                 self.screen = Screen::Ready;
+                theme::add_fallback_fonts(
+                    ctx,
+                    &system_root().join("Fonts"),
+                    [self.title.as_str(), self.publisher.as_str()],
+                );
+                self.theme.apply(ctx);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                    "Install {}",
+                    self.title
+                )));
             }
-            Ok(None) => self.screen = Screen::NoPackage,
-            Err(error) => {
-                self.screen = Screen::Failed(format!("Could not read the installer: {error}"));
-            }
+            Loaded::NoPackage => self.screen = Screen::NoPackage,
+            Loaded::Failed(reason) => self.screen = Screen::Failed(reason),
         }
     }
 
@@ -256,6 +282,11 @@ impl InstallerApp {
                 return;
             }
         };
+        let Some(package) = self.package.clone() else {
+            self.error = Some("This installer carries no package.".to_owned());
+            self.phase = Phase::Done;
+            return;
+        };
         let (sender, receiver) = mpsc::channel();
         self.receiver = Some(receiver);
         self.phase = Phase::Running;
@@ -264,20 +295,15 @@ impl InstallerApp {
         self.error = None;
         self.detail = "Unpacking…".to_owned();
         self.started = Some(Instant::now());
-        let target_root = PathBuf::from(self.target_root.trim());
-        let restore_user_data = self.show_user_data && self.restore_user_data;
-        let restore_license = self.show_license && self.restore_license;
+        let choices = RestoreChoices {
+            target_root: PathBuf::from(self.target_root.trim()),
+            apply,
+            restore_user_data: self.show_user_data && self.restore_user_data,
+            restore_license: self.show_license && self.restore_license,
+        };
         let ctx = ctx.clone();
         thread::spawn(move || {
-            let message = run_restore(
-                &exe,
-                target_root,
-                apply,
-                restore_user_data,
-                restore_license,
-                &sender,
-                &ctx,
-            );
+            let message = run_restore(&exe, &package, choices, &sender, &ctx);
             let _ = sender.send(message);
             ctx.request_repaint();
         });
@@ -317,18 +343,48 @@ impl InstallerApp {
     }
 }
 
+/// What the person chose in the window.
+struct RestoreChoices {
+    target_root: PathBuf,
+    apply: bool,
+    restore_user_data: bool,
+    restore_license: bool,
+}
+
+/// Hash-check the installer's package and read its manifest. The package stays held open
+/// from here on, so what Install unpacks later is what this checked.
+fn load_package() -> Loaded {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => return Loaded::Failed(format!("Could not locate the installer: {error}")),
+    };
+    let package = match EmbeddedPackage::open(&exe) {
+        Ok(Some(package)) => package,
+        Ok(None) => return Loaded::NoPackage,
+        Err(error) => return Loaded::Failed(format!("Could not read the installer: {error}")),
+    };
+    match read_embedded_manifest(&package) {
+        Ok(manifest) => Loaded::Ready(Arc::new(package), Box::new(manifest)),
+        Err(error) => Loaded::Failed(format!("Could not read the installer: {error}")),
+    }
+}
+
 /// Unpack the package only now, after the user clicked, so nothing sits on disk
 /// waiting to be tampered with while the window is idle, and restore it. The staging
 /// folder is removed when this returns.
 fn run_restore(
     exe: &Path,
-    target_root: PathBuf,
-    apply: bool,
-    restore_user_data: bool,
-    restore_license: bool,
+    package: &EmbeddedPackage,
+    choices: RestoreChoices,
     sender: &Sender<Msg>,
     ctx: &egui::Context,
 ) -> Msg {
+    let RestoreChoices {
+        target_root,
+        apply,
+        restore_user_data,
+        restore_license,
+    } = choices;
     // Remove extraction directories from previous or crashed runs first, so nothing
     // accumulates even if a prior window was killed before its own cleanup could run.
     crate::cleanup::sweep_stale_extractions(exe);
@@ -338,10 +394,8 @@ fn run_restore(
         Ok(staging) => staging,
         Err(error) => return Msg::Failed(format!("Could not create a staging folder: {error}")),
     };
-    match extract_embedded_self_archive(exe, staging.path()) {
-        Ok(true) => {}
-        Ok(false) => return Msg::Failed("This installer carries no package.".to_owned()),
-        Err(error) => return Msg::Failed(format!("Could not unpack the package: {error}")),
+    if let Err(error) = package.extract_to(staging.path()) {
+        return Msg::Failed(format!("Could not unpack the package: {error}"));
     }
 
     let _ = sender.send(Msg::Status(if apply {
@@ -373,6 +427,7 @@ impl eframe::App for InstallerApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_load(ctx);
         self.poll(ctx);
     }
 
@@ -444,6 +499,15 @@ impl InstallerApp {
 
     fn draw_body(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         match &self.screen {
+            Screen::Checking => {
+                ui.label(
+                    RichText::new("Checking the installer…")
+                        .size(13.5)
+                        .color(theme.text),
+                );
+                ui.add_space(SPACE_SM);
+                widgets::progress_bar(ui, theme, None);
+            }
             Screen::NoPackage => widgets::notice(
                 ui,
                 theme,
@@ -1026,6 +1090,26 @@ mod tests {
             "a preview checks no hashes, so it must not claim any"
         );
         preview(&mut harness, "preview-light");
+    }
+
+    #[test]
+    fn the_window_says_so_while_the_package_is_being_checked() {
+        let harness = harness_for(InstallerApp::blank());
+        assert!(
+            harness
+                .query_by_label_contains("Checking the installer")
+                .is_some()
+        );
+        assert!(harness.query_by_label("Install").is_none());
+    }
+
+    #[test]
+    fn a_damaged_installer_offers_nothing_to_install() {
+        let mut app = InstallerApp::blank();
+        app.screen = Screen::Failed("this installer is damaged".to_owned());
+        let harness = harness_for(app);
+        assert!(harness.query_by_label_contains("damaged").is_some());
+        assert!(harness.query_by_label("Install").is_none());
     }
 
     #[test]

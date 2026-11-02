@@ -153,6 +153,7 @@ fn detect_license_files(context: &LicenseScanContext<'_>, artifacts: &mut Vec<Li
             package_relative_path: None,
             size_bytes: file.size_bytes,
             hash_sha256,
+            store_files: Vec::new(),
         });
     }
 }
@@ -244,6 +245,7 @@ fn detect_framework_stores(
                 package_relative_path: None,
                 size_bytes: None,
                 hash_sha256: None,
+                store_files: Vec::new(),
             });
         }
     }
@@ -273,6 +275,7 @@ fn detect_license_env_vars(artifacts: &mut Vec<LicenseArtifact>) {
             package_relative_path: None,
             size_bytes: None,
             hash_sha256: None,
+            store_files: Vec::new(),
         });
     }
 }
@@ -542,6 +545,7 @@ fn registry_artifact(
         package_relative_path: None,
         size_bytes: None,
         hash_sha256: None,
+        store_files: Vec::new(),
     }
 }
 

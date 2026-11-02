@@ -11,8 +11,8 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use winappmigrator_core::{
-    RestoreOptions, Result, VerificationOptions, WinAppMigratorError,
-    extract_embedded_self_archive, has_embedded_self_archive, restore_package, verify_package,
+    EmbeddedPackage, RestoreOptions, Result, VerificationOptions, WinAppMigratorError,
+    has_embedded_self_archive, restore_package, verify_package,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -95,6 +95,13 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
         return Ok(EXIT_SUCCESS);
     };
 
+    // Checked before anything is parsed, and held open so it cannot be swapped afterward.
+    let Some(package) = EmbeddedPackage::open(executable)? else {
+        return Err(WinAppMigratorError::InvalidInput(
+            "installer does not contain an embedded package".to_owned(),
+        ));
+    };
+
     // Remove extraction directories from previous or crashed runs first.
     crate::cleanup::sweep_stale_extractions(executable);
     // Stage the extracted package on the install destination's drive (falling
@@ -102,12 +109,7 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     // package never fails to extract for lack of space on the system drive.
     let temp_dir = crate::cleanup::create_staging_dir(Some(&target_root), executable)
         .map_err(|source| WinAppMigratorError::io("staging extraction directory", source))?;
-    let extracted = extract_embedded_self_archive(executable, temp_dir.path())?;
-    if !extracted {
-        return Err(WinAppMigratorError::InvalidInput(
-            "installer does not contain an embedded package".to_owned(),
-        ));
-    }
+    package.extract_to(temp_dir.path())?;
 
     let applied = cli.apply;
     let restore_license = !cli.no_restore_license;

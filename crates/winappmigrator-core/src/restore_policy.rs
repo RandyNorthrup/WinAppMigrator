@@ -9,9 +9,13 @@
 //! The rules are written to let a real app's own items through: a service or Run key that
 //! belongs to the app must keep working.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::path_utils::{path_is_strictly_inside, path_is_within};
+use crate::errors::Result;
+use crate::file_discovery::{restore_destination, safe_relative_path};
+use crate::models::DriverEntry;
+use crate::path_rewrite::RestoreMap;
+use crate::path_utils::{path_is_strictly_inside, path_is_within, sanitize_filename};
 use crate::service_scan::parse_image_path;
 
 /// The longest service name the Service Control Manager accepts.
@@ -152,6 +156,25 @@ pub fn existing_service_refusal(
             current.path.display()
         )
     })
+}
+
+/// Where a bundled driver image goes, always inside the install location. The driver image
+/// is not a copyable file in the inventory, so its original path is re-anchored, with
+/// `<target_root>\drivers\<leaf>` for one that was not under the install location.
+pub fn driver_destination(driver: &DriverEntry, map: &RestoreMap) -> Result<PathBuf> {
+    let target_root = map.target_root();
+    let rewritten = PathBuf::from(map.rewrite(&driver.image_path.to_string_lossy()));
+    if path_is_strictly_inside(&rewritten, target_root) {
+        return Ok(rewritten);
+    }
+    let leaf = driver.image_path.file_name().map_or_else(
+        || format!("{}.sys", sanitize_filename(&driver.service_name)),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    restore_destination(
+        target_root,
+        &Path::new("drivers").join(safe_relative_path(Path::new(&leaf))),
+    )
 }
 
 /// True when the `ImagePath` Windows reports runs exactly this binary with these arguments.

@@ -367,8 +367,9 @@ rules, fonts, certificates, ODBC sources, and event log sources.
 - `ScanOptions.include_program_data` / `PackageOptions.include_program_data` — controls
   machine-wide `ProgramData` separately from per-user data. The app drives it from the
   same option.
-- `ScanOptions.include_hashes` — SHA-256 of copyable files. Packaging always sets it. It
-  dominates scan time for large apps.
+- `ScanOptions.include_hashes` — SHA-256 of copyable files during a scan. It dominates scan
+  time for large apps. Packaging leaves it off and hashes each file as it is staged, so the
+  hash describes what is in the package, including files read in backup mode.
 
 ## Runtime prerequisites
 

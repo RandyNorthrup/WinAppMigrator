@@ -124,9 +124,10 @@ that fails. It does nothing without elevation, where there is no boundary to pro
 ## The produced installer (`winappmigrator-installer`)
 
 Each installer is a standalone GUI self-extractor (its own crate, always embedding a
-`requireAdministrator` manifest). On launch it reads only the manifest, straight out of
-the package inside its own executable, so its window opens at once however large the
-package is. It shows the app, an editable **install location** (defaulted to the
+`requireAdministrator` manifest). Its window opens at once however large the package is,
+showing a check while `EmbeddedPackage::open` hashes the whole package on a worker thread.
+That also holds the installer's own file open, so it cannot be changed or swapped while
+the window is up. Then it reads only the manifest, straight out of the package, and shows the app, an editable **install location** (defaulted to the
 original path), **User data** / **License** options — shown only when `PackageManifest.included_user_data`
 or `included_program_data`, and `included_license_data`, are set — and a
 **Dependencies** list.

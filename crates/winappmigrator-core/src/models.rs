@@ -691,6 +691,19 @@ pub struct LicenseArtifact {
     pub package_relative_path: Option<PathBuf>,
     pub size_bytes: Option<u64>,
     pub hash_sha256: Option<String>,
+    /// For a framework-store folder, each file copied from it. A folder has no hash of
+    /// its own, so these are what gets checked.
+    #[serde(default)]
+    pub store_files: Vec<LicenseStoreFile>,
+}
+
+/// One file of a license store folder.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LicenseStoreFile {
+    /// Relative to the store's folder.
+    pub relative_path: PathBuf,
+    pub size_bytes: u64,
+    pub hash_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

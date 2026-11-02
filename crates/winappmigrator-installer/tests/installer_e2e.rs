@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use winappmigrator_core::{
-    AppSelection, InstallerStub, PackageArchiveFormat, PackageOptions, create_package,
+    AppSelection, EmbeddedPackage, InstallerStub, PackageArchiveFormat, PackageOptions,
+    create_package, read_embedded_manifest,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -80,6 +81,25 @@ fn build_installer_then_reinstall_and_verify_on_clean_target() -> TestResult {
         .self_extracting_archive_path
         .ok_or("no self-extracting installer was produced")?;
     assert!(installer.is_file(), "installer not written");
+
+    // The real stub has nothing appended to it, so it reads as a bare stub and not as a
+    // damaged installer, and what was built passes the footer's hash check.
+    assert!(EmbeddedPackage::open(&stub)?.is_none());
+    let package = EmbeddedPackage::open(&installer)?.ok_or("the installer has no package")?;
+    let manifest = read_embedded_manifest(&package)?;
+    assert!(!manifest.file_inventory.is_empty());
+    for file in manifest
+        .file_inventory
+        .iter()
+        .filter(|file| file.should_copy)
+    {
+        assert!(
+            file.hash_sha256.is_some(),
+            "{} has no hash",
+            file.original_path.display()
+        );
+    }
+    drop(package);
 
     // 2. Reinstall on a clean target, headlessly. The installer reinstalls,
     //    hash-verifies both its package and the reinstalled files, and exits

@@ -1,7 +1,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Component, Path};
 
+use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -12,14 +14,27 @@ use crate::models::InstallerStub;
 use crate::progress::{BuildMonitor, BuildStep};
 
 const ZIP_BUFFER_SIZE: usize = 1024 * 1024;
-const SFX_MAGIC: &[u8] = b"WINAPPMIGRATOR_SFX_V1";
+const SFX_MAGIC: &[u8] = b"WINAPPMIGRATOR_SFX_V2";
+const SFX_HASH_BYTES: usize = 32;
 const SFX_LENGTH_BYTES: usize = 8;
-const SFX_FOOTER_LEN: u64 = (SFX_LENGTH_BYTES + SFX_MAGIC.len()) as u64;
+/// After the package: its SHA-256, its length, then the magic. The stub and its package
+/// always ship together, so the layout can change freely between versions.
+const SFX_FOOTER_LEN: u64 = (SFX_HASH_BYTES + SFX_LENGTH_BYTES + SFX_MAGIC.len()) as u64;
+/// Lets other programs read an installer while it is in use, but not change, rename, or
+/// delete it.
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 
 const PE_HEADER_OFFSET_FIELD: u64 = 0x3C;
 const PE_SIGNATURE: &[u8] = b"PE\0\0";
 const PE_SIGNATURE_LEN: u64 = 4;
 const COFF_HEADER_LEN: u64 = 20;
+/// Offsets from the PE signature.
+const PE_SECTION_COUNT_FIELD: u64 = 6;
+const PE_OPTIONAL_HEADER_SIZE_FIELD: u64 = 20;
+const SECTION_HEADER_LEN: u64 = 40;
+const SECTION_RAW_SIZE_FIELD: u64 = 16;
+const SECTION_RAW_POINTER_FIELD: u64 = 20;
 const PE32_MAGIC: u16 = 0x10B;
 const PE32_PLUS_MAGIC: u16 = 0x20B;
 /// Offset of the security data directory from the start of the optional header.
@@ -181,45 +196,117 @@ fn write_installer(stub: &InstallerStub, archive_path: &Path, output_path: &Path
                 .map_err(|error| WinAppMigratorError::io(output_path, error))?;
         }
     }
-    let archive_len = fs::metadata(archive_path)
-        .map_err(|error| WinAppMigratorError::io(archive_path, error))?
-        .len();
     let mut output = OpenOptions::new()
         .append(true)
         .open(output_path)
         .map_err(|error| WinAppMigratorError::io(output_path, error))?;
     let mut archive =
         File::open(archive_path).map_err(|error| WinAppMigratorError::io(archive_path, error))?;
-    io::copy(&mut archive, &mut output)
-        .map_err(|error| WinAppMigratorError::io(output_path, error))?;
-    output
-        .write_all(&archive_len.to_le_bytes())
-        .map_err(|error| WinAppMigratorError::io(output_path, error))?;
-    output
-        .write_all(SFX_MAGIC)
-        .map_err(|error| WinAppMigratorError::io(output_path, error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    let mut archive_len = 0_u64;
+    loop {
+        let read = archive
+            .read(&mut buffer)
+            .map_err(|error| WinAppMigratorError::io(archive_path, error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        output
+            .write_all(&buffer[..read])
+            .map_err(|error| WinAppMigratorError::io(output_path, error))?;
+        archive_len += read as u64;
+    }
+    for part in [
+        hasher.finalize().as_slice(),
+        &archive_len.to_le_bytes(),
+        SFX_MAGIC,
+    ] {
+        output
+            .write_all(part)
+            .map_err(|error| WinAppMigratorError::io(output_path, error))?;
+    }
     Ok(())
+}
+
+/// The package inside an installer: found, checked against the hash in its footer before
+/// any of it is parsed, and held open. While this exists no other process can change,
+/// rename, or replace the installer file, so what is read later is what was checked. An
+/// installer usually sits in a folder anyone can write to, and it runs elevated.
+///
+/// The hash catches a truncated copy or an edited manifest. It does not prove who made
+/// the package, since whoever edits one can also update its footer. Only signing the
+/// finished installer does that.
+#[derive(Debug)]
+pub struct EmbeddedPackage {
+    file: File,
+    location: ArchiveLocation,
+}
+
+impl EmbeddedPackage {
+    /// Open an installer's package. `Ok(None)` for a bare stub, which carries none. This
+    /// reads the whole package, so a large installer takes a moment.
+    pub fn open(sfx_executable: &Path) -> Result<Option<Self>> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(sfx_executable)
+            .map_err(|error| WinAppMigratorError::io(sfx_executable, error))?;
+        let Some(location) = locate_embedded_archive(&mut file)
+            .map_err(|error| WinAppMigratorError::io(sfx_executable, error))??
+        else {
+            return Ok(None);
+        };
+        check_package_hash(&mut file, location)
+            .map_err(|error| WinAppMigratorError::io(sfx_executable, error))??;
+        Ok(Some(Self { file, location }))
+    }
+
+    fn section(&self) -> Result<ArchiveSection> {
+        let file = self
+            .file
+            .try_clone()
+            .map_err(|error| WinAppMigratorError::io("installer package", error))?;
+        ArchiveSection::new(file, self.location)
+            .map_err(|error| WinAppMigratorError::io("installer package", error))
+    }
+
+    /// Unpack the package into `destination_root`.
+    pub fn extract_to(&self, destination_root: &Path) -> Result<()> {
+        fs::create_dir_all(destination_root)
+            .map_err(|error| WinAppMigratorError::io(destination_root, error))?;
+        extract_zip_reader(BufReader::new(self.section()?), destination_root)
+    }
+
+    /// Read one file without extracting the rest.
+    pub fn read_file(&self, name: &str) -> Result<Vec<u8>> {
+        let mut archive = ZipArchive::new(BufReader::new(self.section()?))
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+        let entry = archive
+            .by_name(name)
+            .map_err(|error| WinAppMigratorError::Archive(format!("{name}: {error}")))?;
+        let mut bytes = Vec::new();
+        entry
+            .take(MAX_EMBEDDED_FILE_BYTES)
+            .read_to_end(&mut bytes)
+            .map_err(|error| WinAppMigratorError::Archive(format!("{name}: {error}")))?;
+        Ok(bytes)
+    }
 }
 
 pub fn extract_embedded_self_archive(
     sfx_executable: &Path,
     destination_root: &Path,
 ) -> Result<bool> {
-    let mut file = File::open(sfx_executable)
-        .map_err(|error| WinAppMigratorError::io(sfx_executable, error))?;
-    let Some(location) = locate_embedded_archive(&mut file)
-        .map_err(|error| WinAppMigratorError::io(sfx_executable, error))??
-    else {
+    let Some(package) = EmbeddedPackage::open(sfx_executable)? else {
         return Ok(false);
     };
-    fs::create_dir_all(destination_root)
-        .map_err(|error| WinAppMigratorError::io(destination_root, error))?;
-    let section = ArchiveSection::new(file, location)
-        .map_err(|error| WinAppMigratorError::io(sfx_executable, error))?;
-    extract_zip_reader(BufReader::new(section), destination_root)?;
+    package.extract_to(destination_root)?;
     Ok(true)
 }
 
+/// Whether an installer carries a package, without reading all of it.
 pub fn has_embedded_self_archive(sfx_executable: &Path) -> Result<bool> {
     let mut file = File::open(sfx_executable)
         .map_err(|error| WinAppMigratorError::io(sfx_executable, error))?;
@@ -228,29 +315,50 @@ pub fn has_embedded_self_archive(sfx_executable: &Path) -> Result<bool> {
     Ok(location.is_some())
 }
 
-/// Read one file out of an installer's package without extracting the rest, so
-/// the installer can show its window before unpacking a large package.
-pub fn read_embedded_file(sfx_executable: &Path, name: &str) -> Result<Option<Vec<u8>>> {
-    let mut file = File::open(sfx_executable)
-        .map_err(|error| WinAppMigratorError::io(sfx_executable, error))?;
-    let Some(location) = locate_embedded_archive(&mut file)
-        .map_err(|error| WinAppMigratorError::io(sfx_executable, error))??
-    else {
-        return Ok(None);
-    };
-    let section = ArchiveSection::new(file, location)
-        .map_err(|error| WinAppMigratorError::io(sfx_executable, error))?;
-    let mut archive = ZipArchive::new(BufReader::new(section))
-        .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
-    let entry = archive
-        .by_name(name)
-        .map_err(|error| WinAppMigratorError::Archive(format!("{name}: {error}")))?;
-    let mut bytes = Vec::new();
-    entry
-        .take(MAX_EMBEDDED_FILE_BYTES)
-        .read_to_end(&mut bytes)
-        .map_err(|error| WinAppMigratorError::Archive(format!("{name}: {error}")))?;
-    Ok(Some(bytes))
+/// Whether a file carries an Authenticode signature at all, valid or not, which can be
+/// answered at once. Checking the signature itself takes as long as hashing the file.
+pub fn has_certificate_table(path: &Path) -> Result<bool> {
+    let mut file = File::open(path).map_err(|error| WinAppMigratorError::io(path, error))?;
+    let len = file
+        .metadata()
+        .map_err(|error| WinAppMigratorError::io(path, error))?
+        .len();
+    let table =
+        certificate_table(&mut file, len).map_err(|error| WinAppMigratorError::io(path, error))?;
+    Ok(table.is_some())
+}
+
+/// Compare the package against the SHA-256 in its footer.
+fn check_package_hash<F: Read + Seek>(
+    file: &mut F,
+    location: ArchiveLocation,
+) -> io::Result<Result<()>> {
+    file.seek(SeekFrom::Start(location.start))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    let mut remaining = location.len;
+    while remaining > 0 {
+        let want = usize::try_from(remaining).map_or(buffer.len(), |left| left.min(buffer.len()));
+        let read = file.read(&mut buffer[..want])?;
+        if read == 0 {
+            return Ok(Err(damaged_installer()));
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    if hasher.finalize().as_slice() == location.sha256 {
+        Ok(Ok(()))
+    } else {
+        Ok(Err(damaged_installer()))
+    }
+}
+
+fn damaged_installer() -> WinAppMigratorError {
+    WinAppMigratorError::Archive(
+        "this installer is damaged or was changed after it was built, so nothing was read from \
+         its package. Copy it again from where it was built."
+            .to_owned(),
+    )
 }
 
 /// A signed stub must never become an installer. Windows does not hash its own
@@ -313,6 +421,7 @@ fn refuse_oversized_installer(size: u64) -> Result<()> {
 struct ArchiveLocation {
     start: u64,
     len: u64,
+    sha256: [u8; SFX_HASH_BYTES],
 }
 
 /// Find the embedded package. A signed installer keeps its package directly
@@ -342,22 +451,74 @@ fn locate_embedded_archive<F: Read + Seek>(
     file.seek(SeekFrom::Start(footer_start))?;
     let mut footer = [0_u8; SFX_FOOTER_LEN as usize];
     file.read_exact(&mut footer)?;
-    if &footer[SFX_LENGTH_BYTES..] != SFX_MAGIC {
+    let (sha256, rest) = footer.split_at(SFX_HASH_BYTES);
+    let (length_bytes, magic) = rest.split_at(SFX_LENGTH_BYTES);
+    if magic != SFX_MAGIC {
+        // Data past the program with no footer means a package whose end was cut off, a
+        // common result of an interrupted copy. Calling that a bare stub would be wrong.
+        if pe_image_end(file, file_len)?.is_some_and(|image_end| end > image_end) {
+            return Ok(Err(damaged_installer()));
+        }
         return Ok(Ok(None));
     }
 
-    let mut length_bytes = [0_u8; SFX_LENGTH_BYTES];
-    length_bytes.copy_from_slice(&footer[..SFX_LENGTH_BYTES]);
-    let len = u64::from_le_bytes(length_bytes);
+    let mut len = [0_u8; SFX_LENGTH_BYTES];
+    len.copy_from_slice(length_bytes);
+    let len = u64::from_le_bytes(len);
     if len > footer_start {
         return Ok(Err(WinAppMigratorError::Archive(
             "self-extracting archive footer length is invalid".to_owned(),
         )));
     }
+    let mut hash = [0_u8; SFX_HASH_BYTES];
+    hash.copy_from_slice(sha256);
     Ok(Ok(Some(ArchiveLocation {
         start: footer_start - len,
         len,
+        sha256: hash,
     })))
+}
+
+/// The offset of a well-formed PE's signature.
+fn pe_header<F: Read + Seek>(file: &mut F, file_len: u64) -> io::Result<Option<u64>> {
+    let Some(pe_offset) = read_u32_at(file, file_len, PE_HEADER_OFFSET_FIELD)? else {
+        return Ok(None);
+    };
+    let pe_offset = u64::from(pe_offset);
+    if pe_offset.saturating_add(PE_SIGNATURE_LEN) > file_len {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(pe_offset))?;
+    let mut signature = [0_u8; PE_SIGNATURE_LEN as usize];
+    file.read_exact(&mut signature)?;
+    Ok((signature == PE_SIGNATURE).then_some(pe_offset))
+}
+
+/// Where a PE's own sections stop, which is where anything appended to it starts.
+fn pe_image_end<F: Read + Seek>(file: &mut F, file_len: u64) -> io::Result<Option<u64>> {
+    let Some(pe_offset) = pe_header(file, file_len)? else {
+        return Ok(None);
+    };
+    let (Some(section_count), Some(optional_header_size)) = (
+        read_u16_at(file, file_len, pe_offset + PE_SECTION_COUNT_FIELD)?,
+        read_u16_at(file, file_len, pe_offset + PE_OPTIONAL_HEADER_SIZE_FIELD)?,
+    ) else {
+        return Ok(None);
+    };
+    let sections = pe_offset + PE_SIGNATURE_LEN + COFF_HEADER_LEN + u64::from(optional_header_size);
+    let mut image_end = None;
+    for index in 0..u64::from(section_count) {
+        let section = sections + index * SECTION_HEADER_LEN;
+        let (Some(size), Some(pointer)) = (
+            read_u32_at(file, file_len, section + SECTION_RAW_SIZE_FIELD)?,
+            read_u32_at(file, file_len, section + SECTION_RAW_POINTER_FIELD)?,
+        ) else {
+            return Ok(None);
+        };
+        let section_end = u64::from(pointer) + u64::from(size);
+        image_end = image_end.max(Some(section_end));
+    }
+    Ok(image_end)
 }
 
 /// An Authenticode certificate table.
@@ -373,19 +534,9 @@ fn certificate_table<F: Read + Seek>(
     file: &mut F,
     file_len: u64,
 ) -> io::Result<Option<CertificateTable>> {
-    let Some(pe_offset) = read_u32_at(file, file_len, PE_HEADER_OFFSET_FIELD)? else {
+    let Some(pe_offset) = pe_header(file, file_len)? else {
         return Ok(None);
     };
-    let pe_offset = u64::from(pe_offset);
-    if pe_offset.saturating_add(PE_SIGNATURE_LEN) > file_len {
-        return Ok(None);
-    }
-    file.seek(SeekFrom::Start(pe_offset))?;
-    let mut signature = [0_u8; PE_SIGNATURE_LEN as usize];
-    file.read_exact(&mut signature)?;
-    if signature != PE_SIGNATURE {
-        return Ok(None);
-    }
 
     let optional_header = pe_offset + PE_SIGNATURE_LEN + COFF_HEADER_LEN;
     let Some(magic) = read_u16_at(file, file_len, optional_header)? else {
@@ -632,8 +783,15 @@ mod tests {
         bytes
     }
 
+    fn sha256_of(archive: &[u8]) -> [u8; SFX_HASH_BYTES] {
+        let mut hash = [0_u8; SFX_HASH_BYTES];
+        hash.copy_from_slice(Sha256::digest(archive).as_slice());
+        hash
+    }
+
     fn footer_for(archive: &[u8]) -> Vec<u8> {
-        let mut footer = (archive.len() as u64).to_le_bytes().to_vec();
+        let mut footer = sha256_of(archive).to_vec();
+        footer.extend_from_slice(&(archive.len() as u64).to_le_bytes());
         footer.extend_from_slice(SFX_MAGIC);
         footer
     }
@@ -655,7 +813,8 @@ mod tests {
             locate(bytes)?,
             Some(ArchiveLocation {
                 start,
-                len: payload.len() as u64
+                len: payload.len() as u64,
+                sha256: sha256_of(payload),
             })
         );
         Ok(())
@@ -683,10 +842,86 @@ mod tests {
             locate(bytes)?,
             Some(ArchiveLocation {
                 start: image_len,
-                len: payload.len() as u64
+                len: payload.len() as u64,
+                sha256: sha256_of(payload),
             })
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_signed_installers_package_still_passes_its_hash_check() -> Result<()> {
+        let payload = b"package";
+        let image_len = fake_pe(None).len() as u64;
+        let mut tail = payload.to_vec();
+        tail.extend_from_slice(&footer_for(payload));
+        let padding = (8 - (image_len + tail.len() as u64) % 8) % 8;
+        tail.resize(tail.len() + padding as usize, 0);
+        let table = CertificateTable {
+            offset: image_len + tail.len() as u64,
+            size: 64,
+        };
+        let mut bytes = fake_pe(Some(table));
+        bytes.extend_from_slice(&tail);
+        bytes.resize(bytes.len() + table.size as usize, 0xAB);
+
+        let mut file = io::Cursor::new(bytes);
+        let location = locate_embedded_archive(&mut file)
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))??
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        check_package_hash(&mut file, location)
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))??;
+        Ok(())
+    }
+
+    #[test]
+    fn a_package_that_does_not_match_its_footer_is_refused() -> Result<()> {
+        let mut bytes = fake_pe(None);
+        bytes.extend_from_slice(b"edited!");
+        bytes.extend_from_slice(&footer_for(b"package"));
+
+        let mut file = io::Cursor::new(bytes);
+        let location = locate_embedded_archive(&mut file)
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))??
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        let checked = check_package_hash(&mut file, location)
+            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+        assert!(checked.is_err());
+        Ok(())
+    }
+
+    /// A minimal PE with one section, as long as `image_len`.
+    fn fake_pe_with_section(image_len: usize) -> Vec<u8> {
+        const PE_OFFSET: usize = 0x80;
+        const OPTIONAL_HEADER_SIZE: usize = 0xF0;
+        let mut bytes = fake_pe(None);
+        bytes.resize(image_len, 0);
+        bytes[PE_OFFSET + PE_SECTION_COUNT_FIELD as usize] = 1;
+        bytes[PE_OFFSET + PE_OPTIONAL_HEADER_SIZE_FIELD as usize] = OPTIONAL_HEADER_SIZE as u8;
+        let section =
+            PE_OFFSET + (PE_SIGNATURE_LEN + COFF_HEADER_LEN) as usize + OPTIONAL_HEADER_SIZE;
+        let raw_size = section + SECTION_RAW_SIZE_FIELD as usize;
+        bytes[raw_size..raw_size + 4].copy_from_slice(&((image_len - 0x400) as u32).to_le_bytes());
+        let raw_pointer = section + SECTION_RAW_POINTER_FIELD as usize;
+        bytes[raw_pointer..raw_pointer + 4].copy_from_slice(&0x400_u32.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_bare_stub_is_not_mistaken_for_a_damaged_installer() -> Result<()> {
+        assert_eq!(locate(fake_pe_with_section(0x800))?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_copy_with_its_end_cut_off_is_called_damaged_not_a_bare_stub() {
+        let payload = vec![7_u8; 4096];
+        let mut bytes = fake_pe_with_section(0x800);
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(&footer_for(&payload));
+        bytes.truncate(bytes.len() - 100);
+
+        assert!(locate(bytes).is_err());
     }
 
     #[test]
@@ -727,6 +962,7 @@ mod tests {
     #[test]
     fn footer_longer_than_the_file_is_refused() {
         let mut bytes = fake_pe(None);
+        bytes.extend_from_slice(&[0_u8; SFX_HASH_BYTES]);
         bytes.extend_from_slice(&u64::MAX.to_le_bytes());
         bytes.extend_from_slice(SFX_MAGIC);
 
@@ -785,11 +1021,11 @@ mod tests {
         assert!(has_embedded_self_archive(&installer_path)?);
         assert!(!has_embedded_self_archive(&stub_path)?);
         assert!(!installer_path.with_extension("partial").exists());
-        assert_eq!(
-            read_embedded_file(&installer_path, "manifest.json")?,
-            Some(b"{}".to_vec())
-        );
-        assert_eq!(read_embedded_file(&stub_path, "manifest.json")?, None);
+        let package = EmbeddedPackage::open(&installer_path)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        assert_eq!(package.read_file("manifest.json")?, b"{}");
+        drop(package);
+        assert!(EmbeddedPackage::open(&stub_path)?.is_none());
 
         let extract_root = root.join("extract");
         assert!(extract_embedded_self_archive(
@@ -800,6 +1036,103 @@ mod tests {
         assert!(extract_root.join("files").join("app.exe").is_file());
         assert!(!extract_root.join("embedded-package.zip").exists());
         fs::remove_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
+        Ok(())
+    }
+
+    /// Build an installer in `root`, returning its path.
+    fn installer_in(root: &Path) -> Result<PathBuf> {
+        let package_root = root.join("package");
+        fs::create_dir_all(&package_root)
+            .map_err(|error| WinAppMigratorError::io(&package_root, error))?;
+        fs::write(package_root.join("manifest.json"), "{\"name\":\"app\"}")
+            .map_err(|error| WinAppMigratorError::io(&package_root, error))?;
+        let archive_path = root.join("package.zip");
+        create_zip_archive(&package_root, &archive_path, &BuildMonitor::default())?;
+        let stub_path = root.join("stub.exe");
+        fs::write(&stub_path, fake_pe(None))
+            .map_err(|error| WinAppMigratorError::io(&stub_path, error))?;
+        let installer_path = root.join("installer.exe");
+        create_self_extracting_archive(
+            &InstallerStub::File(stub_path),
+            &archive_path,
+            &installer_path,
+        )?;
+        Ok(installer_path)
+    }
+
+    #[test]
+    fn an_edited_manifest_is_caught_before_it_is_read() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let installer = installer_in(root.path())?;
+        let mut bytes =
+            fs::read(&installer).map_err(|error| WinAppMigratorError::io(&installer, error))?;
+        // Stored compressed or not, this changes one byte of the package.
+        let middle = fake_pe(None).len() + 10;
+        bytes[middle] ^= 0xFF;
+        fs::write(&installer, bytes).map_err(|error| WinAppMigratorError::io(&installer, error))?;
+
+        let refused = EmbeddedPackage::open(&installer);
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::Archive(message)) if message.contains("damaged")),
+            "{refused:?}"
+        );
+        assert!(extract_embedded_self_archive(&installer, &root.path().join("out")).is_err());
+        assert!(!root.path().join("out").join("manifest.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_truncated_copy_is_caught_before_it_is_read() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let installer = installer_in(root.path())?;
+        let mut bytes =
+            fs::read(&installer).map_err(|error| WinAppMigratorError::io(&installer, error))?;
+        // Keep the footer but lose bytes before it, the case that still looks complete.
+        let footer = bytes.split_off(bytes.len() - SFX_FOOTER_LEN as usize);
+        bytes.truncate(bytes.len() - 20);
+        bytes.extend_from_slice(&footer);
+        fs::write(&installer, bytes).map_err(|error| WinAppMigratorError::io(&installer, error))?;
+
+        assert!(EmbeddedPackage::open(&installer).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn nothing_can_change_or_replace_an_installer_while_it_is_held_open() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let installer = installer_in(root.path())?;
+        let package = EmbeddedPackage::open(&installer)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+
+        assert!(OpenOptions::new().write(true).open(&installer).is_err());
+        assert!(fs::rename(&installer, root.path().join("moved.exe")).is_err());
+        assert!(fs::remove_file(&installer).is_err());
+        assert!(File::open(&installer).is_ok(), "others may still read it");
+        assert_eq!(package.read_file("manifest.json")?, b"{\"name\":\"app\"}");
+
+        drop(package);
+        assert!(OpenOptions::new().write(true).open(&installer).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn an_unsigned_file_has_no_certificate_table_and_a_signed_one_does() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let unsigned = root.path().join("unsigned.exe");
+        fs::write(&unsigned, fake_pe(None))
+            .map_err(|error| WinAppMigratorError::io(&unsigned, error))?;
+        assert!(!has_certificate_table(&unsigned)?);
+
+        let image_len = fake_pe(None).len() as u64;
+        let mut signed_bytes = fake_pe(Some(CertificateTable {
+            offset: image_len,
+            size: 64,
+        }));
+        signed_bytes.resize(signed_bytes.len() + 64, 0xAB);
+        let signed = root.path().join("signed.exe");
+        fs::write(&signed, signed_bytes)
+            .map_err(|error| WinAppMigratorError::io(&signed, error))?;
+        assert!(has_certificate_table(&signed)?);
         Ok(())
     }
 

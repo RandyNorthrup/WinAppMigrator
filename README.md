@@ -121,10 +121,9 @@ Please read these before relying on it, especially on a one-way trip from a fail
   and ODBC sources. Microsoft Store apps are not listed.
 - **Documents and Saved Games** restore under the install folder, not your user folders. AppData and
   ProgramData go to their real locations.
-- **Hash checks have limits.** Driver images and license stores are only checked for presence, and a file
-  that could not be read during the scan is checked by size only. A preview checks no hashes, and its
-  window lists the first 300 changes, with files first, so on a larger app the registry, service, and task
-  changes are not listed.
+- **Hash checks have limits.** They catch damage, and tampering by anyone who does not also update the
+  hashes. A preview checks only the installer's overall hash, not each file, and its window lists the first
+  300 changes, with files first, so on a larger app the registry, service, and task changes are not listed.
 - **Some licenses will not move.** Anything tied to the old machine may need reactivating.
 - **It is only for software you are licensed to move.** That part is up to you.
 

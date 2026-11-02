@@ -3,17 +3,18 @@ use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use winreg::enums::HKEY_LOCAL_MACHINE;
-use winreg::{RegKey, RegValue};
+use winreg::RegValue;
 
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{package_destination_path, user_data_real_destination};
+use crate::file_discovery::{
+    package_destination_path, safe_relative_path, user_data_real_destination,
+};
 use crate::hashing::sha256_file;
 use crate::models::{
-    EnvironmentVariableEntry, FileEntry, PackageManifest, RegistryEntry, RegistryValueKind,
-    ScheduledTaskEntry, ServiceEntry, ShortcutEntry, VERIFICATION_SCHEMA_VERSION,
-    VerificationCategory, VerificationItem, VerificationOptions, VerificationReport,
-    VerificationStatus, Warning, WarningSeverity,
+    DriverEntry, EnvironmentVariableEntry, FileEntry, LicenseStoreFile, PackageManifest,
+    RegistryEntry, RegistryValueKind, ScheduledTaskEntry, ServiceEntry, ShortcutEntry,
+    VERIFICATION_SCHEMA_VERSION, VerificationCategory, VerificationItem, VerificationOptions,
+    VerificationReport, VerificationStatus, Warning, WarningSeverity,
 };
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
@@ -24,7 +25,7 @@ use crate::registry_target::{
     registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
     service_object_name,
 };
-use crate::restore_policy::{ServiceAccount, image_path_matches, paths_equal};
+use crate::restore_policy::{ServiceAccount, driver_destination, image_path_matches, paths_equal};
 
 const VERIFICATION_REPORT_JSON: &str = "verification_report.json";
 const VERIFICATION_REPORT_MARKDOWN: &str = "verification_report.md";
@@ -51,6 +52,7 @@ pub(crate) fn verify_prepared_package(
     verify_package_files(package_root, manifest, &mut items, &mut errors);
     verify_packaged_license(package_root, manifest, &mut items, &mut errors);
     verify_packaged_prerequisites(package_root, manifest, &mut items, &mut errors);
+    verify_packaged_drivers(package_root, manifest, &mut items, &mut errors);
 
     let restore_valid = if let Some(target_root) = options.target_root.as_ref() {
         verify_restored_target(
@@ -235,7 +237,7 @@ fn verify_restored_target(
         errors,
     );
     verify_services(&map, &manifest.services_detected, items, warnings, errors);
-    verify_drivers(manifest, items, warnings, errors);
+    verify_drivers(&map, manifest, items, warnings, errors);
     verify_scheduled_tasks(
         &manifest.scheduled_tasks_detected,
         &map,
@@ -329,16 +331,25 @@ fn verify_hash(
             Some(path.display().to_string()),
         ));
     }
-    if let Some(expected_hash) = expected_hash {
-        let actual_hash = sha256_file(path)?;
-        if !actual_hash.eq_ignore_ascii_case(expected_hash) {
-            return Ok(failed_item(
-                category,
-                name,
-                "SHA-256 hash mismatch.",
-                Some(path.display().to_string()),
-            ));
-        }
+    // A missing hash is a failure, not a pass. Every copied file gets one when it is
+    // packaged, so there is nothing else to check it by, and saying it passed would be
+    // claiming a check that never happened.
+    let Some(expected_hash) = expected_hash else {
+        return Ok(failed_item(
+            category,
+            name,
+            "The manifest records no hash for this file, so it cannot be checked.",
+            Some(path.display().to_string()),
+        ));
+    };
+    let actual_hash = sha256_file(path)?;
+    if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+        return Ok(failed_item(
+            category,
+            name,
+            "SHA-256 hash mismatch.",
+            Some(path.display().to_string()),
+        ));
     }
     Ok(passed_item(
         category,
@@ -366,8 +377,8 @@ fn verify_packaged_license(
         let Ok(packaged) = package_destination_path(package_root, relative) else {
             continue;
         };
-        let item = if artifact.hash_sha256.is_some() {
-            if packaged.is_file() {
+        if artifact.store_files.is_empty() {
+            let item = if packaged.is_file() {
                 verify_hash(
                     VerificationCategory::PackageFile,
                     relative.display().to_string(),
@@ -390,33 +401,60 @@ fn verify_packaged_license(
                     "Packaged license payload is missing.",
                     Some(packaged.display().to_string()),
                 )
-            }
-        } else if packaged.is_dir() {
-            // Framework-store directory artifact: confirm the store was bundled.
-            passed_item(
-                VerificationCategory::PackageFile,
-                relative.display().to_string(),
-                "License store payload is present in the package.",
-                Some(packaged.display().to_string()),
-            )
-        } else {
-            failed_item(
-                VerificationCategory::PackageFile,
-                relative.display().to_string(),
-                "Packaged license store is missing.",
-                Some(packaged.display().to_string()),
-            )
-        };
-        if item.status == VerificationStatus::Failed {
-            errors.push(Warning::new(
-                "verification_license_payload_failed",
-                WarningSeverity::Error,
-                item.message.clone(),
-                item.source.clone(),
-            ));
+            };
+            push_license_payload_item(item, items, errors);
+            continue;
         }
-        items.push(item);
+        for file in &artifact.store_files {
+            let name = relative.join(&file.relative_path).display().to_string();
+            let item = match store_file_path(&packaged, file) {
+                Ok(path) if path.is_file() => verify_hash(
+                    VerificationCategory::PackageFile,
+                    name.clone(),
+                    &path,
+                    Some(file.size_bytes),
+                    Some(&file.hash_sha256),
+                )
+                .unwrap_or_else(|error| {
+                    failed_item(
+                        VerificationCategory::PackageFile,
+                        name,
+                        format!("License store verification failed: {error}"),
+                        None,
+                    )
+                }),
+                Ok(path) => failed_item(
+                    VerificationCategory::PackageFile,
+                    name,
+                    "Packaged license store file is missing.",
+                    Some(path.display().to_string()),
+                ),
+                Err(error) => failed_item(
+                    VerificationCategory::PackageFile,
+                    name,
+                    format!("Packaged license store path is invalid: {error}"),
+                    None,
+                ),
+            };
+            push_license_payload_item(item, items, errors);
+        }
     }
+}
+
+fn push_license_payload_item(
+    item: VerificationItem,
+    items: &mut Vec<VerificationItem>,
+    errors: &mut Vec<Warning>,
+) {
+    if item.status == VerificationStatus::Failed {
+        errors.push(Warning::new(
+            "verification_license_payload_failed",
+            WarningSeverity::Error,
+            item.message.clone(),
+            item.source.clone(),
+        ));
+    }
+    items.push(item);
 }
 
 /// Verify the bundled prerequisite installer payloads (hash). Counts toward
@@ -464,6 +502,59 @@ fn verify_packaged_prerequisites(
         if item.status == VerificationStatus::Failed {
             errors.push(Warning::new(
                 "verification_prerequisite_payload_failed",
+                WarningSeverity::Error,
+                item.message.clone(),
+                item.source.clone(),
+            ));
+        }
+        items.push(item);
+    }
+}
+
+/// Verify the driver images in the package (hash). A driver with no hash fails here, so
+/// it stops the install before anything is written. Counts toward `package_valid`.
+fn verify_packaged_drivers(
+    package_root: &Path,
+    manifest: &PackageManifest,
+    items: &mut Vec<VerificationItem>,
+    errors: &mut Vec<Warning>,
+) {
+    for driver in &manifest.drivers_detected {
+        let Some(relative) = driver.package_relative_path.as_ref() else {
+            continue;
+        };
+        let item = match package_destination_path(package_root, relative) {
+            Ok(packaged) if packaged.is_file() => verify_hash(
+                VerificationCategory::PackageFile,
+                relative.display().to_string(),
+                &packaged,
+                None,
+                driver.hash_sha256.as_deref(),
+            )
+            .unwrap_or_else(|error| {
+                failed_item(
+                    VerificationCategory::PackageFile,
+                    relative.display().to_string(),
+                    format!("Driver image verification failed: {error}"),
+                    Some(packaged.display().to_string()),
+                )
+            }),
+            Ok(packaged) => failed_item(
+                VerificationCategory::PackageFile,
+                relative.display().to_string(),
+                "Bundled driver image is missing.",
+                Some(packaged.display().to_string()),
+            ),
+            Err(error) => failed_item(
+                VerificationCategory::PackageFile,
+                relative.display().to_string(),
+                format!("Bundled driver path is invalid: {error}"),
+                None,
+            ),
+        };
+        if item.status == VerificationStatus::Failed {
+            errors.push(Warning::new(
+                "verification_driver_image_failed",
                 WarningSeverity::Error,
                 item.message.clone(),
                 item.source.clone(),
@@ -533,8 +624,8 @@ fn verify_license_restored(
         };
         let destination = license_destination(original, map, restore_user_data)?;
         let name = original.display().to_string();
-        let item = if artifact.hash_sha256.is_some() {
-            if destination.is_file() {
+        if artifact.store_files.is_empty() {
+            let item = if destination.is_file() {
                 verify_hash(
                     VerificationCategory::License,
                     name,
@@ -549,33 +640,54 @@ fn verify_license_restored(
                     "Restored license file is missing.",
                     Some(destination.display().to_string()),
                 )
-            }
-        } else if destination.is_dir() {
-            passed_item(
-                VerificationCategory::License,
-                name,
-                "Restored license store directory is present.",
-                Some(destination.display().to_string()),
-            )
-        } else {
-            failed_item(
-                VerificationCategory::License,
-                name,
-                "Restored license store is missing.",
-                Some(destination.display().to_string()),
-            )
-        };
-        if item.status == VerificationStatus::Failed {
-            errors.push(Warning::new(
-                "verification_license_failed",
-                WarningSeverity::Error,
-                item.message.clone(),
-                item.source.clone(),
-            ));
+            };
+            push_license_item(item, items, errors);
+            continue;
         }
-        items.push(item);
+        for file in &artifact.store_files {
+            let path = store_file_path(&destination, file)?;
+            let name = path.display().to_string();
+            let item = if path.is_file() {
+                verify_hash(
+                    VerificationCategory::License,
+                    name,
+                    &path,
+                    Some(file.size_bytes),
+                    Some(&file.hash_sha256),
+                )?
+            } else {
+                failed_item(
+                    VerificationCategory::License,
+                    name,
+                    "Restored license store file is missing.",
+                    Some(path.display().to_string()),
+                )
+            };
+            push_license_item(item, items, errors);
+        }
     }
     Ok(())
+}
+
+fn push_license_item(
+    item: VerificationItem,
+    items: &mut Vec<VerificationItem>,
+    errors: &mut Vec<Warning>,
+) {
+    if item.status == VerificationStatus::Failed {
+        errors.push(Warning::new(
+            "verification_license_failed",
+            WarningSeverity::Error,
+            item.message.clone(),
+            item.source.clone(),
+        ));
+    }
+    items.push(item);
+}
+
+/// A license store file under a store folder, by a path the manifest supplied.
+fn store_file_path(store: &Path, file: &LicenseStoreFile) -> Result<PathBuf> {
+    package_destination_path(store, &safe_relative_path(&file.relative_path))
 }
 
 fn license_destination(
@@ -815,6 +927,7 @@ fn service_account_matches(service: &ServiceEntry) -> bool {
 }
 
 fn verify_drivers(
+    map: &RestoreMap,
     manifest: &PackageManifest,
     items: &mut Vec<VerificationItem>,
     warnings: &mut Vec<Warning>,
@@ -822,33 +935,7 @@ fn verify_drivers(
 ) {
     let mut manual_pending = false;
     for driver in &manifest.drivers_detected {
-        if driver.package_relative_path.is_some() {
-            // Bundled, application-owned driver: confirm the service is registered.
-            let item = if driver_service_registered(&driver.service_name) {
-                passed_item(
-                    VerificationCategory::Driver,
-                    driver.service_name.clone(),
-                    "Driver service is registered on the target.",
-                    Some(driver.image_path.display().to_string()),
-                )
-            } else {
-                failed_item(
-                    VerificationCategory::Driver,
-                    driver.service_name.clone(),
-                    "Bundled driver service is not registered after restore.",
-                    Some(driver.image_path.display().to_string()),
-                )
-            };
-            if item.status == VerificationStatus::Failed {
-                errors.push(Warning::new(
-                    "verification_driver_failed",
-                    WarningSeverity::Error,
-                    item.message.clone(),
-                    item.source.clone(),
-                ));
-            }
-            items.push(item);
-        } else {
+        if driver.package_relative_path.is_none() {
             manual_pending = true;
             items.push(VerificationItem {
                 category: VerificationCategory::Driver,
@@ -857,7 +944,18 @@ fn verify_drivers(
                 message: driver.restore_instructions.clone(),
                 source: Some(driver.image_path.display().to_string()),
             });
+            continue;
         }
+        let item = verify_one_driver(map, driver);
+        if item.status == VerificationStatus::Failed {
+            errors.push(Warning::new(
+                "verification_driver_failed",
+                WarningSeverity::Error,
+                item.message.clone(),
+                item.source.clone(),
+            ));
+        }
+        items.push(item);
     }
     if manual_pending {
         warnings.push(Warning::new(
@@ -869,10 +967,72 @@ fn verify_drivers(
     }
 }
 
-fn driver_service_registered(service_name: &str) -> bool {
-    RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey(format!(r"SYSTEM\CurrentControlSet\Services\{service_name}"))
-        .is_ok()
+/// A bundled driver is restored when its service points at its image and the image on
+/// disk is the one that was packaged.
+fn verify_one_driver(map: &RestoreMap, driver: &DriverEntry) -> VerificationItem {
+    let name = || driver.service_name.clone();
+    let destination = match driver_destination(driver, map) {
+        Ok(destination) => destination,
+        Err(error) => {
+            return failed_item(
+                VerificationCategory::Driver,
+                name(),
+                format!("Driver has no safe destination: {error}"),
+                Some(driver.image_path.display().to_string()),
+            );
+        }
+    };
+    let source = Some(destination.display().to_string());
+    match service_image_path(&driver.service_name) {
+        Ok(Some(actual)) if image_path_matches(&actual, &destination, None, system_root()) => {}
+        Ok(Some(actual)) => {
+            return failed_item(
+                VerificationCategory::Driver,
+                name(),
+                "Driver service does not point at the restored image.",
+                Some(actual),
+            );
+        }
+        Ok(None) => {
+            return failed_item(
+                VerificationCategory::Driver,
+                name(),
+                "Bundled driver service is not registered after restore.",
+                source,
+            );
+        }
+        Err(error) => {
+            return failed_item(
+                VerificationCategory::Driver,
+                name(),
+                format!("Driver service is unreadable: {error}"),
+                source,
+            );
+        }
+    }
+    if !destination.is_file() {
+        return failed_item(
+            VerificationCategory::Driver,
+            name(),
+            "Driver image is missing.",
+            source,
+        );
+    }
+    verify_hash(
+        VerificationCategory::Driver,
+        name(),
+        &destination,
+        None,
+        driver.hash_sha256.as_deref(),
+    )
+    .unwrap_or_else(|error| {
+        failed_item(
+            VerificationCategory::Driver,
+            name(),
+            format!("Driver image could not be checked: {error}"),
+            source,
+        )
+    })
 }
 
 fn verify_scheduled_tasks(
@@ -1222,6 +1382,30 @@ fn render_verification_markdown(report: &VerificationReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn checked(expected_hash: Option<&str>) -> std::io::Result<VerificationStatus> {
+        let folder = tempfile::tempdir()?;
+        let file = folder.path().join("a.bin");
+        fs::write(&file, b"x")?;
+        let item = verify_hash(
+            VerificationCategory::PackageFile,
+            "a.bin".to_owned(),
+            &file,
+            None,
+            expected_hash,
+        )
+        .map_err(std::io::Error::other)?;
+        Ok(item.status)
+    }
+
+    #[test]
+    fn a_missing_hash_is_a_failure_and_never_a_pass() -> std::io::Result<()> {
+        assert_eq!(checked(None)?, VerificationStatus::Failed);
+        assert_eq!(checked(Some("00"))?, VerificationStatus::Failed);
+        let right = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881";
+        assert_eq!(checked(Some(right))?, VerificationStatus::Passed);
+        Ok(())
+    }
 
     #[test]
     fn restore_destination_strips_files_root() -> Result<()> {

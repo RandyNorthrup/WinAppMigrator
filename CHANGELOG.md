@@ -4,6 +4,18 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **Hash checks no longer pass by default.** Every copied file is hashed as it goes into the
+  package, including files a scan could not read itself, and a file with no hash now fails
+  verification. Driver images and each file of a license store are checked too, both in the package
+  and once installed. Only those hashes are computed at build time, so this adds no read.
+- **An installer checks its whole package first.** The footer now holds a SHA-256 of the package,
+  checked before anything is parsed, so a truncated copy or an edited manifest is refused at
+  once with a clear message. The window opens straight away and shows the check. While the installer
+  runs, its own file cannot be changed or replaced, so a file swapped in behind a running window is
+  not what gets installed.
+- **Drivers are checked before they are registered.** An image whose hash is wrong is not placed,
+  and an existing `.sys` is no longer overwritten before the `--force` check. A driver already on
+  the PC that loads from outside the install location is left alone.
 - **A package no longer chooses what runs elevated for a prerequisite.** The URL, arguments,
   winget id, Windows feature, and registry probe come from specs compiled into the installer, looked
   up by the prerequisite's kind. A manifest can only say which kind and build, and supply the

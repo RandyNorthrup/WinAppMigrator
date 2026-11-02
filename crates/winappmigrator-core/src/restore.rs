@@ -7,27 +7,25 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use filetime::{FileTime, set_file_times};
-use walkdir::WalkDir;
 use winreg::RegValue;
 use winreg::enums::REG_NONE;
 
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
-    ensure_target_root, ensure_within_root, package_destination_path, reject_unsafe_components,
-    restore_destination, restore_destination_for_entry, safe_relative_path,
-    split_user_data_relative, user_data_real_destination, write_root_for,
+    ensure_target_root, ensure_within_root, package_destination_path,
+    restore_destination_for_entry, safe_relative_path, split_user_data_relative,
+    user_data_real_destination, write_root_for,
 };
+use crate::hashing::sha256_file;
 use crate::models::{
-    DriverEntry, DriverKind, EnvironmentVariableEntry, PackageManifest, RegistryEntry,
-    RegistryValueKind, RestoreOptions, RestorePlan, RestoreResult, RuntimePrerequisite,
-    ScheduledTaskEntry, ServiceEntry, ShortcutEntry, VerificationOptions, Warning, WarningSeverity,
+    DriverEntry, DriverKind, EnvironmentVariableEntry, LicenseArtifact, PackageManifest,
+    RegistryEntry, RegistryValueKind, RestoreOptions, RestorePlan, RestoreResult,
+    RuntimePrerequisite, ScheduledTaskEntry, ServiceEntry, ShortcutEntry, VerificationOptions,
+    Warning, WarningSeverity,
 };
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
-use crate::path_utils::{
-    escape_powershell_single, hidden_command, sanitize_filename, strip_prefix_ignore_case,
-    system_root,
-};
+use crate::path_utils::{escape_powershell_single, hidden_command, sanitize_filename, system_root};
 use crate::prerequisites::{
     PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
 };
@@ -37,7 +35,8 @@ use crate::registry_target::{
     registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
 };
 use crate::restore_policy::{
-    ServiceAccount, existing_service_refusal, is_valid_service_name, service_image_path_value,
+    ServiceAccount, driver_destination, existing_service_refusal, is_valid_service_name,
+    service_image_path_value,
 };
 use crate::verify::verify_prepared_package;
 
@@ -630,7 +629,6 @@ fn restore_license(
             }
         };
 
-        let is_dir = source.is_dir();
         if !options.apply {
             changes_logged.push(format!(
                 "would restore license {} -> {}",
@@ -659,10 +657,10 @@ fn restore_license(
             ));
             continue;
         }
-        let result = if is_dir {
-            copy_license_dir(&source, &destination, &options.target_root)
-        } else {
+        let result = if artifact.store_files.is_empty() {
             copy_restore_file(&source, &destination, &options.target_root)
+        } else {
+            copy_license_store(artifact, &source, &destination, &options.target_root)
         };
         match result {
             Ok(()) => changes_logged.push(format!(
@@ -709,17 +707,21 @@ fn license_destination(
     Ok(PathBuf::from(map.rewrite(&original.to_string_lossy())))
 }
 
-fn copy_license_dir(source: &Path, destination: &Path, target_root: &Path) -> Result<()> {
-    for entry in WalkDir::new(source).follow_links(false) {
-        let entry = entry.map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let relative = entry
-            .path()
-            .strip_prefix(source)
-            .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
-        copy_restore_file(entry.path(), &destination.join(relative), target_root)?;
+/// Copy the files the manifest lists for a license store. They were all hash-checked in
+/// the package before anything was written.
+fn copy_license_store(
+    artifact: &LicenseArtifact,
+    source: &Path,
+    destination: &Path,
+    target_root: &Path,
+) -> Result<()> {
+    for file in &artifact.store_files {
+        let relative = safe_relative_path(&file.relative_path);
+        copy_restore_file(
+            &package_destination_path(source, &relative)?,
+            &package_destination_path(destination, &relative)?,
+            target_root,
+        )?;
     }
     Ok(())
 }
@@ -748,11 +750,7 @@ fn restore_drivers(
             continue;
         };
 
-        // Place the bundled .sys under the target root. The driver image is never
-        // a copyable file-inventory entry, so we re-anchor its original path and
-        // constrain the result to the target root (path-traversal safe), falling
-        // back to <target_root>\drivers\<leaf> for atypical layouts.
-        let destination = match driver_restore_destination(driver, map) {
+        let destination = match driver_destination(driver, map) {
             Ok(path) => path,
             Err(error) => {
                 errors.push(Warning::new(
@@ -794,83 +792,127 @@ fn restore_drivers(
                 continue;
             }
         };
-        if let Err(error) = copy_restore_file(&source, &destination, &options.target_root) {
-            errors.push(Warning::new(
-                "driver_copy_failed",
-                WarningSeverity::Error,
-                format!("Could not place driver image: {error}"),
-                Some(destination.display().to_string()),
-            ));
-            continue;
-        }
-        changes_logged.push(format!(
-            "placed driver image {} -> {}",
-            source.display(),
-            destination.display()
-        ));
-        match apply_driver(driver, &destination, options.force) {
+        match place_and_register_driver(driver, &source, &destination, options) {
             Ok(messages) => changes_logged.extend(messages),
             Err(warning) => errors.push(warning),
         }
     }
 }
 
+/// Decide whether a driver can be restored before touching anything, then put its image
+/// in place and register it. An existing image is not replaced unless `--force` was
+/// given, and an image whose hash is wrong is never registered: a driver loads into the
+/// kernel and is the last thing to take on trust.
+fn place_and_register_driver(
+    driver: &DriverEntry,
+    source: &Path,
+    destination: &Path,
+    options: &RestoreOptions,
+) -> std::result::Result<Vec<String>, Warning> {
+    let name = driver.service_name.as_str();
+    let problem = |code: &'static str, message: String| {
+        Warning::new(code, WarningSeverity::Error, message, Some(name.to_owned()))
+    };
+    if !is_valid_service_name(name) {
+        return Err(problem(
+            "driver_name_invalid",
+            "The driver's name is not one Windows accepts, so it was not set up.".to_owned(),
+        ));
+    }
+    let current = service_image_path(name).map_err(|error| {
+        problem(
+            "driver_query_failed",
+            format!("Could not read the driver's current settings: {error}"),
+        )
+    })?;
+    if let Some(current) = current.as_deref() {
+        if !options.force {
+            return Err(Warning::new(
+                "driver_exists",
+                WarningSeverity::Warning,
+                "Driver service exists; use --force to reconfigure it.",
+                Some(name.to_owned()),
+            ));
+        }
+        if let Some(refusal) =
+            existing_service_refusal(name, current, &options.target_root, system_root())
+        {
+            return Err(problem("driver_exists_elsewhere", refusal));
+        }
+    }
+    if destination.exists() && !options.force {
+        return Err(Warning::new(
+            "driver_image_exists",
+            WarningSeverity::Warning,
+            "Driver image exists; use --force to overwrite.",
+            Some(destination.display().to_string()),
+        ));
+    }
+    let matches_manifest = |path: &Path| match driver.hash_sha256.as_deref() {
+        Some(expected) => {
+            sha256_file(path).is_ok_and(|actual| actual.eq_ignore_ascii_case(expected))
+        }
+        None => false,
+    };
+    if !matches_manifest(source) {
+        return Err(problem(
+            "driver_hash_failed",
+            "The bundled driver image does not match its recorded hash, so it was not installed."
+                .to_owned(),
+        ));
+    }
+    copy_restore_file(source, destination, &options.target_root).map_err(|error| {
+        problem(
+            "driver_copy_failed",
+            format!("Could not place driver image: {error}"),
+        )
+    })?;
+    if !matches_manifest(destination) {
+        return Err(problem(
+            "driver_hash_failed",
+            "The driver image changed after it was placed, so it was not registered.".to_owned(),
+        ));
+    }
+    let mut messages = vec![format!(
+        "placed driver image {} -> {}",
+        source.display(),
+        destination.display()
+    )];
+    messages.push(apply_driver(driver, destination, current.is_some())?);
+    Ok(messages)
+}
+
+/// The arguments for `sc.exe`. A driver's `ImagePath` is a path, not a command line, and
+/// the kernel does not remove quotes from it, so unlike a service's it stays bare.
+fn sc_driver_arguments(driver: &DriverEntry, image_path: &Path, exists: bool) -> Vec<OsString> {
+    let mut command: Vec<OsString> = vec![
+        if exists { "config" } else { "create" }.into(),
+        driver.service_name.as_str().into(),
+        "type=".into(),
+        driver_sc_type(&driver.driver_kind).into(),
+        "binPath=".into(),
+        image_path.into(),
+    ];
+    if !exists && let Some(start_type) = driver.start_type.as_deref().and_then(sc_start_type) {
+        command.extend(["start=".into(), start_type.into()]);
+    }
+    command
+}
+
 fn apply_driver(
     driver: &DriverEntry,
     image_path: &Path,
-    force: bool,
-) -> std::result::Result<Vec<String>, Warning> {
-    let exists = service_image_path(&driver.service_name)
-        .map_err(|error| {
-            Warning::new(
-                "driver_query_failed",
-                WarningSeverity::Error,
-                format!("Could not read the driver's current settings: {error}"),
-                Some(driver.service_name.clone()),
-            )
-        })?
-        .is_some();
-    if exists && !force {
-        return Err(Warning::new(
-            "driver_exists",
-            WarningSeverity::Warning,
-            "Driver service exists; use --force to reconfigure it.",
-            Some(driver.service_name.clone()),
-        ));
-    }
-
-    let type_flag = driver_sc_type(&driver.driver_kind);
-    // Pass the raw path: a driver's ImagePath is a path, not a command line, and the
-    // kernel does not remove quotes from it. A service's is the opposite, see
-    // `service_image_path_value`.
-    let mut messages = Vec::new();
-    if exists {
-        let mut command = hidden_command(SC_EXE);
-        command
-            .arg("config")
-            .arg(&driver.service_name)
-            .arg("type=")
-            .arg(type_flag)
-            .arg("binPath=")
-            .arg(image_path);
-        run_checked(&mut command, "driver_config_failed", &driver.service_name)?;
-        messages.push(format!("configured driver {}", driver.service_name));
+    exists: bool,
+) -> std::result::Result<String, Warning> {
+    let mut command = hidden_command(SC_EXE);
+    command.args(sc_driver_arguments(driver, image_path, exists));
+    let (code, done) = if exists {
+        ("driver_config_failed", "configured")
     } else {
-        let mut command = hidden_command(SC_EXE);
-        command
-            .arg("create")
-            .arg(&driver.service_name)
-            .arg("type=")
-            .arg(type_flag)
-            .arg("binPath=")
-            .arg(image_path);
-        if let Some(start_type) = driver.start_type.as_deref().and_then(sc_start_type) {
-            command.arg("start=").arg(start_type);
-        }
-        run_checked(&mut command, "driver_create_failed", &driver.service_name)?;
-        messages.push(format!("created driver {}", driver.service_name));
-    }
-    Ok(messages)
+        ("driver_create_failed", "created")
+    };
+    run_checked(&mut command, code, &driver.service_name)?;
+    Ok(format!("{done} driver {}", driver.service_name))
 }
 
 fn driver_sc_type(kind: &DriverKind) -> &'static str {
@@ -879,27 +921,6 @@ fn driver_sc_type(kind: &DriverKind) -> &'static str {
         DriverKind::FileSystem => "filesys",
         DriverKind::Recognizer => "rec",
     }
-}
-
-/// Resolve a path-traversal-safe destination for a bundled driver image, always
-/// inside `target_root`.
-fn driver_restore_destination(driver: &DriverEntry, map: &RestoreMap) -> Result<PathBuf> {
-    let target_root = map.target_root();
-    let rewritten = PathBuf::from(map.rewrite(&driver.image_path.to_string_lossy()));
-    if strip_prefix_ignore_case(&rewritten, target_root).is_some_and(|relative| {
-        !relative.as_os_str().is_empty() && reject_unsafe_components(&relative).is_ok()
-    }) {
-        return Ok(rewritten);
-    }
-    let leaf = driver
-        .image_path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| format!("{}.sys", sanitize_filename(&driver.service_name)));
-    restore_destination(
-        target_root,
-        &Path::new("drivers").join(safe_relative_path(Path::new(&leaf))),
-    )
 }
 
 fn restore_scheduled_tasks(
@@ -1732,6 +1753,109 @@ mod tests {
         assert!(restore_package(&options).is_err());
     }
 
+    #[test]
+    fn a_parent_step_cannot_carry_a_driver_out_of_the_install_location() -> Result<()> {
+        let driver = test_driver(r"C:\App\..\..\Windows\System32\drivers\flt.sys");
+        let destination = driver_destination(&driver, &app_map()?)?;
+        assert_eq!(destination, PathBuf::from(r"D:\Restored\drivers\flt.sys"));
+        Ok(())
+    }
+
+    /// The opposite of a service: quotes here would stop the driver from loading.
+    #[test]
+    fn a_drivers_path_reaches_sc_without_quotes() {
+        let driver = test_driver(r"C:\Program Files\Acme\flt.sys");
+        let arguments =
+            sc_driver_arguments(&driver, Path::new(r"D:\Program Files\Acme\flt.sys"), false);
+        assert_eq!(
+            strings(&arguments),
+            [
+                "create",
+                "AcmeFlt",
+                "type=",
+                "kernel",
+                "binPath=",
+                r"D:\Program Files\Acme\flt.sys",
+                "start=",
+                "demand",
+            ]
+        );
+    }
+
+    fn driver_options(work: &Path, force: bool) -> RestoreOptions {
+        RestoreOptions {
+            package_root: work.join("package"),
+            target_root: work.join("target"),
+            dry_run: false,
+            apply: true,
+            force,
+            restore_user_data: false,
+            restore_license: true,
+        }
+    }
+
+    /// A service name no real PC has, so the query answers "not there" and nothing is
+    /// written to the registry. These all stop before registering.
+    fn unregistered_driver(hash: Option<String>) -> DriverEntry {
+        let mut driver = test_driver(r"C:\App\drivers\flt.sys");
+        driver.service_name = "WamTestDriverThatDoesNotExist".to_owned();
+        driver.hash_sha256 = hash;
+        driver
+    }
+
+    #[test]
+    fn a_driver_image_with_the_wrong_hash_is_not_placed() -> Result<()> {
+        let work = temp_folder()?;
+        let options = driver_options(work.path(), true);
+        let source = work.path().join(r"package\drivers\flt.sys");
+        write_file(&source, b"tampered")?;
+        fs::create_dir_all(&options.target_root)
+            .map_err(|error| WinAppMigratorError::io(&options.target_root, error))?;
+        let destination = options.target_root.join(r"drivers\flt.sys");
+
+        for hash in [None, Some("00".repeat(32))] {
+            let refused = place_and_register_driver(
+                &unregistered_driver(hash),
+                &source,
+                &destination,
+                &options,
+            );
+            assert_eq!(
+                refused.err().map(|warning| warning.code).as_deref(),
+                Some("driver_hash_failed")
+            );
+            assert!(!destination.exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_existing_driver_image_is_not_overwritten_without_force() -> Result<()> {
+        let work = temp_folder()?;
+        let options = driver_options(work.path(), false);
+        let source = work.path().join(r"package\drivers\flt.sys");
+        write_file(&source, b"new")?;
+        let destination = options.target_root.join(r"drivers\flt.sys");
+        write_file(&destination, b"existing")?;
+
+        let refused = place_and_register_driver(
+            &unregistered_driver(Some(sha256_file(&source)?)),
+            &source,
+            &destination,
+            &options,
+        );
+
+        assert_eq!(
+            refused.err().map(|warning| warning.code).as_deref(),
+            Some("driver_image_exists")
+        );
+        assert_eq!(
+            fs::read(&destination).map_err(|error| WinAppMigratorError::io(&destination, error))?,
+            b"existing"
+        );
+        Ok(())
+    }
+
     fn sample_service() -> ServiceEntry {
         ServiceEntry {
             service_name: "AcmeSync".to_owned(),
@@ -1974,11 +2098,9 @@ mod tests {
 
     #[test]
     fn driver_destination_reanchors_under_target_root() -> Result<()> {
-        let target = PathBuf::from(r"D:\Restored");
         let driver = test_driver(r"C:\App\drivers\flt.sys");
-        let destination = driver_restore_destination(&driver, &app_map()?)?;
+        let destination = driver_destination(&driver, &app_map()?)?;
         assert_eq!(destination, PathBuf::from(r"D:\Restored\drivers\flt.sys"));
-        assert!(destination.starts_with(&target));
         Ok(())
     }
 
@@ -1987,7 +2109,7 @@ mod tests {
         let target = PathBuf::from(r"D:\Restored");
         // No rewrite matches a machine path, so it must fall back under target.
         let driver = test_driver(r"C:\Windows\System32\drivers\flt.sys");
-        let destination = driver_restore_destination(&driver, &app_map()?)?;
+        let destination = driver_destination(&driver, &app_map()?)?;
         assert!(
             destination.starts_with(&target),
             "driver destination {destination:?} escaped target root"

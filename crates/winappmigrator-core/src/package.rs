@@ -8,17 +8,19 @@ use time::format_description::well_known::Rfc3339;
 use tempfile::TempDir;
 
 use crate::archive::{
-    create_self_extracting_archive, create_zip_archive, extract_zip_archive, read_embedded_file,
+    EmbeddedPackage, create_self_extracting_archive, create_zip_archive, extract_zip_archive,
 };
 use crate::authenticode::check_microsoft_signature;
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{package_destination_path, safe_relative_path};
+use crate::file_discovery::{
+    has_reserved_device_name, package_destination_path, safe_relative_path,
+};
 use crate::hashing::sha256_file;
 use crate::models::{
-    AppArchitecture, DriverEntry, FileEntry, LicenseArtifact, PACKAGE_SCHEMA_VERSION,
-    PackageArchiveFormat, PackageManifest, PackageOptions, PackageResult, RegistryEntry,
-    RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions, ScheduledTaskEntry, Warning,
-    WarningSeverity,
+    AppArchitecture, DriverEntry, FileEntry, LicenseArtifact, LicenseStoreFile,
+    PACKAGE_SCHEMA_VERSION, PackageArchiveFormat, PackageManifest, PackageOptions, PackageResult,
+    RegistryEntry, RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions,
+    ScheduledTaskEntry, Warning, WarningSeverity,
 };
 use crate::path_utils::{hidden_command, sanitize_filename};
 use crate::prerequisites::PREREQUISITES_DIR;
@@ -68,7 +70,10 @@ pub fn create_package_monitored(
         output_dir: reports_dir.clone(),
         current_directory: options.current_directory.clone(),
         recursive_dependencies: true,
-        include_hashes: true,
+        // What goes in the package is hashed as it is copied below. A hash of the original
+        // could not be checked anyway when reading it needed a backup-mode copy, and it
+        // would be wrong for a file that changes in between.
+        include_hashes: false,
         include_user_data: options.include_user_data,
         include_program_data: options.include_program_data,
         include_license_data: options.include_license_data,
@@ -79,6 +84,8 @@ pub fn create_package_monitored(
     let mut warnings = report.warnings.clone();
     let mut files_copied = 0_usize;
     let mut failed_copies: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut staged: std::collections::HashMap<PathBuf, (String, u64)> =
+        std::collections::HashMap::new();
 
     let total_files = report
         .file_inventory
@@ -110,9 +117,16 @@ pub fn create_package_monitored(
         // AppData installer cache entry, etc.) must not abort the whole package.
         // Record it as a warning, mark it not-copied in the manifest so
         // verification stays consistent, and continue.
-        match copy_file_preserving_basic_metadata(&file.original_path, &destination) {
-            Ok(()) => files_copied += 1,
+        match copy_file_preserving_basic_metadata(&file.original_path, &destination)
+            .and_then(|()| staged_fingerprint(&destination))
+        {
+            Ok(fingerprint) => {
+                staged.insert(file.original_path.clone(), fingerprint);
+                files_copied += 1;
+            }
             Err(error) => {
+                // Nothing goes into a package without a hash to check it by.
+                let _ = fs::remove_file(&destination);
                 warnings.push(Warning::new(
                     "file_copy_failed",
                     WarningSeverity::Warning,
@@ -132,6 +146,10 @@ pub fn create_package_monitored(
             if failed_copies.contains(&entry.original_path) {
                 entry.should_copy = false;
             }
+            if let Some((hash, size)) = staged.get(&entry.original_path) {
+                entry.hash_sha256 = Some(hash.clone());
+                entry.size_bytes = Some(*size);
+            }
             entry
         })
         .collect();
@@ -142,7 +160,7 @@ pub fn create_package_monitored(
         &options.output_dir,
         &report.license_artifacts,
         &mut warnings,
-    )?;
+    );
 
     // Make runtime prerequisites installable on the target: download and embed
     // the redistributables when requested, recording a winget/URL fallback when a
@@ -442,61 +460,76 @@ fn package_license_artifacts(
     output_dir: &Path,
     artifacts: &[LicenseArtifact],
     warnings: &mut Vec<Warning>,
-) -> Result<Vec<LicenseArtifact>> {
+) -> Vec<LicenseArtifact> {
     let mut packaged = Vec::with_capacity(artifacts.len());
     for artifact in artifacts {
         let mut artifact = artifact.clone();
+        if artifact.should_copy && package_one_license_artifact(output_dir, &mut artifact, warnings)
+        {
+            packaged.push(artifact);
+            continue;
+        }
         if artifact.should_copy {
-            match artifact.path.as_ref() {
-                Some(source) if source.is_file() => {
-                    let relative = PathBuf::from(LICENSE_DIR).join(safe_relative_path(source));
-                    let destination = package_destination_path(output_dir, &relative)?;
-                    copy_file_preserving_basic_metadata(source, &destination)?;
-                    artifact.hash_sha256 = sha256_file(&destination).ok();
-                    artifact.size_bytes = fs::metadata(&destination).ok().map(|meta| meta.len());
-                    artifact.package_relative_path = Some(relative);
-                }
-                Some(source) if source.is_dir() => {
-                    let relative = PathBuf::from(LICENSE_DIR).join(safe_relative_path(source));
-                    let destination = package_destination_path(output_dir, &relative)?;
-                    let copied = copy_dir_recursive(source, &destination, warnings)?;
-                    if copied > 0 {
-                        artifact.package_relative_path = Some(relative);
-                    } else {
-                        warnings.push(Warning::new(
-                            "license_store_empty",
-                            WarningSeverity::Info,
-                            "License store had no readable files to copy; recorded as metadata only.",
-                            Some(source.display().to_string()),
-                        ));
-                        artifact.should_copy = false;
-                    }
-                }
-                _ => {
-                    warnings.push(Warning::new(
-                        "license_file_not_copied",
-                        WarningSeverity::Warning,
-                        "License data could not be copied (missing or unreadable); recorded as metadata only.",
-                        artifact.path.as_ref().map(|path| path.display().to_string()),
-                    ));
-                    artifact.should_copy = false;
-                }
-            }
+            warnings.push(Warning::new(
+                "license_file_not_copied",
+                WarningSeverity::Warning,
+                "License data could not be copied (missing or unreadable); recorded as metadata only.",
+                artifact.path.as_ref().map(|path| path.display().to_string()),
+            ));
+            artifact.should_copy = false;
+            artifact.package_relative_path = None;
+            artifact.hash_sha256 = None;
         }
         packaged.push(artifact);
     }
-    Ok(packaged)
+    packaged
 }
 
-/// Recursively copy a directory tree into the package, best-effort. Files that
-/// cannot be read (locked/access-denied) are warned about and skipped rather
-/// than aborting the whole package. Returns the number of files copied.
-fn copy_dir_recursive(
+/// Copy one artifact, returning whether it is now in the package with its hashes.
+fn package_one_license_artifact(
+    output_dir: &Path,
+    artifact: &mut LicenseArtifact,
+    warnings: &mut Vec<Warning>,
+) -> bool {
+    let Some(source) = artifact.path.clone() else {
+        return false;
+    };
+    let relative = PathBuf::from(LICENSE_DIR).join(safe_relative_path(&source));
+    let Ok(destination) = package_destination_path(output_dir, &relative) else {
+        return false;
+    };
+    if source.is_file() {
+        let staged = copy_file_preserving_basic_metadata(&source, &destination)
+            .and_then(|()| staged_fingerprint(&destination));
+        let Ok((hash, size)) = staged else {
+            let _ = fs::remove_file(&destination);
+            return false;
+        };
+        artifact.hash_sha256 = Some(hash);
+        artifact.size_bytes = Some(size);
+        artifact.package_relative_path = Some(relative);
+        return true;
+    }
+    if !source.is_dir() {
+        return false;
+    }
+    artifact.store_files = copy_license_store(&source, &destination, warnings);
+    if artifact.store_files.is_empty() {
+        return false;
+    }
+    artifact.package_relative_path = Some(relative);
+    true
+}
+
+/// Recursively copy a license store into the package, best-effort. Files that cannot be
+/// read (locked/access-denied) are warned about and skipped rather than aborting the
+/// whole package. Returns what was copied, each with its hash.
+fn copy_license_store(
     source: &Path,
     destination: &Path,
     warnings: &mut Vec<Warning>,
-) -> Result<usize> {
-    let mut copied = 0_usize;
+) -> Vec<LicenseStoreFile> {
+    let mut copied = Vec::new();
     for entry in walkdir::WalkDir::new(source).follow_links(false) {
         let entry = match entry {
             Ok(entry) => entry,
@@ -516,18 +549,39 @@ fn copy_dir_recursive(
         let Ok(relative) = entry.path().strip_prefix(source) else {
             continue;
         };
+        if has_reserved_device_name(relative) {
+            continue;
+        }
         let target = destination.join(relative);
-        match copy_file_preserving_basic_metadata(entry.path(), &target) {
-            Ok(()) => copied += 1,
-            Err(error) => warnings.push(Warning::new(
-                "license_store_file_skipped",
-                WarningSeverity::Info,
-                format!("Skipped a license store file: {error}"),
-                Some(entry.path().display().to_string()),
-            )),
+        match copy_file_preserving_basic_metadata(entry.path(), &target)
+            .and_then(|()| staged_fingerprint(&target))
+        {
+            Ok((hash_sha256, size_bytes)) => copied.push(LicenseStoreFile {
+                relative_path: relative.to_path_buf(),
+                size_bytes,
+                hash_sha256,
+            }),
+            Err(error) => {
+                let _ = fs::remove_file(&target);
+                warnings.push(Warning::new(
+                    "license_store_file_skipped",
+                    WarningSeverity::Info,
+                    format!("Skipped a license store file: {error}"),
+                    Some(entry.path().display().to_string()),
+                ));
+            }
         }
     }
-    Ok(copied)
+    copied
+}
+
+/// The SHA-256 and size of a file as it now sits in the package.
+fn staged_fingerprint(path: &Path) -> Result<(String, u64)> {
+    let hash = sha256_file(path)?;
+    let size = fs::metadata(path)
+        .map_err(|source| WinAppMigratorError::io(path, source))?
+        .len();
+    Ok((hash, size))
 }
 
 fn create_package_dirs(root: &Path) -> Result<()> {
@@ -871,12 +925,9 @@ pub fn read_manifest(package_root: &Path) -> Result<PackageManifest> {
 }
 
 /// Read the manifest of the package embedded in an installer, without extracting
-/// the package. `None` for a bare stub that carries no package.
-pub fn read_embedded_manifest(sfx_executable: &Path) -> Result<Option<PackageManifest>> {
-    let Some(bytes) = read_embedded_file(sfx_executable, MANIFEST_FILE)? else {
-        return Ok(None);
-    };
-    Ok(Some(serde_json::from_slice(&bytes)?))
+/// the package.
+pub fn read_embedded_manifest(package: &EmbeddedPackage) -> Result<PackageManifest> {
+    Ok(serde_json::from_slice(&package.read_file(MANIFEST_FILE)?)?)
 }
 
 #[cfg(test)]
@@ -911,6 +962,20 @@ mod tests {
         assert!(result.manifest_path.is_file());
         assert!(result.files_copied >= 1);
         assert!(!restore_plan.planned_file_writes.is_empty());
+        for file in &restore_plan.planned_file_writes {
+            let Some(hash) = file.hash_sha256.as_deref() else {
+                panic!("{} has no hash", file.original_path.display());
+            };
+            let Some(relative) = file.package_relative_path.as_ref() else {
+                panic!("{} has no package path", file.original_path.display());
+            };
+            let staged = package_destination_path(&package_dir, relative)?;
+            assert_eq!(hash, sha256_file(&staged)?);
+            assert_eq!(
+                file.size_bytes,
+                fs::metadata(&staged).ok().map(|meta| meta.len())
+            );
+        }
         fs::remove_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
         Ok(())
     }
@@ -922,6 +987,33 @@ mod tests {
             OffsetDateTime::now_utc().unix_timestamp_nanos()
         ));
         Ok(dir)
+    }
+
+    #[test]
+    fn a_license_store_records_a_hash_for_every_file() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let store = root.path().join("FlexLM");
+        fs::create_dir_all(store.join("sub"))
+            .map_err(|error| WinAppMigratorError::io(&store, error))?;
+        fs::write(store.join("a.lic"), b"a")
+            .map_err(|error| WinAppMigratorError::io(&store, error))?;
+        fs::write(store.join(r"sub\b.lic"), b"bb")
+            .map_err(|error| WinAppMigratorError::io(&store, error))?;
+        let mut warnings = Vec::new();
+
+        let mut copied = copy_license_store(&store, &root.path().join("stage"), &mut warnings);
+        copied.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+
+        assert_eq!(copied.len(), 2);
+        assert_eq!(copied[0].relative_path, PathBuf::from("a.lic"));
+        assert_eq!(copied[0].size_bytes, 1);
+        assert_eq!(copied[1].relative_path, PathBuf::from(r"sub\b.lic"));
+        assert_eq!(copied[1].size_bytes, 2);
+        assert_eq!(
+            copied[0].hash_sha256,
+            sha256_file(&root.path().join(r"stage\a.lic"))?
+        );
+        Ok(())
     }
 
     #[test]

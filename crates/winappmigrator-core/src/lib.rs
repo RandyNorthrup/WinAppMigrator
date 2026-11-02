@@ -31,7 +31,8 @@ pub mod verify;
 
 pub use app_inventory::list_installed_apps_from;
 pub use archive::{
-    create_self_extracting_archive, extract_embedded_self_archive, has_embedded_self_archive,
+    EmbeddedPackage, create_self_extracting_archive, extract_embedded_self_archive,
+    has_embedded_self_archive,
 };
 pub use errors::{Result, WinAppMigratorError};
 pub use models::*;
