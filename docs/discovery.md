@@ -445,9 +445,10 @@ regardless of the source drive letter.
 
 Run headlessly, program and user-data files (including the `files\_external\…` data staged
 from outside the install directory) land under one `target_root` unless
-`--restore-user-data` is passed. Captured license files keep their original paths unless
-they were among the copied files, and registry values, environment variables, and shortcuts
-always go to their real locations. The installer's window asks instead: its **User data**
+`--restore-user-data` is passed. Captured license files go under the install location when
+their paths map there, and otherwise to this PC's own folder for where they came from.
+Registry values and environment variables always go to their real locations, and shortcuts
+to this PC's own Desktop and Start Menu. The installer's window asks instead: its **User data**
 option is on by default whenever data was captured. Turning it off still writes the data,
 under the install folder.
 
@@ -479,6 +480,17 @@ writing; headless restore overwrites existing files only with
 `--force`, while the installer's window always overwrites and warns first if the install
 folder has files; and the built-in verification runs with the same user-data setting so it
 checks the real locations.
+
+## What a restore refuses
+
+A package is not authenticated, and it directs an elevated process, so scanning conservatively
+is not enough. `restore_policy.rs` holds the rules, as pure functions, and `restore_review.rs`
+applies them to a whole package. Restoring, verification, and the installer's window all work
+from the same review, so verification expects exactly what was allowed. What is refused goes
+in `RestoreResult.refused`, and the rest of the install goes ahead.
+
+Any rule added for a new kind of capture belongs there too. Event log sources, for example, live
+under `SYSTEMCurrentControlSetServicesventLog`, which is refused today because nothing writes it.
 
 ## Known limitations
 

@@ -6,15 +6,12 @@ use time::format_description::well_known::Rfc3339;
 use winreg::RegValue;
 
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{
-    package_destination_path, safe_relative_path, user_data_real_destination,
-};
+use crate::file_discovery::{package_destination_path, safe_relative_path};
 use crate::hashing::sha256_file;
 use crate::models::{
-    DriverEntry, EnvironmentVariableEntry, FileEntry, LicenseStoreFile, PackageManifest,
-    RegistryEntry, RegistryValueKind, ScheduledTaskEntry, ServiceEntry, ShortcutEntry,
-    VERIFICATION_SCHEMA_VERSION, VerificationCategory, VerificationItem, VerificationOptions,
-    VerificationReport, VerificationStatus, Warning, WarningSeverity,
+    EnvironmentVariableEntry, FileEntry, LicenseStoreFile, PackageManifest, RegistryEntry,
+    RegistryValueKind, VERIFICATION_SCHEMA_VERSION, VerificationCategory, VerificationItem,
+    VerificationOptions, VerificationReport, VerificationStatus, Warning, WarningSeverity,
 };
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
@@ -25,7 +22,14 @@ use crate::registry_target::{
     registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
     service_object_name,
 };
-use crate::restore_policy::{ServiceAccount, driver_destination, image_path_matches, paths_equal};
+use crate::restore_policy::{
+    ServiceAccount, image_path_matches, paths_equal, read_task_definition,
+};
+use crate::restore_review::{
+    ReviewedDriver, ReviewedLicense, ReviewedPackage, ReviewedService, ReviewedShortcut,
+    ReviewedTask,
+};
+use crate::task_scan::live_task_xml;
 
 const VERIFICATION_REPORT_JSON: &str = "verification_report.json";
 const VERIFICATION_REPORT_MARKDOWN: &str = "verification_report.md";
@@ -219,51 +223,45 @@ fn verify_restored_target(
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) -> Result<()> {
-    let map = RestoreMap::new(manifest, target_root, restore_user_data)?;
-    verify_restored_files(&map, manifest, items, errors)?;
-    verify_prerequisites(manifest, items);
-    // License artifacts and their transferable registry values are only expected
-    // on the target when the restore was told to write them.
-    if restore_license {
-        verify_license_restored(manifest, &map, restore_user_data, items, errors)?;
-        verify_registry_entries(&manifest.license_registry_entries, &map, items, errors);
+    // The same review the restore used, so this expects exactly what it was allowed to do.
+    let review = ReviewedPackage::new(manifest, target_root, restore_user_data, restore_license)?;
+    for refused in &review.refused {
+        items.push(VerificationItem {
+            category: VerificationCategory::Refused,
+            name: refused.source.clone().unwrap_or_default(),
+            status: VerificationStatus::Skipped,
+            message: refused.message.clone(),
+            source: None,
+        });
     }
-    verify_registry_entries(&manifest.registry_keys_exported, &map, items, errors);
-    verify_environment_variables(
-        &manifest.environment_variables_detected,
-        target_root,
-        &map,
+    verify_restored_files(&review, items, errors)?;
+    verify_prerequisites(manifest, items);
+    verify_license_restored(&review.license, items, errors)?;
+    verify_registry_entries(
+        review.license_registry.iter().copied(),
+        &review.map,
         items,
         errors,
     );
-    verify_services(&map, &manifest.services_detected, items, warnings, errors);
-    verify_drivers(&map, manifest, items, warnings, errors);
-    verify_scheduled_tasks(
-        &manifest.scheduled_tasks_detected,
-        &map,
-        items,
-        warnings,
-        errors,
-    );
-    verify_shortcuts(&map, &manifest.shortcuts_detected, items, errors);
+    verify_registry_entries(review.registry.iter().copied(), &review.map, items, errors);
+    verify_environment_variables(&review.environment, target_root, &review.map, items, errors);
+    verify_services(&review.services, &review.map, items, warnings, errors);
+    verify_drivers(&review, items, warnings, errors);
+    verify_scheduled_tasks(&review.tasks, items, warnings, errors);
+    verify_shortcuts(&review.shortcuts, items, errors);
     Ok(())
 }
 
 fn verify_restored_files(
-    map: &RestoreMap,
-    manifest: &PackageManifest,
+    review: &ReviewedPackage<'_>,
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) -> Result<()> {
-    for file in manifest
-        .file_inventory
-        .iter()
-        .filter(|entry| entry.should_copy)
-    {
-        let Some(relative) = file.package_relative_path.as_ref() else {
-            continue;
-        };
-        let Some(destination) = map.destination_of(&file.original_path) else {
+    for file in &review.files {
+        let (Some(relative), Some(destination)) = (
+            file.package_relative_path.as_ref(),
+            review.map.destination_of(&file.original_path),
+        ) else {
             continue;
         };
         let item = if destination.is_file() {
@@ -609,27 +607,20 @@ fn verify_prerequisites(manifest: &PackageManifest, items: &mut Vec<Verification
 /// Verify restored license files match their packaged hashes at their target
 /// locations.
 fn verify_license_restored(
-    manifest: &PackageManifest,
-    map: &RestoreMap,
-    restore_user_data: bool,
+    licenses: &[ReviewedLicense<'_>],
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) -> Result<()> {
-    for artifact in &manifest.license_artifacts_detected {
-        if !artifact.should_copy {
-            continue;
-        }
-        let Some(original) = artifact.path.as_ref() else {
-            continue;
-        };
-        let destination = license_destination(original, map, restore_user_data)?;
-        let name = original.display().to_string();
+    for license in licenses {
+        let artifact = license.artifact;
+        let destination = &license.destination;
+        let name = destination.display().to_string();
         if artifact.store_files.is_empty() {
             let item = if destination.is_file() {
                 verify_hash(
                     VerificationCategory::License,
                     name,
-                    &destination,
+                    destination,
                     artifact.size_bytes,
                     artifact.hash_sha256.as_deref(),
                 )?
@@ -645,7 +636,7 @@ fn verify_license_restored(
             continue;
         }
         for file in &artifact.store_files {
-            let path = store_file_path(&destination, file)?;
+            let path = store_file_path(destination, file)?;
             let name = path.display().to_string();
             let item = if path.is_file() {
                 verify_hash(
@@ -690,19 +681,8 @@ fn store_file_path(store: &Path, file: &LicenseStoreFile) -> Result<PathBuf> {
     package_destination_path(store, &safe_relative_path(&file.relative_path))
 }
 
-fn license_destination(
-    original: &Path,
-    map: &RestoreMap,
-    restore_user_data: bool,
-) -> Result<PathBuf> {
-    if restore_user_data && let Some(destination) = user_data_real_destination(original)? {
-        return Ok(destination);
-    }
-    Ok(PathBuf::from(map.rewrite(&original.to_string_lossy())))
-}
-
-fn verify_registry_entries(
-    entries: &[RegistryEntry],
+fn verify_registry_entries<'a>(
+    entries: impl IntoIterator<Item = &'a RegistryEntry>,
     map: &RestoreMap,
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
@@ -779,7 +759,7 @@ fn verify_registry_entry(
 }
 
 fn verify_environment_variables(
-    variables: &[EnvironmentVariableEntry],
+    variables: &[&EnvironmentVariableEntry],
     target_root: &Path,
     map: &RestoreMap,
     items: &mut Vec<VerificationItem>,
@@ -838,42 +818,39 @@ fn verify_environment_variables(
 }
 
 fn verify_services(
+    services: &[ReviewedService<'_>],
     map: &RestoreMap,
-    services: &[ServiceEntry],
     items: &mut Vec<VerificationItem>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
     for service in services {
-        let expected_binary = map
-            .destination_of(&service.binary_path)
-            .unwrap_or(&service.binary_path);
-        let expected_arguments = service.arguments.as_deref().map(|text| map.rewrite(text));
-        let item = match service_image_path(&service.service_name) {
+        let name = || service.entry.service_name.clone();
+        let item = match service_image_path(&service.entry.service_name) {
             Ok(Some(actual)) => {
                 if !image_path_matches(
                     &actual,
-                    expected_binary,
-                    expected_arguments.as_deref(),
+                    &service.binary,
+                    service.arguments.as_deref(),
                     system_root(),
                 ) {
                     failed_item(
                         VerificationCategory::Service,
-                        service.service_name.clone(),
+                        name(),
                         "Service exists but does not run the restored binary with its arguments.",
                         Some(actual),
                     )
                 } else if !service_account_matches(service) {
                     failed_item(
                         VerificationCategory::Service,
-                        service.service_name.clone(),
+                        name(),
                         "Service exists but does not run as the expected account.",
-                        service_object_name(&service.service_name),
+                        service_object_name(&service.entry.service_name),
                     )
                 } else {
                     passed_item(
                         VerificationCategory::Service,
-                        service.service_name.clone(),
+                        name(),
                         "Service exists, and runs the restored binary with its arguments and account.",
                         Some(actual),
                     )
@@ -881,15 +858,15 @@ fn verify_services(
             }
             Ok(None) => failed_item(
                 VerificationCategory::Service,
-                service.service_name.clone(),
+                name(),
                 "Service is missing.",
-                Some(service.service_name.clone()),
+                Some(name()),
             ),
             Err(error) => failed_item(
                 VerificationCategory::Service,
-                service.service_name.clone(),
+                name(),
                 format!("Service is unreadable: {error}"),
-                Some(service.service_name.clone()),
+                Some(name()),
             ),
         };
         if item.status == VerificationStatus::Failed {
@@ -901,7 +878,7 @@ fn verify_services(
             ));
         }
         items.push(item);
-        verify_registry_entries(&service.parameters, map, items, errors);
+        verify_registry_entries(&service.entry.parameters, map, items, errors);
     }
     if !services.is_empty() {
         warnings.push(Warning::new(
@@ -915,38 +892,32 @@ fn verify_services(
 
 /// The account on the target is the one restoring asked for, and that is not always the
 /// recorded one: a custom account is set up as LocalService.
-fn service_account_matches(service: &ServiceEntry) -> bool {
-    let expected =
-        ServiceAccount::from_recorded(service.account_name.as_deref(), &service.service_name);
-    let Some(expected) = expected.sc_object_name() else {
+fn service_account_matches(service: &ReviewedService<'_>) -> bool {
+    let Some(expected) = service.account.sc_object_name() else {
         return true;
     };
-    let actual = service_object_name(&service.service_name);
-    ServiceAccount::from_recorded(actual.as_deref(), &service.service_name).sc_object_name()
+    let actual = service_object_name(&service.entry.service_name);
+    ServiceAccount::from_recorded(actual.as_deref(), &service.entry.service_name).sc_object_name()
         == Some(expected)
 }
 
 fn verify_drivers(
-    map: &RestoreMap,
-    manifest: &PackageManifest,
+    review: &ReviewedPackage<'_>,
     items: &mut Vec<VerificationItem>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
-    let mut manual_pending = false;
-    for driver in &manifest.drivers_detected {
-        if driver.package_relative_path.is_none() {
-            manual_pending = true;
-            items.push(VerificationItem {
-                category: VerificationCategory::Driver,
-                name: driver.service_name.clone(),
-                status: VerificationStatus::Skipped,
-                message: driver.restore_instructions.clone(),
-                source: Some(driver.image_path.display().to_string()),
-            });
-            continue;
-        }
-        let item = verify_one_driver(map, driver);
+    for driver in &review.manual_drivers {
+        items.push(VerificationItem {
+            category: VerificationCategory::Driver,
+            name: driver.service_name.clone(),
+            status: VerificationStatus::Skipped,
+            message: driver.restore_instructions.clone(),
+            source: Some(driver.image_path.display().to_string()),
+        });
+    }
+    for driver in &review.drivers {
+        let item = verify_one_driver(driver);
         if item.status == VerificationStatus::Failed {
             errors.push(Warning::new(
                 "verification_driver_failed",
@@ -957,7 +928,7 @@ fn verify_drivers(
         }
         items.push(item);
     }
-    if manual_pending {
+    if !review.manual_drivers.is_empty() {
         warnings.push(Warning::new(
             "verification_driver_manual",
             WarningSeverity::Warning,
@@ -969,22 +940,13 @@ fn verify_drivers(
 
 /// A bundled driver is restored when its service points at its image and the image on
 /// disk is the one that was packaged.
-fn verify_one_driver(map: &RestoreMap, driver: &DriverEntry) -> VerificationItem {
+fn verify_one_driver(reviewed: &ReviewedDriver<'_>) -> VerificationItem {
+    let driver = reviewed.entry;
+    let destination = &reviewed.destination;
     let name = || driver.service_name.clone();
-    let destination = match driver_destination(driver, map) {
-        Ok(destination) => destination,
-        Err(error) => {
-            return failed_item(
-                VerificationCategory::Driver,
-                name(),
-                format!("Driver has no safe destination: {error}"),
-                Some(driver.image_path.display().to_string()),
-            );
-        }
-    };
     let source = Some(destination.display().to_string());
     match service_image_path(&driver.service_name) {
-        Ok(Some(actual)) if image_path_matches(&actual, &destination, None, system_root()) => {}
+        Ok(Some(actual)) if image_path_matches(&actual, destination, None, system_root()) => {}
         Ok(Some(actual)) => {
             return failed_item(
                 VerificationCategory::Driver,
@@ -1021,7 +983,7 @@ fn verify_one_driver(map: &RestoreMap, driver: &DriverEntry) -> VerificationItem
     verify_hash(
         VerificationCategory::Driver,
         name(),
-        &destination,
+        destination,
         None,
         driver.hash_sha256.as_deref(),
     )
@@ -1036,47 +998,42 @@ fn verify_one_driver(map: &RestoreMap, driver: &DriverEntry) -> VerificationItem
 }
 
 fn verify_scheduled_tasks(
-    tasks: &[ScheduledTaskEntry],
-    map: &RestoreMap,
+    tasks: &[ReviewedTask<'_>],
     items: &mut Vec<VerificationItem>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
     for task in tasks {
-        let name = format!("{}{}", task.task_path, task.task_name);
-        let item = match scheduled_task_xml(task) {
+        let name = format!("{}{}", task.entry.task_path, task.entry.task_name);
+        let item = match live_task_xml(&task.entry.task_path, &task.entry.task_name) {
             Ok(Some(xml)) => {
-                let expected_command = map.rewrite(&task.action_command.to_string_lossy());
-                if xml
-                    .to_ascii_lowercase()
-                    .contains(&expected_command.to_ascii_lowercase())
-                {
+                if task_runs_commands(&xml, &task.commands) {
                     passed_item(
                         VerificationCategory::ScheduledTask,
-                        name,
-                        "Scheduled task exists and references the restored command path.",
-                        Some(expected_command),
+                        name.clone(),
+                        "Scheduled task exists and runs the restored programs.",
+                        Some(name),
                     )
                 } else {
                     failed_item(
                         VerificationCategory::ScheduledTask,
-                        name,
-                        "Scheduled task exists but does not reference the restored command path.",
-                        Some(expected_command),
+                        name.clone(),
+                        "Scheduled task exists but does not run the restored programs.",
+                        Some(name),
                     )
                 }
             }
             Ok(None) => failed_item(
                 VerificationCategory::ScheduledTask,
-                name,
+                name.clone(),
                 "Scheduled task is missing.",
-                Some(format!("{}{}", task.task_path, task.task_name)),
+                Some(name),
             ),
             Err(error) => failed_item(
                 VerificationCategory::ScheduledTask,
-                name,
+                name.clone(),
                 format!("Scheduled task query failed: {error}"),
-                Some(format!("{}{}", task.task_path, task.task_name)),
+                Some(name),
             ),
         };
         if item.status == VerificationStatus::Failed {
@@ -1099,29 +1056,46 @@ fn verify_scheduled_tasks(
     }
 }
 
+/// True when a task's definition runs exactly these commands.
+fn task_runs_commands(xml: &str, expected: &[String]) -> bool {
+    let Ok(definition) = read_task_definition(xml) else {
+        return false;
+    };
+    let same = |left: &str, right: &str| {
+        paths_equal(
+            Path::new(left.trim().trim_matches('"')),
+            Path::new(right.trim().trim_matches('"')),
+        )
+    };
+    definition.commands.len() == expected.len()
+        && definition
+            .commands
+            .iter()
+            .zip(expected)
+            .all(|(actual, wanted)| same(actual, wanted))
+}
+
 fn verify_shortcuts(
-    map: &RestoreMap,
-    shortcuts: &[ShortcutEntry],
+    shortcuts: &[ReviewedShortcut<'_>],
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) {
     for shortcut in shortcuts {
-        let expected_target = map
-            .destination_of(&shortcut.target_path)
-            .unwrap_or(&shortcut.target_path);
-        let item = match shortcut_target(&shortcut.original_lnk_path) {
+        let destination = &shortcut.placement.destination;
+        let name = || destination.display().to_string();
+        let item = match shortcut_target(destination) {
             Ok(Some(actual)) => {
-                if paths_equal(Path::new(&actual), expected_target) {
+                if paths_equal(Path::new(&actual), &shortcut.target) {
                     passed_item(
                         VerificationCategory::Shortcut,
-                        shortcut.original_lnk_path.display().to_string(),
+                        name(),
                         "Shortcut exists and target path matches restored target.",
                         Some(actual),
                     )
                 } else {
                     failed_item(
                         VerificationCategory::Shortcut,
-                        shortcut.original_lnk_path.display().to_string(),
+                        name(),
                         "Shortcut exists but target path does not match restored target.",
                         Some(actual),
                     )
@@ -1129,15 +1103,15 @@ fn verify_shortcuts(
             }
             Ok(None) => failed_item(
                 VerificationCategory::Shortcut,
-                shortcut.original_lnk_path.display().to_string(),
+                name(),
                 "Shortcut is missing.",
-                Some(shortcut.original_lnk_path.display().to_string()),
+                Some(name()),
             ),
             Err(error) => failed_item(
                 VerificationCategory::Shortcut,
-                shortcut.original_lnk_path.display().to_string(),
+                name(),
                 format!("Shortcut query failed: {error}"),
-                Some(shortcut.original_lnk_path.display().to_string()),
+                Some(name()),
             ),
         };
         if item.status == VerificationStatus::Failed {
@@ -1180,29 +1154,6 @@ fn registry_value_matches(
                 })?;
             Ok(actual.bytes.as_ref() == expected.as_slice())
         }
-    }
-}
-
-fn scheduled_task_xml(task: &ScheduledTaskEntry) -> std::io::Result<Option<String>> {
-    let script = format!(
-        "$task = Get-ScheduledTask -TaskName '{}' -TaskPath '{}' -ErrorAction SilentlyContinue; if ($null -eq $task) {{ exit 2 }}; Export-ScheduledTask -TaskName '{}' -TaskPath '{}'",
-        escape_powershell_single(&task.task_name),
-        escape_powershell_single(&task.task_path),
-        escape_powershell_single(&task.task_name),
-        escape_powershell_single(&task.task_path)
-    );
-    let output = hidden_command(POWERSHELL_EXE)
-        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
-        .output()?;
-    if output.status.code() == Some(2) {
-        return Ok(None);
-    }
-    if output.status.success() {
-        Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))
-    } else {
-        Err(std::io::Error::other(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ))
     }
 }
 
@@ -1382,6 +1333,37 @@ fn render_verification_markdown(report: &VerificationReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn task_xml(commands: &[&str]) -> String {
+        let actions: String = commands
+            .iter()
+            .map(|command| format!("<Exec><Command>{command}</Command></Exec>"))
+            .collect();
+        format!("<Task><Actions>{actions}</Actions></Task>")
+    }
+
+    #[test]
+    fn a_task_is_checked_for_exactly_its_programs() {
+        let expected = [r"D:\Apps\Acme\acme.exe".to_owned()];
+        assert!(task_runs_commands(
+            &task_xml(&[r"D:\Apps\Acme\acme.exe"]),
+            &expected
+        ));
+        assert!(task_runs_commands(
+            &task_xml(&[r#""d:\apps\acme\ACME.exe""#]),
+            &expected
+        ));
+        // It only had to contain the expected text before.
+        assert!(!task_runs_commands(
+            &task_xml(&[r"D:\Apps\Acme\acme.exe.bak"]),
+            &expected
+        ));
+        assert!(!task_runs_commands(
+            &task_xml(&[r"D:\Apps\Acme\acme.exe", r"C:\evil.exe"]),
+            &expected
+        ));
+        assert!(!task_runs_commands("<Task>", &expected));
+    }
 
     fn checked(expected_hash: Option<&str>) -> std::io::Result<VerificationStatus> {
         let folder = tempfile::tempdir()?;

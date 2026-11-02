@@ -67,10 +67,10 @@ pub(crate) fn service_object_name(service_name: &str) -> Option<String> {
         .ok()
 }
 
-/// `Path` is shared with everything else on the machine, so it is merged entry by
-/// entry instead of being replaced with the source machine's value.
+/// `Path` and `PSModulePath` are shared with everything else on the machine, so they are
+/// merged entry by entry instead of being replaced with the source machine's value.
 pub(crate) fn is_path_variable(name: &str) -> bool {
-    name.eq_ignore_ascii_case("Path")
+    name.eq_ignore_ascii_case("Path") || name.eq_ignore_ascii_case("PSModulePath")
 }
 
 /// The entries of a captured `Path`, already rewritten for the target, that belong
@@ -153,6 +153,13 @@ pub(crate) fn registry_raw_type(kind: &RegistryValueKind) -> RegType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_lists_are_merged_and_other_variables_replaced() {
+        assert!(is_path_variable("PATH"));
+        assert!(is_path_variable("PSModulePath"));
+        assert!(!is_path_variable("ACME_HOME"));
+    }
 
     #[test]
     fn only_entries_under_the_target_root_belong_to_the_app() {

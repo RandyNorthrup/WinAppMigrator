@@ -877,14 +877,25 @@ pub struct RestorePlan {
     pub planned_shortcut_changes: Vec<ShortcutEntry>,
     pub planned_environment_changes: Vec<EnvironmentVariableEntry>,
     pub warnings: Vec<Warning>,
+    /// What the package asked for and the restore rules will not allow. The `planned_`
+    /// lists hold only what is allowed.
+    #[serde(default)]
+    pub refused: Vec<Warning>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestoreResult {
     pub applied: bool,
+    /// What was done, or for a preview what would be, with what reaches beyond files
+    /// first, so the list leads with what matters however many files the app has.
     pub changes_logged: Vec<String>,
     pub warnings: Vec<Warning>,
     pub errors: Vec<Warning>,
+    /// What the package asked for and the restore rules did not allow. Nothing was done
+    /// for these, and it does not make the install a failure: a hostile package loses
+    /// only what it should not have asked for.
+    #[serde(default)]
+    pub refused: Vec<Warning>,
     #[serde(default)]
     pub verification: Option<VerificationReport>,
     pub restore_log_json: Option<PathBuf>,
@@ -967,6 +978,8 @@ pub enum VerificationCategory {
     Shortcut,
     Prerequisite,
     License,
+    /// Something the package asked for that the restore rules did not allow.
+    Refused,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

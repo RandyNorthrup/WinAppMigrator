@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,20 +12,19 @@ use winreg::enums::REG_NONE;
 
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
-    ensure_target_root, ensure_within_root, package_destination_path,
-    restore_destination_for_entry, safe_relative_path, split_user_data_relative,
-    user_data_real_destination, write_root_for,
+    ensure_target_root, ensure_within_root, package_destination_path, safe_relative_path,
+    split_user_data_relative, write_root_for,
 };
 use crate::hashing::sha256_file;
 use crate::models::{
-    DriverEntry, DriverKind, EnvironmentVariableEntry, LicenseArtifact, PackageManifest,
-    RegistryEntry, RegistryValueKind, RestoreOptions, RestorePlan, RestoreResult,
-    RuntimePrerequisite, ScheduledTaskEntry, ServiceEntry, ShortcutEntry, VerificationOptions,
-    Warning, WarningSeverity,
+    DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry, LicenseArtifact,
+    PackageManifest, RegistryEntry, RegistryHive, RegistryValueKind, RestoreOptions, RestorePlan,
+    RestoreResult, RuntimePrerequisite, ServiceEntry, VerificationOptions, Warning,
+    WarningSeverity,
 };
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
-use crate::path_utils::{escape_powershell_single, hidden_command, sanitize_filename, system_root};
+use crate::path_utils::{escape_powershell_single, hidden_command, system_root};
 use crate::prerequisites::{
     PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
 };
@@ -35,56 +34,102 @@ use crate::registry_target::{
     registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
 };
 use crate::restore_policy::{
-    ServiceAccount, driver_destination, existing_service_refusal, is_valid_service_name,
-    service_image_path_value,
+    ServiceAccount, com_server_refusal, existing_service_refusal, existing_task_refusal,
+    is_autostart_entry, is_com_server_entry, service_image_path_value,
 };
+use crate::restore_review::{
+    ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
+};
+use crate::task_scan::live_task_xml;
 use crate::verify::verify_prepared_package;
 
 const RESTORE_LOG_JSON: &str = "restore_log.json";
 const RESTORE_LOG_MARKDOWN: &str = "restore_log.md";
 const POWERSHELL_EXE: &str = "powershell.exe";
 const SC_EXE: &str = "sc.exe";
+const REFUSED_LOG_HEADING: &str = "\n## Refused\n";
 /// Buffer for copying a file out of the package. Large files are the slow ones.
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
 pub fn plan_restore(options: &RestoreOptions) -> Result<RestorePlan> {
     let manifest = read_manifest(&options.package_root)?;
-    Ok(plan_from_manifest(manifest, options))
-}
-
-fn plan_from_manifest(manifest: PackageManifest, options: &RestoreOptions) -> RestorePlan {
+    let review = ReviewedPackage::new(
+        &manifest,
+        &options.target_root,
+        options.restore_user_data,
+        options.restore_license,
+    )?;
     let mut warnings = manifest.warnings.clone();
-    let mut planned_file_writes = Vec::new();
-
-    for file in manifest
-        .file_inventory
-        .into_iter()
-        .filter(|entry| entry.should_copy)
-    {
-        if file.package_relative_path.is_none() {
-            warnings.push(Warning::new(
-                "restore_package_path_missing",
-                WarningSeverity::Warning,
-                "A copyable file has no package relative path.",
-                Some(file.original_path.display().to_string()),
-            ));
-            continue;
-        }
-        planned_file_writes.push(file);
-    }
-
-    RestorePlan {
+    warnings.extend(review.warnings.iter().cloned());
+    Ok(RestorePlan {
         package_root: options.package_root.clone(),
         target_root: options.target_root.clone(),
         dry_run: !options.apply || options.dry_run,
-        planned_file_writes,
-        planned_registry_writes: manifest.registry_keys_exported,
-        planned_service_changes: manifest.services_detected,
-        planned_driver_actions: manifest.drivers_detected,
-        planned_task_changes: manifest.scheduled_tasks_detected,
-        planned_shortcut_changes: manifest.shortcuts_detected,
-        planned_environment_changes: manifest.environment_variables_detected,
+        planned_file_writes: review.files.iter().map(|file| (*file).clone()).collect(),
+        planned_registry_writes: review
+            .registry
+            .iter()
+            .map(|entry| (*entry).clone())
+            .collect(),
+        planned_service_changes: review
+            .services
+            .iter()
+            .map(|service| service.entry.clone())
+            .collect(),
+        planned_driver_actions: review
+            .drivers
+            .iter()
+            .map(|driver| driver.entry)
+            .chain(review.manual_drivers.iter().copied())
+            .cloned()
+            .collect(),
+        planned_task_changes: review.tasks.iter().map(|task| task.entry.clone()).collect(),
+        planned_shortcut_changes: review
+            .shortcuts
+            .iter()
+            .map(|shortcut| shortcut.entry.clone())
+            .collect(),
+        planned_environment_changes: review
+            .environment
+            .iter()
+            .map(|variable| (*variable).clone())
+            .collect(),
         warnings,
+        refused: review.refused.clone(),
+    })
+}
+
+/// What a restore did or would do, kept apart so what reaches beyond files can be listed
+/// first. A preview of a large app is otherwise thousands of files before anything else.
+#[derive(Default)]
+struct Changes {
+    services: Vec<String>,
+    drivers: Vec<String>,
+    tasks: Vec<String>,
+    autostart: Vec<String>,
+    shortcuts: Vec<String>,
+    environment: Vec<String>,
+    prerequisites: Vec<String>,
+    registry: Vec<String>,
+    license: Vec<String>,
+    files: Vec<String>,
+}
+
+impl Changes {
+    fn in_order(self) -> Vec<String> {
+        [
+            self.services,
+            self.drivers,
+            self.tasks,
+            self.autostart,
+            self.shortcuts,
+            self.environment,
+            self.prerequisites,
+            self.registry,
+            self.license,
+            self.files,
+        ]
+        .concat()
     }
 }
 
@@ -112,8 +157,13 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         refuse_damaged_package(&effective_options, &manifest)?;
     }
 
-    let plan = plan_from_manifest(manifest.clone(), &effective_options);
-    if options.apply && restore_requires_admin(&plan) && !is_elevated() {
+    let review = ReviewedPackage::new(
+        &manifest,
+        &options.target_root,
+        options.restore_user_data,
+        options.restore_license,
+    )?;
+    if options.apply && restore_requires_admin(&review) && !is_elevated() {
         return Err(WinAppMigratorError::InvalidInput(
             "restore plan includes admin-only registry, service, scheduled task, shortcut, or protected target changes"
                 .to_owned(),
@@ -128,25 +178,25 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     if options.apply
         && options.restore_user_data
         && !is_elevated()
-        && user_data_restore_requires_admin(&effective_options, &plan)
+        && user_data_restore_requires_admin(&review)
     {
         return Err(WinAppMigratorError::InvalidInput(
             "restoring user data into ProgramData or other protected locations requires elevated privileges"
                 .to_owned(),
         ));
     }
-
-    let map = RestoreMap::new(&manifest, &options.target_root, options.restore_user_data)?;
     if options.apply {
         ensure_target_root(&options.target_root)?;
     }
+
     let output_dir = restore_output_dir(&options.package_root, &effective_options.package_root);
-    let mut changes_logged = Vec::new();
-    let mut warnings = plan.warnings.clone();
+    let mut changes = Changes::default();
+    let mut warnings = manifest.warnings.clone();
+    warnings.extend(review.warnings.iter().cloned());
     let mut errors = Vec::new();
     if options.restore_user_data
-        && plan
-            .planned_file_writes
+        && review
+            .files
             .iter()
             .any(|file| split_user_data_relative(&file.original_path).is_some())
     {
@@ -163,73 +213,66 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     restore_prerequisites(
         &effective_options,
         &manifest,
-        &mut changes_logged,
+        &mut changes.prerequisites,
         &mut warnings,
         &mut errors,
     );
     restore_files(
         &effective_options,
-        &plan,
-        &mut changes_logged,
+        &review,
+        &mut changes.files,
         &mut warnings,
         &mut errors,
     )?;
     restore_registry(
         &effective_options,
-        &plan.planned_registry_writes,
-        &map,
-        &mut changes_logged,
+        &review,
+        &mut changes,
         &mut warnings,
         &mut errors,
     );
     restore_license(
         &effective_options,
-        &manifest,
-        &map,
-        &mut changes_logged,
-        &mut warnings,
+        &review,
+        &mut changes.license,
         &mut errors,
     );
     restore_services(
         &effective_options,
-        &map,
-        &plan.planned_service_changes,
-        &mut changes_logged,
+        &review,
+        &mut changes.services,
         &mut warnings,
         &mut errors,
     );
     restore_drivers(
         &effective_options,
-        &plan.planned_driver_actions,
-        &map,
-        &mut changes_logged,
+        &review,
+        &mut changes.drivers,
         &mut warnings,
         &mut errors,
     );
     restore_scheduled_tasks(
         &effective_options,
-        &plan.planned_task_changes,
-        &map,
-        &mut changes_logged,
+        &review,
+        &mut changes.tasks,
         &mut warnings,
         &mut errors,
     );
     restore_shortcuts(
         &effective_options,
-        &map,
-        &plan.planned_shortcut_changes,
-        &mut changes_logged,
+        &review,
+        &mut changes,
         &mut warnings,
         &mut errors,
     );
     restore_environment(
         &effective_options,
-        &plan.planned_environment_changes,
-        &map,
-        &mut changes_logged,
+        &review,
+        &mut changes.environment,
         &mut warnings,
         &mut errors,
     );
+    let mut changes_logged = changes.in_order();
 
     let verification = if options.apply {
         match verify_prepared_package(
@@ -279,6 +322,7 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         changes_logged,
         warnings,
         errors,
+        refused: review.refused,
         verification,
         restore_log_json: Some(restore_log_json.clone()),
         restore_log_markdown: Some(restore_log_markdown.clone()),
@@ -289,18 +333,19 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
 
 fn restore_files(
     options: &RestoreOptions,
-    plan: &RestorePlan,
+    review: &ReviewedPackage<'_>,
     changes_logged: &mut Vec<String>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) -> Result<()> {
-    for file in &plan.planned_file_writes {
-        let Some(relative) = file.package_relative_path.as_ref() else {
+    for file in &review.files {
+        let (Some(relative), Some(destination)) = (
+            file.package_relative_path.as_ref(),
+            review.map.destination_of(&file.original_path),
+        ) else {
             continue;
         };
         let source = package_destination_path(&options.package_root, relative)?;
-        let destination =
-            restore_destination_for_entry(file, &options.target_root, options.restore_user_data)?;
 
         if destination.exists() && !options.force {
             let warning = Warning::new(
@@ -318,7 +363,7 @@ fn restore_files(
         }
 
         if options.apply {
-            copy_restore_file(&source, &destination, &options.target_root)?;
+            copy_restore_file(&source, destination, &options.target_root)?;
             changes_logged.push(format!(
                 "copied {} -> {}",
                 source.display(),
@@ -337,15 +382,19 @@ fn restore_files(
 
 fn restore_registry(
     options: &RestoreOptions,
-    entries: &[RegistryEntry],
-    map: &RestoreMap,
-    changes_logged: &mut Vec<String>,
+    review: &ReviewedPackage<'_>,
+    changes: &mut Changes,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
-    for entry in entries {
+    for entry in &review.registry {
+        let log = if is_autostart_entry(entry) {
+            &mut changes.autostart
+        } else {
+            &mut changes.registry
+        };
         if !options.apply {
-            changes_logged.push(format!(
+            log.push(format!(
                 "would restore registry {}\\{} {}",
                 registry_hive_name(&entry.hive),
                 entry.key_path,
@@ -354,12 +403,12 @@ fn restore_registry(
             continue;
         }
 
-        match apply_registry_entry(entry, options.force, map) {
-            Ok(message) => changes_logged.push(message),
+        match apply_registry_entry(entry, options.force, &review.map) {
+            Ok(message) => log.push(message),
             Err(warning) => errors.push(warning),
         }
     }
-    if !entries.is_empty() {
+    if !review.registry.is_empty() {
         warnings.push(Warning::new(
             "registry_restore_review_required",
             WarningSeverity::Info,
@@ -371,50 +420,33 @@ fn restore_registry(
 
 fn restore_services(
     options: &RestoreOptions,
-    map: &RestoreMap,
-    services: &[ServiceEntry],
+    review: &ReviewedPackage<'_>,
     changes_logged: &mut Vec<String>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
-    for service in services {
-        let binary_path = map
-            .destination_of(&service.binary_path)
-            .map_or_else(|| service.binary_path.clone(), Path::to_path_buf);
-        let arguments = service.arguments.as_deref().map(|text| map.rewrite(text));
-        let account =
-            ServiceAccount::from_recorded(service.account_name.as_deref(), &service.service_name);
+    for service in &review.services {
+        if let ServiceAccount::Custom(original) = &service.account {
+            warnings.push(custom_account_warning(service.entry, original));
+        }
         if !options.apply {
             changes_logged.push(format!(
                 "would restore service {} -> {} (runs as {})",
-                service.service_name,
-                service_image_path_value(&binary_path, arguments.as_deref()),
-                account.label()
+                service.entry.service_name,
+                service_image_path_value(&service.binary, service.arguments.as_deref()),
+                service.account.label()
             ));
-            if let ServiceAccount::Custom(original) = &account {
-                warnings.push(custom_account_warning(service, original));
-            }
             continue;
         }
-        match apply_service(
-            service,
-            &binary_path,
-            arguments.as_deref(),
-            &account,
-            &options.target_root,
-            options.force,
-        ) {
+        match apply_service(service, &options.target_root, options.force) {
             Ok(messages) => changes_logged.extend(messages),
             Err(warning) => {
                 errors.push(warning);
                 continue;
             }
         }
-        if let ServiceAccount::Custom(original) = &account {
-            warnings.push(custom_account_warning(service, original));
-        }
-        for entry in &service.parameters {
-            match apply_registry_entry(entry, true, map) {
+        for entry in &service.entry.parameters {
+            match apply_registry_entry(entry, true, &review.map) {
                 Ok(message) => changes_logged.push(message),
                 Err(warning) => errors.push(warning),
             }
@@ -583,51 +615,25 @@ fn confirm_prerequisite(
 /// their original (or re-anchored) locations, plus transferable registry values.
 fn restore_license(
     options: &RestoreOptions,
-    manifest: &PackageManifest,
-    map: &RestoreMap,
+    review: &ReviewedPackage<'_>,
     changes_logged: &mut Vec<String>,
-    _warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
-    // The user (or automation) can opt out of restoring license data even when
-    // it was captured; skip both files and transferable registry values.
-    if !options.restore_license {
-        return;
-    }
-    for artifact in &manifest.license_artifacts_detected {
-        if !artifact.should_copy {
-            continue;
-        }
-        let (Some(relative), Some(original)) = (
-            artifact.package_relative_path.as_ref(),
-            artifact.path.as_ref(),
-        ) else {
-            continue;
-        };
-        let source = match package_destination_path(&options.package_root, relative) {
-            Ok(path) => path,
-            Err(error) => {
-                errors.push(Warning::new(
-                    "license_source_invalid",
-                    WarningSeverity::Error,
-                    format!("Packaged license path is invalid: {error}"),
-                    Some(relative.display().to_string()),
-                ));
-                continue;
-            }
-        };
-        let destination = match license_destination(original, map, options.restore_user_data) {
-            Ok(path) => path,
-            Err(error) => {
-                errors.push(Warning::new(
-                    "license_destination_invalid",
-                    WarningSeverity::Error,
-                    format!("Could not resolve license destination: {error}"),
-                    Some(original.display().to_string()),
-                ));
-                continue;
-            }
-        };
+    for license in &review.license {
+        let destination = &license.destination;
+        let source =
+            match package_destination_path(&options.package_root, license.package_relative_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    errors.push(Warning::new(
+                        "license_source_invalid",
+                        WarningSeverity::Error,
+                        format!("Packaged license path is invalid: {error}"),
+                        Some(license.package_relative_path.display().to_string()),
+                    ));
+                    continue;
+                }
+            };
 
         if !options.apply {
             changes_logged.push(format!(
@@ -637,7 +643,7 @@ fn restore_license(
             ));
             continue;
         }
-        if destination_requires_admin(&destination) && !is_elevated() {
+        if destination_requires_admin(destination) && !is_elevated() {
             errors.push(Warning::new(
                 "license_requires_admin",
                 WarningSeverity::Error,
@@ -657,10 +663,10 @@ fn restore_license(
             ));
             continue;
         }
-        let result = if artifact.store_files.is_empty() {
-            copy_restore_file(&source, &destination, &options.target_root)
+        let result = if license.artifact.store_files.is_empty() {
+            copy_restore_file(&source, destination, &options.target_root)
         } else {
-            copy_license_store(artifact, &source, &destination, &options.target_root)
+            copy_license_store(license.artifact, &source, destination, &options.target_root)
         };
         match result {
             Ok(()) => changes_logged.push(format!(
@@ -677,7 +683,7 @@ fn restore_license(
         }
     }
 
-    for entry in &manifest.license_registry_entries {
+    for entry in &review.license_registry {
         if !options.apply {
             changes_logged.push(format!(
                 "would restore license registry {}\\{}",
@@ -686,25 +692,11 @@ fn restore_license(
             ));
             continue;
         }
-        match apply_registry_entry(entry, options.force, map) {
+        match apply_registry_entry(entry, options.force, &review.map) {
             Ok(message) => changes_logged.push(message),
             Err(warning) => errors.push(warning),
         }
     }
-}
-
-/// Resolve where a license artifact should land on the target: re-anchored to
-/// the real user-data base when applicable, otherwise the original path with
-/// app-install paths rewritten to the target root.
-fn license_destination(
-    original: &Path,
-    map: &RestoreMap,
-    restore_user_data: bool,
-) -> Result<PathBuf> {
-    if restore_user_data && let Some(destination) = user_data_real_destination(original)? {
-        return Ok(destination);
-    }
-    Ok(PathBuf::from(map.rewrite(&original.to_string_lossy())))
 }
 
 /// Copy the files the manifest lists for a license store. They were all hash-checked in
@@ -731,43 +723,27 @@ fn copy_license_store(
 /// redistributed and are reported with precise reinstall guidance.
 fn restore_drivers(
     options: &RestoreOptions,
-    drivers: &[DriverEntry],
-    map: &RestoreMap,
+    review: &ReviewedPackage<'_>,
     changes_logged: &mut Vec<String>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
-    for driver in drivers {
-        let Some(relative) = driver.package_relative_path.as_ref() else {
-            // Not bundled (inbox/vendor driver): precise, actionable guidance.
-            changes_logged.push(format!("driver not auto-restored: {}", driver.service_name));
-            warnings.push(Warning::new(
-                "driver_manual_reinstall",
-                WarningSeverity::Warning,
-                driver.restore_instructions.clone(),
-                Some(driver.service_name.clone()),
-            ));
-            continue;
-        };
-
-        let destination = match driver_destination(driver, map) {
-            Ok(path) => path,
-            Err(error) => {
-                errors.push(Warning::new(
-                    "driver_destination_invalid",
-                    WarningSeverity::Error,
-                    format!("Could not resolve a safe driver destination: {error}"),
-                    Some(driver.service_name.clone()),
-                ));
-                continue;
-            }
-        };
-
+    for driver in &review.manual_drivers {
+        // Not bundled (inbox/vendor driver): precise, actionable guidance.
+        changes_logged.push(format!("driver not auto-restored: {}", driver.service_name));
+        warnings.push(Warning::new(
+            "driver_manual_reinstall",
+            WarningSeverity::Warning,
+            driver.restore_instructions.clone(),
+            Some(driver.service_name.clone()),
+        ));
+    }
+    for driver in &review.drivers {
+        let name = &driver.entry.service_name;
         if !options.apply {
             changes_logged.push(format!(
-                "would install driver {} -> {}",
-                driver.service_name,
-                destination.display()
+                "would install driver {name} -> {}",
+                driver.destination.display()
             ));
             continue;
         }
@@ -776,23 +752,11 @@ fn restore_drivers(
                 "driver_requires_admin",
                 WarningSeverity::Error,
                 "Driver registration requires elevation; re-run the installer as administrator.",
-                Some(driver.service_name.clone()),
+                Some(name.clone()),
             ));
             continue;
         }
-        let source = match package_destination_path(&options.package_root, relative) {
-            Ok(path) => path,
-            Err(error) => {
-                errors.push(Warning::new(
-                    "driver_source_invalid",
-                    WarningSeverity::Error,
-                    format!("Bundled driver path is invalid: {error}"),
-                    Some(relative.display().to_string()),
-                ));
-                continue;
-            }
-        };
-        match place_and_register_driver(driver, &source, &destination, options) {
+        match place_and_register_driver(driver, options) {
             Ok(messages) => changes_logged.extend(messages),
             Err(warning) => errors.push(warning),
         }
@@ -804,21 +768,23 @@ fn restore_drivers(
 /// given, and an image whose hash is wrong is never registered: a driver loads into the
 /// kernel and is the last thing to take on trust.
 fn place_and_register_driver(
-    driver: &DriverEntry,
-    source: &Path,
-    destination: &Path,
+    reviewed: &ReviewedDriver<'_>,
     options: &RestoreOptions,
 ) -> std::result::Result<Vec<String>, Warning> {
+    let driver = reviewed.entry;
+    let destination = reviewed.destination.as_path();
     let name = driver.service_name.as_str();
     let problem = |code: &'static str, message: String| {
         Warning::new(code, WarningSeverity::Error, message, Some(name.to_owned()))
     };
-    if !is_valid_service_name(name) {
-        return Err(problem(
-            "driver_name_invalid",
-            "The driver's name is not one Windows accepts, so it was not set up.".to_owned(),
-        ));
-    }
+    let source = package_destination_path(&options.package_root, reviewed.package_relative_path)
+        .map_err(|error| {
+            problem(
+                "driver_source_invalid",
+                format!("Bundled driver path is invalid: {error}"),
+            )
+        })?;
+    let source = source.as_path();
     let current = service_image_path(name).map_err(|error| {
         problem(
             "driver_query_failed",
@@ -925,21 +891,26 @@ fn driver_sc_type(kind: &DriverKind) -> &'static str {
 
 fn restore_scheduled_tasks(
     options: &RestoreOptions,
-    tasks: &[ScheduledTaskEntry],
-    map: &RestoreMap,
+    review: &ReviewedPackage<'_>,
     changes_logged: &mut Vec<String>,
-    _warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
-    for task in tasks {
-        if !options.apply {
-            changes_logged.push(format!(
-                "would restore scheduled task {}{}",
-                task.task_path, task.task_name
+    for task in &review.tasks {
+        let name = format!("{}{}", task.entry.task_path, task.entry.task_name);
+        if task.runs_as_system {
+            warnings.push(Warning::new(
+                "scheduled_task_runs_as_system",
+                WarningSeverity::Warning,
+                format!("The scheduled task {name} runs as SYSTEM, with full rights over this PC."),
+                Some(name.clone()),
             ));
+        }
+        if !options.apply {
+            changes_logged.push(format!("would restore scheduled task {name}"));
             continue;
         }
-        match apply_scheduled_task(task, options.force, map) {
+        match apply_scheduled_task(task, options) {
             Ok(message) => changes_logged.push(message),
             Err(warning) => errors.push(warning),
         }
@@ -948,53 +919,50 @@ fn restore_scheduled_tasks(
 
 fn restore_shortcuts(
     options: &RestoreOptions,
-    map: &RestoreMap,
-    shortcuts: &[ShortcutEntry],
-    changes_logged: &mut Vec<String>,
+    review: &ReviewedPackage<'_>,
+    changes: &mut Changes,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
-    for shortcut in shortcuts {
-        let target_path = map
-            .destination_of(&shortcut.target_path)
-            .map_or_else(|| shortcut.target_path.clone(), Path::to_path_buf);
-        let working_directory = shortcut
-            .working_directory
-            .as_ref()
-            .map(|working| PathBuf::from(map.rewrite(&working.to_string_lossy())));
-        let icon_path = shortcut
-            .icon_path
-            .as_ref()
-            .map(|icon| PathBuf::from(map.rewrite(&icon.to_string_lossy())));
-
+    for shortcut in &review.shortcuts {
+        let destination = &shortcut.placement.destination;
+        let log = if shortcut.placement.autostart {
+            &mut changes.autostart
+        } else {
+            &mut changes.shortcuts
+        };
+        let kind = if shortcut.placement.autostart {
+            "startup shortcut"
+        } else {
+            "shortcut"
+        };
         if !options.apply {
-            changes_logged.push(format!(
-                "would restore shortcut {} -> {}",
-                shortcut.original_lnk_path.display(),
-                target_path.display()
+            log.push(format!(
+                "would restore {kind} {} -> {}",
+                destination.display(),
+                shortcut.target.display()
             ));
             continue;
         }
-        if shortcut.original_lnk_path.exists() && !options.force {
+        if destination.exists() && !options.force {
             errors.push(Warning::new(
                 "shortcut_destination_exists",
                 WarningSeverity::Warning,
                 "Shortcut exists; use --force to overwrite.",
-                Some(shortcut.original_lnk_path.display().to_string()),
+                Some(destination.display().to_string()),
             ));
             continue;
         }
-        match apply_shortcut(
-            shortcut,
-            &target_path,
-            working_directory.as_deref(),
-            icon_path.as_deref(),
-        ) {
-            Ok(message) => changes_logged.push(message),
+        match apply_shortcut(shortcut) {
+            Ok(message) => log.push(message),
             Err(warning) => errors.push(warning),
         }
     }
-    if shortcuts.iter().any(shortcut_requires_admin) {
+    if review
+        .shortcuts
+        .iter()
+        .any(|shortcut| shortcut.placement.for_all_users)
+    {
         warnings.push(Warning::new(
             "shortcut_admin_scope",
             WarningSeverity::Info,
@@ -1032,13 +1000,12 @@ fn refuse_damaged_package(options: &RestoreOptions, manifest: &PackageManifest) 
 
 fn restore_environment(
     options: &RestoreOptions,
-    environment_variables: &[EnvironmentVariableEntry],
-    map: &RestoreMap,
+    review: &ReviewedPackage<'_>,
     changes_logged: &mut Vec<String>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
-    for variable in environment_variables {
+    for variable in &review.environment {
         if !options.apply {
             changes_logged.push(format!(
                 "would restore {:?} environment variable {}",
@@ -1046,12 +1013,13 @@ fn restore_environment(
             ));
             continue;
         }
-        match apply_environment_variable(variable, options.force, &options.target_root, map) {
+        match apply_environment_variable(variable, options.force, &options.target_root, &review.map)
+        {
             Ok(message) => changes_logged.push(message),
             Err(warning) => errors.push(warning),
         }
     }
-    if !environment_variables.is_empty() {
+    if !review.environment.is_empty() {
         warnings.push(Warning::new(
             "environment_restore_session_refresh_required",
             WarningSeverity::Info,
@@ -1086,6 +1054,10 @@ fn apply_registry_entry(
             registry_hive_name(&entry.hive),
             entry.key_path
         ));
+    }
+
+    if is_com_server_entry(entry) {
+        refuse_taking_over_com_class(entry, map)?;
     }
 
     let value_name = registry_value_name(entry.value_name.as_deref());
@@ -1125,6 +1097,36 @@ fn apply_registry_entry(
     ))
 }
 
+/// Look at what the class is registered as on this PC, before writing over it. A per-user
+/// registration wins over the machine's, so a new one in `HKCU` takes over a class that
+/// only exists in `HKLM` just as surely.
+fn refuse_taking_over_com_class(
+    entry: &RegistryEntry,
+    map: &RestoreMap,
+) -> std::result::Result<(), Warning> {
+    let new_value = map.rewrite(entry.value_data.as_deref().unwrap_or_default());
+    let mut hives = vec![&entry.hive];
+    if entry.hive == RegistryHive::CurrentUser {
+        hives.push(&RegistryHive::LocalMachine);
+    }
+    for hive in hives {
+        let existing = registry_root(hive)
+            .open_subkey(&entry.key_path)
+            .and_then(|key| key.get_value::<String, _>(""));
+        if let Ok(existing) = existing
+            && let Some(refusal) =
+                com_server_refusal(&existing, &new_value, map.target_root(), system_root())
+        {
+            return Err(registry_warning(
+                "registry_com_class_exists",
+                entry,
+                refusal,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn apply_environment_variable(
     variable: &EnvironmentVariableEntry,
     force: bool,
@@ -1157,6 +1159,12 @@ fn apply_environment_variable(
             .get_value::<String, _>(&variable.name)
             .unwrap_or_default();
         let entries = app_path_entries(&rewritten, target_root);
+        if entries.is_empty() {
+            return Ok(format!(
+                "left {:?} environment variable {} as it is: none of it belongs to this app",
+                variable.scope, variable.name
+            ));
+        }
         let vtype = existing.map_or_else(
             || registry_raw_type(&variable.value_kind),
             |value| value.vtype,
@@ -1248,22 +1256,12 @@ fn sc_service_arguments(
 }
 
 fn apply_service(
-    service: &ServiceEntry,
-    binary_path: &Path,
-    arguments: Option<&str>,
-    account: &ServiceAccount,
+    reviewed: &ReviewedService<'_>,
     target_root: &Path,
     force: bool,
 ) -> std::result::Result<Vec<String>, Warning> {
+    let service = reviewed.entry;
     let name = service.service_name.as_str();
-    if !is_valid_service_name(name) {
-        return Err(Warning::new(
-            "service_name_invalid",
-            WarningSeverity::Error,
-            "The service's name is not one Windows accepts, so it was not set up.",
-            Some(name.to_owned()),
-        ));
-    }
     let current = service_image_path(name).map_err(|error| {
         Warning::new(
             "service_query_failed",
@@ -1301,14 +1299,14 @@ fn apply_service(
     command.args(sc_service_arguments(
         verb,
         service,
-        binary_path,
-        arguments,
-        account,
+        &reviewed.binary,
+        reviewed.arguments.as_deref(),
+        &reviewed.account,
     ));
     run_checked(&mut command, error_code, name)?;
     let messages = vec![format!(
         "{done} service {name} (runs as {})",
-        account.label()
+        reviewed.account.label()
     )];
 
     if let Some(description) = service.description.as_deref() {
@@ -1341,74 +1339,107 @@ fn apply_service(
     Ok(messages)
 }
 
+/// Register a task. Its definition is passed through a file in the staging folder, which
+/// other processes cannot write to. A fixed name in `%TEMP%` could be planted as a link.
 fn apply_scheduled_task(
-    task: &ScheduledTaskEntry,
-    force: bool,
-    map: &RestoreMap,
+    task: &ReviewedTask<'_>,
+    options: &RestoreOptions,
 ) -> std::result::Result<String, Warning> {
-    let Some(xml) = task.definition_xml.as_deref() else {
-        return Err(Warning::new(
-            "scheduled_task_xml_missing",
-            WarningSeverity::Error,
-            "Scheduled task XML definition was not archived; exact restore is unavailable.",
-            Some(format!("{}{}", task.task_path, task.task_name)),
-        ));
-    };
-    if scheduled_task_exists(task)? && !force {
-        return Err(Warning::new(
-            "scheduled_task_exists",
-            WarningSeverity::Warning,
-            "Scheduled task exists; use --force to overwrite.",
-            Some(format!("{}{}", task.task_path, task.task_name)),
-        ));
+    let name = format!("{}{}", task.entry.task_path, task.entry.task_name);
+    let existing =
+        live_task_xml(&task.entry.task_path, &task.entry.task_name).map_err(|error| {
+            Warning::new(
+                "scheduled_task_query_failed",
+                WarningSeverity::Error,
+                format!("Failed to query scheduled task: {error}"),
+                Some(name.clone()),
+            )
+        })?;
+    if let Some(existing) = existing.as_deref() {
+        if !options.force {
+            return Err(Warning::new(
+                "scheduled_task_exists",
+                WarningSeverity::Warning,
+                "Scheduled task exists; use --force to overwrite.",
+                Some(name),
+            ));
+        }
+        if let Some(refusal) = existing_task_refusal(existing, &options.target_root) {
+            return Err(Warning::new(
+                "scheduled_task_exists_elsewhere",
+                WarningSeverity::Error,
+                refusal,
+                Some(name),
+            ));
+        }
     }
 
-    let rewritten_xml = map.rewrite_xml(xml).map_err(|error| {
-        Warning::new(
-            "scheduled_task_xml_invalid",
-            WarningSeverity::Error,
-            format!("The scheduled task's definition could not be read: {error}"),
-            Some(format!("{}{}", task.task_path, task.task_name)),
+    let xml_path = write_task_definition(&options.package_root, &task.xml).map_err(|error| {
+        warning_io(
+            "scheduled_task_xml_write_failed",
+            &options.package_root,
+            error,
         )
     })?;
-    let xml_path = std::env::temp_dir().join(format!(
-        "winappmigrator-task-{}-{}.xml",
-        std::process::id(),
-        sanitize_filename(&task.task_name)
-    ));
-    fs::write(&xml_path, rewritten_xml)
-        .map_err(|error| warning_io("scheduled_task_xml_write_failed", &xml_path, error))?;
-    let force_flag = if force { "$true" } else { "$false" };
-    let script = format!(
-        "$xml = Get-Content -Raw -LiteralPath '{}'; Register-ScheduledTask -TaskName '{}' -TaskPath '{}' -Xml $xml -Force:{force_flag} | Out-Null",
-        escape_powershell_single(xml_path.display().to_string().as_str()),
-        escape_powershell_single(&task.task_name),
-        escape_powershell_single(&task.task_path),
+    let script = register_task_script(
+        &xml_path,
+        &task.entry.task_path,
+        &task.entry.task_name,
+        options.force,
     );
-    let result = run_powershell_script(&script).map(|_| {
-        format!(
-            "restored scheduled task {}{}",
-            task.task_path, task.task_name
-        )
-    });
+    let result = run_powershell_script(&script).map(|()| format!("restored scheduled task {name}"));
     let _ = fs::remove_file(&xml_path);
     result
 }
 
-fn apply_shortcut(
-    shortcut: &ShortcutEntry,
-    target_path: &Path,
-    working_directory: Option<&Path>,
-    icon_path: Option<&Path>,
-) -> std::result::Result<String, Warning> {
-    if let Some(parent) = shortcut.original_lnk_path.parent() {
+/// Write a task's definition into `folder` under a new name, failing rather than opening
+/// anything already there.
+fn write_task_definition(folder: &Path, xml: &str) -> io::Result<PathBuf> {
+    let path = folder.join(format!("task-{}.xml", partial_file_name()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(xml.as_bytes())?;
+    Ok(path)
+}
+
+fn register_task_script(xml_path: &Path, task_path: &str, task_name: &str, force: bool) -> String {
+    let force_flag = if force { "$true" } else { "$false" };
+    format!(
+        "$xml = Get-Content -Raw -Encoding UTF8 -LiteralPath '{}'; Register-ScheduledTask -TaskName '{}' -TaskPath '{}' -Xml $xml -Force:{force_flag} | Out-Null",
+        escape_powershell_single(&xml_path.display().to_string()),
+        escape_powershell_single(task_name),
+        escape_powershell_single(task_path),
+    )
+}
+
+fn apply_shortcut(shortcut: &ReviewedShortcut<'_>) -> std::result::Result<String, Warning> {
+    let placement = &shortcut.placement;
+    let destination = &placement.destination;
+    fs::create_dir_all(&placement.root)
+        .map_err(|error| warning_io("shortcut_parent_create_failed", &placement.root, error))?;
+    ensure_within_root(&placement.root, destination).map_err(|error| {
+        Warning::new(
+            "shortcut_destination_invalid",
+            WarningSeverity::Error,
+            error.to_string(),
+            Some(destination.display().to_string()),
+        )
+    })?;
+    if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| warning_io("shortcut_parent_create_failed", parent, error))?;
     }
+    run_powershell_script(&shortcut_script(shortcut))
+        .map(|()| format!("restored shortcut {}", destination.display()))
+}
+
+fn shortcut_script(shortcut: &ReviewedShortcut<'_>) -> String {
     let mut script = format!(
         "$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath = '{}';",
-        escape_powershell_single(shortcut.original_lnk_path.display().to_string().as_str()),
-        escape_powershell_single(target_path.display().to_string().as_str()),
+        escape_powershell_single(&shortcut.placement.destination.display().to_string()),
+        escape_powershell_single(&shortcut.target.display().to_string()),
     );
     if let Some(arguments) = shortcut.arguments.as_deref() {
         script.push_str(&format!(
@@ -1416,21 +1447,20 @@ fn apply_shortcut(
             escape_powershell_single(arguments)
         ));
     }
-    if let Some(working_directory) = working_directory {
+    if let Some(working_directory) = shortcut.working_directory.as_deref() {
         script.push_str(&format!(
             " $shortcut.WorkingDirectory = '{}';",
-            escape_powershell_single(working_directory.display().to_string().as_str())
+            escape_powershell_single(working_directory)
         ));
     }
-    if let Some(icon_path) = icon_path {
+    if let Some(icon) = shortcut.icon.as_deref() {
         script.push_str(&format!(
             " $shortcut.IconLocation = '{}';",
-            escape_powershell_single(icon_path.display().to_string().as_str())
+            escape_powershell_single(icon)
         ));
     }
     script.push_str(" $shortcut.Save();");
-    run_powershell_script(&script)
-        .map(|_| format!("restored shortcut {}", shortcut.original_lnk_path.display()))
+    script
 }
 
 /// Put a file from the package at its destination. It is written beside the destination
@@ -1520,6 +1550,10 @@ fn write_restore_logs(
     for change in &result.changes_logged {
         markdown.push_str(&format!("- {change}\n"));
     }
+    markdown.push_str(REFUSED_LOG_HEADING);
+    for refused in &result.refused {
+        markdown.push_str(&format!("- {}\n", refused.message));
+    }
     markdown.push_str("\n## Warnings\n");
     for warning in &result.warnings {
         markdown.push_str(&format!(
@@ -1564,41 +1598,34 @@ fn restore_output_dir(original_package_root: &Path, effective_package_root: &Pat
     }
 }
 
-fn restore_requires_admin(plan: &RestorePlan) -> bool {
-    plan.planned_registry_writes
+/// Worked out from what the restore will do, not from what the manifest says about it.
+fn restore_requires_admin(review: &ReviewedPackage<'_>) -> bool {
+    review
+        .registry
         .iter()
-        .any(|entry| entry.requires_admin)
-        || !plan.planned_service_changes.is_empty()
-        || plan
-            .planned_task_changes
+        .chain(review.license_registry.iter())
+        .any(|entry| entry.hive == RegistryHive::LocalMachine)
+        || !review.services.is_empty()
+        || !review.drivers.is_empty()
+        || !review.tasks.is_empty()
+        || review
+            .shortcuts
             .iter()
-            .any(|task| task.requires_admin)
-        || plan
-            .planned_shortcut_changes
+            .any(|shortcut| shortcut.placement.for_all_users)
+        || review
+            .environment
             .iter()
-            .any(shortcut_requires_admin)
-        || plan
-            .planned_environment_changes
-            .iter()
-            .any(|variable| variable.requires_admin)
-}
-
-fn shortcut_requires_admin(shortcut: &ShortcutEntry) -> bool {
-    let path = shortcut
-        .original_lnk_path
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    path.contains(r"\programdata\microsoft\windows\start menu")
-        || path.contains(r"\users\public\desktop")
+            .any(|variable| variable.scope == EnvironmentScope::Machine)
 }
 
 /// True when any planned user-data file will be restored to a machine-wide
 /// protected location (for example ProgramData) and therefore needs elevation.
-fn user_data_restore_requires_admin(options: &RestoreOptions, plan: &RestorePlan) -> bool {
-    plan.planned_file_writes.iter().any(|file| {
-        restore_destination_for_entry(file, &options.target_root, options.restore_user_data)
-            .map(|destination| destination_requires_admin(&destination))
-            .unwrap_or(false)
+fn user_data_restore_requires_admin(review: &ReviewedPackage<'_>) -> bool {
+    review.files.iter().any(|file| {
+        review
+            .map
+            .destination_of(&file.original_path)
+            .is_some_and(destination_requires_admin)
     })
 }
 
@@ -1687,26 +1714,6 @@ fn run_checked(
     ))
 }
 
-fn scheduled_task_exists(task: &ScheduledTaskEntry) -> std::result::Result<bool, Warning> {
-    let script = format!(
-        "$task = Get-ScheduledTask -TaskName '{}' -TaskPath '{}' -ErrorAction SilentlyContinue; if ($null -eq $task) {{ exit 1 }}",
-        escape_powershell_single(&task.task_name),
-        escape_powershell_single(&task.task_path)
-    );
-    let output = hidden_command(POWERSHELL_EXE)
-        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
-        .output()
-        .map_err(|error| {
-            Warning::new(
-                "scheduled_task_query_failed",
-                WarningSeverity::Error,
-                format!("Failed to query scheduled task: {error}"),
-                Some(format!("{}{}", task.task_path, task.task_name)),
-            )
-        })?;
-    Ok(output.status.success())
-}
-
 fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
     let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
@@ -1737,6 +1744,8 @@ fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{FileClassification, FileEntry};
+    use crate::restore_policy::driver_destination;
 
     #[test]
     fn rejects_apply_and_dry_run_together() {
@@ -1803,28 +1812,34 @@ mod tests {
         driver
     }
 
+    fn reviewed_driver<'a>(
+        driver: &'a DriverEntry,
+        options: &RestoreOptions,
+    ) -> ReviewedDriver<'a> {
+        ReviewedDriver {
+            entry: driver,
+            package_relative_path: Path::new(r"drivers\flt.sys"),
+            destination: options.target_root.join(r"drivers\flt.sys"),
+        }
+    }
+
     #[test]
     fn a_driver_image_with_the_wrong_hash_is_not_placed() -> Result<()> {
         let work = temp_folder()?;
         let options = driver_options(work.path(), true);
-        let source = work.path().join(r"package\drivers\flt.sys");
-        write_file(&source, b"tampered")?;
+        write_file(&options.package_root.join(r"drivers\flt.sys"), b"tampered")?;
         fs::create_dir_all(&options.target_root)
             .map_err(|error| WinAppMigratorError::io(&options.target_root, error))?;
-        let destination = options.target_root.join(r"drivers\flt.sys");
 
         for hash in [None, Some("00".repeat(32))] {
-            let refused = place_and_register_driver(
-                &unregistered_driver(hash),
-                &source,
-                &destination,
-                &options,
-            );
+            let driver = unregistered_driver(hash);
+            let reviewed = reviewed_driver(&driver, &options);
+            let refused = place_and_register_driver(&reviewed, &options);
             assert_eq!(
                 refused.err().map(|warning| warning.code).as_deref(),
                 Some("driver_hash_failed")
             );
-            assert!(!destination.exists());
+            assert!(!reviewed.destination.exists());
         }
         Ok(())
     }
@@ -1833,26 +1848,293 @@ mod tests {
     fn an_existing_driver_image_is_not_overwritten_without_force() -> Result<()> {
         let work = temp_folder()?;
         let options = driver_options(work.path(), false);
-        let source = work.path().join(r"package\drivers\flt.sys");
+        let source = options.package_root.join(r"drivers\flt.sys");
         write_file(&source, b"new")?;
-        let destination = options.target_root.join(r"drivers\flt.sys");
-        write_file(&destination, b"existing")?;
+        let driver = unregistered_driver(Some(sha256_file(&source)?));
+        let reviewed = reviewed_driver(&driver, &options);
+        write_file(&reviewed.destination, b"existing")?;
 
-        let refused = place_and_register_driver(
-            &unregistered_driver(Some(sha256_file(&source)?)),
-            &source,
-            &destination,
-            &options,
-        );
+        let refused = place_and_register_driver(&reviewed, &options);
 
         assert_eq!(
             refused.err().map(|warning| warning.code).as_deref(),
             Some("driver_image_exists")
         );
         assert_eq!(
-            fs::read(&destination).map_err(|error| WinAppMigratorError::io(&destination, error))?,
+            fs::read(&reviewed.destination)
+                .map_err(|error| WinAppMigratorError::io(&reviewed.destination, error))?,
             b"existing"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_task_definition_goes_in_the_staging_folder_under_a_new_name() -> Result<()> {
+        let work = temp_folder()?;
+        let path = write_task_definition(work.path(), "<Task>é</Task>")
+            .map_err(|error| WinAppMigratorError::io(work.path(), error))?;
+        assert_eq!(path.parent(), Some(work.path()));
+        assert_eq!(
+            fs::read_to_string(&path).map_err(|error| WinAppMigratorError::io(&path, error))?,
+            "<Task>é</Task>"
+        );
+        let second = write_task_definition(work.path(), "x")
+            .map_err(|error| WinAppMigratorError::io(work.path(), error))?;
+        assert_ne!(path, second);
+        Ok(())
+    }
+
+    #[test]
+    fn the_task_script_names_its_file_and_escapes_what_it_is_given() {
+        let script = register_task_script(
+            Path::new(r"D:\Stage\task-1.xml"),
+            r"\Acme's\",
+            "Sync's",
+            true,
+        );
+        assert!(script.contains("-Encoding UTF8"));
+        assert!(script.contains(r"-LiteralPath 'D:\Stage\task-1.xml'"));
+        assert!(script.contains("-TaskName 'Sync''s'"));
+        assert!(script.contains(r"-TaskPath '\Acme''s\'"));
+        assert!(script.contains("-Force:$true"));
+    }
+
+    fn file_entry(relative: &str, hash: Option<String>, size: u64) -> FileEntry {
+        let original = Path::new(r"C:\Program Files\Acme").join(relative);
+        FileEntry {
+            path: original.clone(),
+            original_path: original,
+            package_relative_path: Some(Path::new("files").join(relative)),
+            suggested_destination_path: None,
+            size_bytes: Some(size),
+            hash_sha256: hash,
+            classification: FileClassification::AppOwned,
+            should_copy: true,
+            reason: String::new(),
+        }
+    }
+
+    fn bare_manifest() -> PackageManifest {
+        PackageManifest {
+            schema_version: crate::models::PACKAGE_SCHEMA_VERSION.to_owned(),
+            source_computer_name: None,
+            source_windows_version: None,
+            scan_timestamp_utc: String::new(),
+            main_executable_path: PathBuf::from(r"C:\Program Files\Acme\acme.exe"),
+            application_metadata: None,
+            file_inventory: Vec::new(),
+            registry_keys_exported: Vec::new(),
+            com_registrations_detected: Vec::new(),
+            file_associations_detected: Vec::new(),
+            services_detected: Vec::new(),
+            drivers_detected: Vec::new(),
+            scheduled_tasks_detected: Vec::new(),
+            shortcuts_detected: Vec::new(),
+            environment_variables_detected: Vec::new(),
+            runtime_prerequisites: Vec::new(),
+            license_artifacts_detected: Vec::new(),
+            license_registry_entries: Vec::new(),
+            warnings: Vec::new(),
+            items_intentionally_excluded: Vec::new(),
+            included_user_data: false,
+            included_program_data: false,
+            included_license_data: false,
+            ui_theme: None,
+        }
+    }
+
+    /// A package of real files in a temp folder, with the manifest pointing at them.
+    fn package_of(
+        root: &Path,
+        files: &[(&str, &[u8])],
+        edit: impl FnOnce(&mut PackageManifest),
+    ) -> Result<PathBuf> {
+        let package = root.join("package");
+        let mut manifest = bare_manifest();
+        for (relative, bytes) in files {
+            let staged = package.join("files").join(relative);
+            write_file(&staged, bytes)?;
+            manifest.file_inventory.push(file_entry(
+                relative,
+                Some(sha256_file(&staged)?),
+                bytes.len() as u64,
+            ));
+        }
+        edit(&mut manifest);
+        write_file(
+            &package.join("manifest.json"),
+            &serde_json::to_vec(&manifest)?,
+        )?;
+        Ok(package)
+    }
+
+    fn restore_options(root: &Path, package: PathBuf, apply: bool) -> RestoreOptions {
+        RestoreOptions {
+            package_root: package,
+            target_root: root.join("target"),
+            dry_run: !apply,
+            apply,
+            force: false,
+            restore_user_data: false,
+            restore_license: true,
+        }
+    }
+
+    /// Temp folders only, and with files alone, so this needs no elevation and touches
+    /// nothing else.
+    #[test]
+    fn installing_a_package_of_files_writes_and_verifies_them() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(
+            work.path(),
+            &[("acme.exe", b"program"), (r"bin\data.dat", b"data")],
+            |_| {},
+        )?;
+        let options = restore_options(work.path(), package, true);
+
+        let result = restore_package(&options)?;
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.refused.is_empty());
+        let report = result.verification.ok_or_else(|| {
+            WinAppMigratorError::InvalidInput("an install is always verified".to_owned())
+        })?;
+        assert!(report.package_valid);
+        assert_eq!(report.restore_valid, Some(true));
+        let installed = options.target_root.join(r"bin\data.dat");
+        assert_eq!(
+            fs::read(&installed).map_err(|error| WinAppMigratorError::io(&installed, error))?,
+            b"data"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_with_no_hash_stops_the_install_before_anything_is_written() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("acme.exe", b"program")], |manifest| {
+            manifest.file_inventory[0].hash_sha256 = None;
+        })?;
+        let options = restore_options(work.path(), package, true);
+
+        let refused = restore_package(&options);
+
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::InvalidInput(message)) if message.contains("hash check")),
+            "{refused:?}"
+        );
+        assert!(!options.target_root.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_changed_file_stops_the_install_before_anything_is_written() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("acme.exe", b"program")], |_| {})?;
+        write_file(&package.join(r"files\acme.exe"), b"PROGRAM")?;
+        let options = restore_options(work.path(), package, true);
+
+        assert!(restore_package(&options).is_err());
+        assert!(!options.target_root.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_junction_at_the_install_location_stops_the_install() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("acme.exe", b"program")], |_| {})?;
+        let options = restore_options(work.path(), package, true);
+        let elsewhere = work.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere)
+            .map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&options.target_root)
+            .arg(&elsewhere)
+            .output()
+            .map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
+        assert!(made.status.success());
+
+        assert!(restore_package(&options).is_err());
+        assert!(!elsewhere.join("acme.exe").exists());
+        Ok(())
+    }
+
+    /// A preview touches nothing, so this can include everything an install would refuse
+    /// or do. Registry, services, and tasks are only described.
+    #[test]
+    fn a_preview_lists_what_reaches_beyond_files_first_and_says_what_it_refuses() -> Result<()> {
+        let work = temp_folder()?;
+        let many_files: Vec<String> = (0..50).map(|index| format!("file{index}.dat")).collect();
+        let mut files: Vec<(&str, &[u8])> = vec![("acme.exe", b"program")];
+        files.extend(many_files.iter().map(|name| (name.as_str(), &b"x"[..])));
+        let task_xml = r#"<Task><Actions><Exec><Command>C:\Program Files\Acme\acme.exe</Command></Exec></Actions></Task>"#;
+        let package = package_of(work.path(), &files, |manifest| {
+            let mut service = sample_service();
+            service.binary_path = PathBuf::from(r"C:\Program Files\Acme\acme.exe");
+            manifest.services_detected = vec![service];
+            let run = |name: &str, data: &str| RegistryEntry {
+                hive: RegistryHive::LocalMachine,
+                key_path: r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run".to_owned(),
+                value_name: Some(name.to_owned()),
+                value_data: Some(data.to_owned()),
+                value_kind: Some(RegistryValueKind::String),
+                value_bytes_hex: None,
+                confidence: crate::models::MatchConfidence::High,
+                requires_admin: true,
+            };
+            let mut hijack = run("Debugger", r"C:\Program Files\Acme\acme.exe");
+            hijack.key_path =
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\sethc.exe"
+                    .to_owned();
+            manifest.registry_keys_exported = vec![
+                run("Acme", r#""C:\Program Files\Acme\acme.exe" --tray"#),
+                run("Evil", r"C:\Windows\System32\cmd.exe /c calc"),
+                hijack,
+            ];
+            manifest.scheduled_tasks_detected = vec![crate::models::ScheduledTaskEntry {
+                task_name: "Sync".to_owned(),
+                task_path: r"\Acme\".to_owned(),
+                action_command: PathBuf::from(r"C:\Program Files\Acme\acme.exe"),
+                arguments: None,
+                working_directory: None,
+                trigger_summary: None,
+                run_level: None,
+                account: None,
+                requires_admin: false,
+                restore_instructions: String::new(),
+                definition_xml: Some(task_xml.to_owned()),
+            }];
+        })?;
+        let options = restore_options(work.path(), package, false);
+
+        let result = restore_package(&options)?;
+
+        let first_file = result
+            .changes_logged
+            .iter()
+            .position(|change| change.starts_with("would copy"));
+        assert_eq!(result.changes_logged.len(), 3 + files.len());
+        assert_eq!(first_file, Some(3));
+        assert!(result.changes_logged[0].contains("service AcmeSync"));
+        assert!(result.changes_logged[1].contains("scheduled task"));
+        assert!(result.changes_logged[2].contains(r"CurrentVersion\Run Acme"));
+        assert_eq!(result.refused.len(), 2);
+        assert!(
+            result
+                .refused
+                .iter()
+                .any(|item| item.message.contains("Evil"))
+        );
+        assert!(
+            result
+                .refused
+                .iter()
+                .any(|item| item.message.contains("Image File Execution Options"))
+        );
+        assert!(!options.target_root.exists(), "a preview creates nothing");
         Ok(())
     }
 
@@ -2060,14 +2342,6 @@ mod tests {
             }"#,
         )?;
         RestoreMap::new(&manifest, Path::new(r"D:\Restored"), false)
-    }
-
-    #[test]
-    fn license_destination_rewrites_app_paths() -> Result<()> {
-        let destination =
-            license_destination(Path::new(r"C:\App\license.lic"), &app_map()?, false)?;
-        assert_eq!(destination, PathBuf::from(r"D:\Restored\license.lic"));
-        Ok(())
     }
 
     #[test]

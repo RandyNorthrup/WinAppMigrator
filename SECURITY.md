@@ -8,16 +8,33 @@ rather than in a public issue. Include the version and the steps to reproduce it
 
 ## What to know before you run an installer
 
-An installer built with WinAppMigrator runs **elevated** and reinstalls whatever its package
+An installer built with WinAppMigrator runs **elevated** and reinstalls what its package
 describes: files, registry values, services, drivers, scheduled tasks, shortcuts, and runtime
-installers. The package is not authenticated, and its hash checks catch damage, not tampering,
-because the hashes travel in the same archive.
+installers.
+
+**The package is not authenticated.** Its hashes catch damage, and an edit by anyone who does not
+also update them, because they travel with it. An installer can only be proven to come from
+someone by signing the finished file ([how](docs/signing.md)), and an unsigned one proves nothing:
+Windows shows "Unknown publisher" for it.
 
 - **Only run installers you built yourself, or got from someone you trust.** Treat one like any
-  other program from that source.
-- **An unsigned installer proves nothing about who made it.** Windows shows "Unknown publisher"
-  for it. Signing a finished installer ([how](docs/signing.md)) lets the recipient check that it
-  is unchanged and who signed it.
+  other program from that source. Whoever hands you a whole executable needs no bug in this
+  project to run anything they like.
+
+What the project does protect against is a package that comes from a hostile or merely odd source
+drive through the genuine builder, another program on the same PC changing what the elevated
+installer is about to trust, and an honest package reaching too far:
+
+- **The package cannot name just anything.** When restoring, keys no app install should write are
+  refused, and so are services, shortcuts, scheduled tasks, and autostart values that run anything
+  other than a file the package installs. Which installer runs for a runtime, and how, is compiled
+  in, and the file must be signed by Microsoft. What is refused is listed.
+- **The rules do not make a package safe.** A package may still run its own files, as a service
+  with full rights if it asks to. That is what installing an app is. The installer's window lists
+  what it will set up, so read it.
+- **While it runs,** its staging folder is writable only by administrators, its own file cannot be
+  swapped, and it will not write through a link. Other programs on the PC can still reach an
+  install location outside a protected folder, as below.
 
 ## An installer can contain secrets
 

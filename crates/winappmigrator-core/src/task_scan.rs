@@ -4,12 +4,34 @@ use serde::{Deserialize, Deserializer};
 use walkdir::WalkDir;
 
 use crate::models::{ScheduledTaskEntry, Warning, WarningSeverity};
-use crate::path_utils::hidden_command;
+use crate::path_utils::{escape_powershell_single, hidden_command};
 use crate::system_context::SystemContext;
 
 const OFFLINE_TASKS_SUBDIR: &str = r"System32\Tasks";
 const TASK_RESTORE_INSTRUCTIONS: &str =
     "Restore uses Register-ScheduledTask with the archived XML definition.";
+
+/// The XML of a scheduled task on this PC, or `None` if there is no such task.
+pub(crate) fn live_task_xml(task_path: &str, task_name: &str) -> std::io::Result<Option<String>> {
+    let script = format!(
+        "$task = Get-ScheduledTask -TaskName '{name}' -TaskPath '{path}' -ErrorAction SilentlyContinue; if ($null -eq $task) {{ exit 2 }}; Export-ScheduledTask -TaskName '{name}' -TaskPath '{path}'",
+        name = escape_powershell_single(task_name),
+        path = escape_powershell_single(task_path),
+    );
+    let output = hidden_command("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
+        .output()?;
+    if output.status.code() == Some(2) {
+        return Ok(None);
+    }
+    if output.status.success() {
+        Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))
+    } else {
+        Err(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TaskScanContext {

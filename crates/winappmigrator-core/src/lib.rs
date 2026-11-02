@@ -22,6 +22,7 @@ mod registry_target;
 pub mod reporting;
 pub mod restore;
 pub mod restore_policy;
+pub mod restore_review;
 pub mod scan;
 pub mod service_scan;
 pub mod shortcut_scan;
@@ -40,5 +41,6 @@ pub use package::{create_package, create_package_monitored, read_embedded_manife
 pub use path_utils::hidden_command;
 pub use progress::{BuildMonitor, BuildStep};
 pub use restore::restore_package;
+pub use restore_review::{SystemChange, SystemChangeKind, SystemChanges, system_changes};
 pub use system_context::{ScanSource, SystemContext};
 pub use verify::verify_package;

@@ -124,6 +124,11 @@ Please read these before relying on it, especially on a one-way trip from a fail
 - **Hash checks have limits.** They catch damage, and tampering by anyone who does not also update the
   hashes. A preview checks only the installer's overall hash, not each file, and its window lists the first
   300 changes, with files first, so on a larger app the registry, service, and task changes are not listed.
+- **An installer leaves out what no app should do.** That includes autostart entries that run something
+  it does not install, such as a Run value that goes through `rundll32`. What it leaves out is listed in its
+  window, and the rest of the install goes ahead.
+- **Shortcuts go to your own Desktop and Start Menu.** One from a Desktop folder with an unusual name is left
+  out and reported.
 - **Some licenses will not move.** Anything tied to the old machine may need reactivating.
 - **It is only for software you are licensed to move.** That part is up to you.
 

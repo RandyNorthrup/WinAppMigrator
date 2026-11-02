@@ -9,6 +9,8 @@ use winreg::enums::HKEY_LOCAL_MACHINE;
 const EXE_EXTENSION: &str = "exe";
 const WINDOWS_VERSION_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
 const SYSTEM_ROOT_VALUE: &str = "SystemRoot";
+const PROFILE_LIST_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
+const SYSTEM_DRIVE_MARKER: &str = "%SystemDrive%";
 const DEFAULT_SYSTEM_ROOT: &str = r"C:\Windows";
 const POWERSHELL_EXE: &str = "powershell.exe";
 
@@ -54,6 +56,46 @@ pub fn system_root() -> &'static Path {
             .and_then(|key| key.get_value::<String, _>(SYSTEM_ROOT_VALUE))
             .map_or_else(|_| PathBuf::from(DEFAULT_SYSTEM_ROOT), PathBuf::from)
     })
+}
+
+/// `ProgramData`, from the admin-only registry.
+pub fn program_data_dir() -> Option<&'static Path> {
+    static FOLDER: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOLDER
+        .get_or_init(|| profile_list_folder("ProgramData"))
+        .as_deref()
+}
+
+/// The shared Public profile, from the admin-only registry.
+pub fn public_profile_dir() -> Option<&'static Path> {
+    static FOLDER: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOLDER
+        .get_or_init(|| profile_list_folder("Public"))
+        .as_deref()
+}
+
+fn profile_list_folder(value: &str) -> Option<PathBuf> {
+    let recorded = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(PROFILE_LIST_KEY)
+        .and_then(|key| key.get_value::<String, _>(value))
+        .ok()?;
+    Some(expand_system_drive(&recorded, system_root()))
+}
+
+/// These values are written `%SystemDrive%\ProgramData`. The drive comes from the Windows
+/// folder rather than from a variable the user could set.
+fn expand_system_drive(recorded: &str, windows_dir: &Path) -> PathBuf {
+    let Some(rest) = recorded
+        .get(..SYSTEM_DRIVE_MARKER.len())
+        .filter(|marker| marker.eq_ignore_ascii_case(SYSTEM_DRIVE_MARKER))
+        .map(|_| &recorded[SYSTEM_DRIVE_MARKER.len()..])
+    else {
+        return PathBuf::from(recorded);
+    };
+    let drive = windows_dir.components().next();
+    let mut path = drive.map_or_else(PathBuf::new, |drive| PathBuf::from(drive.as_os_str()));
+    path.push(rest);
+    path
 }
 
 /// Turn a bare tool name into an absolute path. Windows searches the running
@@ -300,6 +342,27 @@ mod tests {
     fn unknown_tool_never_falls_back_to_the_search_order() {
         let command = hidden_command("winappmigrator-no-such-tool");
         assert!(Path::new(command.get_program()).is_absolute());
+    }
+
+    #[test]
+    fn machine_wide_folders_come_from_the_registry_and_read_like_paths() {
+        assert_eq!(
+            expand_system_drive(r"%SystemDrive%\ProgramData", Path::new(r"D:\Windows")),
+            PathBuf::from(r"D:\ProgramData")
+        );
+        assert_eq!(
+            expand_system_drive(r"%systemdrive%\Users\Public", Path::new(r"C:\Windows")),
+            PathBuf::from(r"C:\Users\Public")
+        );
+        assert_eq!(
+            expand_system_drive(r"E:\Data", Path::new(r"C:\Windows")),
+            PathBuf::from(r"E:\Data")
+        );
+        // On this machine the registry and the environment agree, unless someone set the
+        // variable, and only an absolute path is ever answered.
+        for folder in [program_data_dir(), public_profile_dir()] {
+            assert!(folder.is_some_and(Path::is_absolute), "{folder:?}");
+        }
     }
 
     #[test]

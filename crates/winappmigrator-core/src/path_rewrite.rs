@@ -14,9 +14,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
-use crate::file_discovery::restore_destination_for_entry;
+use crate::file_discovery::{restore_destination_for_entry, split_user_data_relative};
 use crate::models::PackageManifest;
-use crate::path_utils::is_drive_root;
+use crate::path_utils::{is_drive_root, path_is_within};
+use crate::restore_policy::data_location_refusal;
 
 /// What the source and destination of each rule are known by: lowercase, with forward
 /// slashes turned into backslashes and no trailing separator. Every step swaps one
@@ -47,6 +48,9 @@ pub struct RestoreMap {
     /// The longest source path of any rule, which bounds the search at each position.
     longest_rule: usize,
     target_root: PathBuf,
+    /// Files whose destination is not allowed, and why. They are not in this map, so
+    /// nothing can count on them being on the target.
+    refused_files: Vec<(PathBuf, String)>,
 }
 
 impl RestoreMap {
@@ -68,7 +72,18 @@ impl RestoreMap {
                 continue;
             }
             let destination = restore_destination_for_entry(file, target_root, restore_user_data)?;
-            map.add_file(&file.original_path, destination);
+            // Under the install location a file's name means nothing to Windows. Its real
+            // location is what can make it run.
+            let refusal = if path_is_within(&destination, target_root) {
+                None
+            } else {
+                split_user_data_relative(&file.original_path)
+                    .and_then(|(_, tail)| data_location_refusal(&tail))
+            };
+            match refusal {
+                Some(reason) => map.refused_files.push((file.original_path.clone(), reason)),
+                None => map.add_file(&file.original_path, destination),
+            }
         }
         // Files are stored relative to the install location, which can be above the
         // executable's own folder (`Chrome` for `Chrome\Application\chrome.exe`).
@@ -111,6 +126,29 @@ impl RestoreMap {
 
     pub fn target_root(&self) -> &Path {
         &self.target_root
+    }
+
+    /// Files left out because of where they would have gone, with why.
+    pub fn refused_files(&self) -> &[(PathBuf, String)] {
+        &self.refused_files
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests(target_root: &str) -> Self {
+        Self {
+            target_root: PathBuf::from(target_root),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_test_root(&mut self, source: &str, destination: &str) {
+        self.add_root(Path::new(source), Path::new(destination));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_test_file(&mut self, source: &str, destination: &str) {
+        self.add_file(Path::new(source), PathBuf::from(destination));
     }
 
     /// Replace every path in `text` that this restore moves, leaving everything else as

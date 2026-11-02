@@ -15,7 +15,7 @@ use crate::models::{
 };
 use crate::path_utils::{
     file_name_string, is_auxiliary_executable, is_drive_root, path_has_extension, path_is_within,
-    strip_prefix_ignore_case,
+    program_data_dir, public_profile_dir, strip_prefix_ignore_case,
 };
 use crate::product_match::{MatchScope, ProductNames};
 use crate::system_context::SystemContext;
@@ -492,18 +492,21 @@ pub fn split_user_data_relative(original_path: &Path) -> Option<(UserDataAnchor,
 /// Resolve the target-machine base directory for a user-data anchor from the
 /// current process environment. LocalLow has no dedicated variable, so it is
 /// derived from the user profile.
-fn user_data_base(anchor: UserDataAnchor) -> Option<PathBuf> {
+pub(crate) fn user_data_base(anchor: UserDataAnchor) -> Option<PathBuf> {
     match anchor {
         UserDataAnchor::RoamingAppData => std::env::var_os("APPDATA").map(PathBuf::from),
         UserDataAnchor::LocalAppData => std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
         UserDataAnchor::LocalLowAppData => std::env::var_os("USERPROFILE")
             .map(|profile| PathBuf::from(profile).join(APPDATA_LOCAL_LOW_SEGMENT)),
-        UserDataAnchor::ProgramData => std::env::var_os("ProgramData").map(PathBuf::from),
-        // %PUBLIC% is C:\Users\Public on every Windows install; the marker
-        // includes the trailing "public\", so the tail already excludes it.
-        UserDataAnchor::PublicProfile => std::env::var_os("PUBLIC")
-            .map(PathBuf::from)
-            .or_else(|| Some(PathBuf::from(r"C:\Users\Public"))),
+        // The machine-wide folders come from the admin-only registry, because the
+        // environment of an elevated process is partly the user's to set. The marker
+        // for the Public profile includes the trailing "public\", so the tail excludes it.
+        UserDataAnchor::ProgramData => program_data_dir()
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::var_os("ProgramData").map(PathBuf::from)),
+        UserDataAnchor::PublicProfile => public_profile_dir()
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::var_os("PUBLIC").map(PathBuf::from)),
     }
 }
 
@@ -748,7 +751,7 @@ fn user_profile_join(leaf: &str) -> Option<PathBuf> {
 
 /// Read a (possibly redirected) known-folder path from `User Shell Folders`,
 /// expanding the `%USERPROFILE%`-style `REG_EXPAND_SZ` value.
-fn user_shell_folder(value_name: &str) -> Option<PathBuf> {
+pub(crate) fn user_shell_folder(value_name: &str) -> Option<PathBuf> {
     let key = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey(USER_SHELL_FOLDERS_KEY)
         .ok()?;

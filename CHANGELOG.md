@@ -4,6 +4,31 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **An installer now checks what its package asks for.** A package can come from a hostile or
+  odd source drive and nothing authenticates it, so the rules are applied when restoring, not
+  just when scanning. What fails is left out, listed, and does not stop the rest of the install.
+  - Registry: keys no app install should write are refused, including Image File Execution Options,
+    Winlogon, `AppInit_DLLs`, LSA, SecurityProviders, Session Manager, KnownDLLs, certificate
+    stores, and the file types that start programs. Under `SYSTEM`, only the `Parameters` and
+    `Instances` keys of a service the package restores are allowed. Registry links are refused.
+  - Run, RunOnce, and similar values, and App Paths, are allowed only when they run a file the
+    package installs. An app's own `Run` value keeps working.
+  - A COM class already registered to something outside the install location is not taken over.
+  - Services and shortcuts must run a file the package installs, with no fallback to the path the
+    manifest named. Scheduled tasks are checked by the commands in their XML, which is what Windows
+    acts on, and must not replace one of Windows' own or another program's. Tasks that run as
+    SYSTEM are flagged.
+  - Shortcuts only land in this PC's own Desktop and Start Menu folders, so
+    `C:\Users\alice\Desktop` is no longer created on a PC with no alice. One in a Startup folder
+    counts as autostart.
+  - License files only go under the install location or a known data folder. License values for
+    the whole machine are never written, as was always the stated rule.
+  - User data cannot land in a Startup folder or in Windows' own folders under AppData and
+    ProgramData, such as `Microsoft\WindowsApps`.
+  - Environment variables Windows and other programs depend on, such as `ComSpec` or the .NET
+    profiler settings, are refused, and `PSModulePath` is merged like `Path` instead of replaced.
+  - Task definitions no longer go through a predictable `%TEMP%` file, and are read as UTF-8, so a
+    non-ASCII task name survives.
 - **Hash checks no longer pass by default.** Every copied file is hashed as it goes into the
   package, including files a scan could not read itself, and a file with no hash now fails
   verification. Driver images and each file of a license store are checked too, both in the package

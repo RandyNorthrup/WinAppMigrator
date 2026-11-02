@@ -129,6 +129,10 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     println!("Changes logged: {}", result.changes_logged.len());
     println!("Warnings: {}", result.warnings.len());
     println!("Errors: {}", result.errors.len());
+    println!("Refused: {}", result.refused.len());
+    for refused in &result.refused {
+        println!("  {}", refused.message);
+    }
 
     // An applied restore already verified the package and the reinstalled files. A
     // preview changed nothing, so only the package itself has anything to check.
