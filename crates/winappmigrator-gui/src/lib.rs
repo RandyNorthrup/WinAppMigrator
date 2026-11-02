@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use winappmigrator_core::path_utils::system_root;
-use winappmigrator_core::privilege::protect_staging_folder;
+use winappmigrator_core::privilege::ProtectedFolder;
 use winappmigrator_core::{
     AppSelection, BuildMonitor, BuildStep, InstalledApp, InstallerStub, PackageOptions,
     PackageResult, ScanSource, SystemContext, VerificationOptions, VerificationReport,
@@ -455,25 +455,20 @@ fn run_build(
     // lack of space on C:. The chosen folder still ends up holding only the single
     // self-extracting installer. The name is random and removal is automatic, even
     // if the build fails or is cancelled.
-    let staging_parent = match tempfile::Builder::new()
-        .prefix(STAGING_PREFIX)
-        .tempdir_in(staging_base(&job.installer_dir))
-    {
+    // Elevated code reads from here to build the installer, so other processes must not
+    // be able to change it in the meantime. The build stops if that cannot be arranged.
+    let staging_parent = match ProtectedFolder::new_in(
+        staging_base(&job.installer_dir),
+        STAGING_PREFIX,
+    ) {
         Ok(directory) => directory,
         Err(error) => {
             return MigrateMessage::Failed(format!(
-                "Could not create a staging folder near {}: {error}",
+                "Could not create a protected staging folder near {}, so nothing was built: {error}",
                 job.installer_dir.display()
             ));
         }
     };
-    // Elevated code reads from here to build the installer, so other processes must not
-    // be able to change it in the meantime. The build stops if that cannot be arranged.
-    if let Err(error) = protect_staging_folder(staging_parent.path()) {
-        return MigrateMessage::Failed(format!(
-            "Could not protect the staging folder, so nothing was built: {error}"
-        ));
-    }
     let staging = staging_parent.path().join(&job.base_name);
 
     let options = PackageOptions {

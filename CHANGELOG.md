@@ -25,6 +25,9 @@ All notable project changes are tracked here.
   - Shortcuts only land in this PC's own Desktop and Start Menu folders, so
     `C:\Users\alice\Desktop` is no longer created on a PC with no alice. One in a Startup folder
     counts as autostart.
+  - A service, task, or COM class already on the PC that belongs to something outside the install
+    location is left alone, and the package cannot install to a whole drive, the Windows folder, or a
+    folder such as `Program Files` itself, even though it suggests the location.
   - License files only go under the install location or a known data folder. License values for
     the whole machine are never written, as was always the stated rule.
   - User data cannot land in a Startup folder or in Windows' own folders under AppData and
@@ -55,8 +58,10 @@ All notable project changes are tracked here.
 - **winget is no longer found through `PATH`.** The folder holding its shortcut is one the user can
   write to, so a planted `winget.exe` would have run elevated. The installer now asks Windows where
   winget is installed, and checks that file's signature before running it.
-- **Elevated PowerShell ignores the user's module folders and profilers,** either of which could
-  have replaced the commands it runs, the signature check among them.
+- **Elevated PowerShell gets a fixed environment.** The user's module folders, profilers, or
+  `COMPLUS_InstallRoot` could otherwise have replaced the commands it runs, the signature check among
+  them, or loaded a DLL into it. Its output is now read as UTF-8, so a path or task name that is not
+  ASCII no longer fails verification.
 - **Services come back as they were.** A service's path is now stored quoted, so that
   `C:\My Apps\Foo Bar\svc.exe` cannot be hijacked by `C:\My Apps\Foo.exe`. A code comment
   claimed the quoting was handled, but what reached `sc.exe` was unquoted. Arguments are kept, and
@@ -79,18 +84,22 @@ All notable project changes are tracked here.
 - **Staging folders are locked down while elevated.** The installer's extraction folder and
   the app's build folder are restricted to Administrators and SYSTEM before anything is
   written to them, and the work stops if that fails. A process that is not elevated could
-  otherwise change what elevated code was about to read. An installer no longer deletes an
+  otherwise change what elevated code was about to read. Those folders and the install location
+  are also held open, because permissions do not stop whoever controls a parent folder from
+  renaming one and putting another in its place. An installer no longer deletes an
   extraction folder newer than an hour, which could belong to another running installer, and
   no longer follows a link given that folder's name.
 - **Writes cannot be carried somewhere else by a link.** A link anywhere from the install
   location down to a file is refused, including at the install location itself, and each
   file is written beside its destination and renamed into place, so a hard link there is
-  replaced rather than written through. Names Windows opens as devices, such as `CON` or
-  `nul.txt`, are left out of packages and refused when restoring. `.. .` can no longer pass
-  for an ordinary name.
+  replaced rather than written through. Names Windows opens as devices, such as `CON`, are left
+  out of packages and refused when restoring. `.. .` can no longer pass for an ordinary name.
+  Without `--force`, an existing file now stops an install before anything changes. Going on
+  would have registered services against whatever was at those paths.
 - **The manifest is read once per install,** so the install acts on what its hash check saw.
-- **Elevation is asked about once.** The answer took about a second to get, and was asked for
-  repeatedly inside per-item loops.
+- **Elevation is asked about once, and from `whoami`.** PowerShell took about a second to answer,
+  was asked repeatedly inside per-item loops, and could be made to fail, which read as not elevated.
+  Not knowing is now a failure.
 - **The app is now signed.** Releases sign `winappmigrator.exe` with Azure Artifact
   Signing through GitHub's OIDC token, with no stored secret, and record build
   provenance. See `docs/signing.md`. The installer stub deliberately stays unsigned:

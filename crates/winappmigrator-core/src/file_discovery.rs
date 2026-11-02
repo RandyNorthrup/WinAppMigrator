@@ -15,8 +15,9 @@ use crate::models::{
 };
 use crate::path_utils::{
     file_name_string, is_auxiliary_executable, is_drive_root, path_has_extension, path_is_within,
-    program_data_dir, public_profile_dir, strip_prefix_ignore_case,
+    program_data_dir, public_profile_dir, strip_prefix_ignore_case, user_profile_dir,
 };
+use crate::privilege::hold_folder;
 use crate::product_match::{MatchScope, ProductNames};
 use crate::system_context::SystemContext;
 
@@ -262,10 +263,11 @@ pub fn ensure_within_root(root: &Path, candidate: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Create the install location and confirm it is a real folder. Run once, before
-/// anything is written: a junction planted there would carry the whole install
-/// somewhere else.
-pub fn ensure_target_root(target_root: &Path) -> Result<()> {
+/// Create the install location, hold it open, and confirm it is a real folder. Run once,
+/// before anything is written: a junction planted there would carry the whole install
+/// somewhere else. The result keeps it and the folders above it from being renamed and
+/// replaced, so keep it until the install is finished.
+pub fn ensure_target_root(target_root: &Path) -> Result<fs::File> {
     if !target_root.is_absolute() {
         return Err(WinAppMigratorError::InvalidInput(format!(
             "the install location must be a full path: \"{}\"",
@@ -274,6 +276,8 @@ pub fn ensure_target_root(target_root: &Path) -> Result<()> {
     }
     fs::create_dir_all(target_root)
         .map_err(|source| WinAppMigratorError::io(target_root, source))?;
+    let hold =
+        hold_folder(target_root).map_err(|source| WinAppMigratorError::io(target_root, source))?;
     let metadata = fs::symlink_metadata(target_root)
         .map_err(|source| WinAppMigratorError::io(target_root, source))?;
     if metadata.file_type().is_symlink() {
@@ -282,7 +286,7 @@ pub fn ensure_target_root(target_root: &Path) -> Result<()> {
             target_root.display()
         )));
     }
-    Ok(())
+    Ok(hold)
 }
 
 /// The folder a restored file's location is checked against: the install location, or
@@ -298,11 +302,12 @@ pub fn write_root_for(destination: &Path, target_root: &Path) -> Option<PathBuf>
         .find(|base| path_is_within(destination, base))
 }
 
-/// True for the names Windows opens as a device instead of a file. The extension does
-/// not help: on Windows 10 `con.txt` still opens the console.
+/// True for the names Windows opens as a device instead of a file. A trailing dot or space
+/// changes nothing. With an extension, as in `aux.h`, Windows 11 treats it as an ordinary
+/// file, and Windows 10 does not. Opening one there reaches the device or fails, which
+/// harms nothing and shows up as an error, so only a real app's file is at stake either way.
 pub fn is_reserved_device_name(component: &str) -> bool {
-    let stem = component.split('.').next().unwrap_or_default().trim_end();
-    let upper = stem.to_ascii_uppercase();
+    let upper = component.trim_end_matches(['.', ' ']).to_ascii_uppercase();
     if matches!(
         upper.as_str(),
         "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
@@ -494,10 +499,14 @@ pub fn split_user_data_relative(original_path: &Path) -> Option<(UserDataAnchor,
 /// derived from the user profile.
 pub(crate) fn user_data_base(anchor: UserDataAnchor) -> Option<PathBuf> {
     match anchor {
-        UserDataAnchor::RoamingAppData => std::env::var_os("APPDATA").map(PathBuf::from),
-        UserDataAnchor::LocalAppData => std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
-        UserDataAnchor::LocalLowAppData => std::env::var_os("USERPROFILE")
-            .map(|profile| PathBuf::from(profile).join(APPDATA_LOCAL_LOW_SEGMENT)),
+        UserDataAnchor::RoamingAppData => user_profile_folder("APPDATA", APPDATA_ROAMING_SEGMENT),
+        UserDataAnchor::LocalAppData => user_profile_folder("LOCALAPPDATA", APPDATA_LOCAL_SEGMENT),
+        UserDataAnchor::LocalLowAppData => user_profile_dir()
+            .map(|profile| profile.join(APPDATA_LOCAL_LOW_SEGMENT))
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(|profile| PathBuf::from(profile).join(APPDATA_LOCAL_LOW_SEGMENT))
+            }),
         // The machine-wide folders come from the admin-only registry, because the
         // environment of an elevated process is partly the user's to set. The marker
         // for the Public profile includes the trailing "public\", so the tail excludes it.
@@ -508,6 +517,28 @@ pub(crate) fn user_data_base(anchor: UserDataAnchor) -> Option<PathBuf> {
             .map(Path::to_path_buf)
             .or_else(|| std::env::var_os("PUBLIC").map(PathBuf::from)),
     }
+}
+
+/// A per-user folder, from its variable as long as that is inside this account's profile,
+/// which the admin-only registry says where to find. The variable can be set by any
+/// program, and an elevated process writes wherever it points. With no profile on record,
+/// as for a system account, the variable is all there is.
+fn user_profile_folder(variable: &str, default: &str) -> Option<PathBuf> {
+    let recorded = std::env::var_os(variable).map(PathBuf::from);
+    checked_user_folder(recorded, user_profile_dir(), default)
+}
+
+fn checked_user_folder(
+    recorded: Option<PathBuf>,
+    profile: Option<&Path>,
+    default: &str,
+) -> Option<PathBuf> {
+    let Some(profile) = profile else {
+        return recorded;
+    };
+    recorded
+        .filter(|folder| path_is_within(folder, profile))
+        .or_else(|| Some(profile.join(default)))
 }
 
 /// The names this app's own folders can go by. The install folder's parent only ever
@@ -1321,20 +1352,20 @@ mod tests {
     }
 
     #[test]
-    fn device_names_are_recognized_with_any_case_or_extension() {
+    fn device_names_are_recognized_in_any_case_and_ordinary_files_are_not() {
         for name in [
             "CON",
             "con",
             "NUL",
-            "nul.txt",
             "Com1",
-            "COM9.log",
+            "COM9",
             "lpt1",
-            "AUX.h",
+            "AUX",
             "PRN",
             "CONIN$",
             "COM\u{b9}",
-            "nul .txt",
+            "nul ",
+            "NUL.",
         ] {
             assert!(is_reserved_device_name(name), "{name}");
         }
@@ -1348,6 +1379,11 @@ mod tests {
             "auxiliary.dll",
             "prn2",
             "a.con",
+            // Ordinary files on Windows 11, and shipped by real apps.
+            "aux.h",
+            "con.txt",
+            "nul.c",
+            "com1.txt",
         ] {
             assert!(!is_reserved_device_name(name), "{name}");
         }
@@ -1366,7 +1402,7 @@ mod tests {
         );
         assert!(restore_destination(root, Path::new(r"files\CON")).is_err());
         assert!(restore_destination(root, Path::new(r"files\NUL\x.dat")).is_err());
-        assert!(package_destination_path(root, Path::new(r"files\com1.txt")).is_err());
+        assert!(package_destination_path(root, Path::new(r"files\com1")).is_err());
         Ok(())
     }
 
@@ -1441,14 +1477,48 @@ mod tests {
     fn a_target_root_is_created_and_must_be_a_real_folder() -> Result<()> {
         let base = temp_base()?;
         let fresh = base.path().join(r"new\target");
-        ensure_target_root(&fresh)?;
+        let hold = ensure_target_root(&fresh)?;
         assert!(fresh.is_dir());
+        assert!(fs::rename(&fresh, base.path().join("moved")).is_err());
+        drop(hold);
         assert!(ensure_target_root(Path::new("relative")).is_err());
 
         let linked = base.path().join("linked");
         assert!(make_junction(&linked, &fresh));
         assert!(ensure_target_root(&linked).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn a_per_user_folder_outside_the_profile_is_ignored() {
+        let profile = Path::new(r"C:\Users\bob");
+        let check = |recorded: &str| {
+            checked_user_folder(
+                Some(PathBuf::from(recorded)),
+                Some(profile),
+                APPDATA_ROAMING_SEGMENT,
+            )
+        };
+        let usual = Some(PathBuf::from(r"C:\Users\bob\AppData\Roaming"));
+        assert_eq!(check(r"C:\Users\bob\AppData\Roaming"), usual);
+        assert_eq!(
+            check(r"C:\Users\bob\Moved"),
+            Some(PathBuf::from(r"C:\Users\bob\Moved"))
+        );
+        assert_eq!(check(r"C:\Windows\System32"), usual);
+        assert_eq!(check(r"C:\Users\bobby\AppData"), usual);
+        assert_eq!(
+            checked_user_folder(None, Some(profile), APPDATA_ROAMING_SEGMENT),
+            usual
+        );
+        assert_eq!(
+            checked_user_folder(
+                Some(PathBuf::from(r"D:\Anywhere")),
+                None,
+                APPDATA_ROAMING_SEGMENT
+            ),
+            Some(PathBuf::from(r"D:\Anywhere"))
+        );
     }
 
     #[test]

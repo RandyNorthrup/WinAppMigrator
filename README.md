@@ -167,7 +167,7 @@ Run with any argument, an installer skips its window. With `--target-root` it pr
 | `--target-root <DIR>` | Where to install. Must be a full path |
 | `--apply` | Actually install. Without it nothing is installed: the package is unpacked to a temporary folder, which is then removed |
 | `--dry-run` | Preview, stated explicitly |
-| `--force` | Replace existing files, registry values, services, tasks, shortcuts, and environment variables |
+| `--force` | Replace existing files, registry values, services, tasks, shortcuts, and environment variables. Without it, an existing file stops the install before anything changes |
 | `--restore-user-data` | Put user data in the real AppData and ProgramData folders, not under the target |
 | `--no-restore-license` | Skip captured license data, which is otherwise restored |
 

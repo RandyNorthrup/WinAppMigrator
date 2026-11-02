@@ -7,14 +7,13 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::path_utils::hidden_command;
+use crate::path_utils::{POWERSHELL_UTF8_OUTPUT, hidden_command};
 
 const POWERSHELL_EXE: &str = "powershell.exe";
 /// The path travels in this variable, so that no quoting can go wrong. The script only
 /// reads it through the provider, as a literal path.
 const PATH_VARIABLE: &str = "WAM_SIGNATURE_PATH";
 const SIGNATURE_SCRIPT: &str = "$s = Get-AuthenticodeSignature -LiteralPath $env:WAM_SIGNATURE_PATH; \
-     [Console]::OutputEncoding = [Text.Encoding]::UTF8; \
      [pscustomobject]@{ \
        Status = [string]$s.Status; \
        Subject = $s.SignerCertificate.Subject; \
@@ -69,7 +68,7 @@ pub fn read_signature(path: &Path) -> Result<Signature, String> {
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            SIGNATURE_SCRIPT,
+            &format!("{POWERSHELL_UTF8_OUTPUT}{SIGNATURE_SCRIPT}"),
         ])
         .env(PATH_VARIABLE, path)
         .output()

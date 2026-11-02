@@ -23,7 +23,7 @@ use winappmigrator_core::prerequisites::spec_for_bundle;
 use winappmigrator_core::{
     EmbeddedPackage, PackageManifest, RestoreOptions, RestoreResult, RuntimePrerequisite,
     RuntimePrerequisiteKind, SystemChange, SystemChanges, WarningSeverity, hidden_command,
-    read_embedded_manifest, restore_package, system_changes,
+    install_location_problem, read_embedded_manifest, restore_package, system_changes,
 };
 use winappmigrator_ui::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
@@ -302,9 +302,14 @@ impl InstallerApp {
     }
 
     /// A full path is required: anything else would resolve against whatever folder
-    /// the installer happens to run from.
+    /// the installer happens to run from. And the package suggests this location, so it
+    /// cannot be somewhere everything else lives, like the Windows folder.
     fn target_is_valid(&self) -> bool {
-        Path::new(self.target_root.trim()).is_absolute()
+        self.target_problem().is_none()
+    }
+
+    fn target_problem(&self) -> Option<String> {
+        install_location_problem(Path::new(self.target_root.trim()))
     }
 
     fn start(&mut self, apply: bool, ctx: &egui::Context) {
@@ -620,12 +625,12 @@ impl InstallerApp {
                         .pick_folder()
                 },
             );
-            if !self.target_is_valid() {
+            if let Some(problem) = self.target_problem() {
                 ui.add_space(SPACE_XS);
                 widgets::hint(
                     ui,
                     theme,
-                    r"Enter a full folder path, such as C:\Program Files\App.",
+                    &format!(r"Enter another folder, such as C:\Program Files\App: {problem}."),
                 );
             } else if folder_has_files(Path::new(self.target_root.trim())) {
                 ui.add_space(SPACE_SM);
@@ -1306,7 +1311,25 @@ mod tests {
         );
         assert!(
             harness
-                .query_by_label_contains("Enter a full folder path")
+                .query_by_label_contains("Enter another folder")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn install_will_not_go_to_a_system_folder_the_package_suggested() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.target_root = system_root().display().to_string();
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .get_by_label("Install")
+                .accesskit_node()
+                .is_disabled()
+        );
+        assert!(
+            harness
+                .query_by_label_contains("cannot be the Windows folder")
                 .is_some()
         );
     }

@@ -22,7 +22,6 @@ test = false
 [dependencies]
 eframe.workspace = true
 rfd.workspace = true
-tempfile.workspace = true
 winappmigrator-core.workspace = true
 winappmigrator-ui.workspace = true
 

@@ -21,6 +21,7 @@ use winreg::enums::{
 };
 
 use crate::models::{EnvironmentScope, RegistryHive, RegistryValueKind};
+use crate::path_utils::path_is_strictly_inside;
 
 /// The live `winreg` predefined root for a captured hive.
 pub(crate) fn registry_root(hive: &RegistryHive) -> RegKey {
@@ -77,13 +78,13 @@ pub(crate) fn is_path_variable(name: &str) -> bool {
 /// to the application being restored.
 pub(crate) fn app_path_entries(rewritten: &str, target_root: &Path) -> Vec<String> {
     let root = normalized_path_entry(&target_root.to_string_lossy());
-    let prefix = format!("{root}\\");
     rewritten
         .split(';')
         .map(str::trim)
         .filter(|entry| {
-            let entry = normalized_path_entry(entry);
-            !entry.is_empty() && (entry == root || entry.starts_with(&prefix))
+            !entry.is_empty()
+                && (normalized_path_entry(entry) == root
+                    || path_is_strictly_inside(Path::new(entry), target_root))
         })
         .map(ToOwned::to_owned)
         .collect()
@@ -132,6 +133,20 @@ pub(crate) fn registry_value_name(value_name: Option<&str>) -> &str {
     }
 }
 
+/// Decode a captured binary value.
+pub(crate) fn hex_decode(value: &str) -> Result<Vec<u8>, &'static str> {
+    if !value.len().is_multiple_of(2) {
+        return Err("registry hex data has an odd length");
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks(2) {
+        let text = std::str::from_utf8(pair).map_err(|_| "registry hex data is not UTF-8")?;
+        let byte = u8::from_str_radix(text, 16).map_err(|_| "registry hex data is invalid")?;
+        bytes.push(byte);
+    }
+    Ok(bytes)
+}
+
 /// Map the serializable value kind back to the raw `winreg` value type.
 pub(crate) fn registry_raw_type(kind: &RegistryValueKind) -> RegType {
     match kind {
@@ -172,6 +187,15 @@ mod tests {
             entries,
             vec![r"C:\Program Files\App\bin", r"C:\Program Files\App"]
         );
+    }
+
+    #[test]
+    fn a_parent_step_does_not_make_a_path_entry_the_apps_own() {
+        let entries = app_path_entries(
+            r"C:\Program Files\App\..\..\Users\Public;C:\Program Files\App\bin\",
+            Path::new(r"C:\Program Files\App"),
+        );
+        assert_eq!(entries, vec![r"C:\Program Files\App\bin\"]);
     }
 
     #[test]

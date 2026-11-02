@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use winappmigrator_core::privilege::protect_staging_folder;
+use winappmigrator_core::privilege::ProtectedFolder;
 
 /// Prefix of the directories the installer extracts its embedded package into.
 pub const EXTRACTION_PREFIX: &str = "winappmigrator-install-";
@@ -69,40 +69,39 @@ fn is_stale_folder(path: &Path, now: SystemTime, age: Duration) -> bool {
 /// given), then the installer executable's own drive, then the system temp drive
 /// — so a large package never fails to extract for lack of space on `C:`. Using
 /// [`EXTRACTION_PREFIX`] keeps every staging directory matchable by
-/// [`sweep_stale_extractions`]. Auto-removed when the returned `TempDir` drops.
+/// [`sweep_stale_extractions`]. Removed when the result drops.
 ///
 /// Elevated code reads from this folder, so it is made admin-only before anything is
-/// written there. A location where that fails is not used, and if none works the
-/// install does not go ahead.
+/// written there, and held so it cannot be swapped. A location where that fails is not
+/// used, and if none works the install does not go ahead. A link on the way to the install
+/// location is passed over, because the package would be unpacked wherever it points
+/// before the install got as far as refusing it.
 pub fn create_staging_dir(
     target_root: Option<&Path>,
     executable: &Path,
-) -> std::io::Result<tempfile::TempDir> {
+) -> std::io::Result<ProtectedFolder> {
     // The nearest existing ancestor of the install location sits on the
     // destination drive.
     let mut ancestor = target_root;
     while let Some(dir) = ancestor {
-        if dir.is_dir()
-            && let Ok(temp) = staging_in(dir)
+        if is_real_folder(dir)
+            && let Ok(staging) = ProtectedFolder::new_in(dir, EXTRACTION_PREFIX)
         {
-            return Ok(temp);
+            return Ok(staging);
         }
         ancestor = dir.parent();
     }
     if let Some(parent) = executable.parent()
-        && let Ok(temp) = staging_in(parent)
+        && let Ok(staging) = ProtectedFolder::new_in(parent, EXTRACTION_PREFIX)
     {
-        return Ok(temp);
+        return Ok(staging);
     }
-    staging_in(&std::env::temp_dir())
+    ProtectedFolder::new_in_temp(EXTRACTION_PREFIX)
 }
 
-fn staging_in(dir: &Path) -> std::io::Result<tempfile::TempDir> {
-    let temp = tempfile::Builder::new()
-        .prefix(EXTRACTION_PREFIX)
-        .tempdir_in(dir)?;
-    protect_staging_folder(temp.path())?;
-    Ok(temp)
+fn is_real_folder(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
 }
 
 #[cfg(test)]
@@ -176,6 +175,28 @@ mod tests {
         let target = base.path().join(r"not\there\yet");
         let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"))?;
         assert_eq!(staging.path().parent(), Some(base.path()));
+        Ok(())
+    }
+
+    #[test]
+    fn staging_passes_over_a_junction_at_the_install_location() -> std::io::Result<()> {
+        let base = tempfile::tempdir()?;
+        let elsewhere = base.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere)?;
+        let target = base.path().join("target");
+        let made = winappmigrator_core::hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&target)
+            .arg(&elsewhere)
+            .output()?;
+        assert!(made.status.success());
+
+        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"))?;
+
+        assert_eq!(staging.path().parent(), Some(base.path()));
+        assert_eq!(std::fs::read_dir(&elsewhere)?.count(), 0);
         Ok(())
     }
 }

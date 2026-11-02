@@ -84,8 +84,11 @@ name, so both executables also:
   registry rather than from an environment variable the user controls. winget is not a
   Windows tool. `PATH` only holds a shortcut to it in a folder the user can write to, so the
   installer asks Windows where its package is installed and checks that file's signature;
-- start PowerShell with its module path set to the Windows folder's, and without .NET
-  profiling, because both are otherwise taken from the user's environment;
+- start PowerShell with a fixed list of environment variables, and its module path and tools from
+  the Windows folder. It is a .NET program, and the user's environment could otherwise load a
+  runtime or DLL into it, or replace the commands it runs;
+- ask `whoami` for elevation, which is not a .NET program, and treat not being able to tell as a
+  failure rather than as not elevated;
 - check that a prerequisite's installer is validly signed by Microsoft when it is downloaded
   and again just before running it;
 - write the embedded stub straight into the installer, never through `%TEMP%`.

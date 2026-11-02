@@ -15,15 +15,17 @@ use crate::models::{
 };
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
-use crate::path_utils::{escape_powershell_single, hidden_command, system_root};
+use crate::path_utils::{
+    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, system_root,
+};
 use crate::prerequisites::{is_present, spec_for_bundle};
 use crate::registry_target::{
-    app_path_entries, environment_registry_target, is_path_variable, path_contains_entry,
-    registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
-    service_object_name,
+    app_path_entries, environment_registry_target, hex_decode, is_path_variable,
+    path_contains_entry, registry_hive_name, registry_raw_type, registry_root, registry_value_name,
+    service_image_path, service_object_name,
 };
 use crate::restore_policy::{
-    ServiceAccount, image_path_matches, paths_equal, read_task_definition,
+    ServiceAccount, image_path_matches, paths_equal, read_task_definition, restored_value_text,
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedLicense, ReviewedPackage, ReviewedService, ReviewedShortcut,
@@ -1076,7 +1078,7 @@ fn task_runs_commands(xml: &str, expected: &[String]) -> bool {
 }
 
 fn verify_shortcuts(
-    shortcuts: &[ReviewedShortcut<'_>],
+    shortcuts: &[ReviewedShortcut],
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) {
@@ -1143,8 +1145,7 @@ fn registry_value_matches(
     }
     match kind {
         RegistryValueKind::String | RegistryValueKind::ExpandString => {
-            let expected = map.rewrite(entry.value_data.as_deref().unwrap_or_default());
-            Ok(actual.to_string() == expected)
+            Ok(actual.to_string() == restored_value_text(entry, map))
         }
         RegistryValueKind::None => Ok(actual.bytes.is_empty()),
         _ => {
@@ -1162,7 +1163,7 @@ fn shortcut_target(path: &Path) -> std::io::Result<Option<String>> {
         return Ok(None);
     }
     let script = format!(
-        "$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath",
+        "{POWERSHELL_UTF8_OUTPUT}$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath",
         escape_powershell_single(path.display().to_string().as_str())
     );
     let output = hidden_command(POWERSHELL_EXE)
@@ -1186,19 +1187,6 @@ fn registry_entry_name(entry: &RegistryEntry) -> String {
         entry.key_path,
         entry.value_name.as_deref().unwrap_or("(Default)")
     )
-}
-
-fn hex_decode(value: &str) -> std::result::Result<Vec<u8>, &'static str> {
-    if !value.len().is_multiple_of(2) {
-        return Err("registry hex data has an odd length");
-    }
-    let mut bytes = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks(2) {
-        let text = std::str::from_utf8(pair).map_err(|_| "registry hex data is not UTF-8")?;
-        let byte = u8::from_str_radix(text, 16).map_err(|_| "registry hex data is invalid")?;
-        bytes.push(byte);
-    }
-    Ok(bytes)
 }
 
 fn registry_warning(

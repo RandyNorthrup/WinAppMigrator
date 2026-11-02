@@ -117,9 +117,11 @@ after the application** (`safe_file_stem`), e.g.
 installer likewise extracts its embedded package onto the **install destination's
 drive** (falling back to the installer's own drive, then the system temp drive).
 
-Elevated code reads from both folders, so `privilege::protect_staging_folder` restricts
-them to Administrators and SYSTEM before anything is written there, and the work stops if
-that fails. It does nothing without elevation, where there is no boundary to protect.
+Elevated code reads from both folders, so `privilege::ProtectedFolder` restricts them to
+Administrators and SYSTEM before anything is written there, and the work stops if that fails.
+It also holds the folder open with no delete sharing, because an access list does not stop
+whoever controls its parent from renaming it and putting another in its place. The access list
+is skipped without elevation, where there is no boundary to protect.
 
 ## The produced installer (`winappmigrator-installer`)
 
@@ -137,6 +139,8 @@ drivers, scheduled tasks, autostart entries, shortcuts, and `Path` changes, from
 `restore_review::system_changes`, which uses the same review as the install. It also lists what
 was refused. The window says whether the installer itself is signed and by whom, or "Not signed:
 publisher unknown". A package's own publisher name is not evidence of that, so the two are separate.
+The package also suggests the install location, so **Install** stays disabled while it is a whole
+drive, the Windows folder, or a folder such as `Program Files` that holds other things side by side.
 
 **Install** and **Preview changes** unpack the package on a worker thread only at that
 point, then run `restore_package`. **Install** hash-checks each file before writing

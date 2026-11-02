@@ -1,49 +1,129 @@
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::OnceLock;
+
+use tempfile::TempDir;
 
 use crate::path_utils::hidden_command;
 
 /// SIDs rather than names, because the names are translated on other Windows languages.
+const ADMINISTRATORS_SID: &str = "*S-1-5-32-544";
 const ADMINISTRATORS_ONLY_GRANTS: [&str; 2] = ["*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"];
+/// The mandatory labels of a process running with full rights: High, and System.
+const ELEVATED_LABELS: [&str; 2] = ["S-1-16-12288", "S-1-16-16384"];
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+/// What lets `CreateFile` open a folder at all.
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
-/// Whether this process runs as an administrator. Asking spawns PowerShell, about a
-/// second, and the answer cannot change during a run, so it is asked once.
+/// Whether this process runs with full administrator rights.
 pub fn is_elevated() -> bool {
-    static ELEVATED: OnceLock<bool> = OnceLock::new();
+    elevation() == Some(true)
+}
+
+/// Asked once, since the answer cannot change during a run. `None` means it could not be
+/// found out, which is not the same as no: asking runs a program, and that can be made to
+/// fail. Asking `whoami` rather than PowerShell also takes a fraction of the time.
+fn elevation() -> Option<bool> {
+    static ELEVATED: OnceLock<Option<bool>> = OnceLock::new();
     *ELEVATED.get_or_init(query_elevation)
 }
 
-fn query_elevation() -> bool {
-    let script = "[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent() | ForEach-Object { $_.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }";
-    hidden_command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+fn query_elevation() -> Option<bool> {
+    let output = hidden_command("whoami")
+        .args(["/groups", "/fo", "csv"])
         .output()
-        .ok()
-        .and_then(|output| {
-            output.status.success().then(|| {
-                String::from_utf8_lossy(&output.stdout)
-                    .trim()
-                    .eq_ignore_ascii_case("true")
-            })
-        })
-        .unwrap_or(false)
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| groups_show_elevation(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// The group list shows the process's mandatory label by SID, whatever the language.
+fn groups_show_elevation(groups: &str) -> bool {
+    ELEVATED_LABELS.iter().any(|label| groups.contains(label))
+}
+
+/// A folder that elevated code reads from: new, held open so it and the folders above it
+/// cannot be renamed and replaced, and when elevated writable only by administrators.
+/// Removed when dropped.
+///
+/// Permissions on a folder do not stop whoever controls its parent from renaming it and
+/// putting another in its place, and everything reads by path. Holding it open does.
+pub struct ProtectedFolder {
+    // In this order, because a field drops in the order it is declared, and the folder
+    // cannot be removed while it is held.
+    _hold: File,
+    temp: TempDir,
+}
+
+impl ProtectedFolder {
+    /// Create one in `parent`, with a name starting `prefix`. A failure means nothing
+    /// should be written there.
+    pub fn new_in(parent: &Path, prefix: &str) -> io::Result<Self> {
+        let temp = tempfile::Builder::new().prefix(prefix).tempdir_in(parent)?;
+        Self::protect(temp)
+    }
+
+    /// Create one in the system's temp folder.
+    pub fn new_in_temp(prefix: &str) -> io::Result<Self> {
+        let temp = tempfile::Builder::new().prefix(prefix).tempdir()?;
+        Self::protect(temp)
+    }
+
+    fn protect(temp: TempDir) -> io::Result<Self> {
+        let hold = hold_folder(temp.path())?;
+        protect_staging_folder(temp.path())?;
+        Ok(Self { _hold: hold, temp })
+    }
+
+    pub fn path(&self) -> &Path {
+        self.temp.path()
+    }
+}
+
+/// Hold a folder open with no delete sharing. While the result is alive, neither it nor
+/// any folder above it can be renamed, and what is inside can still be used normally.
+pub fn hold_folder(folder: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(folder)
 }
 
 /// Make a freshly created staging folder writable only by administrators, so a process
-/// that is not elevated cannot change what elevated code is about to read from it. Call
-/// it before writing anything there, and treat a failure as fatal.
+/// that is not elevated cannot change what elevated code is about to read from it.
 ///
 /// Without elevation there is no boundary to protect, and this process could not read
-/// the folder afterward, so development builds and tests leave it alone.
-pub fn protect_staging_folder(folder: &Path) -> io::Result<()> {
-    if is_elevated() {
-        restrict_to_administrators(folder)?;
-        refuse_anything_already_inside(folder)?;
+/// the folder afterward, so development builds and tests leave it alone. Not knowing
+/// is a failure: a process that was never asked to be fooled about this cannot tell.
+fn protect_staging_folder(folder: &Path) -> io::Result<()> {
+    match elevation() {
+        Some(true) => {
+            take_ownership_for_administrators(folder)?;
+            restrict_to_administrators(folder)?;
+            refuse_anything_already_inside(folder)
+        }
+        Some(false) => Ok(()),
+        None => Err(io::Error::other(
+            "could not tell whether this process is elevated",
+        )),
     }
-    Ok(())
+}
+
+/// The owner of a folder can always change its permissions, so the owner has to be
+/// administrators too. It normally is already, but policy can make it the signed-in user.
+fn administrators_owner_arguments(folder: &Path) -> Vec<OsString> {
+    vec![
+        folder.as_os_str().to_owned(),
+        OsString::from("/setowner"),
+        OsString::from(ADMINISTRATORS_SID),
+    ]
 }
 
 /// The arguments that replace a folder's permissions with administrators and SYSTEM.
@@ -57,10 +137,8 @@ fn administrators_only_arguments(folder: &Path) -> Vec<OsString> {
     arguments
 }
 
-fn restrict_to_administrators(folder: &Path) -> io::Result<()> {
-    let output = hidden_command("icacls")
-        .args(administrators_only_arguments(folder))
-        .output()?;
+fn run_icacls(folder: &Path, arguments: Vec<OsString>) -> io::Result<()> {
+    let output = hidden_command("icacls").args(arguments).output()?;
     if output.status.success() {
         return Ok(());
     }
@@ -70,6 +148,14 @@ fn restrict_to_administrators(folder: &Path) -> io::Result<()> {
         String::from_utf8_lossy(&output.stdout).trim(),
         String::from_utf8_lossy(&output.stderr).trim()
     )))
+}
+
+fn take_ownership_for_administrators(folder: &Path) -> io::Result<()> {
+    run_icacls(folder, administrators_owner_arguments(folder))
+}
+
+fn restrict_to_administrators(folder: &Path) -> io::Result<()> {
+    run_icacls(folder, administrators_only_arguments(folder))
 }
 
 /// The folder was empty when it was created. Anything there now arrived in the moment
@@ -128,6 +214,32 @@ mod tests {
     }
 
     #[test]
+    fn this_shell_can_tell_whether_it_is_elevated() {
+        assert!(elevation().is_some());
+    }
+
+    #[test]
+    fn elevation_is_read_from_the_mandatory_label() {
+        let medium = r#""Everyone","Well-known group","S-1-1-0","Mandatory group"
+"Mandatory Label\Medium Mandatory Level","Label","S-1-16-8192","""#;
+        let high = r#""BUILTIN\Administrators","Alias","S-1-5-32-544","Mandatory group"
+"Mandatory Label\High Mandatory Level","Label","S-1-16-12288","""#;
+        let system =
+            r#""Etiqueta obligatoria\Nivel obligatorio del sistema","Etiqueta","S-1-16-16384","""#;
+        assert!(!groups_show_elevation(medium));
+        assert!(groups_show_elevation(high));
+        assert!(groups_show_elevation(system));
+    }
+
+    #[test]
+    fn the_owner_arguments_name_administrators() {
+        assert_eq!(
+            administrators_owner_arguments(Path::new(r"D:\Stage Here")),
+            [r"D:\Stage Here", "/setowner", "*S-1-5-32-544"].map(OsString::from)
+        );
+    }
+
+    #[test]
     fn the_acl_arguments_name_only_administrators_and_system() {
         assert_eq!(
             administrators_only_arguments(Path::new(r"D:\Stage Here")),
@@ -174,11 +286,42 @@ mod tests {
     }
 
     #[test]
-    fn protecting_a_folder_leaves_it_usable_by_this_process() -> io::Result<()> {
-        let folder = tempfile::tempdir()?;
-        protect_staging_folder(folder.path())?;
-        fs::write(folder.path().join("manifest.json"), b"{}")?;
-        assert!(folder.path().join("manifest.json").is_file());
+    fn a_protected_folder_is_usable_and_gone_when_dropped() -> io::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let folder = ProtectedFolder::new_in(parent.path(), "stage-")?;
+        let path = folder.path().to_path_buf();
+        assert_eq!(path.parent(), Some(parent.path()));
+        fs::write(path.join("manifest.json"), b"{}")?;
+        assert!(path.join("manifest.json").is_file());
+        drop(folder);
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    /// Run for real in a normal shell, against the rename that an access list does not stop.
+    #[test]
+    fn a_held_folder_and_the_folders_above_it_cannot_be_renamed() -> io::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let above = parent.path().join("above");
+        let folder = above.join("stage");
+        fs::create_dir_all(&folder)?;
+
+        let hold = hold_folder(&folder)?;
+        assert!(fs::rename(&folder, above.join("moved")).is_err());
+        assert!(fs::rename(&above, parent.path().join("moved")).is_err());
+        fs::write(folder.join("inside.txt"), b"still usable")?;
+        fs::remove_file(folder.join("inside.txt"))?;
+
+        drop(hold);
+        fs::rename(&above, parent.path().join("moved"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_protected_folder_cannot_be_renamed_out_from_under_its_user() -> io::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let folder = ProtectedFolder::new_in(parent.path(), "stage-")?;
+        assert!(fs::rename(folder.path(), parent.path().join("moved")).is_err());
         Ok(())
     }
 }

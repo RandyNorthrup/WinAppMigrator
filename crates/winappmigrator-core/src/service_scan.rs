@@ -4,7 +4,9 @@ use winreg::enums::KEY_READ;
 
 use crate::file_discovery::expand_env_vars;
 use crate::models::{DriverEntry, DriverKind, ServiceEntry, Warning, WarningSeverity};
-use crate::path_utils::{escape_powershell_single, hidden_command, path_is_within};
+use crate::path_utils::{
+    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, path_is_within,
+};
 use crate::registry_scan::capture_hklm_subtree;
 use crate::restore_policy::service_image_path_value;
 use crate::system_context::SystemContext;
@@ -214,7 +216,7 @@ fn driver_signer(image_path: &Path) -> Option<String> {
         return None;
     }
     let script = format!(
-        "$s = Get-AuthenticodeSignature -LiteralPath '{}'; if ($s -and $s.SignerCertificate) {{ $s.SignerCertificate.Subject }}",
+        "{POWERSHELL_UTF8_OUTPUT}$s = Get-AuthenticodeSignature -LiteralPath '{}'; if ($s -and $s.SignerCertificate) {{ $s.SignerCertificate.Subject }}",
         escape_powershell_single(&image_path.display().to_string())
     );
     let output = hidden_command(POWERSHELL_EXE)

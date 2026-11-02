@@ -31,16 +31,15 @@ pub mod task_scan;
 pub mod verify;
 
 pub use app_inventory::list_installed_apps_from;
-pub use archive::{
-    EmbeddedPackage, create_self_extracting_archive, extract_embedded_self_archive,
-    has_embedded_self_archive,
-};
+pub use archive::{EmbeddedPackage, create_self_extracting_archive, has_embedded_self_archive};
 pub use errors::{Result, WinAppMigratorError};
 pub use models::*;
 pub use package::{create_package, create_package_monitored, read_embedded_manifest};
 pub use path_utils::hidden_command;
 pub use progress::{BuildMonitor, BuildStep};
 pub use restore::restore_package;
-pub use restore_review::{SystemChange, SystemChangeKind, SystemChanges, system_changes};
+pub use restore_review::{
+    SystemChange, SystemChangeKind, SystemChanges, install_location_problem, system_changes,
+};
 pub use system_context::{ScanSource, SystemContext};
 pub use verify::verify_package;

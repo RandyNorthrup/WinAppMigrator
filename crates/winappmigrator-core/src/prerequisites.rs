@@ -31,6 +31,7 @@ use crate::models::{
 use crate::path_utils::hidden_command;
 
 const WINGET_EXE: &str = "winget.exe";
+const WINGET_NOT_INSTALLED: &str = "winget is not installed";
 const DISM_EXE: &str = "dism";
 const POWERSHELL_EXE: &str = "powershell.exe";
 /// Where the package keeps prerequisite payloads, and the only place one can be run from.
@@ -325,7 +326,7 @@ fn trusted_winget_path() -> std::result::Result<PathBuf, String> {
         .map_err(|error| format!("could not look for winget: {error}"))?;
     let location = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !output.status.success() || location.is_empty() {
-        return Err("winget is not installed".to_owned());
+        return Err(WINGET_NOT_INSTALLED.to_owned());
     }
     let winget = Path::new(&location).join(WINGET_EXE);
     check_microsoft_signature(&winget).map_err(|reason| {
@@ -682,7 +683,8 @@ mod tests {
         assert!(matches!(outcome, PrerequisiteInstallOutcome::Skipped(_)));
     }
 
-    /// Only asks, and runs `--version` at most. Skips on a PC without winget.
+    /// Only asks. Skips on a PC without winget, and nothing else, so a failed signature
+    /// check on a real winget would fail this.
     #[test]
     fn winget_is_found_where_windows_installed_it_and_not_on_path() {
         match trusted_winget_path() {
@@ -694,7 +696,8 @@ mod tests {
                 );
                 assert!(!text.contains(r"\appdata\"), "{text}");
             }
-            Err(reason) => eprintln!("skipping: {reason}"),
+            Err(reason) if reason == WINGET_NOT_INSTALLED => eprintln!("skipping: {reason}"),
+            Err(reason) => panic!("{reason}"),
         }
     }
 

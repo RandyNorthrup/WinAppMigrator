@@ -25,17 +25,19 @@ What the project does protect against is a package that comes from a hostile or 
 drive through the genuine builder, another program on the same PC changing what the elevated
 installer is about to trust, and an honest package reaching too far:
 
-- **The package cannot name just anything.** When restoring, keys no app install should write are
-  refused, and so are services, shortcuts, scheduled tasks, and autostart values that run anything
-  other than a file the package installs. Which installer runs for a runtime, and how, is compiled
-  in, and the file must be signed by Microsoft. What is refused is listed.
+- **The package cannot name just anything.** When restoring, a list of keys no app install should
+  write is refused, and so are services, shortcuts, scheduled tasks, and autostart values that run
+  anything other than a file the package installs. It cannot install to a system folder or take
+  over a service, task, or COM class already on the PC. Which installer runs for a runtime, and how,
+  is compiled in, and the file must be signed by Microsoft. What is refused is listed. The lists are
+  of what is known to be dangerous, so a package can still do something they do not name.
 - **The rules do not make a package safe.** A package may still run its own files, as a service
   with full rights if it asks to. That is what installing an app is. Before anything happens, the
   installer's window lists the services, drivers, scheduled tasks, autostart entries, shortcuts, and
   `Path` changes it will set up, what it will leave out, and whether it is signed and by whom. Read it.
-- **While it runs,** its staging folder is writable only by administrators, its own file cannot be
-  swapped, and it will not write through a link. Other programs on the PC can still reach an
-  install location outside a protected folder, as below.
+- **While it runs,** its staging folder is writable only by administrators, that folder and the
+  install location cannot be renamed and replaced, and it will not write through a link at or below
+  the install location. From the moment it opens its own file, that cannot be changed or swapped.
 
 ## An installer can contain secrets
 
@@ -54,12 +56,21 @@ the installer stub must never be signed.
 
 ## Known gaps
 
-[docs/PLAN.md](docs/PLAN.md#open-issues-most-important-first) lists open issues.
+[docs/PLAN.md](docs/PLAN.md#open-issues-most-important-first) lists open issues. These are the ones
+that matter most for deciding whether to run an installer:
 
-An install location outside a protected folder, such as `D:\Apps`, stays writable by other
-programs on the PC. Links are checked just before each file is written, but a program running
-at that moment could still race the check, and it can change the installed files afterward.
-Choose a location under `C:\Program Files` for anything that installs a service or a driver.
+- An install location outside a protected folder, such as `D:\Apps`, stays writable by other
+  programs on the PC. Links are checked just before each file is written, but a program running at
+  that moment could still race the check, and it can change the installed files afterward. Choose a
+  location under `C:\Program Files` for anything that installs a service or a driver.
+- A program already running on the PC can rename a running installer and put another file at its
+  path in the moment before the installer opens its own file. The installer then reads that file's
+  package, and shows that file's signature, not the one you approved at the UAC prompt. So read the
+  signature line in the window, not just the UAC prompt. Closing this needs a handle to the running
+  image, which this project's rules on `unsafe` code do not allow.
+- A package that may run its own files can also run them as a Microsoft-signed runtime installer's
+  neighbor, since that installer loads DLLs from its folder. This adds nothing to what such a package
+  can already do with its own files.
 
 ## Licensing data
 

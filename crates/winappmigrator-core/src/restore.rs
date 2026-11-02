@@ -18,9 +18,8 @@ use crate::file_discovery::{
 use crate::hashing::sha256_file;
 use crate::models::{
     DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry, LicenseArtifact,
-    PackageManifest, RegistryEntry, RegistryHive, RegistryValueKind, RestoreOptions, RestorePlan,
-    RestoreResult, RuntimePrerequisite, ServiceEntry, VerificationOptions, Warning,
-    WarningSeverity,
+    PackageManifest, RegistryEntry, RegistryHive, RegistryValueKind, RestoreOptions, RestoreResult,
+    RuntimePrerequisite, ServiceEntry, VerificationOptions, Warning, WarningSeverity,
 };
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
@@ -30,15 +29,18 @@ use crate::prerequisites::{
 };
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
 use crate::registry_target::{
-    app_path_entries, environment_registry_target, is_path_variable, merge_path_entries,
-    registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
+    app_path_entries, environment_registry_target, hex_decode, is_path_variable,
+    merge_path_entries, registry_hive_name, registry_raw_type, registry_root, registry_value_name,
+    service_image_path,
 };
 use crate::restore_policy::{
-    ServiceAccount, com_server_refusal, existing_service_refusal, existing_task_refusal,
-    is_autostart_entry, is_com_server_entry, service_image_path_value,
+    COM_SERVER_KEYS, ServiceAccount, com_server_refusal, existing_service_refusal,
+    existing_task_refusal, is_autostart_entry, is_com_server_entry, paths_equal,
+    restored_value_text, service_image_path_value,
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
+    install_location_problem,
 };
 use crate::task_scan::live_task_xml;
 use crate::verify::verify_prepared_package;
@@ -50,54 +52,6 @@ const SC_EXE: &str = "sc.exe";
 const REFUSED_LOG_HEADING: &str = "\n## Refused\n";
 /// Buffer for copying a file out of the package. Large files are the slow ones.
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
-
-pub fn plan_restore(options: &RestoreOptions) -> Result<RestorePlan> {
-    let manifest = read_manifest(&options.package_root)?;
-    let review = ReviewedPackage::new(
-        &manifest,
-        &options.target_root,
-        options.restore_user_data,
-        options.restore_license,
-    )?;
-    let mut warnings = manifest.warnings.clone();
-    warnings.extend(review.warnings.iter().cloned());
-    Ok(RestorePlan {
-        package_root: options.package_root.clone(),
-        target_root: options.target_root.clone(),
-        dry_run: !options.apply || options.dry_run,
-        planned_file_writes: review.files.iter().map(|file| (*file).clone()).collect(),
-        planned_registry_writes: review
-            .registry
-            .iter()
-            .map(|entry| (*entry).clone())
-            .collect(),
-        planned_service_changes: review
-            .services
-            .iter()
-            .map(|service| service.entry.clone())
-            .collect(),
-        planned_driver_actions: review
-            .drivers
-            .iter()
-            .map(|driver| driver.entry)
-            .chain(review.manual_drivers.iter().copied())
-            .cloned()
-            .collect(),
-        planned_task_changes: review.tasks.iter().map(|task| task.entry.clone()).collect(),
-        planned_shortcut_changes: review
-            .shortcuts
-            .iter()
-            .map(|shortcut| shortcut.entry.clone())
-            .collect(),
-        planned_environment_changes: review
-            .environment
-            .iter()
-            .map(|variable| (*variable).clone())
-            .collect(),
-        warnings,
-        refused: review.refused.clone(),
-    })
-}
 
 /// What a restore did or would do, kept apart so what reaches beyond files can be listed
 /// first. A preview of a large app is otherwise thousands of files before anything else.
@@ -146,6 +100,12 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
             options.target_root.display()
         )));
     }
+    if let Some(problem) = install_location_problem(&options.target_root) {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "that install location cannot be used: {problem}: \"{}\"",
+            options.target_root.display()
+        )));
+    }
 
     let prepared = PreparedPackage::new(&options.package_root)?;
     let mut effective_options = options.clone();
@@ -185,14 +145,25 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
                 .to_owned(),
         ));
     }
-    if options.apply {
-        ensure_target_root(&options.target_root)?;
+    if options.apply && !options.force {
+        refuse_replacing_anything(&review)?;
     }
+    // Held until the install has finished and been checked.
+    let _target_hold = if options.apply {
+        Some(ensure_target_root(&options.target_root)?)
+    } else {
+        None
+    };
 
     let output_dir = restore_output_dir(&options.package_root, &effective_options.package_root);
     let mut changes = Changes::default();
     let mut warnings = manifest.warnings.clone();
     warnings.extend(review.warnings.iter().cloned());
+    if options.apply
+        && let Some(warning) = install_location_link_warning(&options.target_root)
+    {
+        warnings.push(warning);
+    }
     let mut errors = Vec::new();
     if options.restore_user_data
         && review
@@ -224,19 +195,8 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         &mut warnings,
         &mut errors,
     )?;
-    restore_registry(
-        &effective_options,
-        &review,
-        &mut changes,
-        &mut warnings,
-        &mut errors,
-    );
-    restore_license(
-        &effective_options,
-        &review,
-        &mut changes.license,
-        &mut errors,
-    );
+    // Services first, so a registry key under one can never make it look like it already
+    // existed.
     restore_services(
         &effective_options,
         &review,
@@ -249,6 +209,19 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         &review,
         &mut changes.drivers,
         &mut warnings,
+        &mut errors,
+    );
+    restore_registry(
+        &effective_options,
+        &review,
+        &mut changes,
+        &mut warnings,
+        &mut errors,
+    );
+    restore_license(
+        &effective_options,
+        &review,
+        &mut changes.license,
         &mut errors,
     );
     restore_scheduled_tasks(
@@ -329,6 +302,42 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     };
     write_restore_logs(&restore_log_json, &restore_log_markdown, &result)?;
     Ok(result)
+}
+
+/// Without `--force`, nothing already there gets replaced, so if anything is there the
+/// install does not start. Going on would register services and tasks against whatever is
+/// at those paths, which could be a file another program put there for that purpose.
+fn refuse_replacing_anything(review: &ReviewedPackage<'_>) -> Result<()> {
+    let existing = review
+        .files
+        .iter()
+        .filter_map(|file| review.map.destination_of(&file.original_path))
+        .find(|destination| destination.exists());
+    match existing {
+        Some(destination) => Err(WinAppMigratorError::InvalidInput(format!(
+            "{} already exists, so nothing was installed. Use --force to replace it",
+            destination.display()
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// An install location can sit under a link higher up, such as a volume mounted on a folder.
+/// That can be intended, so it is reported rather than refused.
+fn install_location_link_warning(target_root: &Path) -> Option<Warning> {
+    let actual = fs::canonicalize(target_root).ok()?;
+    let text = actual.to_string_lossy();
+    let actual = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    (!paths_equal(Path::new(actual), target_root)).then(|| {
+        Warning::new(
+            "install_location_is_a_link",
+            WarningSeverity::Warning,
+            format!(
+                "The install location is really {actual}, because a folder above it is a link."
+            ),
+            Some(target_root.display().to_string()),
+        )
+    })
 }
 
 fn restore_files(
@@ -1034,6 +1043,10 @@ fn apply_registry_entry(
     force: bool,
     map: &RestoreMap,
 ) -> std::result::Result<String, Warning> {
+    // Before the key is created: a new empty key can take over a class by itself.
+    if is_com_server_entry(entry) {
+        refuse_taking_over_com_class(entry, map)?;
+    }
     let root = registry_root(&entry.hive);
     let (key, _) = root.create_subkey(&entry.key_path).map_err(|error| {
         Warning::new(
@@ -1054,10 +1067,6 @@ fn apply_registry_entry(
             registry_hive_name(&entry.hive),
             entry.key_path
         ));
-    }
-
-    if is_com_server_entry(entry) {
-        refuse_taking_over_com_class(entry, map)?;
     }
 
     let value_name = registry_value_name(entry.value_name.as_deref());
@@ -1099,29 +1108,35 @@ fn apply_registry_entry(
 
 /// Look at what the class is registered as on this PC, before writing over it. A per-user
 /// registration wins over the machine's, so a new one in `HKCU` takes over a class that
-/// only exists in `HKLM` just as surely.
+/// only exists in `HKLM` just as surely. Any server of the class counts: registering a
+/// `LocalServer32` or `TreatAs` for an in-process class redirects it as well.
 fn refuse_taking_over_com_class(
     entry: &RegistryEntry,
     map: &RestoreMap,
 ) -> std::result::Result<(), Warning> {
     let new_value = map.rewrite(entry.value_data.as_deref().unwrap_or_default());
+    let Some((class_key, _)) = entry.key_path.trim_end_matches('\\').rsplit_once('\\') else {
+        return Ok(());
+    };
     let mut hives = vec![&entry.hive];
     if entry.hive == RegistryHive::CurrentUser {
         hives.push(&RegistryHive::LocalMachine);
     }
     for hive in hives {
-        let existing = registry_root(hive)
-            .open_subkey(&entry.key_path)
-            .and_then(|key| key.get_value::<String, _>(""));
-        if let Ok(existing) = existing
-            && let Some(refusal) =
-                com_server_refusal(&existing, &new_value, map.target_root(), system_root())
-        {
-            return Err(registry_warning(
-                "registry_com_class_exists",
-                entry,
-                refusal,
-            ));
+        for server in COM_SERVER_KEYS {
+            let existing = registry_root(hive)
+                .open_subkey(format!(r"{class_key}\{server}"))
+                .and_then(|key| key.get_value::<String, _>(""));
+            if let Ok(existing) = existing
+                && let Some(refusal) =
+                    com_server_refusal(&existing, &new_value, map.target_root(), system_root())
+            {
+                return Err(registry_warning(
+                    "registry_com_class_exists",
+                    entry,
+                    refusal,
+                ));
+            }
         }
     }
     Ok(())
@@ -1203,13 +1218,10 @@ fn registry_value_from_entry(
         )
     })?;
     match kind {
-        RegistryValueKind::String | RegistryValueKind::ExpandString => {
-            let rewritten = map.rewrite(entry.value_data.as_deref().unwrap_or_default());
-            Ok(RegValue {
-                bytes: Cow::Owned(encode_utf16_nul(&rewritten)),
-                vtype: registry_raw_type(kind),
-            })
-        }
+        RegistryValueKind::String | RegistryValueKind::ExpandString => Ok(RegValue {
+            bytes: Cow::Owned(encode_utf16_nul(&restored_value_text(entry, map))),
+            vtype: registry_raw_type(kind),
+        }),
         RegistryValueKind::None => Ok(RegValue {
             bytes: Cow::Owned(Vec::new()),
             vtype: REG_NONE,
@@ -1414,7 +1426,7 @@ fn register_task_script(xml_path: &Path, task_path: &str, task_name: &str, force
     )
 }
 
-fn apply_shortcut(shortcut: &ReviewedShortcut<'_>) -> std::result::Result<String, Warning> {
+fn apply_shortcut(shortcut: &ReviewedShortcut) -> std::result::Result<String, Warning> {
     let placement = &shortcut.placement;
     let destination = &placement.destination;
     fs::create_dir_all(&placement.root)
@@ -1435,7 +1447,7 @@ fn apply_shortcut(shortcut: &ReviewedShortcut<'_>) -> std::result::Result<String
         .map(|()| format!("restored shortcut {}", destination.display()))
 }
 
-fn shortcut_script(shortcut: &ReviewedShortcut<'_>) -> String {
+fn shortcut_script(shortcut: &ReviewedShortcut) -> String {
     let mut script = format!(
         "$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath = '{}';",
         escape_powershell_single(&shortcut.placement.destination.display().to_string()),
@@ -1464,10 +1476,10 @@ fn shortcut_script(shortcut: &ReviewedShortcut<'_>) -> String {
 }
 
 /// Put a file from the package at its destination. It is written beside the destination
-/// under a new name, then renamed over it. A rename replaces whatever is at the
-/// destination and cannot be carried through it, unlike opening it for writing, which
-/// follows a link and also writes through a hard link. It also means a failure part-way
-/// through a file leaves the old one in place.
+/// under a new name, then renamed over it. A rename replaces the name at the destination
+/// and cannot be carried through it, unlike opening it for writing, which follows a link
+/// and also writes through a hard link. A failure part-way through a file also leaves the
+/// old one in place.
 fn copy_restore_file(source: &Path, destination: &Path, target_root: &Path) -> Result<()> {
     let root = write_root_for(destination, target_root).ok_or_else(|| {
         WinAppMigratorError::InvalidInput(format!(
@@ -1486,6 +1498,7 @@ fn copy_restore_file(source: &Path, destination: &Path, target_root: &Path) -> R
 
     let partial = parent.join(partial_file_name());
     let copied = write_partial_copy(source, &partial).and_then(|()| {
+        make_replaceable(destination)?;
         fs::rename(&partial, destination)
             .map_err(|error| WinAppMigratorError::io(destination, error))
     });
@@ -1493,6 +1506,23 @@ fn copy_restore_file(source: &Path, destination: &Path, target_root: &Path) -> R
         let _ = fs::remove_file(&partial);
     }
     copied
+}
+
+/// A rename does not replace a read-only file, and an earlier install of the same app can
+/// have left one, since a copy keeps the read-only attribute. Whether to replace it has
+/// been decided by this point. On Windows this clears that one attribute, and nothing else.
+#[allow(clippy::permissions_set_readonly_false)]
+fn make_replaceable(destination: &Path) -> Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(destination) else {
+        return Ok(());
+    };
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        fs::set_permissions(destination, permissions)
+            .map_err(|error| WinAppMigratorError::io(destination, error))?;
+    }
+    Ok(())
 }
 
 /// A name no other copy in this run is using. It is opened with `create_new`, which
@@ -1637,19 +1667,6 @@ fn encode_utf16_nul(value: &str) -> Vec<u8> {
         .collect()
 }
 
-fn hex_decode(value: &str) -> std::result::Result<Vec<u8>, &'static str> {
-    if !value.len().is_multiple_of(2) {
-        return Err("registry hex data has an odd length");
-    }
-    let mut bytes = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks(2) {
-        let text = std::str::from_utf8(pair).map_err(|_| "registry hex data is not UTF-8")?;
-        let byte = u8::from_str_radix(text, 16).map_err(|_| "registry hex data is invalid")?;
-        bytes.push(byte);
-    }
-    Ok(bytes)
-}
-
 fn registry_warning(
     code: &'static str,
     entry: &RegistryEntry,
@@ -1760,6 +1777,70 @@ mod tests {
         };
 
         assert!(restore_package(&options).is_err());
+    }
+
+    /// Windows' own shortcut class, which is on every PC. Only reads the registry, and the
+    /// refusal comes before anything could be written.
+    const SHELL_LINK_CLASS: &str = r"SOFTWARE\Classes\CLSID\{00021401-0000-0000-C000-000000000046}";
+
+    fn com_entry(hive: RegistryHive, key: String, kind: RegistryValueKind) -> RegistryEntry {
+        RegistryEntry {
+            hive,
+            key_path: key,
+            value_name: None,
+            value_data: Some(r"C:\App\evil.dll".to_owned()),
+            value_kind: Some(kind),
+            value_bytes_hex: None,
+            confidence: crate::models::MatchConfidence::High,
+            requires_admin: false,
+        }
+    }
+
+    #[test]
+    fn a_class_already_on_this_pc_is_not_taken_over_by_any_route() -> Result<()> {
+        let map = app_map()?;
+        for (hive, server, kind) in [
+            (
+                RegistryHive::LocalMachine,
+                "InprocServer32",
+                RegistryValueKind::String,
+            ),
+            // A new per-user key wins over the machine's, even with nothing in it.
+            (
+                RegistryHive::CurrentUser,
+                "InprocServer32",
+                RegistryValueKind::None,
+            ),
+            // Another kind of server redirects the class just the same.
+            (
+                RegistryHive::CurrentUser,
+                "LocalServer32",
+                RegistryValueKind::String,
+            ),
+            (
+                RegistryHive::CurrentUser,
+                "TreatAs",
+                RegistryValueKind::String,
+            ),
+        ] {
+            let entry = com_entry(hive, format!(r"{SHELL_LINK_CLASS}\{server}"), kind);
+            assert!(is_com_server_entry(&entry), "{server}");
+            let refused = refuse_taking_over_com_class(&entry, &map);
+            assert_eq!(
+                refused.err().map(|warning| warning.code).as_deref(),
+                Some("registry_com_class_exists"),
+                "{server}"
+            );
+        }
+
+        let own_class = com_entry(
+            RegistryHive::LocalMachine,
+            r"SOFTWARE\Classes\CLSID\{5A7E6E0C-0000-4000-8000-000000000000}\InprocServer32"
+                .to_owned(),
+            RegistryValueKind::String,
+        );
+        assert!(refuse_taking_over_com_class(&own_class, &map).is_ok());
+        Ok(())
     }
 
     #[test]
@@ -2040,6 +2121,65 @@ mod tests {
     }
 
     #[test]
+    fn without_force_an_existing_file_stops_the_install_before_anything_changes() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(
+            work.path(),
+            &[("acme.exe", b"program"), ("other.dat", b"data")],
+            |_| {},
+        )?;
+        let options = restore_options(work.path(), package, true);
+        let planted = options.target_root.join("acme.exe");
+        write_file(&planted, b"planted")?;
+
+        let refused = restore_package(&options);
+
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::InvalidInput(message)) if message.contains("already exists")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            fs::read(&planted).map_err(|error| WinAppMigratorError::io(&planted, error))?,
+            b"planted"
+        );
+        assert!(!options.target_root.join("other.dat").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn with_force_an_existing_file_is_replaced() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("acme.exe", b"program")], |_| {})?;
+        let mut options = restore_options(work.path(), package, true);
+        options.force = true;
+        let planted = options.target_root.join("acme.exe");
+        write_file(&planted, b"planted")?;
+
+        let result = restore_package(&options)?;
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            fs::read(&planted).map_err(|error| WinAppMigratorError::io(&planted, error))?,
+            b"program"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_system_folder_is_refused_as_an_install_location_before_anything_happens() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("acme.exe", b"program")], |_| {})?;
+        let mut options = restore_options(work.path(), package, false);
+        options.target_root = system_root().to_path_buf();
+        let refused = restore_package(&options);
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::InvalidInput(message)) if message.contains("cannot be used")),
+            "{refused:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_junction_at_the_install_location_stops_the_install() -> Result<()> {
         let work = temp_folder()?;
         let package = package_of(work.path(), &[("acme.exe", b"program")], |_| {})?;
@@ -2250,6 +2390,30 @@ mod tests {
             .map(|entry| entry.file_name())
             .collect();
         assert_eq!(names, ["app.exe"]);
+        Ok(())
+    }
+
+    #[test]
+    fn copying_replaces_a_read_only_file_from_an_earlier_install() -> Result<()> {
+        let work = temp_folder()?;
+        let source = work.path().join("source.bin");
+        write_file(&source, b"new")?;
+        let root = work.path().join("target");
+        let destination = root.join("app.exe");
+        write_file(&destination, b"old")?;
+        let mut permissions = fs::metadata(&destination)
+            .map_err(|error| WinAppMigratorError::io(&destination, error))?
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&destination, permissions)
+            .map_err(|error| WinAppMigratorError::io(&destination, error))?;
+
+        copy_restore_file(&source, &destination, &root)?;
+
+        assert_eq!(
+            fs::read(&destination).map_err(|error| WinAppMigratorError::io(&destination, error))?,
+            b"new"
+        );
         Ok(())
     }
 

@@ -473,11 +473,16 @@ The profile name is discarded, so data captured from several accounts lands in t
 running the installer, and when the same file exists in two accounts the last one wins.
 Elevating with a different administrator account means that account's `%APPDATA%`.
 
+The target's folders come from `user_data_base`: `ProgramData` and `Public` from the admin-only
+registry, and the per-user folders from their variables only while those stay inside this account's
+profile, as the registry records it. An elevated process cannot otherwise trust them, since a program
+that is not elevated can set them.
+
 Safety: ProgramData (and other machine-wide protected roots) require elevation on apply —
 `privilege::destination_requires_admin` gates this; a re-anchored destination's path cannot
 leave its base, and `ensure_within_root` refuses a link anywhere below that base just before
-writing; headless restore overwrites existing files only with
-`--force`, while the installer's window always overwrites and warns first if the install
+writing; without `--force`, a headless restore stops before changing anything if any file
+it would write already exists, while the installer's window always overwrites and warns first if the install
 folder has files; and the built-in verification runs with the same user-data setting so it
 checks the real locations.
 

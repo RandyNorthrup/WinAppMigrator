@@ -1,38 +1,44 @@
 //! Applies the rules in [`crate::restore_policy`] to a whole package.
 //!
-//! Restoring, verifying, and the installer's window all work from the one result, so what
-//! the window lists is what gets done, and verification expects exactly what was allowed.
+//! Restoring and verifying work from the one result, so verification expects exactly what
+//! was allowed. The installer's window shows the same rules before an install location has
+//! been chosen, so a few checks that depend on what is already at that location can only
+//! happen once one has: a task or COM class that belongs to something else is refused then.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
 use crate::file_discovery::{
-    expand_env_vars, has_reserved_device_name, split_user_data_relative, user_data_base,
-    user_shell_folder,
+    expand_env_vars, has_reserved_device_name, known_base_dirs, split_user_data_relative,
+    user_data_base, user_shell_folder,
 };
 use crate::models::{
     DriverEntry, EnvironmentVariableEntry, FileEntry, LicenseArtifact, PackageManifest,
-    RegistryEntry, RegistryHive, ScheduledTaskEntry, ServiceEntry, ShortcutEntry, Warning,
-    WarningSeverity,
+    RegistryEntry, RegistryHive, ScheduledTaskEntry, ServiceEntry, Warning, WarningSeverity,
 };
 use crate::path_rewrite::RestoreMap;
-use crate::path_utils::strip_prefix_ignore_case;
-use crate::registry_target::{app_path_entries, is_path_variable};
+use crate::path_utils::{strip_prefix_ignore_case, system_root};
+use crate::registry_target::{app_path_entries, is_path_variable, service_image_path};
 use crate::restore_policy::{
-    KnownFolders, ServiceAccount, ShortcutPlacement, driver_destination, environment_refusal,
-    is_autostart_entry, is_valid_service_name, license_destination, read_task_definition,
-    registry_refusal, shortcut_placement, task_refusal,
+    KnownFolders, SERVICES_PREFIX, ServiceAccount, ShortcutPlacement, driver_destination,
+    environment_refusal, existing_service_refusal, install_location_refusal, is_autostart_entry,
+    is_valid_service_name, license_destination, read_task_definition, registry_refusal,
+    shortcut_placement, task_refusal,
 };
+use crate::system_context::SystemContext;
 
 const DESKTOP_SHELL_FOLDER: &str = "Desktop";
 const DESKTOP_FOLDER: &str = "Desktop";
 const START_MENU_SUBFOLDER: &str = r"Microsoft\Windows\Start Menu";
-const SERVICES_KEY_PREFIX: &str = r"system\currentcontrolset\services\";
 const PARAMETERS_SUBKEY: &str = "parameters";
 const REFUSED_CODE: &str = "restore_refused";
+const UNC_PREFIX: &str = r"\\";
 /// A stand-in target, for describing a package before an install location is chosen.
 const NO_TARGET_YET: &str = r"C:\WinAppMigrator install location";
+
+/// How to look up a service already on this PC by name.
+type ExistingService<'a> = &'a dyn Fn(&str) -> std::io::Result<Option<String>>;
 
 /// A service that is allowed, with what it will run.
 pub(crate) struct ReviewedService<'a> {
@@ -55,11 +61,12 @@ pub(crate) struct ReviewedTask<'a> {
     pub xml: String,
     pub commands: Vec<String>,
     pub runs_as_system: bool,
+    /// The account its definition names, which is what it will run as.
+    pub account: Option<String>,
 }
 
 /// A shortcut that is allowed, with its paths rewritten for the target.
-pub(crate) struct ReviewedShortcut<'a> {
-    pub entry: &'a ShortcutEntry,
+pub(crate) struct ReviewedShortcut {
     pub placement: ShortcutPlacement,
     pub target: PathBuf,
     pub arguments: Option<String>,
@@ -86,7 +93,7 @@ pub(crate) struct ReviewedPackage<'a> {
     /// Drivers that were not bundled, for which there are only instructions.
     pub manual_drivers: Vec<&'a DriverEntry>,
     pub tasks: Vec<ReviewedTask<'a>>,
-    pub shortcuts: Vec<ReviewedShortcut<'a>>,
+    pub shortcuts: Vec<ReviewedShortcut>,
     pub environment: Vec<&'a EnvironmentVariableEntry>,
     /// What the package asked for and will not be given.
     pub refused: Vec<Warning>,
@@ -110,6 +117,7 @@ impl<'a> ReviewedPackage<'a> {
             restore_license,
             &current_known_folders(),
             &expand_env_vars,
+            &service_image_path,
         )
     }
 
@@ -121,6 +129,7 @@ impl<'a> ReviewedPackage<'a> {
         restore_license: bool,
         folders: &KnownFolders,
         expand: &dyn Fn(&str) -> String,
+        existing_service: ExistingService<'_>,
     ) -> Result<Self> {
         let map = RestoreMap::new(manifest, target_root, restore_user_data)?;
         let mut review = Self {
@@ -139,8 +148,8 @@ impl<'a> ReviewedPackage<'a> {
             map,
         };
         review.review_files(manifest);
-        review.review_services(manifest, expand);
-        review.review_drivers(manifest);
+        review.review_services(manifest, expand, existing_service);
+        review.review_drivers(manifest, existing_service);
         let restored_services = review.restored_service_names();
         review.review_registry(manifest, &restored_services, expand);
         review.review_tasks(manifest, expand);
@@ -185,11 +194,38 @@ impl<'a> ReviewedPackage<'a> {
         }
     }
 
-    fn review_services(&mut self, manifest: &'a PackageManifest, expand: &dyn Fn(&str) -> String) {
+    /// Why a name already taken on this PC must be left alone, if so. This has to be known
+    /// before anything is written, since a restored service's name opens its registry key.
+    fn existing_service_problem(
+        &self,
+        name: &str,
+        existing_service: ExistingService<'_>,
+    ) -> Option<String> {
+        match existing_service(name) {
+            Ok(None) => None,
+            Ok(Some(current)) => {
+                existing_service_refusal(name, &current, self.map.target_root(), system_root())
+            }
+            Err(error) => Some(format!("its current settings could not be read: {error}")),
+        }
+    }
+
+    fn review_services(
+        &mut self,
+        manifest: &'a PackageManifest,
+        expand: &dyn Fn(&str) -> String,
+        existing_service: ExistingService<'_>,
+    ) {
         for service in &manifest.services_detected {
             let item = format!("The service {}", service.service_name);
             if !is_valid_service_name(&service.service_name) {
                 self.refuse(item, "Windows would not accept its name");
+                continue;
+            }
+            if let Some(problem) =
+                self.existing_service_problem(&service.service_name, existing_service)
+            {
+                self.refuse(item, problem);
                 continue;
             }
             if !service
@@ -252,7 +288,11 @@ impl<'a> ReviewedPackage<'a> {
         }
     }
 
-    fn review_drivers(&mut self, manifest: &'a PackageManifest) {
+    fn review_drivers(
+        &mut self,
+        manifest: &'a PackageManifest,
+        existing_service: ExistingService<'_>,
+    ) {
         for driver in &manifest.drivers_detected {
             let Some(relative) = driver.package_relative_path.as_deref() else {
                 self.manual_drivers.push(driver);
@@ -265,6 +305,12 @@ impl<'a> ReviewedPackage<'a> {
             }
             if driver.hash_sha256.is_none() {
                 self.refuse(item, "it has no hash to check it by");
+                continue;
+            }
+            if let Some(problem) =
+                self.existing_service_problem(&driver.service_name, existing_service)
+            {
+                self.refuse(item, problem);
                 continue;
             }
             match driver_destination(driver, &self.map) {
@@ -343,6 +389,13 @@ impl<'a> ReviewedPackage<'a> {
                 );
                 continue;
             }
+            if is_autostart_entry(entry) {
+                self.refuse(
+                    format!("The license value {}", registry_item(entry)),
+                    "a license has no reason to start anything",
+                );
+                continue;
+            }
             match registry_refusal(entry, &self.map, restored_services, expand) {
                 None => self.license_registry.push(entry),
                 Some(reason) => self.refuse(registry_item(entry), reason),
@@ -382,6 +435,7 @@ impl<'a> ReviewedPackage<'a> {
                 xml,
                 commands: definition.commands,
                 runs_as_system: definition.runs_as_system,
+                account: definition.account,
             });
         }
     }
@@ -407,15 +461,19 @@ impl<'a> ReviewedPackage<'a> {
                 continue;
             };
             let target = target.to_path_buf();
-            let rewrite_path = |path: &PathBuf| self.map.rewrite(&path.to_string_lossy());
-            let working_directory = shortcut.working_directory.as_ref().map(rewrite_path);
-            let icon = shortcut.icon_path.as_ref().map(rewrite_path);
+            // Windows opens a shortcut's icon just by showing it, so one on a network share
+            // would hand that server the name and password hash of whoever looks at it.
+            let local_path = |path: &PathBuf| {
+                Some(self.map.rewrite(&path.to_string_lossy()))
+                    .filter(|path| !path.starts_with(UNC_PREFIX))
+            };
+            let working_directory = shortcut.working_directory.as_ref().and_then(local_path);
+            let icon = shortcut.icon_path.as_ref().and_then(local_path);
             let arguments = shortcut
                 .arguments
                 .as_deref()
                 .map(|text| self.map.rewrite(text));
             self.shortcuts.push(ReviewedShortcut {
-                entry: shortcut,
                 placement,
                 target,
                 arguments,
@@ -447,7 +505,7 @@ fn is_own_parameter(entry: &RegistryEntry, service_name: &str) -> bool {
     }
     let lower = entry.key_path.to_ascii_lowercase();
     let parameters = format!(
-        "{SERVICES_KEY_PREFIX}{}\\{PARAMETERS_SUBKEY}",
+        "{SERVICES_PREFIX}{}\\{PARAMETERS_SUBKEY}",
         service_name.to_ascii_lowercase()
     );
     lower == parameters || lower.starts_with(&format!("{parameters}\\"))
@@ -542,8 +600,26 @@ pub struct SystemChanges {
 /// install location chosen later. `Err` means the package would be refused whole.
 pub fn system_changes(manifest: &PackageManifest) -> Result<SystemChanges> {
     let target = PathBuf::from(NO_TARGET_YET);
-    let review = ReviewedPackage::new(manifest, &target, true, manifest.included_license_data)?;
+    let review = ReviewedPackage::with_folders(
+        manifest,
+        &target,
+        true,
+        manifest.included_license_data,
+        &current_known_folders(),
+        &expand_env_vars,
+        // Whether an existing service may be replaced depends on where it is being installed.
+        &|_| Ok(None),
+    )?;
     Ok(describe(&review, &target))
+}
+
+/// Why this install location must not be used on this PC, if so.
+pub fn install_location_problem(target_root: &Path) -> Option<String> {
+    install_location_refusal(
+        target_root,
+        system_root(),
+        &known_base_dirs(&SystemContext::live()),
+    )
 }
 
 fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
@@ -594,10 +670,9 @@ fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
         let runs_as = if task.runs_as_system {
             "SYSTEM".to_owned()
         } else {
-            task.entry
-                .account
+            task.account
                 .clone()
-                .unwrap_or_else(|| "the user it names".to_owned())
+                .unwrap_or_else(|| "the user who created it".to_owned())
         };
         changes.push(SystemChange {
             kind: SystemChangeKind::ScheduledTask,
@@ -676,7 +751,7 @@ fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
             changes.push(SystemChange {
                 kind: SystemChangeKind::EnvironmentVariable,
                 title: variable.name.clone(),
-                detail: "Set by this install".to_owned(),
+                detail: format!("Set to {}", variable.value),
                 high_rights: false,
             });
         }
@@ -703,7 +778,7 @@ mod tests {
     use super::*;
     use crate::models::{
         DriverKind, EnvironmentScope, FileClassification, LicenseArtifactKind, LicenseFramework,
-        MatchConfidence, RegistryValueKind, TransferableHint,
+        MatchConfidence, RegistryValueKind, ShortcutEntry, TransferableHint,
     };
 
     const SOURCE: &str = r"C:\Program Files\Acme";
@@ -780,6 +855,7 @@ mod tests {
             true,
             &folders(),
             &|text| text.to_owned(),
+            &|_| Ok(None),
         )
     }
 
@@ -828,6 +904,83 @@ mod tests {
         );
         assert_eq!(reviewed.refused.len(), 1);
         assert!(reviewed.refused[0].message.contains("Evil"));
+        Ok(())
+    }
+
+    /// Naming a service already on the PC must not open its registry key. The window shows
+    /// a service by its display name, so this could look like anything.
+    #[test]
+    fn a_service_already_elsewhere_is_refused_along_with_its_registry_keys() -> Result<()> {
+        let existing = |name: &str| {
+            Ok(match name {
+                "Schedule" => Some(r"%SystemRoot%\system32\svchost.exe -k netsvcs".to_owned()),
+                "Earlier" => Some(format!(r#""{TARGET}\bin\svc.exe" --run"#)),
+                "WinSock2" => Some(String::new()),
+                _ => None,
+            })
+        };
+        let hash = "00".repeat(32);
+        let mut manifest = acme_manifest();
+        let mut disguised = service("Schedule", r"C:\Program Files\Acme\bin\svc.exe");
+        disguised.display_name = Some("Acme Sync".to_owned());
+        manifest.services_detected = vec![
+            disguised,
+            service("Earlier", r"C:\Program Files\Acme\bin\svc.exe"),
+            service("WinSock2", r"C:\Program Files\Acme\bin\svc.exe"),
+            service("New", r"C:\Program Files\Acme\bin\svc.exe"),
+        ];
+        manifest.drivers_detected = vec![driver("WdFilter", Some(&hash))];
+        manifest.registry_keys_exported = vec![value(
+            RegistryHive::LocalMachine,
+            r"SYSTEM\CurrentControlSet\Services\Schedule\Parameters",
+            "ServiceDll",
+            r"C:\Program Files\Acme\bin\svc.exe",
+        )];
+        let existing_driver = |name: &str| {
+            if name == "WdFilter" {
+                Ok(Some(r"system32\drivers\wd\WdFilter.sys".to_owned()))
+            } else {
+                existing(name)
+            }
+        };
+
+        let reviewed = ReviewedPackage::with_folders(
+            &manifest,
+            Path::new(TARGET),
+            false,
+            true,
+            &folders(),
+            &|text| text.to_owned(),
+            &existing_driver,
+        )?;
+
+        let kept: Vec<_> = reviewed
+            .services
+            .iter()
+            .map(|service| service.entry.service_name.as_str())
+            .collect();
+        assert_eq!(kept, ["Earlier", "New"]);
+        assert!(reviewed.drivers.is_empty());
+        assert!(reviewed.registry.is_empty());
+        assert_eq!(reviewed.refused.len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn a_service_whose_settings_cannot_be_read_is_refused() -> Result<()> {
+        let mut manifest = acme_manifest();
+        manifest.services_detected = vec![service("New", r"C:\Program Files\Acme\bin\svc.exe")];
+        let reviewed = ReviewedPackage::with_folders(
+            &manifest,
+            Path::new(TARGET),
+            false,
+            true,
+            &folders(),
+            &|text| text.to_owned(),
+            &|_| Err(std::io::Error::other("denied")),
+        )?;
+        assert!(reviewed.services.is_empty());
+        assert_eq!(reviewed.refused.len(), 1);
         Ok(())
     }
 
@@ -1181,6 +1334,59 @@ mod tests {
     }
 
     #[test]
+    fn a_license_value_cannot_start_anything() -> Result<()> {
+        let mut manifest = acme_manifest();
+        manifest.license_registry_entries = vec![value(
+            RegistryHive::CurrentUser,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            "Serial",
+            r"C:\Program Files\Acme\acme.exe",
+        )];
+        let reviewed = review(&manifest)?;
+        assert!(reviewed.license_registry.is_empty());
+        assert_eq!(reviewed.refused.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_shortcut_cannot_point_its_icon_or_folder_at_a_network_share() -> Result<()> {
+        let mut manifest = acme_manifest();
+        let mut remote = shortcut(
+            r"C:\Users\alice\Desktop\Acme.lnk",
+            r"C:\Program Files\Acme\acme.exe",
+        );
+        remote.icon_path = Some(PathBuf::from(r"\\evil.example\share\a.ico,0"));
+        remote.working_directory = Some(PathBuf::from(r"\\evil.example\share"));
+        manifest.shortcuts_detected = vec![remote];
+        let reviewed = review(&manifest)?;
+        assert_eq!(reviewed.shortcuts.len(), 1);
+        assert_eq!(reviewed.shortcuts[0].icon, None);
+        assert_eq!(reviewed.shortcuts[0].working_directory, None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_tasks_account_is_read_from_its_definition_not_the_manifest() -> Result<()> {
+        let mut manifest = acme_manifest();
+        let hidden = task_xml(
+            r"C:\Program Files\Acme\acme.exe",
+            "<!-- looks empty -->S-1-5-18",
+        );
+        manifest.scheduled_tasks_detected = vec![task(r"\Acme\", "Updater", Some(hidden))];
+        let changes = describe(&review(&manifest)?, Path::new(TARGET));
+        assert!(changes.changes[0].high_rights);
+        assert!(changes.changes[0].detail.contains("SYSTEM"));
+        Ok(())
+    }
+
+    #[test]
+    fn this_pc_refuses_its_own_windows_folder_as_an_install_location() {
+        assert!(install_location_problem(system_root()).is_some());
+        assert!(install_location_problem(&system_root().join("System32")).is_some());
+        assert_eq!(install_location_problem(Path::new(TARGET)), None);
+    }
+
+    #[test]
     fn license_data_stays_out_of_the_review_when_it_is_not_being_restored() -> Result<()> {
         let mut manifest = acme_manifest();
         manifest.license_artifacts_detected = vec![license_file(r"C:\Windows\evil.dll")];
@@ -1191,6 +1397,7 @@ mod tests {
             false,
             &folders(),
             &|text| text.to_owned(),
+            &|_| Ok(None),
         )?;
         assert!(reviewed.license.is_empty());
         assert!(reviewed.refused.is_empty());
@@ -1311,6 +1518,7 @@ mod tests {
                 true,
                 &folders(),
                 &|text| text.to_owned(),
+                &|_| Ok(None),
             )
         };
 

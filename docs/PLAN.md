@@ -84,7 +84,8 @@ From the audit of 2026-11-01. Items are removed from this list as they are fixed
    can ask for, but it can run its own files with full rights, and its hashes travel with it.
    Only signing a finished installer proves origin. An install location outside a protected
    folder also stays writable by other programs on the PC, which can race the link checks and
-   change installed files afterward.
+   change installed files afterward. A program already on the PC can swap a running installer's
+   file in the moment before it opens it, which a handle to the running image would close.
 5. **No rollback.** The first copy failure stops the install part-way, and existing files
    are overwritten with no backup.
 6. **Secrets.** All values under an app's registry keys and license files in its install

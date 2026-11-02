@@ -25,10 +25,10 @@ winappmigrator-ui.workspace = true
 eframe.workspace = true
 rfd.workspace = true
 clap.workspace = true
-tempfile.workspace = true
 
 [dev-dependencies]
 egui_kittest.workspace = true
+tempfile.workspace = true
 
 [build-dependencies]
 embed-manifest.workspace = true

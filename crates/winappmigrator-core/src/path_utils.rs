@@ -13,6 +13,40 @@ const PROFILE_LIST_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Pr
 const SYSTEM_DRIVE_MARKER: &str = "%SystemDrive%";
 const DEFAULT_SYSTEM_ROOT: &str = r"C:\Windows";
 const POWERSHELL_EXE: &str = "powershell.exe";
+const POWERSHELL_HOME: &str = r"WindowsPowerShell\v1.0";
+/// What PowerShell and the modules it uses read from the environment, none of which can
+/// load code. Paths to the Windows folder are set separately, from the registry.
+const POWERSHELL_ENVIRONMENT: &[&str] = &[
+    "ALLUSERSPROFILE",
+    "APPDATA",
+    "CommonProgramFiles",
+    "CommonProgramFiles(x86)",
+    "CommonProgramW6432",
+    "COMPUTERNAME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOCALAPPDATA",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "PUBLIC",
+    "SystemDrive",
+    "TEMP",
+    "TMP",
+    "USERDOMAIN",
+    "USERNAME",
+    "USERPROFILE",
+];
+/// Put at the start of a PowerShell script whose output is read back. It otherwise writes
+/// the console's code page, which turns `größe` into bytes that are not UTF-8. This form
+/// writes no byte order mark.
+pub const POWERSHELL_UTF8_OUTPUT: &str =
+    "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; ";
 
 /// Build a `Command` that does not pop up a console window for the child
 /// process. Every external tool WinAppMigrator runs (sc.exe, PowerShell, winget,
@@ -25,15 +59,7 @@ pub fn hidden_command(program: impl AsRef<OsStr>) -> Command {
         .is_some_and(|name| name.eq_ignore_ascii_case(POWERSHELL_EXE));
     let mut command = Command::new(tool);
     if is_powershell {
-        // Both come from the user's environment, which a process that is not elevated can
-        // change. A module folder could replace the commands the scripts use, signature
-        // checks included, and a profiler is loaded into every .NET program.
-        command.env(
-            "PSModulePath",
-            system_root().join(r"System32\WindowsPowerShell\v1.0\Modules"),
-        );
-        command.env_remove("COR_ENABLE_PROFILING");
-        command.env_remove("CORECLR_ENABLE_PROFILING");
+        set_powershell_environment(&mut command);
     }
     #[cfg(windows)]
     {
@@ -43,6 +69,30 @@ pub fn hidden_command(program: impl AsRef<OsStr>) -> Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
+}
+
+/// Give PowerShell a fixed environment instead of inheriting one. The user's environment
+/// is theirs to change, and an elevated process gets it. PowerShell is a .NET program, so
+/// `COMPLUS_InstallRoot` can load a runtime from any folder, `COR_PROFILER` can load a DLL,
+/// and `PSModulePath` can replace the commands it runs, signature checks included. Those
+/// are the ones known about, so what is passed is a list of what it needs.
+fn set_powershell_environment(command: &mut Command) {
+    command.env_clear();
+    for name in POWERSHELL_ENVIRONMENT {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let system32 = system_root().join("System32");
+    let powershell_home = system32.join(POWERSHELL_HOME);
+    command
+        .env("SystemRoot", system_root())
+        .env("windir", system_root())
+        .env("ComSpec", system32.join("cmd.exe"))
+        .env("PSModulePath", powershell_home.join("Modules"));
+    if let Ok(path) = std::env::join_paths([system32, powershell_home]) {
+        command.env("Path", path);
+    }
 }
 
 /// The Windows directory, read from the admin-only registry. The `SystemRoot`
@@ -72,6 +122,34 @@ pub fn public_profile_dir() -> Option<&'static Path> {
     FOLDER
         .get_or_init(|| profile_list_folder("Public"))
         .as_deref()
+}
+
+/// This account's profile folder, from the admin-only registry. Which account comes from
+/// `whoami`, because a variable could name any other.
+pub fn user_profile_dir() -> Option<&'static Path> {
+    static FOLDER: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOLDER.get_or_init(query_user_profile).as_deref()
+}
+
+fn query_user_profile() -> Option<PathBuf> {
+    let output = hidden_command("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .ok()?;
+    let line = String::from_utf8_lossy(&output.stdout);
+    let sid = sid_from_whoami_line(&line)?;
+    let recorded = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(format!(r"{PROFILE_LIST_KEY}\{sid}"))
+        .and_then(|key| key.get_value::<String, _>("ProfileImagePath"))
+        .ok()?;
+    Some(expand_system_drive(&recorded, system_root()))
+}
+
+/// `"domain\user","S-1-5-21-..."` is one line, and a name can hold a comma, so the SID is
+/// the last field.
+fn sid_from_whoami_line(line: &str) -> Option<&str> {
+    let sid = line.trim().rsplit(',').next()?.trim_matches('"');
+    sid.starts_with("S-1-").then_some(sid)
 }
 
 fn profile_list_folder(value: &str) -> Option<PathBuf> {
@@ -366,6 +444,21 @@ mod tests {
     }
 
     #[test]
+    fn the_accounts_sid_is_the_last_field_of_whoami() {
+        assert_eq!(
+            sid_from_whoami_line("\"pc\\bob, jr\",\"S-1-5-21-1-2-3-1001\"\r\n"),
+            Some("S-1-5-21-1-2-3-1001")
+        );
+        assert_eq!(sid_from_whoami_line("ERROR"), None);
+        assert_eq!(sid_from_whoami_line(""), None);
+    }
+
+    #[test]
+    fn this_accounts_profile_is_found_in_the_registry() {
+        assert!(user_profile_dir().is_some_and(Path::is_dir));
+    }
+
+    #[test]
     fn a_tool_on_path_is_not_found() {
         // Cargo is on `PATH` for any test run, and has no business being run elevated.
         let command = hidden_command("cargo");
@@ -377,15 +470,45 @@ mod tests {
     }
 
     #[test]
-    fn powershell_ignores_the_users_module_folders_and_profilers() {
+    fn powershell_is_given_its_module_folder_and_tools_from_the_windows_folder() {
         let command = hidden_command("powershell.exe");
         let envs: Vec<_> = command.get_envs().collect();
-        assert!(envs.iter().any(|(name, value)| {
-            *name == "PSModulePath"
-                && value.is_some_and(|value| Path::new(value).starts_with(system_root()))
-        }));
-        assert!(envs.contains(&(OsStr::new("COR_ENABLE_PROFILING"), None)));
+        for name in ["PSModulePath", "SystemRoot", "ComSpec", "Path"] {
+            assert!(
+                envs.iter().any(|(key, value)| {
+                    *key == name
+                        && value.is_some_and(|value| Path::new(value).starts_with(system_root()))
+                }),
+                "{name}"
+            );
+        }
         assert!(hidden_command("sc.exe").get_envs().next().is_none());
+    }
+
+    fn powershell_output(script: &str) -> std::io::Result<String> {
+        let output = hidden_command("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()?;
+        assert!(output.status.success());
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Run for real. Cargo sets these for every test, so if PowerShell saw the environment
+    /// it inherited, they would be there.
+    #[test]
+    fn powershell_inherits_nothing_it_was_not_given() -> std::io::Result<()> {
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let names = powershell_output("(Get-ChildItem env:).Name")?;
+        assert!(!names.contains("CARGO_MANIFEST_DIR"), "{names}");
+        assert!(names.contains("SystemRoot"), "{names}");
+        Ok(())
+    }
+
+    #[test]
+    fn powershell_output_can_be_read_as_utf8() -> std::io::Result<()> {
+        let script = format!("{POWERSHELL_UTF8_OUTPUT}Write-Output 'größe'");
+        assert_eq!(powershell_output(&script)?.trim_end(), "größe");
+        Ok(())
     }
 
     #[test]

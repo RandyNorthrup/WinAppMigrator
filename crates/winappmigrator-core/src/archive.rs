@@ -295,17 +295,6 @@ impl EmbeddedPackage {
     }
 }
 
-pub fn extract_embedded_self_archive(
-    sfx_executable: &Path,
-    destination_root: &Path,
-) -> Result<bool> {
-    let Some(package) = EmbeddedPackage::open(sfx_executable)? else {
-        return Ok(false);
-    };
-    package.extract_to(destination_root)?;
-    Ok(true)
-}
-
 /// Whether an installer carries a package, without reading all of it.
 pub fn has_embedded_self_archive(sfx_executable: &Path) -> Result<bool> {
     let mut file = File::open(sfx_executable)
@@ -1028,10 +1017,9 @@ mod tests {
         assert!(EmbeddedPackage::open(&stub_path)?.is_none());
 
         let extract_root = root.join("extract");
-        assert!(extract_embedded_self_archive(
-            &installer_path,
-            &extract_root
-        )?);
+        EmbeddedPackage::open(&installer_path)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?
+            .extract_to(&extract_root)?;
         assert!(extract_root.join("manifest.json").is_file());
         assert!(extract_root.join("files").join("app.exe").is_file());
         assert!(!extract_root.join("embedded-package.zip").exists());
@@ -1076,8 +1064,6 @@ mod tests {
             matches!(&refused, Err(WinAppMigratorError::Archive(message)) if message.contains("damaged")),
             "{refused:?}"
         );
-        assert!(extract_embedded_self_archive(&installer, &root.path().join("out")).is_err());
-        assert!(!root.path().join("out").join("manifest.json").exists());
         Ok(())
     }
 
@@ -1112,6 +1098,16 @@ mod tests {
 
         drop(package);
         assert!(OpenOptions::new().write(true).open(&installer).is_ok());
+        Ok(())
+    }
+
+    /// A real executable that is running, which is what an installer opens: its own file.
+    /// It has nothing appended, so it reads as carrying no package.
+    #[test]
+    fn a_running_executable_can_be_held_open() -> Result<()> {
+        let exe = std::env::current_exe()
+            .map_err(|error| WinAppMigratorError::io("current executable", error))?;
+        assert!(EmbeddedPackage::open(&exe)?.is_none());
         Ok(())
     }
 

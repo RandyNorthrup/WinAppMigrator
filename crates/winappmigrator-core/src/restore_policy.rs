@@ -17,7 +17,7 @@ use crate::file_discovery::{has_reserved_device_name, restore_destination, safe_
 use crate::models::{DriverEntry, RegistryEntry, RegistryHive, RegistryValueKind};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
-    path_has_extension, path_is_strictly_inside, path_is_within, sanitize_filename,
+    is_drive_root, path_has_extension, path_is_strictly_inside, path_is_within, sanitize_filename,
     trim_icon_suffix,
 };
 use crate::service_scan::parse_image_path;
@@ -141,6 +141,38 @@ pub fn service_image_path_value(binary: &Path, arguments: Option<&str>) -> Strin
     value
 }
 
+/// Why an install location must not be used, if so. The rules treat what is inside the
+/// install location as the app's own, so that cannot be somewhere everything else lives,
+/// and a package gets to suggest the location. `shared_folders` are those that hold other
+/// things side by side: Program Files, ProgramData, user profiles, and so on.
+pub fn install_location_refusal(
+    target_root: &Path,
+    windows_dir: &Path,
+    shared_folders: &[PathBuf],
+) -> Option<String> {
+    if !target_root.is_absolute() {
+        return Some("it must be a full path".to_owned());
+    }
+    if target_root
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Some("it must not contain \"..\"".to_owned());
+    }
+    if is_drive_root(target_root) {
+        return Some("it cannot be a whole drive".to_owned());
+    }
+    if path_is_within(target_root, windows_dir) || path_is_within(windows_dir, target_root) {
+        return Some("it cannot be the Windows folder".to_owned());
+    }
+    shared_folders
+        .iter()
+        .any(|folder| paths_equal(folder, target_root))
+        .then(|| {
+            "it holds other things side by side, so the app needs a folder inside it".to_owned()
+        })
+}
+
 /// Why a service already on this PC must not be taken over, if so. `--force` does not
 /// change this. A package that names `WinDefend` must not be able to repoint it, however
 /// the rest of the package looks. A service already running from the install location is
@@ -154,9 +186,8 @@ pub fn existing_service_refusal(
     let current = parse_image_path(current_image_path, windows_dir);
     (!path_is_strictly_inside(&current.path, target_root)).then(|| {
         format!(
-            "The service {service_name} already exists on this PC and runs {}, which is outside \
-             the install location, so it was left as it is. If it is an older copy of this app, \
-             uninstall that first.",
+            "{service_name} already exists on this PC and runs {}, outside the install location. \
+             If it is an older copy of this app, uninstall that first",
             current.path.display()
         )
     })
@@ -216,11 +247,19 @@ const REFUSED_SOFTWARE_KEYS: &[&str] = &[
     r"software\microsoft\windows nt\currentversion\svchost",
     // The Task Scheduler's own store. Tasks go through their own rules.
     r"software\microsoft\windows nt\currentversion\schedule",
+    // Runs at sign-in on a terminal server, like the Run keys.
+    r"software\microsoft\windows nt\currentversion\terminal server",
+    r"software\microsoft\windows nt\currentversion\drivers32",
     r"software\microsoft\windows nt\currentversion\appcompatflags\custom",
     r"software\microsoft\windows nt\currentversion\appcompatflags\installedsdb",
     r"software\microsoft\windows\currentversion\policies",
     r"software\microsoft\windows\currentversion\authentication",
     r"software\microsoft\windows\currentversion\shellserviceobjectdelayload",
+    r"software\microsoft\windows\currentversion\explorer\shellserviceobjects",
+    // Where the Startup folder is. Pointing it at the app makes every file there run.
+    r"software\microsoft\windows\currentversion\explorer\user shell folders",
+    r"software\microsoft\windows\currentversion\explorer\shell folders",
+    r"software\microsoft\windows\windows error reporting",
     r"software\microsoft\windows\currentversion\explorer\shellexecutehooks",
     r"software\microsoft\windows\currentversion\explorer\browser helper objects",
     r"software\microsoft\windows\currentversion\explorer\sharedtaskscheduler",
@@ -270,7 +309,24 @@ const REFUSED_CLASSES: &[&str] = &[
     ".wsf",
     ".wsh",
 ];
+/// Values that name a debugger for every .NET program.
+const NET_DEBUGGER_KEY: &str = r"software\microsoft\.netframework";
+const NET_DEBUGGER_VALUES: &[&str] = &["dbgmanageddebugger", "dbgjitdebuglaunchsetting"];
 const CLASSES_PREFIX: &str = r"software\classes\";
+/// File types and protocols every program shares. An app can add a command to them, which
+/// is how "Git Bash Here" works, so long as the command runs the app's own file. Changing
+/// which command is the default changes what happens for everyone.
+const SHARED_CLASSES: &[&str] = &[
+    "*",
+    "allfilesystemobjects",
+    "desktopbackground",
+    "directory",
+    r"directory\background",
+    "drive",
+    "folder",
+    "http",
+    "https",
+];
 const OPEN_WITH_PREFIX: &str = "openwith";
 /// `Folder\shell\open` decides what opening any folder runs.
 const REFUSED_CLASS_VERBS: &[&str] = &[r"folder\shell\open"];
@@ -287,14 +343,14 @@ const ACTIVE_SETUP_KEY: &str = r"software\microsoft\active setup\installed compo
 const ACTIVE_SETUP_COMMAND: &str = "stubpath";
 const APP_PATHS_KEY: &str = r"software\microsoft\windows\currentversion\app paths";
 /// Under a CLSID, the keys that name what COM loads.
-const COM_SERVER_KEYS: &[&str] = &[
+pub(crate) const COM_SERVER_KEYS: &[&str] = &[
     "inprocserver32",
     "localserver32",
     "inprochandler32",
     "treatas",
 ];
 const CLSID_PREFIX: &str = r"software\classes\clsid\";
-const SERVICES_PREFIX: &str = r"system\currentcontrolset\services\";
+pub(crate) const SERVICES_PREFIX: &str = r"system\currentcontrolset\services\";
 /// What a package may write for a service it restores. The rest of a service's key, such
 /// as its `ImagePath` and account, is set through `sc.exe` and these rules.
 const SERVICE_SUBKEYS: &[&str] = &["parameters", "instances"];
@@ -346,18 +402,36 @@ const REFUSED_ENVIRONMENT_VARIABLES: &[&str] = &[
     "pythonstartup",
     "rubyopt",
 ];
-/// A .NET profiler is a DLL loaded into every .NET program.
-const REFUSED_ENVIRONMENT_PREFIXES: &[&str] = &["cor_", "coreclr_"];
+/// A .NET profiler is a DLL loaded into every .NET program, and these others can load a
+/// different runtime altogether.
+const REFUSED_ENVIRONMENT_PREFIXES: &[&str] =
+    &["cor_", "coreclr_", "complus_", "appdomain_manager_"];
 const START_MENU_MARKER: &str = r"\start menu\";
 const DESKTOP_MARKER: &str = r"\desktop\";
 const STARTUP_TAIL: &str = r"programs\startup\";
 const STARTUP_FOLDER: &str = r"start menu\programs\startup\";
 const SHORTCUT_EXTENSION: &str = "lnk";
 /// A real data location an app's user data has no business in, whichever base it is under.
-const REFUSED_DATA_FOLDERS: &[&str] = &[r"microsoft\windows\", r"microsoft\windowsapps\"];
+const REFUSED_DATA_FOLDERS: &[&str] = &[
+    r"microsoft\windows\",
+    r"microsoft\windowsapps\",
+    r"microsoft\windows defender\",
+    r"microsoft\crypto\",
+    r"microsoft\protect\",
+    r"microsoft\credentials\",
+    r"microsoft\systemcertificates\",
+    // Office runs what is in these when it starts.
+    r"microsoft\word\startup\",
+    r"microsoft\excel\xlstart\",
+    // On `PATH` on most PCs.
+    r"oracle\java\javapath\",
+    // In the Public profile, where a file would appear on everyone's desktop.
+    r"desktop\",
+    r"start menu\",
+];
 /// Windows' own scheduled tasks, which run with high rights and are expected to be there.
 const WINDOWS_TASK_FOLDER: &str = r"\microsoft\windows\";
-const SYSTEM_ACCOUNTS: &[&str] = &["s-1-5-18", "system", r"nt authority\system", "localsystem"];
+const SYSTEM_ACCOUNTS: &[&str] = &["s-1-5-18", "system", "localsystem"];
 
 /// A key path to compare against the rules: lowercase, single separators, and no
 /// `WOW6432Node`, which is the same key seen by a 32-bit program.
@@ -420,8 +494,8 @@ pub fn command_runs_restored_file(command: &str, map: &RestoreMap) -> bool {
         if map.is_restored_file(Path::new(candidate)) {
             return true;
         }
-        // Windows tries a shorter path first, so an unquoted command naming something
-        // else that exists is not the app's. `.exe` ends the path for certain.
+        // Past an `.exe`, the words are arguments. Without this `cmd.exe /c C:\App\a.exe`
+        // would count, if anything could make the whole text a file name.
         if candidate.to_ascii_lowercase().ends_with(".exe") {
             return false;
         }
@@ -469,11 +543,21 @@ pub fn registry_refusal(
     {
         return Some("no app install should change this key".to_owned());
     }
-    if key
-        .strip_prefix(CLASSES_PREFIX)
-        .is_some_and(class_key_redirects_programs)
+    if key == NET_DEBUGGER_KEY
+        && entry
+            .value_name
+            .as_deref()
+            .is_some_and(|name| NET_DEBUGGER_VALUES.contains(&name.to_ascii_lowercase().as_str()))
     {
-        return Some("it would change how a kind of program or folder is opened".to_owned());
+        return Some("it would name a debugger for every .NET program".to_owned());
+    }
+    if let Some(class) = key.strip_prefix(CLASSES_PREFIX) {
+        if class_key_redirects_programs(class) {
+            return Some("it would change how a kind of program or folder is opened".to_owned());
+        }
+        if let Some(refusal) = shared_class_refusal(class, entry, map, expand) {
+            return Some(refusal);
+        }
     }
     if is_autostart_entry(entry) {
         return autostart_refusal(entry, map, expand);
@@ -502,6 +586,68 @@ fn class_key_redirects_programs(class: &str) -> bool {
     }
     let (name, rest) = class.split_once('\\').unwrap_or((class, ""));
     REFUSED_CLASSES.contains(&name) && !rest.starts_with(OPEN_WITH_PREFIX)
+}
+
+/// A shared file type's default verb, and any command the app adds to one.
+fn shared_class_refusal(
+    class: &str,
+    entry: &RegistryEntry,
+    map: &RestoreMap,
+    expand: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    if !is_default_value(entry.value_name.as_deref())
+        || entry.value_kind == Some(RegistryValueKind::None)
+    {
+        return None;
+    }
+    let shell = SHARED_CLASSES
+        .iter()
+        .find_map(|shared| class.strip_prefix(shared)?.strip_prefix(r"\shell"))?;
+    if shell.is_empty() {
+        return Some("it would change what opening every file or folder of a kind does".to_owned());
+    }
+    shell
+        .strip_prefix('\\')?
+        .strip_suffix(r"\command")
+        .and_then(|_| autostart_refusal(entry, map, expand))
+        .map(|_| "it adds a command that runs something this package does not install".to_owned())
+}
+
+/// What a registry value's text will be on the target. A command that runs at sign-in gets
+/// its path quoted if it needs it, because this is where `C:\App\a.exe --x` becomes
+/// `D:\My Apps\a.exe --x`, and Windows would try `D:\My.exe` first.
+pub fn restored_value_text(entry: &RegistryEntry, map: &RestoreMap) -> String {
+    let rewritten = map.rewrite(entry.value_data.as_deref().unwrap_or_default());
+    if is_autostart_entry(entry) {
+        quote_command_path(&rewritten, map)
+    } else {
+        rewritten
+    }
+}
+
+/// Quote the path of an unquoted command that runs a restored file, when the path has a
+/// space in it. Anything else is returned as it was.
+fn quote_command_path(command: &str, map: &RestoreMap) -> String {
+    let trimmed = command.trim();
+    if trimmed.starts_with('"') {
+        return command.to_owned();
+    }
+    let ends = trimmed
+        .char_indices()
+        .filter(|(_, character)| character.is_whitespace())
+        .map(|(index, _)| index)
+        .chain([trimmed.len()]);
+    for end in ends {
+        let (path, rest) = trimmed.split_at(end);
+        if map.is_restored_file(Path::new(path)) {
+            return if path.contains(char::is_whitespace) {
+                format!("\"{path}\"{rest}")
+            } else {
+                command.to_owned()
+            };
+        }
+    }
+    command.to_owned()
 }
 
 /// An autostart value must be text, and must run the app's own restored file.
@@ -618,6 +764,27 @@ pub struct TaskDefinition {
     /// An action that is not a program, such as a COM handler, which no path can vouch for.
     pub has_other_actions: bool,
     pub runs_as_system: bool,
+    /// The account it says it runs as.
+    pub account: Option<String>,
+}
+
+/// All of an element's text. A comment splits it, and the Task Scheduler reads straight
+/// across, so stopping at the first piece would read something else.
+fn node_text(node: roxmltree::Node<'_, '_>) -> String {
+    node.children()
+        .filter(roxmltree::Node::is_text)
+        .filter_map(|child| child.text())
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// True for the names SYSTEM can be given in a task: by SID, or by name, alone or after any
+/// authority (`NT AUTHORITY\\SYSTEM`, `.\\SYSTEM`, `PCNAME\\SYSTEM`).
+fn is_system_account(account: &str) -> bool {
+    let lower = account.to_ascii_lowercase();
+    let name = lower.rsplit('\\').next().unwrap_or_default();
+    SYSTEM_ACCOUNTS.contains(&name)
 }
 
 /// Read a task's definition. The XML is what Windows acts on, so this is what is checked,
@@ -636,13 +803,16 @@ pub fn read_task_definition(xml: &str) -> std::result::Result<TaskDefinition, St
                         action
                             .descendants()
                             .filter(|child| child.tag_name().name() == "Command")
-                            .map(|child| child.text().unwrap_or_default().trim().to_owned()),
+                            .map(node_text),
                     );
                 }
             }
             "UserId" | "GroupId" => {
-                let account = node.text().unwrap_or_default().trim().to_ascii_lowercase();
-                definition.runs_as_system |= SYSTEM_ACCOUNTS.contains(&account.as_str());
+                let account = node_text(node);
+                definition.runs_as_system |= is_system_account(&account);
+                if !account.is_empty() {
+                    definition.account.get_or_insert(account);
+                }
             }
             _ => {}
         }
@@ -702,6 +872,9 @@ pub fn existing_task_refusal(existing_xml: &str, target_root: &Path) -> Option<S
     let Ok(definition) = read_task_definition(existing_xml) else {
         return Some("a task with this name already exists and could not be read".to_owned());
     };
+    if definition.has_other_actions || definition.commands.is_empty() {
+        return Some("a task with this name already exists and does not run the app".to_owned());
+    }
     definition.commands.iter().find_map(|command| {
         let path = command.trim().trim_matches('"');
         (!path_is_strictly_inside(Path::new(path), target_root)).then(|| {
@@ -758,9 +931,9 @@ pub fn shortcut_placement(
         return Err("its path uses a name that cannot be checked".to_owned());
     }
     let for_all_users = if is_start_menu {
-        lower[..marker_at].contains(r"\programdata")
+        lower[..marker_at].contains(r"\programdata\")
     } else {
-        lower[..marker_at].contains(r"\users\public")
+        lower[..marker_at].ends_with(r"\users\public")
     };
     let root = match (is_start_menu, for_all_users) {
         (true, true) => folders.common_start_menu.as_ref(),
@@ -985,6 +1158,48 @@ mod tests {
     }
 
     #[test]
+    fn an_install_location_cannot_be_where_everything_else_lives() {
+        let windows = Path::new(WINDOWS);
+        let shared = [
+            PathBuf::from(r"C:\Program Files"),
+            PathBuf::from(r"C:\ProgramData"),
+            PathBuf::from(r"C:\Users\bob"),
+        ];
+        for bad in [
+            r"C:\",
+            r"D:\",
+            r"C:\Windows",
+            r"c:\windows\system32",
+            r"C:\Windows\App",
+            r"C:\Program Files",
+            r"C:\program files\",
+            r"C:\ProgramData",
+            r"C:\Users\bob",
+            r"C:\Program Files\..\Windows",
+            "relative",
+        ] {
+            assert!(
+                install_location_refusal(Path::new(bad), windows, &shared).is_some(),
+                "{bad}"
+            );
+        }
+        for good in [
+            r"C:\Program Files\Acme",
+            r"C:\Program Files\Vendor\Acme",
+            r"C:\CocosDashboard",
+            r"D:\Apps\Acme",
+            r"C:\Users\bob\AppData\Local\Programs\Acme",
+            r"C:\WindowsApps2\Acme",
+        ] {
+            assert_eq!(
+                install_location_refusal(Path::new(good), windows, &shared),
+                None,
+                "{good}"
+            );
+        }
+    }
+
+    #[test]
     fn a_service_outside_the_install_location_is_never_taken_over() {
         let target = Path::new(r"C:\Program Files\Acme");
         let windows = Path::new(WINDOWS);
@@ -1158,6 +1373,22 @@ mod tests {
                 r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
             ),
             (LocalMachine, r"SYSTEM\ControlSet001\Control\Lsa"),
+            (
+                LocalMachine,
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Terminal Server\Install\Software\Microsoft\Windows\CurrentVersion\Run",
+            ),
+            (
+                CurrentUser,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+            ),
+            (
+                LocalMachine,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellServiceObjects\{A}",
+            ),
+            (
+                LocalMachine,
+                r"SOFTWARE\Microsoft\Windows\Windows Error Reporting\Hangs",
+            ),
             (LocalMachine, r"SECURITY\Policy"),
             (LocalMachine, r"SAM\SAM"),
             (LocalMachine, r"BCD00000000\Objects"),
@@ -1227,6 +1458,57 @@ mod tests {
                 "{key} should be allowed"
             );
         }
+    }
+
+    #[test]
+    fn a_shared_file_type_can_gain_the_apps_command_but_nothing_else() {
+        let verb = |class: &str, data: &str| {
+            entry(
+                RegistryHive::CurrentUser,
+                &format!(r"Software\Classes\{class}\shell\acme\command"),
+                None,
+                data,
+            )
+        };
+        let own = r#""C:\Program Files\Acme\acme.exe" "%V""#;
+        for class in [
+            "Directory",
+            r"Directory\Background",
+            "*",
+            "Folder",
+            "Drive",
+            "http",
+        ] {
+            assert_eq!(refusal(&verb(class, own)), None, "{class}");
+            assert!(
+                refusal(&verb(class, r"C:\Windows\System32\cmd.exe /c calc")).is_some(),
+                "{class}"
+            );
+        }
+        // A file type of the app's own can open with whatever it likes.
+        assert_eq!(refusal(&verb("Acme.Document", "notepad.exe %1")), None);
+
+        let default_verb = entry(
+            RegistryHive::CurrentUser,
+            r"Software\Classes\Folder\shell",
+            None,
+            "evil",
+        );
+        assert!(refusal(&default_verb).is_some());
+    }
+
+    #[test]
+    fn a_debugger_for_every_net_program_is_refused_and_other_net_settings_are_not() {
+        let key = r"SOFTWARE\Microsoft\.NETFramework";
+        let debugger = entry(
+            RegistryHive::LocalMachine,
+            key,
+            Some("DbgManagedDebugger"),
+            "x",
+        );
+        let other = entry(RegistryHive::LocalMachine, key, Some("InstallRoot"), "x");
+        assert!(refusal(&debugger).is_some());
+        assert_eq!(refusal(&other), None);
     }
 
     #[test]
@@ -1311,6 +1593,49 @@ mod tests {
                 assert!(refusal(&run(bad)).is_some(), "{bad}");
             }
         }
+    }
+
+    #[test]
+    fn a_command_that_runs_at_sign_in_is_quoted_when_its_new_path_has_a_space() {
+        let mut map = RestoreMap::for_tests(r"D:\My Apps");
+        map.add_test_root(r"C:\App", r"D:\My Apps");
+        map.add_test_file(r"C:\App\a.exe", r"D:\My Apps\a.exe");
+        let run = |data: &str| {
+            entry(
+                RegistryHive::CurrentUser,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                Some("Acme"),
+                data,
+            )
+        };
+        assert_eq!(
+            restored_value_text(&run(r"C:\App\a.exe --x"), &map),
+            r#""D:\My Apps\a.exe" --x"#
+        );
+        assert_eq!(
+            restored_value_text(&run(r#""C:\App\a.exe" --x"#), &map),
+            r#""D:\My Apps\a.exe" --x"#
+        );
+
+        let settings = entry(
+            RegistryHive::CurrentUser,
+            r"Software\Acme",
+            Some("Cmd"),
+            r"C:\App\a.exe --x",
+        );
+        assert_eq!(
+            restored_value_text(&settings, &map),
+            r"D:\My Apps\a.exe --x",
+            "only a command Windows runs by itself is changed"
+        );
+
+        let mut no_space = RestoreMap::for_tests(r"D:\Apps");
+        no_space.add_test_root(r"C:\App", r"D:\Apps");
+        no_space.add_test_file(r"C:\App\a.exe", r"D:\Apps\a.exe");
+        assert_eq!(
+            restored_value_text(&run(r"C:\App\a.exe --x"), &no_space),
+            r"D:\Apps\a.exe --x"
+        );
     }
 
     #[test]
@@ -1475,6 +1800,9 @@ mod tests {
     #[test]
     fn environment_variables_are_refused_by_name_and_only_by_name() {
         for name in [
+            "COMPLUS_InstallRoot",
+            "COMPLUS_Version",
+            "APPDOMAIN_MANAGER_ASM",
             "ComSpec",
             "PATHEXT",
             "windir",
@@ -1540,7 +1868,16 @@ mod tests {
         assert!(parsed.runs_as_system);
         assert!(!parsed.has_other_actions);
 
-        for user in ["SYSTEM", r"NT AUTHORITY\SYSTEM", "s-1-5-18", "LocalSystem"] {
+        for user in [
+            "SYSTEM",
+            r"NT AUTHORITY\SYSTEM",
+            "s-1-5-18",
+            "LocalSystem",
+            r".\SYSTEM",
+            r"PCNAME\SYSTEM",
+            "<!-- hidden -->S-1-5-18",
+            "S-1-5<!-- hidden -->-18",
+        ] {
             let xml = task_xml(&exec("x"), &format!("<UserId>{user}</UserId>"));
             assert!(definition(&xml).runs_as_system, "{user}");
         }
@@ -1628,6 +1965,8 @@ mod tests {
         assert!(existing_task_refusal(&task(r"%windir%\system32\defrag.exe"), target).is_some());
         assert!(existing_task_refusal(&task(r"C:\Program Files\Other\x.exe"), target).is_some());
         assert!(existing_task_refusal("<Task>", target).is_some());
+        let com_handler = task_xml("<ComHandler><ClassId>{A}</ClassId></ComHandler>", "");
+        assert!(existing_task_refusal(&com_handler, target).is_some());
     }
 
     fn shortcut_folders() -> KnownFolders {
@@ -1699,6 +2038,7 @@ mod tests {
             r"C:\Program Files\Acme\Acme.lnk",
             r"C:\Users\alice\Desktop\Acme.exe",
             r"C:\Users\alice\Desktop\Acme.url",
+            r"C:\Users\alice\Desktop\NUL\Acme.lnk",
             r"C:\Users\alice\Desktop\CON\Acme.lnk",
             r"C:\Users\alice\AppData\Roaming\Microsoft\Windows\Start Menu\PROGRA~1\STARTU~1\Acme.lnk",
         ] {
@@ -1734,6 +2074,13 @@ mod tests {
             r"microsoft\windows\start menu\programs\startup\sub\x.exe",
             r"Microsoft\Windows\Themes\x.dll",
             r"Microsoft\WindowsApps\winget.exe",
+            r"Microsoft\Windows Defender\Platform\x.dll",
+            r"Microsoft\Word\STARTUP\x.dotm",
+            r"Microsoft\Excel\XLSTART\x.xlsm",
+            r"Microsoft\Crypto\RSA\x",
+            r"Oracle\Java\javapath\java.exe",
+            r"Desktop\Evil.lnk",
+            r"Start Menu\Programs\Evil.lnk",
             r"Vendor\Start Menu\Programs\Startup\x.exe",
             r"Microsoft\Windows\STARTM~1\Programs\Startup\x.exe",
             r"PROGRA~1\x.exe",

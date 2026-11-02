@@ -5,8 +5,6 @@ use filetime::{FileTime, set_file_times};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use tempfile::TempDir;
-
 use crate::archive::{
     EmbeddedPackage, create_self_extracting_archive, create_zip_archive, extract_zip_archive,
 };
@@ -24,7 +22,7 @@ use crate::models::{
 };
 use crate::path_utils::{hidden_command, sanitize_filename};
 use crate::prerequisites::PREREQUISITES_DIR;
-use crate::privilege::protect_staging_folder;
+use crate::privilege::ProtectedFolder;
 use crate::progress::{BuildMonitor, BuildStep};
 use crate::scan::scan_and_write_reports;
 
@@ -40,6 +38,7 @@ const MANIFESTS_DIR: &str = "manifests";
 const REPORTS_DIR: &str = "reports";
 const MANIFEST_FILE: &str = "manifest.json";
 const ZIP_EXTENSION: &str = "zip";
+const TEMP_PACKAGE_PREFIX: &str = "winappmigrator-package-";
 const RESTORE_PLAN_FILE: &str = "restore_plan.md";
 const REGISTRY_ENTRIES_FILE: &str = "registry_entries.json";
 const REGISTRY_EXPORT_FILE: &str = "registry_export.reg";
@@ -887,7 +886,7 @@ fn write_restore_plan(path: &Path, manifest: &PackageManifest) -> Result<()> {
 /// folder, which is removed when this is dropped.
 pub(crate) struct PreparedPackage {
     package_root: PathBuf,
-    _temp_dir: Option<TempDir>,
+    _temp_dir: Option<ProtectedFolder>,
 }
 
 impl PreparedPackage {
@@ -897,10 +896,8 @@ impl PreparedPackage {
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case(ZIP_EXTENSION))
         {
-            let temp_dir = tempfile::tempdir()
+            let temp_dir = ProtectedFolder::new_in_temp(TEMP_PACKAGE_PREFIX)
                 .map_err(|source| WinAppMigratorError::io("temporary package folder", source))?;
-            protect_staging_folder(temp_dir.path())
-                .map_err(|source| WinAppMigratorError::io(temp_dir.path(), source))?;
             extract_zip_archive(package_root, temp_dir.path())?;
             return Ok(Self {
                 package_root: temp_dir.path().to_path_buf(),
@@ -933,8 +930,7 @@ pub fn read_embedded_manifest(package: &EmbeddedPackage) -> Result<PackageManife
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::RestoreOptions;
-    use crate::restore::plan_restore;
+    use crate::restore_review::ReviewedPackage;
 
     #[test]
     fn creates_package_from_isolated_pe_copy() -> Result<()> {
@@ -949,20 +945,13 @@ mod tests {
             .map_err(|error| WinAppMigratorError::io(&app_exe, error))?;
 
         let result = create_package(&PackageOptions::for_executable(&app_exe, &package_dir))?;
-        let restore_plan = plan_restore(&RestoreOptions {
-            package_root: package_dir.clone(),
-            target_root: root.join("restore"),
-            dry_run: true,
-            apply: false,
-            force: false,
-            restore_user_data: false,
-            restore_license: true,
-        })?;
+        let manifest = read_manifest(&package_dir)?;
+        let review = ReviewedPackage::new(&manifest, &root.join("restore"), false, true)?;
 
         assert!(result.manifest_path.is_file());
         assert!(result.files_copied >= 1);
-        assert!(!restore_plan.planned_file_writes.is_empty());
-        for file in &restore_plan.planned_file_writes {
+        assert!(!review.files.is_empty());
+        for file in &review.files {
             let Some(hash) = file.hash_sha256.as_deref() else {
                 panic!("{} has no hash", file.original_path.display());
             };

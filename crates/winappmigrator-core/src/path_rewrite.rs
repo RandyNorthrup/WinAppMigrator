@@ -101,8 +101,12 @@ impl RestoreMap {
     fn add_file(&mut self, source: &Path, destination: PathBuf) {
         let source = folded_path(source);
         self.longest_rule = self.longest_rule.max(source.len());
-        self.destinations.insert(folded_path(&destination));
-        self.files.insert(source, destination);
+        let destination_key = folded_path(&destination);
+        // Listed twice in a manifest, a file is only written to where it is finally mapped.
+        if let Some(earlier) = self.files.insert(source, destination) {
+            self.destinations.remove(&folded_path(&earlier));
+        }
+        self.destinations.insert(destination_key);
     }
 
     fn add_root(&mut self, source: &Path, destination: &Path) {
@@ -176,8 +180,12 @@ impl RestoreMap {
 
     /// Rewrite the text of an XML document. Paths in XML are escaped, so `C:\A&B` appears
     /// as `C:\A&amp;B`, and a target holding `&` would otherwise break the document.
-    /// Fails on anything that does not parse.
+    /// Fails on anything that does not parse, and on CDATA, whose text would not map back
+    /// to one place in the document. Windows does not write it in a task's definition.
     pub fn rewrite_xml(&self, xml: &str) -> std::result::Result<String, String> {
+        if xml.contains("<![CDATA[") {
+            return Err("it holds a CDATA section".to_owned());
+        }
         let document = roxmltree::Document::parse(xml).map_err(|error| error.to_string())?;
         let mut output = String::with_capacity(xml.len());
         let mut written = 0;
@@ -448,6 +456,18 @@ mod tests {
     }
 
     #[test]
+    fn a_file_listed_twice_only_counts_where_it_finally_lands() {
+        let mut map = RestoreMap::default();
+        map.add_file(Path::new(r"C:\App\a.exe"), PathBuf::from(r"D:\T\first.exe"));
+        map.add_file(
+            Path::new(r"C:\App\a.exe"),
+            PathBuf::from(r"D:\T\second.exe"),
+        );
+        assert!(!map.is_restored_file(Path::new(r"D:\T\first.exe")));
+        assert!(map.is_restored_file(Path::new(r"D:\T\second.exe")));
+    }
+
+    #[test]
     fn looking_up_a_file_works_from_either_side() {
         let mut map = RestoreMap::default();
         map.add_file(Path::new(r"C:\App\A.exe"), PathBuf::from(r"D:\T\A.exe"));
@@ -472,6 +492,10 @@ mod tests {
         );
         assert!(roxmltree::Document::parse(&rewritten).is_ok());
         assert!(map.rewrite_xml("<Task>").is_err());
+        assert!(
+            map.rewrite_xml(r"<Task>C:\A&amp;B<![CDATA[\x]]></Task>")
+                .is_err()
+        );
         Ok(())
     }
 

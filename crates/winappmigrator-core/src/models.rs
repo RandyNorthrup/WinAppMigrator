@@ -865,25 +865,6 @@ pub enum WarningSeverity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RestorePlan {
-    pub package_root: PathBuf,
-    pub target_root: PathBuf,
-    pub dry_run: bool,
-    pub planned_file_writes: Vec<FileEntry>,
-    pub planned_registry_writes: Vec<RegistryEntry>,
-    pub planned_service_changes: Vec<ServiceEntry>,
-    pub planned_driver_actions: Vec<DriverEntry>,
-    pub planned_task_changes: Vec<ScheduledTaskEntry>,
-    pub planned_shortcut_changes: Vec<ShortcutEntry>,
-    pub planned_environment_changes: Vec<EnvironmentVariableEntry>,
-    pub warnings: Vec<Warning>,
-    /// What the package asked for and the restore rules will not allow. The `planned_`
-    /// lists hold only what is allowed.
-    #[serde(default)]
-    pub refused: Vec<Warning>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestoreResult {
     pub applied: bool,
     /// What was done, or for a preview what would be, with what reaches beyond files
