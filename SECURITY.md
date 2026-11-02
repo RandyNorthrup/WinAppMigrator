@@ -61,7 +61,8 @@ installer is about to trust, and an honest package reaching too far:
   - **What the PC already has as something else's stays.** That goes for a protocol, a file type, what opening one does,
     a class in either view or either hive, with or without a server of its own, an interface, a type library, an AppID,
     an event source in any log, a font, a driver, a source, a program name, what "Open with" goes by, a Default apps entry,
-    an autostart value, and a firewall rule that says something else. `--force` does not change it. The only thing a
+    an app's row in Settings, an autostart value, and a firewall rule that says something else. `--force` does not
+    change it. The only thing a
     package can then ask for is exactly what is there. So a server copied from this PC does not let in what comes
     beside it, and for these, a value only added to something of someone else's is refused like one that replaces it.
     Any app can add a verb of its own to a type that is another's, as "Git Bash Here" does, if it runs the package's own
@@ -69,9 +70,11 @@ installer is about to trust, and an honest package reaching too far:
   - **Being in the install location says nothing by itself.** A package suggests that place, so a package that said its
     home was another app's folder could otherwise call everything of that app's its own. What is on this PC only counts
     as an earlier install there if a record in the admin-only folder says one was, of any app. That goes for services,
-    drivers, and tasks too, and a service left out takes what would have gone under its key along. It does not go for
-    files: `--force` replaces a file of the same name wherever it is put, which the installer warns of, and an uninstall
-    puts back.
+    drivers, and tasks too, and a service left out takes what would have gone under its key along.
+  - **Files are the exception, and only if you ask.** `--force` on a command line replaces a file of the same name wherever
+    it is put, and an uninstall puts it back. If that file is a program another app's service runs, the next start of
+    that service runs the package's, which no rule above sees. So only use `--force` for a folder you know is this
+    app's. The installer's window will not use a folder with files in it unless a record says an install was there.
 - **The rules do not make a package safe.** A package may still run its own files, as a service
   with full rights if it asks to. That is what installing an app is. Before anything happens, the
   installer's window lists the services, drivers, scheduled tasks, autostart entries, shortcuts,

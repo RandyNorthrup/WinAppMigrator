@@ -661,7 +661,8 @@ Any rule added for a new kind of capture belongs there too.
 What ties an app into Windows goes by what points at what. `PackageRegistrations` says what a whole package has,
 and `registration_refusal` and `registered_value_refusal` go by that. A class counts as the package's only if a server it has
 is, and no other is anything but one of Windows' hosts. A unit, meaning a class, interface, type library, AppID, event source, ODBC
-driver or source, program name, `Applications\<program>`, or `Clients` entry, is all or nothing when it is refused as a whole.
+driver or source, program name, `Applications\<program>`, row in Settings, or `Clients` entry, is all or nothing when it is
+refused as a whole.
 A single value refused for what it says by itself, such as an icon on a share, is only that value.
 
 What depends on what this PC has can only be seen when installing, so `restore.rs` looks then. A class, or a unit of any of those
@@ -672,7 +673,13 @@ apps entry. A verb the package only adds to a type goes by that verb alone. They
 `--force` does not change it.
 
 **An earlier install here** means a record in the admin-only folder says one was at this location. A package suggests the location
-itself, so what is on this PC does not count as the package's for naming it. Services, drivers, and tasks go by the same.
+itself, so what is on this PC does not count as the package's for naming it. Services, drivers, and tasks go by the same. Files
+do not, when `--force` is asked for on a command line. The installer's window will not use a folder with files in it without
+such a record.
+
+An install record that names a key is not taken at its word for a file type's lists and verbs, which have other apps' lines in
+them, so `integration_scan.rs` goes through those. A verb that runs another app's program does not come along with its type, and
+an AppID hosted by something else, as the one preview handlers share is, stays Windows'.
 
 A firewall rule is told from another by its name, way, program, protocol, and ports, and one like it that says something else
 is left alone. A journal entry goes first, and rollback and uninstall take out only that one by all of those. Rules that differ

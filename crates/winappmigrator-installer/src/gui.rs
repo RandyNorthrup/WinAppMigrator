@@ -19,7 +19,7 @@ use eframe::egui::{self, Margin, RichText};
 
 use winappmigrator_core::archive::has_certificate_table;
 use winappmigrator_core::authenticode::read_signature;
-use winappmigrator_core::journal::machine_state_root;
+use winappmigrator_core::journal::{install_on_record_at, machine_state_root};
 use winappmigrator_core::logging;
 use winappmigrator_core::path_utils::system_root;
 use winappmigrator_core::prerequisites::spec_for_bundle;
@@ -350,7 +350,8 @@ impl InstallerApp {
         {
             return problem.clone();
         }
-        let problem = install_location_problem(Path::new(text));
+        let problem = install_location_problem(Path::new(text))
+            .or_else(|| files_no_install_put_there(Path::new(text)));
         *checked = Some((text.to_owned(), problem.clone()));
         problem
     }
@@ -965,6 +966,20 @@ fn refused_ui(ui: &mut egui::Ui, theme: &Theme, refused: &[String]) {
     }
 }
 
+/// What is wrong with a folder that has files in it, unless a record says an install was there. The
+/// location is one a package suggests, and this window replaces what it finds, so without this a
+/// package could say its home was another app's folder and put its own program in place of one that
+/// app's service runs, with nothing on the list to say so.
+fn files_no_install_put_there(folder: &Path) -> Option<String> {
+    let on_record = machine_state_root()
+        .is_some_and(|state_root| install_on_record_at(&state_root, folder, None));
+    (folder_has_files(folder) && !on_record).then(|| {
+        "it already has files that no install here put there, so use an empty folder, or \
+         uninstall what is there first"
+            .to_owned()
+    })
+}
+
 fn folder_has_files(folder: &Path) -> bool {
     std::fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_some())
 }
@@ -1511,6 +1526,16 @@ mod tests {
                 .is_some()
         );
         assert!(harness.query_by_label_contains("Signed by").is_none());
+    }
+
+    /// Reads only: nothing is on record for a folder that was just made.
+    #[test]
+    fn a_folder_with_files_no_install_put_there_is_not_offered() -> std::io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        assert_eq!(files_no_install_put_there(folder.path()), None);
+        std::fs::write(folder.path().join("theirs.exe"), b"theirs")?;
+        assert!(files_no_install_put_there(folder.path()).is_some());
+        Ok(())
     }
 
     #[test]

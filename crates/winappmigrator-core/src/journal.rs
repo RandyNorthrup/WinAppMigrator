@@ -1092,6 +1092,23 @@ pub(crate) fn install_folders(state_root: &Path) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
+/// Whether a record says an install was at this location, other than `but_not`, the folder of one
+/// going on now. Only an administrator can write where these are kept, and a package cannot name
+/// that place, so this is what says a location has been installed to, and a package saying so does
+/// not.
+pub fn install_on_record_at(state_root: &Path, target_root: &Path, but_not: Option<&Path>) -> bool {
+    install_folders(state_root)
+        .unwrap_or_default()
+        .iter()
+        .filter(|folder| but_not.is_none_or(|this_one| folder.file_name() != this_one.file_name()))
+        .filter_map(|folder| read_journal(folder).ok())
+        .any(|record| {
+            let recorded = record.summary().target_root;
+            crate::path_utils::path_is_within(&recorded, target_root)
+                && crate::path_utils::path_is_within(target_root, &recorded)
+        })
+}
+
 /// True when a folder holds no journal.
 pub(crate) fn has_no_journal(folder: &Path) -> bool {
     matches!(
@@ -1103,6 +1120,29 @@ pub(crate) fn has_no_journal(folder: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_location_is_only_on_record_if_a_record_of_another_install_says_so() -> Result<()> {
+        let (_work, state) = temp_state()?;
+        let place = Path::new(r"C:\Acme");
+        assert!(!install_on_record_at(&state, place, None));
+        let journal = Journal::begin(&state, "Acme", place, None, None)?;
+        let folder = journal.folder().to_path_buf();
+        drop(journal);
+        assert!(install_on_record_at(&state, place, None));
+        assert!(install_on_record_at(&state, Path::new(r"c:\acme\"), None));
+        assert!(!install_on_record_at(&state, Path::new(r"C:\Acme2"), None));
+        assert!(!install_on_record_at(
+            &state,
+            Path::new(r"C:\Acme\bin"),
+            None
+        ));
+        assert!(
+            !install_on_record_at(&state, place, Some(&folder)),
+            "the record of this install says nothing of what was there before it"
+        );
+        Ok(())
+    }
 
     /// Whether the install finished or not, and whether what was last written was whole or not,
     /// what is added is read, and nothing is taken for damage.

@@ -11,7 +11,7 @@ use winreg::{RegKey, RegValue};
 
 use crate::hashing::hex_lower;
 use crate::integration_scan::{
-    IntegrationInputs, Integrations, certificate_named_by, scan_integrations,
+    IntegrationInputs, Integrations, OwnedFiles, PointsAt, certificate_named_by, scan_integrations,
 };
 use crate::models::{
     CertificateEntry, ComRegistrationEntry, ComServerKind, FileAssociationEntry, FileEntry,
@@ -264,6 +264,7 @@ pub(crate) fn scan_registry_artifacts(
     } = scan_integrations(integrations, system);
     entries.extend(integration_entries);
     warnings.extend(integration_warnings);
+    without_other_apps_verbs(&mut entries, integrations.owned);
     leave_stores_of_certificates_out(&mut entries, &mut certificates);
 
     entries.sort_by(|left, right| {
@@ -674,7 +675,54 @@ fn is_shared_registry_key(key_path: &str) -> bool {
     let plain = lower
         .strip_prefix(r"software\wow6432node\")
         .map_or(lower.clone(), |rest| format!(r"software\{rest}"));
-    SHARED_REGISTRY_KEYS.contains(&plain.as_str())
+    // A file type's lists and verbs have other apps' lines in them, however many are this app's, and
+    // `integration_scan` goes through each by what it runs.
+    let of_many_apps = plain
+        .strip_prefix(r"software\classes\")
+        .map(|rest| rest.strip_prefix(r"wow6432node\").unwrap_or(rest))
+        .is_some_and(|rest| {
+            let (top, below) = rest.split_once('\\').unwrap_or((rest, ""));
+            let first_below = below.split('\\').next().unwrap_or_default();
+            top.starts_with('.') || first_below == "shell" || first_below == "shellex"
+        });
+    of_many_apps || SHARED_REGISTRY_KEYS.contains(&plain.as_str())
+}
+
+/// Without a verb another app added to a type, which comes along when all of a type is the app's,
+/// or a record names all of it. One that runs something of Windows' can be the type's own.
+fn without_other_apps_verbs(entries: &mut Vec<RegistryEntry>, owned: &OwnedFiles) {
+    const COMMAND_TAIL: &str = r"\command";
+    let others: Vec<String> = entries
+        .iter()
+        .filter_map(|entry| {
+            let key = entry.key_path.to_ascii_lowercase();
+            let classes = key.contains(r"\classes\") && key.contains(r"\shell\");
+            let is_default = entry
+                .value_name
+                .as_deref()
+                .is_none_or(|name| name.is_empty() || name.eq_ignore_ascii_case("(Default)"));
+            let verb = key
+                .strip_suffix(COMMAND_TAIL)
+                .filter(|_| classes && is_default)?;
+            (owned.points_at(entry.value_data.as_deref().unwrap_or_default())
+                == PointsAt::Elsewhere
+                && entry
+                    .value_data
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty()))
+            .then(|| verb.to_owned())
+        })
+        .collect();
+    if others.is_empty() {
+        return;
+    }
+    entries.retain(|entry| {
+        let key = entry.key_path.to_ascii_lowercase();
+        !others.iter().any(|verb| {
+            key.strip_prefix(verb.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\'))
+        })
+    });
 }
 
 /// Capture this app's keys under `Software`, in both registry views. A key counts when it
@@ -1604,6 +1652,62 @@ mod tests {
     }
 
     #[test]
+    fn a_verb_another_app_added_to_a_type_does_not_come_along() {
+        let owned = OwnedFiles::new(
+            Path::new(r"C:\App\a.exe"),
+            Some(Path::new(r"C:\App")),
+            Path::new(r"C:\Windows"),
+            std::iter::empty(),
+        );
+        let value = |key: &str, name: Option<&str>, data: &str| RegistryEntry {
+            hive: RegistryHive::LocalMachine,
+            key_path: key.to_owned(),
+            value_name: name.map(ToOwned::to_owned),
+            value_data: Some(data.to_owned()),
+            value_kind: Some(RegistryValueKind::String),
+            value_bytes_hex: None,
+            confidence: MatchConfidence::High,
+            requires_admin: true,
+        };
+        let mut entries = vec![
+            value(
+                r"Software\Classes\AudioCD\shell\play\command",
+                None,
+                r#""C:\App\a.exe" "%1""#,
+            ),
+            value(
+                r"Software\Classes\AudioCD\shell\PlayWithVLC",
+                None,
+                "Play with VLC",
+            ),
+            value(
+                r"Software\Classes\AudioCD\shell\PlayWithVLC\command",
+                None,
+                r#""C:\Other\vlc.exe" "%1""#,
+            ),
+            value(
+                r"Software\Classes\AudioCD\shell\print\command",
+                None,
+                "rundll32.exe x",
+            ),
+            value(r"Software\App\shell\thing\command", None, r"C:\Other\o.exe"),
+        ];
+        without_other_apps_verbs(&mut entries, &owned);
+        let kept: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry.key_path.as_str())
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                r"Software\Classes\AudioCD\shell\play\command",
+                r"Software\Classes\AudioCD\shell\print\command",
+                r"Software\App\shell\thing\command",
+            ]
+        );
+    }
+
+    #[test]
     fn a_record_cannot_claim_a_shared_key_whole() {
         for key in [
             r"Software",
@@ -1611,6 +1715,12 @@ mod tests {
             r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
             r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
             r"Software\RegisteredApplications",
+            r"Software\Classes\.pdf",
+            r"Software\Classes\.pdf\OpenWithProgids",
+            r"Software\WOW6432Node\Classes\.pdf",
+            r"Software\Classes\AudioCD\shell",
+            r"Software\Classes\AudioCD\shell\Play",
+            r"Software\Classes\*\shellex\ContextMenuHandlers",
         ] {
             assert!(is_shared_registry_key(key), "{key}");
         }

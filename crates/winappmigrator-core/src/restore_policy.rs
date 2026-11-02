@@ -648,6 +648,7 @@ const REFUSED_DATA_FOLDERS: &[&str] = &[
 ];
 /// Where Settings finds what it lists under installed apps.
 const UNINSTALL_KEY: &str = r"software\microsoft\windows\currentversion\uninstall";
+const UNINSTALL_PREFIX: &str = r"software\microsoft\windows\currentversion\uninstall\";
 /// What a captured entry says about how to change or remove the app on the PC it came from.
 /// None of it means anything here, and `WindowsInstaller` and `NoRemove` would stop Windows
 /// from using the uninstaller this entry is given.
@@ -834,6 +835,13 @@ pub fn registry_refusal(
     }
     if is_autostart_entry(entry) {
         return autostart_refusal(entry, map, expand);
+    }
+    // It is only ever a file's name, which looking it up would otherwise read as a path.
+    if key
+        .strip_prefix(APP_PATHS_PREFIX)
+        .is_some_and(|rest| rest.contains(['/', ':']))
+    {
+        return Some("it names a program by something other than a file's name".to_owned());
     }
     if key_is_within(&key, APP_PATHS_KEY)
         && key.len() > APP_PATHS_KEY.len()
@@ -1357,13 +1365,15 @@ pub fn registration_unit_of(entry: &RegistryEntry) -> Option<String> {
     if key.strip_prefix(CLSID_PREFIX).is_some() {
         return com_class_key(&entry.key_path);
     }
-    // A program's name, and what `Open with` goes by for it, is one thing for one program.
+    // A program's name, what `Open with` goes by for it, and its row in Settings are each one thing
+    // for one program.
     for prefix in [
         INTERFACE_PREFIX,
         TYPE_LIBRARY_PREFIX,
         APP_ID_PREFIX,
         APP_PATHS_PREFIX,
         APPLICATIONS_PREFIX,
+        UNINSTALL_PREFIX,
     ] {
         if let Some(rest) = key.strip_prefix(prefix) {
             return Some(format!(
@@ -4314,6 +4324,21 @@ mod tests {
                 verb: "acme".to_owned()
             })
         );
+    }
+
+    #[test]
+    fn a_program_is_named_by_a_files_name() {
+        let named = |name: &str| {
+            let key = format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{name}");
+            machine(&key, None, r"C:\Program Files\Acme\acme.exe")
+        };
+        let refusal = |entry: &RegistryEntry| {
+            registry_refusal(entry, &app_map(), &HashSet::new(), &no_expanding)
+        };
+        assert_eq!(refusal(&named("acme.exe")), None);
+        for name in ["//evil/share/x.exe", "C:x.exe", "a/b.exe"] {
+            assert!(refusal(&named(name)).is_some(), "{name}");
+        }
     }
 
     #[test]

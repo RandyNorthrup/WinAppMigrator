@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -22,7 +22,7 @@ use crate::hashing::sha256_file;
 use crate::integration_scan::{first_path_in, parse_firewall_rule};
 use crate::journal::{
     Change, ItemKind, Journal, QUIET_FLAG, STAGING_PREFIX, StoredValue, UNINSTALL_FLAG,
-    find_backup, install_folders, lock_state, read_journal,
+    find_backup, install_on_record_at, lock_state,
 };
 use crate::models::{
     DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry, FileClassification,
@@ -52,8 +52,8 @@ use crate::restore_policy::{
     COM_SERVER_KEYS, EVENT_LOG_PREFIX, Registration, SERVICES_PREFIX, ServiceAccount,
     com_class_key, com_server_refusal, existing_service_refusal, existing_task_refusal,
     firewall_fingerprint, firewall_identity, is_autostart_entry, is_uninstall_entry_key,
-    netsh_add_rule_arguments, paths_equal, registration_of, registration_unit_of,
-    restored_value_bytes, restored_value_name, restored_value_text, service_image_path_value,
+    netsh_add_rule_arguments, registration_of, registration_unit_of, restored_value_bytes,
+    restored_value_name, restored_value_text, service_image_path_value,
     stored_firewall_rule_matches,
 };
 use crate::restore_review::{
@@ -366,9 +366,13 @@ pub fn restore_package_monitored(
         ));
     }
 
-    let earlier_install_here = journal
-        .as_ref()
-        .is_some_and(|journal| earlier_install_at(&effective_options, journal.folder()));
+    let earlier_install_here = journal.as_ref().is_some_and(|journal| {
+        install_on_record_at(
+            &effective_options.state_root,
+            &effective_options.target_root,
+            Some(journal.folder()),
+        )
+    });
     let mut run = Run {
         options: &effective_options,
         review: &review,
@@ -1597,7 +1601,19 @@ impl Run<'_, '_> {
         self.monitor
             .report(InstallStep::new(InstallPhase::UninstallEntry, 0, 0));
         let id = journal.id().to_owned();
-        let mut keys = review.uninstall_keys.clone();
+        // A row that is another app's stays that app's, and this install has one of its own.
+        let mut keys: Vec<_> = review
+            .uninstall_keys
+            .iter()
+            .filter(|key| {
+                !self
+                    .registrations_left_alone
+                    .iter()
+                    .any(|left_alone| left_alone.covers_key(&key.key_path))
+            })
+            .cloned()
+            .collect();
+        let captured = !keys.is_empty();
         if keys.is_empty() {
             keys.push(crate::restore_review::UninstallKey {
                 hive: RegistryHive::LocalMachine,
@@ -1614,7 +1630,6 @@ impl Run<'_, '_> {
             self.manifest,
             &self.options.target_root,
         );
-        let captured = !review.uninstall_keys.is_empty();
         for key in &keys {
             for (name, value) in &values {
                 // What a captured entry already says about the app stays as it said.
@@ -2120,17 +2135,6 @@ fn place_of_an_earlier_install(options: &RestoreOptions, earlier_install_here: b
     }
 }
 
-/// Whether this PC has a record of another install at this location. Only an administrator can
-/// write where those are kept, and a package cannot name that place.
-fn earlier_install_at(options: &RestoreOptions, this_one: &Path) -> bool {
-    install_folders(&options.state_root)
-        .unwrap_or_default()
-        .iter()
-        .filter(|folder| folder.file_name() != this_one.file_name())
-        .filter_map(|folder| read_journal(folder).ok())
-        .any(|record| paths_equal(&record.summary().target_root, &options.target_root))
-}
-
 /// The COM classes in `entries` that belong to something else on this PC, each with why. All of
 /// a class goes together, whatever order it comes in, since a value beside a server can change
 /// what it does, and a new empty key can take over a class by itself.
@@ -2217,6 +2221,14 @@ struct LeftAlone {
 }
 
 impl LeftAlone {
+    /// Whether this is all of a key, or one above it.
+    fn covers_key(&self, key_path: &str) -> bool {
+        self.value.is_none()
+            && plain_key(key_path)
+                .strip_prefix(self.key.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\'))
+    }
+
     fn covers(&self, entry: &RegistryEntry) -> bool {
         let key = plain_key(&entry.key_path);
         let under = key
@@ -2404,7 +2416,14 @@ fn names_a_program_of_windows(unit: &str) -> bool {
     else {
         return false;
     };
-    !name.starts_with('{')
+    // Looking for a name that is really a path would go wherever it says, even onto a network.
+    let is_a_plain_name = !name.contains(['/', '\\', ':'])
+        && matches!(
+            Path::new(name).components().collect::<Vec<_>>().as_slice(),
+            [Component::Normal(_)]
+        );
+    is_a_plain_name
+        && !name.starts_with('{')
         && [
             system_root().to_path_buf(),
             system_root().join("System32"),

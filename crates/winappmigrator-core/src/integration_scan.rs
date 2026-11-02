@@ -43,6 +43,7 @@ const CLSID: &str = "CLSID";
 const INTERFACE: &str = "Interface";
 const TYPE_LIB: &str = "TypeLib";
 const APP_ID: &str = "AppID";
+const DLL_SURROGATE_VALUE: &str = "DllSurrogate";
 const INPROC_SERVER: &str = "InprocServer32";
 const COM_SERVERS: &[&str] = &[INPROC_SERVER, "LocalServer32", "InprocHandler32"];
 /// Where `LocalServer32` is written with a Windows Installer descriptor, the path is this value.
@@ -640,7 +641,18 @@ impl Scan<'_> {
         };
         let by_id: Vec<String> = self.owned.app_ids.iter().cloned().collect();
         for id in by_id {
-            if app_ids.open_subkey_with_flags(&id, KEY_READ).is_ok() {
+            // Windows has AppIDs that any class can name, such as the one each preview handler
+            // goes by. What hosts it says whose it is, and with none it is the class's own.
+            let is_the_apps = app_ids
+                .open_subkey_with_flags(&id, KEY_READ)
+                .is_ok_and(|key| {
+                    let host = key
+                        .get_raw_value(DLL_SURROGATE_VALUE)
+                        .map(|value| raw_value_to_display(&value))
+                        .unwrap_or_default();
+                    host.trim().is_empty() || self.runs_the_app(&host)
+                });
+            if is_the_apps {
                 self.capture(root, &format!(r"{view}\{APP_ID}\{id}"));
             }
         }
