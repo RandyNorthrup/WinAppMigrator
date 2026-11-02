@@ -1447,8 +1447,13 @@ mod tests {
         let elsewhere = base.path().join("outside.txt");
         fs::write(&elsewhere, b"x").map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
         let link = base.path().join("app.exe");
-        // Symbolic links need Developer Mode or elevation, so this cannot always run.
-        if std::os::windows::fs::symlink_file(&elsewhere, &link).is_err() {
+        // Symbolic links need Developer Mode or elevation, so this cannot always run. CI
+        // is elevated, so there this fails rather than skipping.
+        if let Err(error) = std::os::windows::fs::symlink_file(&elsewhere, &link) {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI should be able to create a symbolic link: {error}"
+            );
             eprintln!("skipping: this shell cannot create a symbolic link");
             return Ok(());
         }

@@ -127,8 +127,16 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
         if applied { "applied" } else { "previewed" }
     );
     println!("Changes logged: {}", result.changes_logged.len());
+    // The restore logs are in the staging folder, which is removed when this returns, so
+    // this is the only place automation can see what went wrong.
     println!("Warnings: {}", result.warnings.len());
+    for warning in &result.warnings {
+        println!("  {}: {}", warning.code, warning.message);
+    }
     println!("Errors: {}", result.errors.len());
+    for error in &result.errors {
+        println!("  {}: {}", error.code, error.message);
+    }
     println!("Refused: {}", result.refused.len());
     for refused in &result.refused {
         println!("  {}", refused.message);
