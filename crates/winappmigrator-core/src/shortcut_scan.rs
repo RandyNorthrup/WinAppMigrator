@@ -27,15 +27,14 @@ pub fn scan_shortcuts(
     system: &SystemContext,
 ) -> (Vec<ShortcutEntry>, Vec<Warning>) {
     if system.is_offline() {
-        // The live shell folders and WScript.Shell COM only see this PC. Reading
-        // a foreign disk's .lnk files is not required for a correct migration —
-        // the installer recreates shortcuts from the captured install location on
-        // restore — so we skip source-shortcut enumeration and note it.
+        // The live shell folders and WScript.Shell COM only see this PC, and a
+        // foreign disk's .lnk files are not parsed, so an installer built from a
+        // connected drive restores no shortcuts. The warning says so.
         let warning = Warning::new(
             "shortcuts_offline_skipped",
             WarningSeverity::Info,
-            "Source Start Menu/Desktop shortcuts are not read from a connected drive; the \
-             installer recreates shortcuts from the app's install location on restore.",
+            "Start Menu and Desktop shortcuts are not read from a connected drive, so this \
+             installer will not recreate them.",
             None,
         );
         return (Vec::new(), vec![warning]);

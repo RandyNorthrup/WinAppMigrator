@@ -11,6 +11,8 @@
 //! restore/verify, which always operate on the target PC; offline (foreign-disk)
 //! registry access goes through [`crate::system_context::SystemContext`] instead.
 
+use std::path::Path;
+
 use winreg::RegKey;
 use winreg::enums::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN,
@@ -40,6 +42,53 @@ pub(crate) fn environment_registry_target(scope: &EnvironmentScope) -> (RegKey, 
             r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
         ),
     }
+}
+
+/// `Path` is shared with everything else on the machine, so it is merged entry by
+/// entry instead of being replaced with the source machine's value.
+pub(crate) fn is_path_variable(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Path")
+}
+
+/// The entries of a captured `Path`, already rewritten for the target, that belong
+/// to the application being restored.
+pub(crate) fn app_path_entries(rewritten: &str, target_root: &Path) -> Vec<String> {
+    let root = normalized_path_entry(&target_root.to_string_lossy());
+    let prefix = format!("{root}\\");
+    rewritten
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| {
+            let entry = normalized_path_entry(entry);
+            !entry.is_empty() && (entry == root || entry.starts_with(&prefix))
+        })
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Append any of `app_entries` missing from `existing`, leaving the rest as it is.
+pub(crate) fn merge_path_entries(existing: &str, app_entries: &[String]) -> String {
+    let mut merged = existing.trim_end_matches(';').to_owned();
+    for entry in app_entries {
+        if !path_contains_entry(&merged, entry) {
+            if !merged.is_empty() {
+                merged.push(';');
+            }
+            merged.push_str(entry);
+        }
+    }
+    merged
+}
+
+pub(crate) fn path_contains_entry(value: &str, entry: &str) -> bool {
+    let entry = normalized_path_entry(entry);
+    value
+        .split(';')
+        .any(|existing| normalized_path_entry(existing) == entry)
+}
+
+fn normalized_path_entry(entry: &str) -> String {
+    entry.trim().trim_end_matches('\\').to_ascii_lowercase()
 }
 
 /// Short hive label (`HKLM`/`HKCU`) used in log and warning messages. (Distinct
@@ -75,5 +124,38 @@ pub(crate) fn registry_raw_type(kind: &RegistryValueKind) -> RegType {
         RegistryValueKind::FullResourceDescriptor => REG_FULL_RESOURCE_DESCRIPTOR,
         RegistryValueKind::ResourceRequirementsList => REG_RESOURCE_REQUIREMENTS_LIST,
         RegistryValueKind::Qword => REG_QWORD,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_entries_under_the_target_root_belong_to_the_app() {
+        let entries = app_path_entries(
+            r"C:\Windows;C:\Program Files\App\bin;C:\Program Files\App;C:\Program Files\Apple;;",
+            Path::new(r"C:\Program Files\App"),
+        );
+
+        assert_eq!(
+            entries,
+            vec![r"C:\Program Files\App\bin", r"C:\Program Files\App"]
+        );
+    }
+
+    #[test]
+    fn merging_keeps_the_existing_value_and_adds_only_missing_entries() {
+        let merged = merge_path_entries(
+            r"%SystemRoot%;C:\Tools\;",
+            &[r"C:\App".to_owned(), r"c:\tools".to_owned()],
+        );
+
+        assert_eq!(merged, r"%SystemRoot%;C:\Tools\;C:\App");
+    }
+
+    #[test]
+    fn merging_into_an_empty_value_has_no_leading_separator() {
+        assert_eq!(merge_path_entries("", &[r"C:\App".to_owned()]), r"C:\App");
     }
 }

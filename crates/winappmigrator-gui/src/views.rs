@@ -1,513 +1,747 @@
-//! The single application screen: browse installed apps, pick one, choose
-//! whether to also back up its license and user data, and build a
-//! self-extracting installer that reinstalls it on another device.
+//! The single application screen: browse installed apps on the left, then choose
+//! what to include and build a self-extracting installer on the right.
 
-use eframe::egui::{self, Align2, RichText, Sense};
+use std::cmp::Ordering;
 
-use winappmigrator_core::{AppArchitecture, InstallScope, Warning, WarningSeverity};
+use eframe::egui::Role as A11yRole;
+use eframe::egui::{self, Key, Margin, Modifiers, RichText, Sense, Stroke, WidgetInfo};
 
-use crate::theme::{Role, Theme};
-use crate::widgets::{self, ButtonKind, Icon, button, metric};
-use crate::{InventoryState, MigrationOutcome, OperationState, ScopeFilter, WinAppMigratorApp};
+use winappmigrator_core::{AppArchitecture, InstallScope, InstalledApp, ScanSource, Warning};
+use winappmigrator_core::{BuildStep, WarningSeverity};
+
+use crate::theme::{
+    self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
+};
+use crate::widgets::{self, ButtonKind, Icon, metric};
+use crate::{
+    BuildProgress, InventoryState, MigrationOutcome, OperationState, ScopeFilter, SortColumn,
+    WinAppMigratorApp,
+};
+
+const DETAIL_PANEL_WIDTH: f32 = 400.0;
+const ROW_HEIGHT: f32 = 36.0;
+const COLUMN_GUTTER: f32 = 12.0;
+const COLUMN_FRACTIONS: [f32; 5] = [0.38, 0.25, 0.14, 0.13, 0.10];
+/// How many warnings to list before summarizing the rest.
+const MAX_LISTED_WARNINGS: usize = 200;
+
+const COLUMNS: [(&str, SortColumn); 5] = [
+    ("Name", SortColumn::Name),
+    ("Publisher", SortColumn::Publisher),
+    ("Version", SortColumn::Version),
+    ("Scope", SortColumn::Scope),
+    ("Arch", SortColumn::Architecture),
+];
 
 impl WinAppMigratorApp {
-    pub(crate) fn view_applications(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn draw(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
 
-        // Scan source: this PC or a connected drive from another PC.
-        self.source_selector(ui, &theme);
-        ui.add_space(12.0);
+        egui::Panel::top("header")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.surface)
+                    .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_MD as i8)),
+            )
+            .show(ui, |ui| self.draw_header(ui, &theme));
 
-        // Search + scope filter.
-        widgets::card(ui, &theme, |ui| {
-            ui.horizontal(|ui| {
-                let search_width = (ui.available_width() - 330.0).max(160.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.app_search)
-                        .hint_text("Search by name or publisher")
-                        .desired_width(search_width),
+        egui::Panel::right("details")
+            .exact_size(DETAIL_PANEL_WIDTH)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(theme.surface))
+            .show(ui, |ui| self.draw_details(ui, &theme));
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.bg)
+                    .inner_margin(Margin::same(SPACE_LG as i8)),
+            )
+            .show(ui, |ui| self.draw_applications(ui, &theme));
+    }
+
+    fn draw_header(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), Sense::hover());
+            widgets::paint_logo(ui.painter(), rect, theme);
+            ui.add_space(SPACE_XS);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(
+                    RichText::new("WinAppMigrator")
+                        .font(theme::semibold(16.0))
+                        .color(theme.text),
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    segmented(
-                        ui,
-                        &theme,
-                        &mut self.app_scope_filter,
-                        &[
-                            ("All", ScopeFilter::All),
-                            ("Per-user", ScopeFilter::PerUser),
-                            ("Per-machine", ScopeFilter::PerMachine),
-                        ],
-                    );
-                });
+                ui.label(
+                    RichText::new("Turn an installed app into a self-extracting installer")
+                        .size(12.5)
+                        .color(theme.text_muted),
+                );
+            });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_XS;
+                let (icon, label) = if theme.mode == ThemeMode::Dark {
+                    (Icon::Sun, "Switch to light theme")
+                } else {
+                    (Icon::Moon, "Switch to dark theme")
+                };
+                if widgets::icon_button(ui, theme, icon, label, true).clicked() {
+                    self.toggle_theme();
+                }
+                let can_reload =
+                    !matches!(self.inventory_state, InventoryState::Loading) && !self.is_building();
+                if widgets::icon_button(
+                    ui,
+                    theme,
+                    Icon::Refresh,
+                    "Reload the application list",
+                    can_reload,
+                )
+                .clicked()
+                {
+                    self.start_inventory_load();
+                }
+                ui.add_space(SPACE_SM);
+                let (label, role) = match &self.inventory_state {
+                    InventoryState::Loading => ("Loading".to_owned(), Role::Neutral),
+                    InventoryState::Loaded => (format!("{} apps", self.apps.len()), Role::Success),
+                    InventoryState::Failed(_) => ("Load failed".to_owned(), Role::Danger),
+                };
+                widgets::status_pill(ui, theme, &label, role);
             });
         });
+    }
 
-        ui.add_space(12.0);
+    // ----- Left: the application list ---------------------------------------
+
+    fn draw_applications(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        self.source_selector(ui, theme);
+        ui.add_space(SPACE_MD);
+
+        let search_id = ui.make_persistent_id("app-search");
+        widgets::control_row(ui, |ui| {
+            let filter_width = 262.0;
+            let search_width = (ui.available_width() - filter_width - SPACE_SM).max(160.0);
+            widgets::search_field(
+                ui,
+                theme,
+                search_id,
+                &mut self.app_search,
+                "Search by name or publisher  (Ctrl+F)",
+                search_width,
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                widgets::segmented(
+                    ui,
+                    theme,
+                    &mut self.app_scope_filter,
+                    &[
+                        ("All", ScopeFilter::All),
+                        ("Per-user", ScopeFilter::PerUser),
+                        ("Per-machine", ScopeFilter::PerMachine),
+                    ],
+                    true,
+                );
+            });
+        });
+        if ui.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::F)) {
+            ui.memory_mut(|memory| memory.request_focus(search_id));
+        }
+        ui.add_space(SPACE_MD);
 
         match &self.inventory_state {
             InventoryState::Loading => {
-                widgets::card(ui, &theme, |ui| {
-                    busy_row(ui, &theme, "Loading installed applications…")
+                widgets::card(ui, theme, |ui| {
+                    busy_row(ui, theme, "Loading installed applications…");
                 });
-                ui.ctx().request_repaint();
                 return;
             }
             InventoryState::Failed(error) => {
-                let error = error.clone();
-                widgets::card(ui, &theme, |ui| {
-                    widgets::notice(
-                        ui,
-                        &theme,
-                        Role::Danger,
-                        &format!("Inventory failed: {error}"),
-                    );
-                });
+                let message = format!("Could not list applications: {error}");
+                widgets::notice(ui, theme, Role::Danger, &message);
                 return;
             }
             InventoryState::Loaded => {}
         }
 
-        let query = self.app_search.trim().to_lowercase();
-        let scope_filter = self.app_scope_filter;
-        let filtered: Vec<usize> = self
-            .apps
-            .iter()
-            .enumerate()
-            .filter(|(_, app)| scope_matches(scope_filter, &app.install_scope))
-            .filter(|(_, app)| {
-                if query.is_empty() {
-                    return true;
-                }
-                app.display_name.to_lowercase().contains(&query)
-                    || app
-                        .publisher
-                        .as_deref()
-                        .map(|publisher| publisher.to_lowercase().contains(&query))
-                        .unwrap_or(false)
-            })
-            .map(|(index, _)| index)
-            .collect();
+        let visible = self.visible_apps();
+        self.handle_row_keys(ui, search_id, &visible);
 
-        widgets::card(ui, &theme, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("Installed applications")
-                        .size(15.0)
-                        .strong()
-                        .color(theme.text),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!("{} shown", filtered.len()))
-                            .size(12.0)
-                            .color(theme.text_muted),
+        egui::Frame::new()
+            .fill(theme.card)
+            .stroke(Stroke::new(1.0, theme.border))
+            .corner_radius(theme::RADIUS_LG)
+            .inner_margin(Margin::same(SPACE_XS as i8))
+            .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                self.draw_table_header(ui, theme);
+                ui.add_space(SPACE_XS);
+
+                if visible.is_empty() {
+                    ui.add_space(SPACE_XL);
+                    widgets::empty_state(
+                        ui,
+                        theme,
+                        Icon::Apps,
+                        "No matching applications",
+                        "Adjust the search text or scope filter.",
                     );
-                });
-            });
-            ui.add_space(8.0);
-            app_table_header(ui, &theme);
-            ui.add_space(2.0);
+                    return;
+                }
 
-            if filtered.is_empty() {
-                widgets::empty_state(
-                    ui,
-                    &theme,
-                    Icon::Apps,
-                    "No matching applications",
-                    "Adjust the search text or scope filter.",
-                );
-                return;
-            }
-
-            ui.spacing_mut().item_spacing.y = 3.0;
-            egui::ScrollArea::vertical()
-                .id_salt("apps-table")
-                .auto_shrink([false, false])
-                .max_height(360.0)
-                .show_rows(ui, 32.0, filtered.len(), |ui, range| {
+                let mut area = egui::ScrollArea::vertical()
+                    .id_salt("apps-table")
+                    .auto_shrink([false, false]);
+                if let Some(row) = self.scroll_to_row.take() {
+                    area = area.vertical_scroll_offset(scroll_offset_for_row(row, ui));
+                }
+                let building = self.is_building();
+                area.show_rows(ui, ROW_HEIGHT, visible.len(), |ui, range| {
                     for row in range {
-                        let app_index = filtered[row];
+                        let app_index = visible[row];
                         let selected = self.selected_app_index == Some(app_index);
-                        if app_table_row(ui, &theme, &self.apps[app_index], selected).clicked() {
+                        let clicked =
+                            app_row(ui, theme, &self.apps[app_index], selected, !building)
+                                .clicked();
+                        if clicked {
                             self.select_app(app_index);
                         }
                     }
                 });
-        });
-
-        if let Some(index) = self.selected_app_index
-            && index < self.apps.len()
-        {
-            ui.add_space(12.0);
-            self.migrate_panel(ui, &theme, index);
-        }
+            });
     }
 
     /// The scan-source selector: read installed apps from this PC, or from a
     /// drive connected from another (often failing) PC.
     fn source_selector(&mut self, ui: &mut egui::Ui, theme: &Theme) {
-        let offline = self.scan_source.is_offline();
-        let offline_root = match &self.scan_source {
-            winappmigrator_core::ScanSource::OfflineVolume { volume_root } => {
-                Some(volume_root.display().to_string())
-            }
-            winappmigrator_core::ScanSource::Live => None,
+        #[derive(Clone, Copy, PartialEq)]
+        enum Source {
+            ThisPc,
+            Drive,
+        }
+        let mut chosen = if self.scan_source.is_offline() {
+            Source::Drive
+        } else {
+            Source::ThisPc
         };
-        widgets::card(ui, theme, |ui| {
-            ui.horizontal(|ui| {
-                widgets::field_label(ui, theme, "Scan source");
-                ui.add_space(6.0);
-                if button(
-                    ui,
-                    theme,
-                    if offline {
-                        ButtonKind::Ghost
-                    } else {
-                        ButtonKind::Primary
-                    },
-                    "This PC",
-                    true,
-                )
-                .clicked()
-                {
-                    self.select_live_source();
+        let enabled = !self.is_building();
+        widgets::control_row(ui, |ui| {
+            widgets::field_label(ui, theme, "Scan source");
+            let before = chosen;
+            let changed = widgets::segmented(
+                ui,
+                theme,
+                &mut chosen,
+                &[
+                    ("This PC", Source::ThisPc),
+                    ("Connected drive…", Source::Drive),
+                ],
+                enabled,
+            );
+            if changed && before != chosen {
+                match chosen {
+                    Source::ThisPc => self.select_live_source(),
+                    Source::Drive => self.pick_offline_drive(),
                 }
-                if button(
-                    ui,
-                    theme,
-                    if offline {
-                        ButtonKind::Primary
-                    } else {
-                        ButtonKind::Ghost
-                    },
-                    "Connected drive…",
-                    true,
-                )
-                .clicked()
-                {
+            }
+            if let ScanSource::OfflineVolume { volume_root } = &self.scan_source {
+                let drive = volume_root.display().to_string();
+                ui.add_space(SPACE_XS);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+                widgets::paint_icon(ui.painter(), Icon::Drive, rect, theme.text_muted);
+                ui.label(RichText::new(drive).size(13.0).color(theme.text_muted));
+                if widgets::button(ui, theme, ButtonKind::Ghost, "Change…", enabled).clicked() {
                     self.pick_offline_drive();
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (label, role) = if offline {
-                        ("Offline drive", Role::Warning)
-                    } else {
-                        ("This PC", Role::Success)
-                    };
-                    widgets::status_pill(ui, theme, label, role);
-                });
-            });
-
-            if let Some(root) = offline_root.as_ref() {
-                ui.add_space(8.0);
-                widgets::mono_path(ui, theme, "Drive root", root);
-            }
-
-            if let Some(error) = self.source_error.clone() {
-                ui.add_space(8.0);
-                widgets::notice(ui, theme, Role::Danger, &error);
-            }
-
-            if offline {
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new(
-                        "Reads apps, files, registry, services, and scheduled tasks straight from \
-                         the drive; the built installer works exactly like a live scan.",
-                    )
-                    .size(12.0)
-                    .color(theme.text_muted),
-                );
             }
         });
+        if let Some(error) = self.source_error.clone() {
+            ui.add_space(SPACE_SM);
+            widgets::notice(ui, theme, Role::Danger, &error);
+        }
     }
 
-    /// Select an app and prefill the default output directory for it.
-    fn select_app(&mut self, index: usize) {
+    fn visible_apps(&self) -> Vec<usize> {
+        let query = self.app_search.trim().to_lowercase();
+        let mut visible: Vec<usize> = self
+            .apps
+            .iter()
+            .enumerate()
+            .filter(|(_, app)| scope_matches(self.app_scope_filter, &app.install_scope))
+            .filter(|(_, app)| {
+                query.is_empty()
+                    || app.display_name.to_lowercase().contains(&query)
+                    || app
+                        .publisher
+                        .as_deref()
+                        .is_some_and(|publisher| publisher.to_lowercase().contains(&query))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        visible.sort_by(|left, right| {
+            let ordering = compare_apps(&self.apps[*left], &self.apps[*right], self.sort_column);
+            if self.sort_ascending {
+                ordering
+            } else {
+                ordering.reverse()
+            }
+        });
+        visible
+    }
+
+    /// Arrow keys move the selection, unless the user is typing somewhere else.
+    fn handle_row_keys(&mut self, ui: &egui::Ui, search_id: egui::Id, visible: &[usize]) {
+        if self.is_building() || visible.is_empty() {
+            return;
+        }
+        let focused = ui.memory(|memory| memory.focused());
+        if focused.is_some_and(|id| id != search_id) {
+            return;
+        }
+        let (down, up) = ui.input(|input| {
+            (
+                input.key_pressed(Key::ArrowDown),
+                input.key_pressed(Key::ArrowUp),
+            )
+        });
+        if !down && !up {
+            return;
+        }
+        let current = self
+            .selected_app_index
+            .and_then(|selected| visible.iter().position(|index| *index == selected));
+        let last = visible.len() - 1;
+        let target = match (current, down) {
+            (None, true) => 0,
+            (None, false) => last,
+            (Some(row), true) => (row + 1).min(last),
+            (Some(row), false) => row.saturating_sub(1),
+        };
+        if current != Some(target) {
+            self.select_app(visible[target]);
+            self.scroll_to_row = Some(target);
+        }
+    }
+
+    fn draw_table_header(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::hover());
+        let cells = column_rects(rect);
+        for (index, (cell, (label, column))) in cells.into_iter().zip(COLUMNS).enumerate() {
+            let id = ui.scope_id().with(("sort", index));
+            let response = ui
+                .interact(cell, id, Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            let sorted = self.sort_column == column;
+            response.widget_info(|| {
+                WidgetInfo::labeled(A11yRole::Button, true, format!("Sort by {label}"))
+            });
+            let color = if sorted || response.hovered() {
+                theme.text
+            } else {
+                theme.text_subtle
+            };
+            let font = theme::semibold(12.0);
+            let galley = ui.painter().layout_no_wrap(label.to_owned(), font, color);
+            let text_size = galley.size();
+            let top = cell.center().y - text_size.y / 2.0;
+            ui.painter()
+                .galley(egui::pos2(cell.left(), top), galley, color);
+            if sorted {
+                let icon = if self.sort_ascending {
+                    Icon::ChevronUp
+                } else {
+                    Icon::ChevronDown
+                };
+                let icon_rect = egui::Rect::from_center_size(
+                    egui::pos2(cell.left() + text_size.x + 10.0, cell.center().y),
+                    egui::vec2(10.0, 10.0),
+                );
+                widgets::paint_icon(ui.painter(), icon, icon_rect, theme.text);
+            }
+            if response.clicked() {
+                if sorted {
+                    self.sort_ascending = !self.sort_ascending;
+                } else {
+                    self.sort_column = column;
+                    self.sort_ascending = true;
+                }
+            }
+        }
+        let separator = rect.bottom();
+        ui.painter()
+            .hline(rect.x_range(), separator, Stroke::new(1.0, theme.border));
+    }
+
+    /// Select an app and prefill the default output directory for it. Selection is
+    /// locked during a build: the build and its result belong to the app it started
+    /// with.
+    pub(crate) fn select_app(&mut self, index: usize) {
+        if self.is_building() {
+            return;
+        }
         self.selected_app_index = Some(index);
         self.output_dir = crate::default_output_for(&self.apps[index].display_name);
         // A fresh selection starts a fresh migration result.
         self.migrate_state = OperationState::Idle;
-        self.migrate_detail.clear();
         self.last_outcome = None;
         self.last_error = None;
     }
 
-    /// The migration controls and result for the selected application.
-    fn migrate_panel(&mut self, ui: &mut egui::Ui, theme: &Theme, index: usize) {
-        let app = self.apps[index].clone();
-        let running = matches!(self.migrate_state, OperationState::Running);
+    // ----- Right: the selected application ----------------------------------
 
-        widgets::card(ui, theme, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(&app.display_name)
-                        .size(17.0)
-                        .strong()
-                        .color(theme.text),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    widgets::badge(ui, theme, arch_label(&app.architecture), theme.text_subtle);
-                    widgets::status_pill(
+    fn draw_details(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        let selected = self
+            .selected_app_index
+            .and_then(|index| self.apps.get(index).cloned());
+        let Some(app) = selected else {
+            egui::Frame::new()
+                .inner_margin(Margin::same(SPACE_XL as i8))
+                .show(ui, |ui| {
+                    ui.add_space(ui.available_height() / 3.0);
+                    widgets::empty_state(
                         ui,
                         theme,
-                        scope_label(&app.install_scope),
-                        scope_role(&app.install_scope),
+                        Icon::Apps,
+                        "Pick an application",
+                        "Select an app from the list to choose what to include and build its \
+                         installer.",
                     );
                 });
-            });
+            return;
+        };
 
-            ui.add_space(10.0);
-            widgets::kv_row(
-                ui,
-                theme,
-                "Publisher",
-                app.publisher.as_deref().unwrap_or("Unknown"),
-            );
-            ui.add_space(4.0);
-            widgets::kv_row(
-                ui,
-                theme,
-                "Version",
-                app.version.as_deref().unwrap_or("Unknown"),
-            );
-            if let Some(location) = app.install_location.as_ref() {
-                ui.add_space(8.0);
-                widgets::mono_path(
-                    ui,
-                    theme,
-                    "Install location",
-                    &location.display().to_string(),
-                );
-            }
-
-            ui.add_space(14.0);
-            widgets::field_label(ui, theme, "Also back up (optional)");
-            ui.checkbox(
-                &mut self.backup_license,
-                "License / activation data (may be machine-bound and need reactivation)",
-            );
-            ui.checkbox(
-                &mut self.backup_user_data,
-                "User data — settings, Documents, Saved Games, and ProgramData",
-            );
-
-            ui.add_space(12.0);
-            widgets::path_field(
-                ui,
-                theme,
-                "Installer output folder",
-                &mut self.output_dir,
-                "Where the installer is written",
-                || rfd::FileDialog::new().pick_folder(),
-            );
-
-            ui.add_space(10.0);
-            let mut summary =
-                "Builds a self-extracting installer that reinstalls the app".to_owned();
-            if self.backup_license {
-                summary.push_str(", its license");
-            }
-            if self.backup_user_data {
-                summary.push_str(", its user data");
-            }
-            summary.push_str(" on another device, then hash-verifies fidelity.");
-            widgets::notice(ui, theme, Role::Accent, &summary);
-
-            let stub_present = crate::installer_stub_path().is_some();
-            if !stub_present {
-                ui.add_space(8.0);
-                widgets::notice(
-                    ui,
-                    theme,
-                    Role::Danger,
-                    "Installer stub (winappmigrator-installer.exe) was not found beside this app, \
-                     so a self-extracting installer cannot be built.",
-                );
-            }
-
-            ui.add_space(14.0);
-            if button(
-                ui,
-                theme,
-                ButtonKind::Primary,
-                "Create self-extracting installer",
-                !running && stub_present,
+        egui::Panel::bottom("details-actions")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.surface)
+                    .inner_margin(Margin::same(SPACE_LG as i8)),
             )
-            .clicked()
-            {
-                self.start_migration();
-            }
-        });
+            .show(ui, |ui| self.draw_actions(ui, theme));
 
-        ui.add_space(12.0);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(theme.surface))
+            .show(ui, |ui| {
+                let mut area = egui::ScrollArea::vertical()
+                    .id_salt("details-scroll")
+                    .auto_shrink([false, false]);
+                // A new result appears at the top, so bring the top into view.
+                if std::mem::take(&mut self.scroll_details_to_top) {
+                    area = area.vertical_scroll_offset(0.0);
+                }
+                area.show(ui, |ui| {
+                    egui::Frame::new()
+                        .inner_margin(Margin::same(SPACE_LG as i8))
+                        .show(ui, |ui| {
+                            ui.set_max_width(ui.available_width());
+                            draw_app_title(ui, theme, &app);
+                            // The result goes first: it is what the user is waiting
+                            // for, and it holds the installer's path and folder button.
+                            self.draw_build_result(ui, theme);
+                            ui.add_space(SPACE_MD);
+                            draw_app_facts(ui, theme, &app);
+                            ui.add_space(SPACE_LG);
+                            self.draw_build_options(ui, theme);
+                        });
+                });
+            });
+    }
 
-        match self.migrate_state {
-            OperationState::Idle => {}
-            OperationState::Running => {
-                widgets::card(ui, theme, |ui| {
-                    busy_row(ui, theme, "Building installer");
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(&self.migrate_detail).color(theme.text_muted));
-                });
-                ui.ctx().request_repaint();
-            }
-            OperationState::Failed => {
-                widgets::card(ui, theme, |ui| {
-                    widgets::notice(ui, theme, Role::Danger, "Installer build failed.");
-                    if let Some(error) = self.last_error.as_ref() {
-                        ui.add_space(6.0);
-                        ui.label(RichText::new(error).color(theme.text));
-                    }
-                });
-            }
-            OperationState::Completed | OperationState::Warning => self.migrate_result(ui, theme),
+    fn draw_build_options(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        let enabled = !self.is_building();
+        widgets::field_label(ui, theme, "Include in the installer");
+        ui.add_space(2.0);
+        let mut always = true;
+        widgets::option_row(
+            ui,
+            theme,
+            &mut always,
+            "Program files and registry",
+            "Always included, with services, tasks, and runtimes. Shortcuts too, when building \
+             from this PC.",
+            false,
+        );
+        widgets::option_row(
+            ui,
+            theme,
+            &mut self.backup_license,
+            "License and activation data",
+            "May be tied to this PC and need reactivation on the new one.",
+            enabled,
+        );
+        widgets::option_row(
+            ui,
+            theme,
+            &mut self.backup_user_data,
+            "User data",
+            "Settings, Documents, Saved Games, and ProgramData.",
+            enabled,
+        );
+
+        ui.add_space(SPACE_MD);
+        widgets::path_field(
+            ui,
+            theme,
+            "Output folder",
+            &mut self.output_dir,
+            r"C:\Users\You\WinAppMigrator",
+            enabled,
+            || rfd::FileDialog::new().pick_folder(),
+        );
+        if !self.output_dir_is_valid() {
+            ui.add_space(SPACE_XS);
+            widgets::hint(
+                ui,
+                theme,
+                "Enter a full folder path, such as D:\\Installers.",
+            );
         }
     }
 
-    fn migrate_result(&mut self, ui: &mut egui::Ui, theme: &Theme) {
-        let mut folder_error = None;
-        if let Some(outcome) = self.last_outcome.as_ref() {
-            let MigrationOutcome {
-                app_name,
-                package,
-                verification,
-            } = outcome;
+    pub(crate) fn output_dir_is_valid(&self) -> bool {
+        std::path::Path::new(self.output_dir.trim()).is_absolute()
+    }
 
-            widgets::card_titled(
+    fn draw_actions(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        if self.is_building() {
+            let (label, fraction) = progress_label(self.build_progress);
+            let label = if self.is_cancelling() {
+                "Cancelling after the current step…".to_owned()
+            } else {
+                label
+            };
+            let elapsed = self
+                .build_started
+                .map_or(0, |start| start.elapsed().as_secs());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).size(13.0).color(theme.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(widgets::format_elapsed(elapsed))
+                            .size(12.5)
+                            .color(theme.text_muted),
+                    );
+                });
+            });
+            ui.add_space(SPACE_SM);
+            widgets::progress_bar(ui, theme, fraction);
+            ui.add_space(SPACE_MD);
+            let cancelling = self.is_cancelling();
+            if widgets::wide_button(ui, theme, ButtonKind::Secondary, "Cancel", !cancelling)
+                .clicked()
+            {
+                self.cancel_migration();
+            }
+            return;
+        }
+
+        if !self.stub_available {
+            widgets::notice(
                 ui,
                 theme,
-                "Installer ready",
-                Some(app_name.as_str()),
-                |ui| {
-                    widgets::metric_tiles(
-                        ui,
-                        theme,
-                        &[
-                            metric(
-                                "Files captured",
-                                package.files_copied.to_string(),
-                                Role::Accent,
-                            ),
-                            metric(
-                                "Hashes",
-                                if verification.package_valid {
-                                    "Verified"
-                                } else {
-                                    "Failed"
-                                },
-                                if verification.package_valid {
-                                    Role::Success
-                                } else {
-                                    Role::Danger
-                                },
-                            ),
-                            metric("Checks", verification.items.len().to_string(), Role::Accent),
-                            metric(
-                                "Warnings",
-                                package.warnings.len().to_string(),
-                                if package.warnings.is_empty() {
-                                    Role::Neutral
-                                } else {
-                                    Role::Warning
-                                },
-                            ),
-                        ],
-                    );
-
-                    ui.add_space(8.0);
-                    widgets::status_pill(
-                        ui,
-                        theme,
-                        if verification.package_valid {
-                            "Hashes confirmed"
-                        } else {
-                            "Hash check failed"
-                        },
-                        if verification.package_valid {
-                            Role::Success
-                        } else {
-                            Role::Danger
-                        },
-                    );
-
-                    ui.add_space(10.0);
-                    if let Some(sfx) = package.self_extracting_archive_path.as_ref() {
-                        widgets::mono_path(
-                            ui,
-                            theme,
-                            "Self-extracting installer",
-                            &sfx.display().to_string(),
-                        );
-                    }
-
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(
-                            "Run this installer on the target PC to reinstall the app and restore \
-                             its captured data, then it verifies every file by SHA-256.",
-                        )
-                        .size(12.0)
-                        .color(theme.text_muted),
-                    );
-
-                    ui.add_space(12.0);
-                    if button(ui, theme, ButtonKind::Secondary, "Open folder", true).clicked() {
-                        let target = package
-                            .self_extracting_archive_path
-                            .as_deref()
-                            .and_then(|path| path.parent())
-                            .unwrap_or(package.package_root.as_path());
-                        if let Err(error) = crate::open_folder(target) {
-                            folder_error = Some(error.to_string());
-                        }
-                    }
-                },
+                Role::Danger,
+                "Installer stub (winappmigrator-installer.exe) was not found beside this app, \
+                 so a self-extracting installer cannot be built.",
             );
-
-            if !verification.errors.is_empty() {
-                ui.add_space(12.0);
-                widgets::card_titled(
-                    ui,
-                    theme,
-                    &format!("Verification errors · {}", verification.errors.len()),
-                    None,
-                    |ui| {
-                        for error in &verification.errors {
-                            warning_row(ui, theme, error);
-                        }
-                    },
-                );
-            }
-
-            if !package.warnings.is_empty() {
-                ui.add_space(12.0);
-                widgets::card_titled(
-                    ui,
-                    theme,
-                    &format!("Warnings · {}", package.warnings.len()),
-                    None,
-                    |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("migrate-warnings")
-                            .max_height(220.0)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                for warning in &package.warnings {
-                                    warning_row(ui, theme, warning);
-                                }
-                            });
-                    },
-                );
-            }
+            ui.add_space(SPACE_SM);
         }
+        let can_build = self.stub_available && self.output_dir_is_valid();
+        // Once an installer exists, the result is the next thing to act on.
+        let (kind, label) = if matches!(self.migrate_state, OperationState::Completed) {
+            (ButtonKind::Secondary, "Create installer again")
+        } else {
+            (ButtonKind::Primary, "Create installer")
+        };
+        if widgets::wide_button(ui, theme, kind, label, can_build).clicked() {
+            self.start_migration();
+        }
+    }
+
+    fn draw_build_result(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        match self.migrate_state {
+            OperationState::Idle | OperationState::Running => {}
+            OperationState::Cancelled => {
+                ui.add_space(SPACE_MD);
+                widgets::notice(
+                    ui,
+                    theme,
+                    Role::Neutral,
+                    "Build cancelled. No installer was written.",
+                );
+            }
+            OperationState::Failed => {
+                ui.add_space(SPACE_MD);
+                let error = self.last_error.clone().unwrap_or_default();
+                widgets::notice(ui, theme, Role::Danger, &error);
+                ui.add_space(SPACE_SM);
+                if widgets::icon_text_button(
+                    ui,
+                    theme,
+                    ButtonKind::Secondary,
+                    Icon::Copy,
+                    "Copy error",
+                    true,
+                )
+                .clicked()
+                {
+                    ui.ctx().copy_text(error);
+                }
+            }
+            OperationState::Completed => self.draw_outcome(ui, theme),
+        }
+    }
+
+    fn draw_outcome(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        let Some(outcome) = self.last_outcome.as_ref() else {
+            return;
+        };
+        let MigrationOutcome {
+            app_name,
+            package,
+            verification,
+            installer_bytes,
+        } = outcome;
+
+        ui.add_space(SPACE_MD);
+        let (role, message) = outcome_summary(outcome);
+        widgets::notice(ui, theme, role, &message);
+        ui.add_space(SPACE_SM);
+        widgets::metric_tiles(
+            ui,
+            theme,
+            &[
+                metric("Files", package.files_copied.to_string(), Role::Accent),
+                metric(
+                    "Installer size",
+                    widgets::format_bytes(*installer_bytes),
+                    Role::Accent,
+                ),
+                metric(
+                    "Warnings",
+                    package.warnings.len().to_string(),
+                    if package.warnings.is_empty() {
+                        Role::Neutral
+                    } else {
+                        Role::Warning
+                    },
+                ),
+            ],
+        );
+
+        let mut folder_error = None;
+        if let Some(path) = package.self_extracting_archive_path.as_ref() {
+            ui.add_space(SPACE_SM);
+            widgets::mono_path(ui, theme, "Installer", &path.display().to_string());
+            ui.add_space(SPACE_SM);
+            widgets::control_row(ui, |ui| {
+                if widgets::icon_text_button(
+                    ui,
+                    theme,
+                    ButtonKind::Secondary,
+                    Icon::Folder,
+                    "Open folder",
+                    true,
+                )
+                .clicked()
+                    && let Some(folder) = path.parent()
+                    && let Err(error) = crate::open_folder(folder)
+                {
+                    folder_error = Some(format!("Could not open the folder: {error}"));
+                }
+                if widgets::icon_text_button(
+                    ui,
+                    theme,
+                    ButtonKind::Ghost,
+                    Icon::Copy,
+                    "Copy path",
+                    true,
+                )
+                .clicked()
+                {
+                    ui.ctx().copy_text(path.display().to_string());
+                }
+            });
+        }
+        ui.add_space(SPACE_SM);
+        widgets::hint(
+            ui,
+            theme,
+            &format!(
+                "Run it on the other PC to reinstall {app_name}. It checks its files by SHA-256. \
+                 Windows shows \"Unknown publisher\" because installers you build are not \
+                 signed."
+            ),
+        );
+
+        warning_list(ui, theme, "Verification errors", &verification.errors, true);
+        // When files were lost, the list of which ones is the next thing to read.
+        warning_list(
+            ui,
+            theme,
+            "Warnings",
+            &package.warnings,
+            role == Role::Warning,
+        );
 
         if let Some(error) = folder_error {
             self.last_error = Some(error);
+        }
+        if let Some(error) = self.last_error.as_ref() {
+            ui.add_space(SPACE_SM);
+            widgets::notice(ui, theme, Role::Danger, error);
         }
     }
 }
 
 // ----- Free helpers ----------------------------------------------------------
+
+fn draw_app_title(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp) {
+    ui.add(
+        egui::Label::new(
+            RichText::new(&app.display_name)
+                .font(theme::semibold(17.0))
+                .color(theme.text),
+        )
+        .wrap_mode(egui::TextWrapMode::Wrap),
+    );
+    ui.add_space(SPACE_XS);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_XS;
+        widgets::status_pill(
+            ui,
+            theme,
+            scope_label(&app.install_scope),
+            scope_role(&app.install_scope),
+        );
+        widgets::badge(ui, theme, arch_label(&app.architecture), theme.text_muted);
+    });
+}
+
+fn draw_app_facts(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp) {
+    widgets::kv_row(
+        ui,
+        theme,
+        "Publisher",
+        app.publisher.as_deref().unwrap_or("Unknown"),
+    );
+    widgets::kv_row(
+        ui,
+        theme,
+        "Version",
+        app.version.as_deref().unwrap_or("Unknown"),
+    );
+    if let Some(location) = app.install_location.as_ref() {
+        ui.add_space(SPACE_SM);
+        widgets::mono_path(
+            ui,
+            theme,
+            "Install location",
+            &location.display().to_string(),
+        );
+    }
+}
 
 fn busy_row(ui: &mut egui::Ui, theme: &Theme, label: &str) {
     ui.horizontal(|ui| {
@@ -516,151 +750,252 @@ fn busy_row(ui: &mut egui::Ui, theme: &Theme, label: &str) {
     });
 }
 
-fn warning_row(ui: &mut egui::Ui, theme: &Theme, warning: &Warning) {
-    ui.horizontal(|ui| {
-        widgets::badge(
-            ui,
-            theme,
-            &warning.code,
-            theme.role(severity_role(&warning.severity)),
-        );
-        ui.label(RichText::new(&warning.message).color(theme.text));
+/// What the build's outcome means for the person holding the installer. A package
+/// that lost files still hash-verifies, because a file that was never copied has
+/// nothing to check, so that must not read as a clean success.
+pub(crate) fn outcome_summary(outcome: &MigrationOutcome) -> (Role, String) {
+    let missed = outcome
+        .package
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == "file_copy_failed")
+        .count();
+    if !outcome.verification.package_valid {
+        (
+            Role::Danger,
+            "Do not use this installer: it failed its hash check.".to_owned(),
+        )
+    } else if missed > 0 {
+        (
+            Role::Warning,
+            format!(
+                "Installer built, but {missed} {} could not be captured, usually because \
+                 {} locked or unreadable. The app may not work without {}. See Warnings below.",
+                if missed == 1 { "file" } else { "files" },
+                if missed == 1 { "it was" } else { "they were" },
+                if missed == 1 { "it" } else { "them" },
+            ),
+        )
+    } else {
+        (
+            Role::Success,
+            "Installer ready. Its package passed its hash check.".to_owned(),
+        )
+    }
+}
+
+fn warning_list(ui: &mut egui::Ui, theme: &Theme, title: &str, warnings: &[Warning], open: bool) {
+    if warnings.is_empty() {
+        return;
+    }
+    ui.add_space(SPACE_SM);
+    egui::CollapsingHeader::new(
+        RichText::new(format!("{title} ({})", warnings.len()))
+            .font(theme::semibold(13.0))
+            .color(theme.text),
+    )
+    .default_open(open)
+    .show(ui, |ui| {
+        for warning in warnings.iter().take(MAX_LISTED_WARNINGS) {
+            warning_row(ui, theme, warning);
+        }
+        if warnings.len() > MAX_LISTED_WARNINGS {
+            widgets::hint(
+                ui,
+                theme,
+                &format!("and {} more.", warnings.len() - MAX_LISTED_WARNINGS),
+            );
+        }
     });
-    ui.add_space(4.0);
 }
 
-fn segmented<T: Copy + PartialEq>(
-    ui: &mut egui::Ui,
-    theme: &Theme,
-    current: &mut T,
-    options: &[(&str, T)],
-) {
-    egui::Frame::new()
-        .fill(theme.field_bg)
-        .stroke(egui::Stroke::new(1.0, theme.border))
-        .corner_radius(crate::theme::RADIUS_SM)
-        .inner_margin(egui::Margin::same(3))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
-                for (label, value) in options {
-                    let selected = *current == *value;
-                    let widget = egui::Button::new(RichText::new(*label).color(if selected {
-                        theme.on_accent
-                    } else {
-                        theme.text_muted
-                    }))
-                    .fill(if selected {
-                        theme.accent
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    })
-                    .stroke(egui::Stroke::NONE)
-                    .corner_radius(crate::theme::RADIUS_SM - 1)
-                    .min_size(egui::vec2(0.0, 26.0));
-                    if ui.add(widget).clicked() {
-                        *current = *value;
-                    }
-                }
-            });
-        });
-}
-
-fn app_table_header(ui: &mut egui::Ui, theme: &Theme) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
-    let cells = ["NAME", "PUBLISHER", "VERSION", "SCOPE", "ARCH"];
-    let offsets = column_offsets(rect);
-    let painter = ui.painter();
-    for (text, x) in cells.iter().zip(offsets.iter()) {
-        painter.text(
-            egui::pos2(*x, rect.center().y),
-            Align2::LEFT_CENTER,
-            text,
-            egui::FontId::proportional(11.0),
-            theme.text_subtle,
+fn warning_row(ui: &mut egui::Ui, theme: &Theme, warning: &Warning) {
+    let role = severity_role(&warning.severity);
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 16.0), Sense::hover());
+        let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(13.0, 13.0));
+        widgets::paint_icon(
+            ui.painter(),
+            widgets::role_icon(role),
+            icon_rect,
+            theme.role(role),
         );
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.add(
+                egui::Label::new(RichText::new(&warning.message).size(12.5).color(theme.text))
+                    .wrap_mode(egui::TextWrapMode::Wrap),
+            );
+            if let Some(source) = warning.source.as_deref() {
+                ui.add(
+                    egui::Label::new(RichText::new(source).size(11.5).color(theme.text_muted))
+                        .wrap_mode(egui::TextWrapMode::Wrap),
+                );
+            }
+        });
+    });
+    ui.add_space(SPACE_XS);
+}
+
+fn progress_label(progress: Option<BuildProgress>) -> (String, Option<f32>) {
+    let share = |done: usize, total: usize| {
+        if total == 0 {
+            None
+        } else {
+            Some(done as f32 / total as f32)
+        }
+    };
+    match progress {
+        None | Some(BuildProgress::Build(BuildStep::Scanning)) => {
+            ("Reverse-engineering the app…".to_owned(), None)
+        }
+        Some(BuildProgress::Build(BuildStep::Copying { done, total })) => (
+            format!("Copying files: {done} of {total}"),
+            share(done, total),
+        ),
+        Some(BuildProgress::Build(BuildStep::Bundling)) => {
+            ("Bundling runtimes and drivers…".to_owned(), None)
+        }
+        Some(BuildProgress::Build(BuildStep::Compressing { done, total })) => (
+            format!("Compressing: {done} of {total}"),
+            share(done, total),
+        ),
+        Some(BuildProgress::Build(BuildStep::WritingInstaller)) => {
+            ("Writing the installer…".to_owned(), None)
+        }
+        Some(BuildProgress::Verifying) => ("Verifying hashes…".to_owned(), None),
     }
 }
 
-fn app_table_row(
+/// The scroll offset that centers a row in the list.
+fn scroll_offset_for_row(row: usize, ui: &egui::Ui) -> f32 {
+    (row as f32 * ROW_HEIGHT - ui.available_height() / 2.0).max(0.0)
+}
+
+fn app_row(
     ui: &mut egui::Ui,
     theme: &Theme,
-    app: &winappmigrator_core::InstalledApp,
+    app: &InstalledApp,
     selected: bool,
+    enabled: bool,
 ) -> egui::Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::click());
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let painter = ui.painter();
-    if selected {
-        painter.rect_filled(rect, crate::theme::RADIUS_SM, theme.accent_soft);
-    } else if response.hovered() {
-        painter.rect_filled(rect, crate::theme::RADIUS_SM, theme.card_hover);
-    }
-
-    let offsets = column_offsets(rect);
-    let widths = column_widths(rect);
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), sense);
+    let response = if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    };
     let publisher = app.publisher.as_deref().unwrap_or("—");
     let version = app.version.as_deref().unwrap_or("—");
+    response.widget_info(|| {
+        WidgetInfo::selected(
+            A11yRole::Button,
+            enabled,
+            selected,
+            format!("{}, {publisher}, version {version}", app.display_name),
+        )
+    });
+
+    let row = rect.shrink2(egui::vec2(0.0, 1.0));
+    if selected {
+        ui.painter()
+            .rect_filled(row, theme::RADIUS_SM, theme.accent_soft);
+    } else if enabled && response.hovered() {
+        ui.painter()
+            .rect_filled(row, theme::RADIUS_SM, theme.card_hover);
+    }
+
     let cells = [
         (app.display_name.as_str(), theme.text, true),
         (publisher, theme.text_muted, false),
         (version, theme.text_muted, false),
-        (
-            scope_label(&app.install_scope),
-            theme.role(scope_role(&app.install_scope)),
-            false,
-        ),
+        (scope_label(&app.install_scope), theme.text_muted, false),
         (arch_label(&app.architecture), theme.text_muted, false),
     ];
-    for (index, (text, color, strong)) in cells.into_iter().enumerate() {
-        let budget = (widths[index] / 6.7) as usize;
+    for (cell, (text, color, strong)) in column_rects(rect).into_iter().zip(cells) {
         let font = if strong {
-            egui::FontId::proportional(13.0)
+            theme::semibold(13.5)
         } else {
-            egui::FontId::proportional(12.5)
+            theme::regular(13.0)
         };
-        painter.text(
-            egui::pos2(offsets[index], rect.center().y),
-            Align2::LEFT_CENTER,
-            truncate_tail(text, budget.max(4)),
+        widgets::paint_elided(
+            ui,
+            text,
             font,
             color,
+            cell.left(),
+            cell.center().y,
+            cell.width(),
         );
     }
-    response
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            row,
+            theme::RADIUS_SM,
+            Stroke::new(1.5, theme.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.on_hover_text(app.display_name.as_str())
 }
 
-fn column_widths(rect: egui::Rect) -> [f32; 5] {
-    let usable = rect.width() - 24.0;
-    let fractions = [0.36, 0.26, 0.16, 0.12, 0.10];
-    let mut widths = [0.0; 5];
-    for (slot, fraction) in widths.iter_mut().zip(fractions.iter()) {
-        *slot = usable * fraction;
-    }
-    widths
+/// The cell rectangles of a table row, with a gutter between columns.
+fn column_rects(rect: egui::Rect) -> [egui::Rect; 5] {
+    let usable = rect.width() - COLUMN_GUTTER;
+    let mut left = rect.left() + COLUMN_GUTTER;
+    COLUMN_FRACTIONS.map(|fraction| {
+        let width = usable * fraction;
+        let cell = egui::Rect::from_min_size(
+            egui::pos2(left, rect.top()),
+            egui::vec2((width - COLUMN_GUTTER).max(0.0), rect.height()),
+        );
+        left += width;
+        cell
+    })
 }
 
-fn column_offsets(rect: egui::Rect) -> [f32; 5] {
-    let widths = column_widths(rect);
-    let mut offsets = [0.0; 5];
-    let mut x = rect.left() + 12.0;
-    for (slot, width) in offsets.iter_mut().zip(widths.iter()) {
-        *slot = x;
-        x += width;
-    }
-    offsets
+fn compare_apps(left: &InstalledApp, right: &InstalledApp, column: SortColumn) -> Ordering {
+    let by_name = || {
+        left.display_name
+            .to_lowercase()
+            .cmp(&right.display_name.to_lowercase())
+    };
+    let ordering = match column {
+        SortColumn::Name => by_name(),
+        SortColumn::Publisher => {
+            let lower = |app: &InstalledApp| app.publisher.as_deref().map(str::to_lowercase);
+            lower(left).cmp(&lower(right))
+        }
+        SortColumn::Version => compare_versions(
+            left.version.as_deref().unwrap_or_default(),
+            right.version.as_deref().unwrap_or_default(),
+        ),
+        SortColumn::Scope => {
+            scope_label(&left.install_scope).cmp(scope_label(&right.install_scope))
+        }
+        SortColumn::Architecture => {
+            arch_label(&left.architecture).cmp(arch_label(&right.architecture))
+        }
+    };
+    ordering.then_with(by_name)
 }
 
-fn truncate_tail(value: &str, max_chars: usize) -> String {
-    let count = value.chars().count();
-    if count <= max_chars {
-        return value.to_owned();
-    }
-    let keep = max_chars.saturating_sub(1);
-    let skipped = count - keep;
-    let tail: String = value.chars().skip(skipped).collect();
-    format!("…{tail}")
+/// Compare versions number by number, so 10.2 sorts after 9.11.
+pub(crate) fn compare_versions(left: &str, right: &str) -> Ordering {
+    let numbers = |version: &str| -> Vec<u64> {
+        version
+            .split(|character: char| !character.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse().unwrap_or(u64::MAX))
+            .collect()
+    };
+    numbers(left).cmp(&numbers(right))
 }
 
 fn scope_matches(filter: ScopeFilter, scope: &InstallScope) -> bool {
@@ -690,8 +1025,7 @@ fn scope_label(scope: &InstallScope) -> &'static str {
 
 fn scope_role(scope: &InstallScope) -> Role {
     match scope {
-        InstallScope::PerUser => Role::Accent,
-        InstallScope::PerMachine => Role::Warning,
+        InstallScope::PerUser | InstallScope::PerMachine => Role::Accent,
         InstallScope::Unknown => Role::Neutral,
     }
 }

@@ -11,7 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use winappmigrator_core::{AppSelection, PackageArchiveFormat, PackageOptions, create_package};
+use winappmigrator_core::{
+    AppSelection, InstallerStub, PackageArchiveFormat, PackageOptions, create_package,
+};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -60,7 +62,7 @@ fn build_installer_then_reinstall_and_verify_on_clean_target() -> TestResult {
         current_directory: Some(source_dir.clone()),
         archive_format: Some(PackageArchiveFormat::Zip),
         create_self_extracting_archive: true,
-        self_extracting_stub: Some(stub.clone()),
+        self_extracting_stub: Some(InstallerStub::File(stub.clone())),
         installer_dir: None,
         include_user_data: false,
         include_program_data: false,
@@ -93,9 +95,9 @@ fn build_installer_then_reinstall_and_verify_on_clean_target() -> TestResult {
         Ok(output) => output,
         // ERROR_ELEVATION_REQUIRED (740): the installer embeds a
         // `requireAdministrator` manifest, so a non-elevated process cannot spawn
-        // it. Skip the reinstall assertion on such hosts; CI runs elevated and
-        // exercises the full reinstall + verify.
-        Err(error) if error.raw_os_error() == Some(740) => {
+        // it. Skip the reinstall assertion on a developer's normal shell. On CI this
+        // falls through to a failure, so the test cannot pass without having run.
+        Err(error) if error.raw_os_error() == Some(740) && std::env::var_os("CI").is_none() => {
             eprintln!(
                 "skipping installer reinstall: spawning the elevated installer needs an elevated shell ({error})"
             );

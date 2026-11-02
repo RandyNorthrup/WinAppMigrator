@@ -20,11 +20,11 @@ use crate::models::{
     VerificationStatus, Warning, WarningSeverity,
 };
 use crate::package::read_manifest;
-use crate::path_utils::hidden_command;
+use crate::path_utils::{escape_powershell_single, hidden_command};
 use crate::prerequisites::is_present;
 use crate::registry_target::{
-    environment_registry_target, registry_hive_name, registry_raw_type, registry_root,
-    registry_value_name,
+    app_path_entries, environment_registry_target, is_path_variable, path_contains_entry,
+    registry_hive_name, registry_raw_type, registry_root, registry_value_name,
 };
 
 const ZIP_EXTENSION: &str = "zip";
@@ -232,6 +232,7 @@ fn verify_restored_target(
     );
     verify_environment_variables(
         &manifest.environment_variables_detected,
+        target_root,
         &path_rewrites,
         items,
         errors,
@@ -686,6 +687,7 @@ fn verify_registry_entry(
 
 fn verify_environment_variables(
     variables: &[EnvironmentVariableEntry],
+    target_root: &Path,
     path_rewrites: &[(String, String)],
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
@@ -699,7 +701,15 @@ fn verify_environment_variables(
         {
             Ok(actual) => {
                 let expected = rewrite_known_paths(&variable.value, path_rewrites);
-                if actual.to_string() == expected {
+                let matches = if is_path_variable(&variable.name) {
+                    let actual = actual.to_string();
+                    app_path_entries(&expected, target_root)
+                        .iter()
+                        .all(|entry| path_contains_entry(&actual, entry))
+                } else {
+                    actual.to_string() == expected
+                };
+                if matches {
                     passed_item(
                         VerificationCategory::Environment,
                         name,
@@ -1100,10 +1110,10 @@ fn read_service_image_path(service_name: &str) -> std::io::Result<String> {
 fn scheduled_task_xml(task: &ScheduledTaskEntry) -> std::io::Result<Option<String>> {
     let script = format!(
         "$task = Get-ScheduledTask -TaskName '{}' -TaskPath '{}' -ErrorAction SilentlyContinue; if ($null -eq $task) {{ exit 2 }}; Export-ScheduledTask -TaskName '{}' -TaskPath '{}'",
-        escape_ps_single(&task.task_name),
-        escape_ps_single(&task.task_path),
-        escape_ps_single(&task.task_name),
-        escape_ps_single(&task.task_path)
+        escape_powershell_single(&task.task_name),
+        escape_powershell_single(&task.task_path),
+        escape_powershell_single(&task.task_name),
+        escape_powershell_single(&task.task_path)
     );
     let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
@@ -1126,7 +1136,7 @@ fn shortcut_target(path: &Path) -> std::io::Result<Option<String>> {
     }
     let script = format!(
         "$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath",
-        escape_ps_single(path.display().to_string().as_str())
+        escape_powershell_single(path.display().to_string().as_str())
     );
     let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
@@ -1296,10 +1306,6 @@ fn render_verification_markdown(report: &VerificationReport) -> String {
         }
     }
     output
-}
-
-fn escape_ps_single(value: &str) -> String {
-    value.replace('\'', "''")
 }
 
 struct PreparedPackage {

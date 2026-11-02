@@ -92,7 +92,7 @@ pub fn scan_license_artifacts(
         warnings.push(Warning::new(
             "license_data_detected",
             WarningSeverity::Info,
-            "Licensing/activation data was detected. The installer captures and restores it automatically; WinAppMigrator never decrypts, bypasses activation, or emulates dongles.",
+            "Licensing/activation data was detected. With the License option on, the installer restores what can be moved; machine-wide values and hardware-bound stores are only reported. WinAppMigrator never decrypts, bypasses activation, or emulates dongles.",
             None,
         ));
         if artifacts.iter().any(|artifact| artifact.machine_bound) {

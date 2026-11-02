@@ -3,11 +3,13 @@
 //! app, then remove the staging directory). Used to verify the produced
 //! installer's GUI and that no staging/temp files are left behind.
 //!
-//! Usage: `build_installer <source_exe> <stub_exe> <out_dir> <app_name>`
+//! Usage: `wam_pkg <source_exe> <stub_exe> <out_dir> <app_name>`
 
 use std::path::PathBuf;
 
-use winappmigrator_core::{AppSelection, PackageOptions, ScanSource, create_package};
+use winappmigrator_core::{
+    AppSelection, InstallerStub, PackageOptions, ScanSource, create_package,
+};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -45,7 +47,7 @@ fn main() {
         current_directory: std::env::current_dir().ok(),
         archive_format: None,
         create_self_extracting_archive: true,
-        self_extracting_stub: Some(PathBuf::from(&stub)),
+        self_extracting_stub: Some(InstallerStub::File(PathBuf::from(&stub))),
         installer_dir: Some(installer_dir.clone()),
         include_user_data: false,
         include_program_data: false,

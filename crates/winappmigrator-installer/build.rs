@@ -18,6 +18,13 @@ fn main() {
         return;
     }
 
+    // Resolve the DLLs this executable imports from System32 only. An installer is
+    // usually run from Downloads, where a planted DLL would otherwise load elevated
+    // before `main` gets to run. `0x800` is `LOAD_LIBRARY_SEARCH_SYSTEM32`.
+    println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+
+    embed_file_details();
+
     use embed_manifest::manifest::ExecutionLevel;
     use embed_manifest::{embed_manifest, new_manifest};
 
@@ -28,5 +35,24 @@ fn main() {
         // (the user can right-click "Run as administrator"), just without the
         // automatic UAC prompt.
         println!("cargo:warning=could not embed installer manifest: {error}");
+    }
+}
+
+/// Embed the icon and the details Explorer shows for every installer. The publisher
+/// is deliberately left out: whoever builds an installer is its publisher, not the
+/// author of this tool.
+fn embed_file_details() {
+    const ICON: &str = "../winappmigrator-ui/assets/winappmigrator.ico";
+    println!("cargo:rerun-if-changed={ICON}");
+    let mut resource = winresource::WindowsResource::new();
+    resource
+        .set_icon(ICON)
+        .set(
+            "FileDescription",
+            "Application installer built with WinAppMigrator",
+        )
+        .set("ProductName", "WinAppMigrator Installer");
+    if let Err(error) = resource.compile_for("winappmigrator-installer") {
+        println!("cargo:warning=could not embed the icon and file details: {error}");
     }
 }

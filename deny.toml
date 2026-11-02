@@ -1,3 +1,7 @@
+# Windows only: the lockfile also lists crates for other platforms that never compile.
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+
 [advisories]
 version = 2
 yanked = "deny"

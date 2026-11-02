@@ -313,10 +313,8 @@ fn expand_task_path(value: &str, windows_dir: &Path) -> PathBuf {
 fn read_text_file(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        let units: Vec<u16> = rest
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
+        let (pairs, _odd_byte) = rest.as_chunks::<2>();
+        let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
         Some(String::from_utf16_lossy(&units))
     } else if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         Some(String::from_utf8_lossy(rest).into_owned())

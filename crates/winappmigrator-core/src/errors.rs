@@ -30,6 +30,9 @@ pub enum WinAppMigratorError {
 
     #[error("time formatting failed: {0}")]
     TimeFormat(#[from] time::error::Format),
+
+    #[error("the build was cancelled")]
+    Cancelled,
 }
 
 impl WinAppMigratorError {

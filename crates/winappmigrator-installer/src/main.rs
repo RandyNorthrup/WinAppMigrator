@@ -17,13 +17,13 @@
 // e2e test and automation use), which a windowed subsystem does not affect.
 #![windows_subsystem = "windows"]
 
-mod cleanup;
-mod gui;
-mod headless;
-
 use std::process::ExitCode;
 
+use winappmigrator_installer::{gui, headless};
+
 fn main() -> ExitCode {
+    // First, before anything else can load a DLL.
+    winappmigrator_ui::hardening::restrict_dll_search();
     // Arguments beyond the program name mean a scripted/headless restore; a bare
     // double-click (argv == [exe]) opens the GUI. Deciding on argument count also
     // keeps the GUI path from ever touching CLI parsing.

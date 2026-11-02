@@ -11,7 +11,7 @@
 //! 2. **Embeds the installer stub.** WinAppMigrator is a single portable
 //!    executable: it carries the compiled installer stub inside itself and writes
 //!    it out (plus the chosen app's package) to produce each self-extracting
-//!    installer. This stages the stub binary so `main.rs` can `include_bytes!` it.
+//!    installer. This stages the stub binary so `lib.rs` can `include_bytes!` it.
 //!
 //!    Resolution order for the stub to embed:
 //!      1. `WINAPPMIGRATOR_INSTALLER_STUB` — an explicit path (the release build
@@ -27,7 +27,38 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     embed_app_manifest();
+    embed_file_details();
+    restrict_import_dll_search();
     stage_installer_stub();
+}
+
+/// Resolve the DLLs this executable imports from System32 only, so one dropped beside
+/// it cannot load before `main` gets to run. `0x800` is
+/// `LOAD_LIBRARY_SEARCH_SYSTEM32`.
+fn restrict_import_dll_search() {
+    if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
+        println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+    }
+}
+
+/// Embed the icon and the details Explorer shows, and the publisher's own name, so the
+/// UAC prompt and SmartScreen describe a real product instead of a bare file name.
+fn embed_file_details() {
+    const ICON: &str = "../winappmigrator-ui/assets/winappmigrator.ico";
+    println!("cargo:rerun-if-changed={ICON}");
+    if std::env::var_os("CARGO_CFG_WINDOWS").is_none() {
+        return;
+    }
+    let mut resource = winresource::WindowsResource::new();
+    resource
+        .set_icon(ICON)
+        .set("FileDescription", "WinAppMigrator")
+        .set("ProductName", "WinAppMigrator")
+        .set("CompanyName", "Randy Northrup")
+        .set("LegalCopyright", "Copyright (c) 2026 Randy Northrup");
+    if let Err(error) = resource.compile_for("winappmigrator") {
+        println!("cargo:warning=could not embed the icon and file details: {error}");
+    }
 }
 
 /// Embed the `requireAdministrator` elevation manifest (Windows only) in every

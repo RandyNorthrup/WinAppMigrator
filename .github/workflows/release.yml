@@ -1,18 +1,16 @@
 name: Release
 
+# A release is cut by pushing a v* tag. To retry a run that failed before publishing,
+# start this workflow from that tag ("Use workflow from"): the signing environment
+# accepts v* tags only.
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag to build and publish (e.g. v0.4.2.0)"
-        required: true
-        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -20,25 +18,19 @@ concurrency:
 
 jobs:
   release:
-    name: Build and publish Windows x64 release
+    name: Build, sign, and publish Windows x64 release
     runs-on: windows-latest
+    # Azure trusts GitHub's sign-in token only from this environment, which only v*
+    # tags can use.
+    environment: release
+    permissions:
+      contents: write # publishes the release
+      id-token: write # signs in to Azure for code signing and signs the provenance
+      attestations: write # stores it on GitHub, for `gh attestation verify`
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      - name: Resolve release tag
-        id: meta
-        shell: pwsh
-        run: |
-          if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            $tag = $env:GITHUB_REF_NAME
-          } else {
-            $tag = '${{ inputs.tag }}'
-          }
-          if ([string]::IsNullOrWhiteSpace($tag)) { throw 'No release tag resolved.' }
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "Release tag: $tag"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -47,13 +39,54 @@ jobs:
       # stub (the app is a single portable exe that carries the stub inside it).
       - name: Build installer stub (release)
         shell: pwsh
-        run: cargo build --release -p winappmigrator-installer
+        run: cargo build --locked --release -p winappmigrator-installer
+
+      # The stub must never be signed, and is never published on its own. Windows does
+      # not hash its own certificate table, so anyone holding a signed stub could hide
+      # their own package there, keep a valid signature, and have it run elevated under
+      # this project's name. See docs/signing.md.
+      - name: Check the stub is unsigned
+        shell: pwsh
+        run: |
+          $status = (Get-AuthenticodeSignature target/release/winappmigrator-installer.exe).Status
+          if ($status -ne 'NotSigned') { throw "The installer stub must stay unsigned, but its signature is $status." }
 
       - name: Build app with embedded stub (release)
         shell: pwsh
         env:
           WINAPPMIGRATOR_INSTALLER_STUB: ${{ github.workspace }}\target\release\winappmigrator-installer.exe
-        run: cargo build --release -p winappmigrator-gui
+        run: cargo build --locked --release -p winappmigrator-gui
+
+      # Code signing with Azure Artifact Signing, under the maintainer's verified
+      # identity (CN=Randy Northrup). No password is stored anywhere: Azure accepts
+      # GitHub's OIDC token for this repo's "release" environment only, and that
+      # identity may do nothing but sign with this one certificate profile.
+      - name: Sign in to Azure for code signing
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Sign the app
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: https://wus.codesigning.azure.net/
+          signing-account-name: scnetsolutions
+          certificate-profile-name: SAKUtility
+          files: ${{ github.workspace }}\target\release\winappmigrator.exe
+          description: WinAppMigrator
+          description-url: https://github.com/RandyNorthrup/WinAppMigrator
+          exclude-environment-credential: true
+
+      - name: Check the signature
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature target/release/winappmigrator.exe
+          if ($signature.Status -ne 'Valid') { throw "The app's signature is $($signature.Status): $($signature.StatusMessage)" }
+          if ($signature.SignerCertificate.Subject -notmatch 'CN=Randy Northrup') { throw "Signed by someone else: $($signature.SignerCertificate.Subject)" }
+          if (-not $signature.TimeStamperCertificate) { throw 'The signature has no timestamp.' }
+          Write-Host "Signed by $($signature.SignerCertificate.Subject), timestamped by $($signature.TimeStamperCertificate.Subject)"
 
       # Regenerate the open-source attribution bundle so it always matches the
       # dependencies actually compiled into this release.
@@ -64,34 +97,42 @@ jobs:
           cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md
           if (-not (Test-Path THIRD-PARTY-LICENSES.md)) { throw 'THIRD-PARTY-LICENSES.md was not generated' }
 
+      # Checksums come last, so they describe the signed files.
       - name: Stage release artifacts
-        id: stage
         shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          $tag = '${{ steps.meta.outputs.tag }}'
-          $name = "WinAppMigrator-$tag-windows-x64"
+          $name = "WinAppMigrator-$env:TAG-windows-x64"
           New-Item -ItemType Directory -Force -Path dist, "dist/$name" | Out-Null
           Copy-Item target/release/winappmigrator.exe "dist/$name/winappmigrator.exe"
           Copy-Item README.md, CHANGELOG.md, LICENSE, THIRD-PARTY-LICENSES.md "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip" -Force
-          Copy-Item target/release/winappmigrator.exe "dist/WinAppMigrator-$tag.exe"
-          foreach ($f in @("dist/$name.zip", "dist/WinAppMigrator-$tag.exe")) {
+          Copy-Item target/release/winappmigrator.exe "dist/WinAppMigrator-$env:TAG.exe"
+          foreach ($f in @("dist/$name.zip", "dist/WinAppMigrator-$env:TAG.exe")) {
             $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
             "$h  $(Split-Path $f -Leaf)" | Out-File dist/SHA256SUMS.txt -Append -Encoding ascii
           }
           Write-Host '--- SHA256SUMS.txt ---'
           Get-Content dist/SHA256SUMS.txt
 
+      - name: Record where the downloads were built
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/WinAppMigrator-*-windows-x64.zip
+            dist/WinAppMigrator-*.exe
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         shell: pwsh
         run: |
-          $tag = '${{ steps.meta.outputs.tag }}'
-          $notes = "WinAppMigrator $tag - portable Windows x64 build. A single elevated app (winappmigrator.exe) that carries the self-extracting installer stub inside it. See CHANGELOG.md for details. Unsigned build."
-          gh release create $tag `
-            "dist/WinAppMigrator-$tag-windows-x64.zip" `
-            "dist/WinAppMigrator-$tag.exe" `
+          $notes = "WinAppMigrator $env:TAG - portable Windows x64 build. A single elevated app (winappmigrator.exe) that carries the self-extracting installer stub inside it. See CHANGELOG.md for details.`n`n**Code signing:** winappmigrator.exe is signed with Azure Artifact Signing (publisher: Randy Northrup). Installers you build with it are not signed unless you sign them yourself; see docs/signing.md.`n`nCheck any download with ``gh attestation verify <file> --repo RandyNorthrup/WinAppMigrator``."
+          gh release create $env:TAG `
+            "dist/WinAppMigrator-$env:TAG-windows-x64.zip" `
+            "dist/WinAppMigrator-$env:TAG.exe" `
             "dist/SHA256SUMS.txt" `
-            --title "WinAppMigrator $tag" `
+            --title "WinAppMigrator $env:TAG" `
             --notes $notes

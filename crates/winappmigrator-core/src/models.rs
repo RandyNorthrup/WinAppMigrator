@@ -110,7 +110,7 @@ pub struct ScanOptions {
     /// Include machine-wide `ProgramData` application data.
     #[serde(default = "default_true")]
     pub include_program_data: bool,
-    /// Detect and (for `package`) copy the application's own licensing data.
+    /// Detect and (when packaging) copy the application's own licensing data.
     /// Defaults to false: license data is sensitive and may be machine-bound,
     /// so it is opt-in.
     #[serde(default)]
@@ -295,6 +295,16 @@ pub struct PackageManifest {
     pub ui_theme: Option<String>,
 }
 
+/// The installer stub an installer is built from.
+#[derive(Debug, Clone)]
+pub enum InstallerStub {
+    /// A stub on disk (a development build, or the end-to-end test).
+    File(PathBuf),
+    /// The stub compiled into the app. Written straight to the installer, so it
+    /// never passes through a user-writable folder where it could be swapped.
+    Embedded(&'static [u8]),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageOptions {
     pub selection: AppSelection,
@@ -302,7 +312,8 @@ pub struct PackageOptions {
     pub current_directory: Option<PathBuf>,
     pub archive_format: Option<PackageArchiveFormat>,
     pub create_self_extracting_archive: bool,
-    pub self_extracting_stub: Option<PathBuf>,
+    #[serde(skip)]
+    pub self_extracting_stub: Option<InstallerStub>,
     /// Directory the single self-extracting installer executable is written to.
     /// Defaults to the parent of `output_dir` when `None`. The installer's file
     /// name encodes the chosen contents (e.g. `App_userdata_license_installer.exe`).

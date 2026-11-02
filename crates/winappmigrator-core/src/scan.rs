@@ -274,7 +274,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         items_excluded: vec![
             "Windows directory, System32, and SysWOW64 files are reported but not copied."
                 .to_owned(),
-            "Non-app-owned shared files outside the app directory are never copied; shared runtimes are reported as prerequisites."
+            "Shared runtimes are reported as prerequisites, not copied. Folder matching can still capture other products, so check the file count and size."
                 .to_owned(),
             "Registry, services, scheduled tasks, and shortcuts are archived for restore; apply mode remains explicit and privilege-gated."
                 .to_owned(),
@@ -590,7 +590,7 @@ fn driver_component_warnings(drivers: &[DriverEntry]) -> Vec<Warning> {
             Warning::new(
                 "driver_kernel_component_detected",
                 WarningSeverity::Warning,
-                "Driver or kernel component detected. It is archived as metadata only and must be reinstalled with a signed vendor driver package.",
+                "Driver or kernel component detected. A driver the app owns is bundled and re-registered; a vendor or inbox driver is not redistributed and must be reinstalled from its signed vendor package.",
                 Some(format!(
                     "{} -> {}",
                     driver.service_name,

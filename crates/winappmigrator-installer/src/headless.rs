@@ -83,6 +83,11 @@ where
 fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     let cli = InstallerCli::parse_from(raw_args);
     let Some(target_root) = cli.target_root else {
+        if cli.apply {
+            return Err(WinAppMigratorError::InvalidInput(
+                "--apply needs --target-root <DIR>; nothing was installed".to_owned(),
+            ));
+        }
         println!("WinAppMigrator self-extracting installer.");
         println!("Run it with no arguments to open the graphical installer, or:");
         println!("  preview the reinstall: --target-root <DIR>");
@@ -123,15 +128,18 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     println!("Warnings: {}", result.warnings.len());
     println!("Errors: {}", result.errors.len());
 
-    // Hash-verify the bundled package, and — when applied — the reinstalled
-    // files on the target.
-    let verification = verify_package(&VerificationOptions {
-        package_root: temp_dir.path().to_path_buf(),
-        target_root: applied.then_some(target_root),
-        output_dir: None,
-        restore_user_data: cli.restore_user_data,
-        restore_license,
-    })?;
+    // An applied restore already verified the package and the reinstalled files. A
+    // preview changed nothing, so only the package itself has anything to check.
+    let verification = match result.verification.as_ref() {
+        Some(report) => report.clone(),
+        None => verify_package(&VerificationOptions {
+            package_root: temp_dir.path().to_path_buf(),
+            target_root: None,
+            output_dir: None,
+            restore_user_data: cli.restore_user_data,
+            restore_license,
+        })?,
+    };
     println!("Package hashes valid: {}", verification.package_valid);
     let restore_ok = match verification.restore_valid {
         Some(valid) => {

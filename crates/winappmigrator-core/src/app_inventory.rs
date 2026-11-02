@@ -22,6 +22,7 @@ const DISPLAY_VERSION_VALUE: &str = "DisplayVersion";
 const INSTALL_LOCATION_VALUE: &str = "InstallLocation";
 const UNINSTALL_STRING_VALUE: &str = "UninstallString";
 const DISPLAY_ICON_VALUE: &str = "DisplayIcon";
+const SYSTEM_COMPONENT_VALUE: &str = "SystemComponent";
 
 #[derive(Debug, Clone)]
 struct HklmUninstallLocation {
@@ -38,6 +39,9 @@ pub struct RawUninstallEntry {
     pub install_location: Option<String>,
     pub uninstall_string: Option<String>,
     pub display_icon: Option<String>,
+    /// Marked `SystemComponent=1`: a part of another product, which Windows leaves out
+    /// of its own installed-apps list.
+    pub system_component: bool,
 }
 
 /// List apps installed on the system `system` points at (live OS or a connected
@@ -163,6 +167,9 @@ fn read_raw_entry(key: &RegKey) -> RawUninstallEntry {
         install_location: read_optional_string(key, INSTALL_LOCATION_VALUE),
         uninstall_string: read_optional_string(key, UNINSTALL_STRING_VALUE),
         display_icon: read_optional_string(key, DISPLAY_ICON_VALUE),
+        system_component: key
+            .get_value::<u32, _>(SYSTEM_COMPONENT_VALUE)
+            .is_ok_and(|value| value == 1),
     }
 }
 
@@ -181,7 +188,7 @@ pub fn parse_uninstall_entry(
     install_scope: InstallScope,
 ) -> Option<InstalledApp> {
     let display_name = raw.display_name.as_ref()?.trim().to_owned();
-    if display_name.is_empty() {
+    if display_name.is_empty() || raw.system_component {
         return None;
     }
 
@@ -328,6 +335,7 @@ mod tests {
             install_location: Some(r"C:\Example".to_owned()),
             uninstall_string: Some(r#""C:\Example\uninstall.exe" /remove"#.to_owned()),
             display_icon: None,
+            system_component: false,
         };
 
         let app = parse_uninstall_entry(
@@ -345,6 +353,25 @@ mod tests {
         assert_eq!(app.architecture, AppArchitecture::X64);
         assert_eq!(app.install_scope, InstallScope::PerMachine);
         Ok(())
+    }
+
+    #[test]
+    fn skips_system_components_as_windows_does() {
+        let raw = RawUninstallEntry {
+            display_name: Some("Runtime Part".to_owned()),
+            system_component: true,
+            ..RawUninstallEntry::default()
+        };
+
+        let app = parse_uninstall_entry(
+            &SystemContext::live(),
+            &raw,
+            "HKLM\\Example".to_owned(),
+            AppArchitecture::X64,
+            InstallScope::PerMachine,
+        );
+
+        assert!(app.is_none());
     }
 
     #[test]

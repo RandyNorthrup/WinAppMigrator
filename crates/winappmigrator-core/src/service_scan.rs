@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use winreg::enums::KEY_READ;
 
 use crate::models::{DriverEntry, DriverKind, ServiceEntry, Warning, WarningSeverity};
-use crate::path_utils::{hidden_command, split_command_executable_path};
+use crate::path_utils::{escape_powershell_single, hidden_command, split_command_executable_path};
 use crate::system_context::SystemContext;
 
 const POWERSHELL_EXE: &str = "powershell.exe";
@@ -195,7 +195,7 @@ fn driver_signer(image_path: &Path) -> Option<String> {
     }
     let script = format!(
         "$s = Get-AuthenticodeSignature -LiteralPath '{}'; if ($s -and $s.SignerCertificate) {{ $s.SignerCertificate.Subject }}",
-        image_path.display().to_string().replace('\'', "''")
+        escape_powershell_single(&image_path.display().to_string())
     );
     let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
@@ -221,7 +221,7 @@ fn driver_restore_instructions(
         .unwrap_or_else(|| ", signature unknown".to_owned());
     if app_owned {
         format!(
-            "Application-owned {} driver '{}' ({}{}). The installer bundles its .sys and re-registers the driver service automatically (sc create, requires elevation), then verifies it loads.",
+            "Application-owned {} driver '{}' ({}{}). The installer bundles its .sys and re-registers the driver service automatically (sc create, requires elevation), then confirms the service is registered.",
             driver_kind_label(kind),
             service_name,
             image_path.display(),

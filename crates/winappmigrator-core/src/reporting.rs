@@ -501,7 +501,7 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
     } else {
         push_line(
             &mut output,
-            "- Detected runtime prerequisites are bundled into the installer (or installed via winget) and verified automatically on the target.",
+            "- Detected runtime prerequisites are bundled into the installer (or installed via winget), and checked on the target where a check exists.",
         );
         push_line(
             &mut output,
@@ -513,7 +513,7 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
     push_line(&mut output, "## Restore Instructions");
     push_line(
         &mut output,
-        "- Use `winappmigrator restore` for dry-run first. Apply mode restores archived files and integrations after privilege and overwrite checks pass.",
+        "- Run the produced installer on the target PC. Use its Preview changes button first, or run it with `--target-root <DIR>` and no `--apply`.",
     );
     push_line(&mut output, "");
 

@@ -13,6 +13,7 @@ pub mod path_utils;
 pub mod pe_scan;
 pub mod prerequisites;
 pub mod privilege;
+pub mod progress;
 pub mod registry_scan;
 mod registry_target;
 pub mod reporting;
@@ -30,7 +31,9 @@ pub use archive::{
 };
 pub use errors::{Result, WinAppMigratorError};
 pub use models::*;
-pub use package::create_package;
+pub use package::{create_package, create_package_monitored, read_embedded_manifest};
+pub use path_utils::hidden_command;
+pub use progress::{BuildMonitor, BuildStep};
 pub use restore::restore_package;
 pub use system_context::{ScanSource, SystemContext};
 pub use verify::verify_package;

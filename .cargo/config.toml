@@ -1,3 +1,11 @@
 [alias]
-quality = "test --workspace --all-targets --all-features"
+# Not --all-targets: that also runs the executables as test harnesses, and they demand
+# elevation, so it fails with error 740 from a normal shell. Their tests are in libraries.
+quality = "test --workspace --all-features"
 typecheck = "check --workspace --all-targets --all-features"
+
+# Link the C runtime statically. The installer has to start on a clean PC to install
+# the runtimes the app needs, so it cannot depend on one of them itself. Without
+# this it also imports VCRUNTIME140.dll, which could be planted beside it.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -12,3 +12,5 @@ workspace = true
 
 [dependencies]
 eframe.workspace = true
+# Not called directly: selects the Direct3D 12 backend for eframe's renderer.
+wgpu.workspace = true

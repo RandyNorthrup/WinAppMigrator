@@ -7,9 +7,10 @@
 //! [`SystemContext`] is the single abstraction both seams now go through, so the
 //! same scanners work against a foreign disk. For an offline volume it:
 //!
-//! * mounts the disk's registry hives read-only via `reg load` (which uses the
-//!   process's backup privilege, so locked `config` hives read regardless of
-//!   ACL — non-destructively), unloading them again on drop;
+//! * loads the disk's registry hives via `reg load` (which uses the process's
+//!   backup privilege, so locked `config` hives read regardless of ACL), unloading
+//!   them again on drop. This app writes nothing to them, though Windows may replay
+//!   a hive's transaction logs when loading it;
 //! * derives every known-folder base (`Program Files`, `ProgramData`, user
 //!   profiles, `Public`, `Windows`) from the mounted volume root instead of the
 //!   live environment; and

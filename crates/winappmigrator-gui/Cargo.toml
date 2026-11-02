@@ -8,18 +8,30 @@ authors.workspace = true
 publish.workspace = true
 build = "build.rs"
 
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+# The executable demands elevation, so its own test harness could not start from a
+# normal shell. All logic and tests live in the library.
 [[bin]]
 name = "winappmigrator"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 eframe.workspace = true
 rfd.workspace = true
+tempfile.workspace = true
 winappmigrator-core.workspace = true
 winappmigrator-ui.workspace = true
 
+[dev-dependencies]
+egui_kittest.workspace = true
+
 [build-dependencies]
 embed-manifest.workspace = true
+winresource.workspace = true
 
 [lints]
 workspace = true

@@ -21,12 +21,12 @@ use crate::models::{
     ScheduledTaskEntry, ServiceEntry, ShortcutEntry, VerificationOptions, Warning, WarningSeverity,
 };
 use crate::package::read_manifest;
-use crate::path_utils::{hidden_command, sanitize_filename};
+use crate::path_utils::{escape_powershell_single, hidden_command, sanitize_filename};
 use crate::prerequisites::{PrerequisiteInstallOutcome, install_bundle, is_present};
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
 use crate::registry_target::{
-    environment_registry_target, registry_hive_name, registry_raw_type, registry_root,
-    registry_value_name,
+    app_path_entries, environment_registry_target, is_path_variable, merge_path_entries,
+    registry_hive_name, registry_raw_type, registry_root, registry_value_name,
 };
 use crate::verify::verify_package;
 
@@ -79,10 +79,20 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
             "--apply and --dry-run cannot both be supplied".to_owned(),
         ));
     }
+    // A relative or empty location would resolve against the working directory.
+    if !options.target_root.is_absolute() {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "the install location must be a full path: \"{}\"",
+            options.target_root.display()
+        )));
+    }
 
     let prepared = PreparedPackage::new(options)?;
     let mut effective_options = options.clone();
     effective_options.package_root = prepared.package_root().to_path_buf();
+    if options.apply {
+        refuse_damaged_package(&effective_options)?;
+    }
 
     let manifest = read_manifest(&effective_options.package_root)?;
     let plan = plan_restore(&effective_options)?;
@@ -409,7 +419,7 @@ fn restore_prerequisites(
             let via = if bundle.package_relative_path.is_some() {
                 "bundled installer"
             } else {
-                "winget/URL"
+                "winget"
             };
             changes_logged.push(format!(
                 "would install prerequisite {} ({via})",
@@ -928,6 +938,28 @@ fn restore_shortcuts(
     }
 }
 
+/// Hash-check the package before anything is written, so a truncated or damaged
+/// copy is refused instead of running prerequisites and overwriting the app first.
+fn refuse_damaged_package(options: &RestoreOptions) -> Result<()> {
+    let report = verify_package(&VerificationOptions {
+        package_root: options.package_root.clone(),
+        target_root: None,
+        output_dir: None,
+        restore_user_data: options.restore_user_data,
+        restore_license: options.restore_license,
+    })?;
+    if report.package_valid {
+        return Ok(());
+    }
+    let detail = report
+        .errors
+        .first()
+        .map_or_else(String::new, |error| format!(": {}", error.message));
+    Err(WinAppMigratorError::InvalidInput(format!(
+        "the package failed its hash check and nothing was installed{detail}"
+    )))
+}
+
 fn restore_environment(
     options: &RestoreOptions,
     environment_variables: &[EnvironmentVariableEntry],
@@ -944,7 +976,12 @@ fn restore_environment(
             ));
             continue;
         }
-        match apply_environment_variable(variable, options.force, path_rewrites) {
+        match apply_environment_variable(
+            variable,
+            options.force,
+            &options.target_root,
+            path_rewrites,
+        ) {
             Ok(message) => changes_logged.push(message),
             Err(warning) => errors.push(warning),
         }
@@ -1026,6 +1063,7 @@ fn apply_registry_entry(
 fn apply_environment_variable(
     variable: &EnvironmentVariableEntry,
     force: bool,
+    target_root: &Path,
     path_rewrites: &[(String, String)],
 ) -> std::result::Result<String, Warning> {
     let (root, key_path) = environment_registry_target(&variable.scope);
@@ -1037,7 +1075,9 @@ fn apply_environment_variable(
             Some(format!("{:?}\\{}", variable.scope, variable.name)),
         )
     })?;
-    if key.get_raw_value(&variable.name).is_ok() && !force {
+    let existing = key.get_raw_value(&variable.name).ok();
+    let is_path = is_path_variable(&variable.name);
+    if existing.is_some() && !is_path && !force {
         return Err(Warning::new(
             "environment_value_exists",
             WarningSeverity::Warning,
@@ -1047,9 +1087,22 @@ fn apply_environment_variable(
     }
 
     let rewritten = rewrite_known_paths(&variable.value, path_rewrites);
+    let (data, vtype) = if is_path {
+        let current = key
+            .get_value::<String, _>(&variable.name)
+            .unwrap_or_default();
+        let entries = app_path_entries(&rewritten, target_root);
+        let vtype = existing.map_or_else(
+            || registry_raw_type(&variable.value_kind),
+            |value| value.vtype,
+        );
+        (merge_path_entries(&current, &entries), vtype)
+    } else {
+        (rewritten, registry_raw_type(&variable.value_kind))
+    };
     let value = RegValue {
-        bytes: Cow::Owned(encode_utf16_nul(&rewritten)),
-        vtype: registry_raw_type(&variable.value_kind),
+        bytes: Cow::Owned(encode_utf16_nul(&data)),
+        vtype,
     };
     key.set_raw_value(&variable.name, &value).map_err(|error| {
         Warning::new(
@@ -1209,9 +1262,9 @@ fn apply_scheduled_task(
     let force_flag = if force { "$true" } else { "$false" };
     let script = format!(
         "$xml = Get-Content -Raw -LiteralPath '{}'; Register-ScheduledTask -TaskName '{}' -TaskPath '{}' -Xml $xml -Force:{force_flag} | Out-Null",
-        escape_ps_single(xml_path.display().to_string().as_str()),
-        escape_ps_single(&task.task_name),
-        escape_ps_single(&task.task_path),
+        escape_powershell_single(xml_path.display().to_string().as_str()),
+        escape_powershell_single(&task.task_name),
+        escape_powershell_single(&task.task_path),
     );
     let result = run_powershell_script(&script).map(|_| {
         format!(
@@ -1235,25 +1288,25 @@ fn apply_shortcut(
     }
     let mut script = format!(
         "$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath = '{}';",
-        escape_ps_single(shortcut.original_lnk_path.display().to_string().as_str()),
-        escape_ps_single(target_path.display().to_string().as_str()),
+        escape_powershell_single(shortcut.original_lnk_path.display().to_string().as_str()),
+        escape_powershell_single(target_path.display().to_string().as_str()),
     );
     if let Some(arguments) = shortcut.arguments.as_deref() {
         script.push_str(&format!(
             " $shortcut.Arguments = '{}';",
-            escape_ps_single(arguments)
+            escape_powershell_single(arguments)
         ));
     }
     if let Some(working_directory) = working_directory {
         script.push_str(&format!(
             " $shortcut.WorkingDirectory = '{}';",
-            escape_ps_single(working_directory.display().to_string().as_str())
+            escape_powershell_single(working_directory.display().to_string().as_str())
         ));
     }
     if let Some(icon_path) = icon_path {
         script.push_str(&format!(
             " $shortcut.IconLocation = '{}';",
-            escape_ps_single(icon_path.display().to_string().as_str())
+            escape_powershell_single(icon_path.display().to_string().as_str())
         ));
     }
     script.push_str(" $shortcut.Save();");
@@ -1542,8 +1595,8 @@ fn command_success(command: &mut Command) -> bool {
 fn scheduled_task_exists(task: &ScheduledTaskEntry) -> std::result::Result<bool, Warning> {
     let script = format!(
         "$task = Get-ScheduledTask -TaskName '{}' -TaskPath '{}' -ErrorAction SilentlyContinue; if ($null -eq $task) {{ exit 1 }}",
-        escape_ps_single(&task.task_name),
-        escape_ps_single(&task.task_path)
+        escape_powershell_single(&task.task_name),
+        escape_powershell_single(&task.task_path)
     );
     let output = hidden_command(POWERSHELL_EXE)
         .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
@@ -1584,10 +1637,6 @@ fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
         ),
         None,
     ))
-}
-
-fn escape_ps_single(value: &str) -> String {
-    value.replace('\'', "''")
 }
 
 struct PreparedPackage {

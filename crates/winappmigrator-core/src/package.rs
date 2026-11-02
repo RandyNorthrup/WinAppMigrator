@@ -5,7 +5,7 @@ use filetime::{FileTime, set_file_times};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::archive::{create_self_extracting_archive, create_zip_archive};
+use crate::archive::{create_self_extracting_archive, create_zip_archive, read_embedded_file};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{package_destination_path, safe_relative_path};
 use crate::hashing::sha256_file;
@@ -16,6 +16,7 @@ use crate::models::{
     WarningSeverity,
 };
 use crate::path_utils::{hidden_command, sanitize_filename};
+use crate::progress::{BuildMonitor, BuildStep};
 use crate::scan::scan_and_write_reports;
 
 const FILES_DIR: &str = "files";
@@ -42,7 +43,17 @@ const SHORTCUTS_FILE: &str = "shortcuts.json";
 const ENVIRONMENT_FILE: &str = "environment_variables.json";
 
 pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
+    create_package_monitored(options, &BuildMonitor::default())
+}
+
+/// [`create_package`], reporting progress to `monitor` and stopping with
+/// [`WinAppMigratorError::Cancelled`] if it is cancelled.
+pub fn create_package_monitored(
+    options: &PackageOptions,
+    monitor: &BuildMonitor,
+) -> Result<PackageResult> {
     create_package_dirs(&options.output_dir)?;
+    monitor.report(BuildStep::Scanning);
 
     let reports_dir = options.output_dir.join(REPORTS_DIR);
     let scan_options = ScanOptions {
@@ -57,15 +68,27 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         source: options.source.clone(),
     };
     let report = scan_and_write_reports(&scan_options)?;
+    monitor.checkpoint()?;
     let mut warnings = report.warnings.clone();
     let mut files_copied = 0_usize;
     let mut failed_copies: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
-    for file in report
+    let total_files = report
         .file_inventory
         .iter()
         .filter(|entry| entry.should_copy)
+        .count();
+    for (done, file) in report
+        .file_inventory
+        .iter()
+        .filter(|entry| entry.should_copy)
+        .enumerate()
     {
+        monitor.checkpoint()?;
+        monitor.report(BuildStep::Copying {
+            done,
+            total: total_files,
+        });
         let Some(relative) = file.package_relative_path.as_ref() else {
             warnings.push(Warning::new(
                 "package_relative_path_missing",
@@ -106,6 +129,8 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
         })
         .collect();
 
+    monitor.checkpoint()?;
+    monitor.report(BuildStep::Bundling);
     let license_artifacts_detected = package_license_artifacts(
         &options.output_dir,
         &report.license_artifacts,
@@ -161,7 +186,8 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
     if matches!(options.archive_format, Some(PackageArchiveFormat::Zip))
         || options.create_self_extracting_archive
     {
-        create_zip_archive(&options.output_dir, &zip_path)?;
+        monitor.checkpoint()?;
+        create_zip_archive(&options.output_dir, &zip_path, monitor)?;
         archive_path = Some(zip_path.clone());
     }
 
@@ -169,13 +195,15 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
     if options.create_self_extracting_archive {
         let stub = options.self_extracting_stub.as_ref().ok_or_else(|| {
             WinAppMigratorError::InvalidInput(
-                "self-extracting archive requires a CLI stub executable".to_owned(),
+                "a self-extracting archive requires an installer stub".to_owned(),
             )
         })?;
         let installer_path = installer_output_path(options);
         if let Some(parent) = installer_path.parent() {
             fs::create_dir_all(parent).map_err(|source| WinAppMigratorError::io(parent, source))?;
         }
+        monitor.checkpoint()?;
+        monitor.report(BuildStep::WritingInstaller);
         create_self_extracting_archive(stub, &zip_path, &installer_path)?;
         self_extracting_archive_path = Some(installer_path);
 
@@ -297,7 +325,7 @@ fn plan_one_prerequisite(
                     "prerequisite_hash_failed",
                     WarningSeverity::Warning,
                     format!(
-                        "Downloaded {} but could not hash it ({error}); the installer will acquire it on the target via winget/URL instead.",
+                        "Downloaded {} but could not hash it ({error}); the installer will try winget on the target instead.",
                         prerequisite.name
                     ),
                     Some(destination.display().to_string()),
@@ -311,7 +339,7 @@ fn plan_one_prerequisite(
                 "prerequisite_download_failed",
                 WarningSeverity::Warning,
                 format!(
-                    "Could not download {} ({error}); the installer will acquire it on the target via winget/URL.",
+                    "Could not download {} ({error}); the installer will try winget on the target.",
                     prerequisite.name
                 ),
                 Some(spec.download_url.clone()),
@@ -782,6 +810,15 @@ pub fn read_manifest(package_root: &Path) -> Result<PackageManifest> {
     let path = package_root.join(MANIFEST_FILE);
     let bytes = fs::read(&path).map_err(|source| WinAppMigratorError::io(&path, source))?;
     serde_json::from_slice(&bytes).map_err(WinAppMigratorError::from)
+}
+
+/// Read the manifest of the package embedded in an installer, without extracting
+/// the package. `None` for a bare stub that carries no package.
+pub fn read_embedded_manifest(sfx_executable: &Path) -> Result<Option<PackageManifest>> {
+    let Some(bytes) = read_embedded_file(sfx_executable, MANIFEST_FILE)? else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
 #[cfg(test)]
