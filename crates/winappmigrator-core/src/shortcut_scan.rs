@@ -9,7 +9,7 @@ use crate::file_discovery::{
 use crate::models::{ShortcutEntry, Warning, WarningSeverity};
 use crate::path_utils::{
     POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT,
-    escape_powershell_single, hidden_command, path_has_extension, path_is_within,
+    escape_powershell_single, hidden_command, path_has_extension, path_is_strictly_inside,
 };
 use crate::system_context::SystemContext;
 
@@ -96,7 +96,8 @@ fn shortcut_folders(system: &SystemContext, warnings: &mut Vec<Warning>) -> Vec<
     if let Some(program_data) = system.program_data() {
         folders.push(program_data.join(COMMON_START_MENU));
     }
-    folders.retain(|folder| system.may_read(folder));
+    // A value can say an account's Desktop is someone else's.
+    folders.retain(|folder| system.may_read(folder) && !system.is_in_another_profile(folder));
     folders
 }
 
@@ -287,7 +288,7 @@ fn path_matches(context: &ShortcutScanContext, candidate: &Path) -> bool {
         || context
             .install_location
             .as_ref()
-            .is_some_and(|root| path_is_within(candidate, root))
+            .is_some_and(|root| path_is_strictly_inside(candidate, root))
 }
 
 /// The target of a `.lnk` file. See [`read_lnk`].

@@ -46,5 +46,7 @@ pub use restore::{default_install_location, restore_package, restore_package_mon
 pub use restore_review::{
     SystemChange, SystemChangeKind, SystemChanges, install_location_problem, system_changes,
 };
-pub use system_context::{ProfileChoice, ScanSource, SystemContext, sweep_leaked_hive_mounts};
+pub use system_context::{
+    ProfileChoice, ScanSource, SystemContext, looks_like_a_windows_drive, sweep_leaked_hive_mounts,
+};
 pub use verify::verify_package;

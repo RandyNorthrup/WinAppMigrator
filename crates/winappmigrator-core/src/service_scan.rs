@@ -6,7 +6,7 @@ use crate::file_discovery::expand_env_vars;
 use crate::models::{DriverEntry, DriverKind, ServiceEntry, Warning, WarningSeverity};
 use crate::path_utils::{
     POWERSHELL_IMPORT_SECURITY, POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command,
-    path_is_within,
+    path_is_strictly_inside,
 };
 use crate::registry_scan::capture_hklm_subtree;
 use crate::restore_policy::service_image_path_value;
@@ -209,7 +209,7 @@ fn path_matches(context: &ServiceScanContext, candidate: &Path) -> bool {
         || context
             .install_location
             .as_ref()
-            .is_some_and(|root| path_is_within(candidate, root))
+            .is_some_and(|root| path_is_strictly_inside(candidate, root))
 }
 
 /// A driver image is application-owned when it lives inside the app's install
@@ -224,7 +224,7 @@ fn is_app_owned_driver(context: &ServiceScanContext, image_path: &Path, file: &P
     let under_install = context
         .install_location
         .as_ref()
-        .is_some_and(|root| path_is_within(image_path, root));
+        .is_some_and(|root| path_is_strictly_inside(image_path, root));
     under_install && file.is_file()
 }
 

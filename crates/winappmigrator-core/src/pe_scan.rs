@@ -37,6 +37,8 @@ pub struct PeScanResult {
     pub warnings: Vec<Warning>,
 }
 
+const MAX_PROGRAM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct ImportedDll {
     pub name: String,
@@ -44,7 +46,7 @@ pub struct ImportedDll {
 }
 
 pub fn scan_pe(path: &Path) -> Result<PeScanResult> {
-    let bytes = fs::read(path).map_err(|source| WinAppMigratorError::io(path, source))?;
+    let bytes = read_program(path)?;
     let pe = PeFile::from_bytes(&bytes)
         .map_err(|source| WinAppMigratorError::pe(path, source.to_string()))?;
     let metadata = file_metadata(path, &pe, &bytes)?;
@@ -84,8 +86,23 @@ fn merge_delay_imports(imports: &mut Vec<ImportedDll>, delay: Vec<ImportedDll>) 
     });
 }
 
+/// A program's file, read whole. Windows will not start one of this size, and on a drive from
+/// elsewhere, one could be made big enough to run this out of memory.
+fn read_program(path: &Path) -> Result<Vec<u8>> {
+    let size = fs::metadata(path)
+        .map_err(|source| WinAppMigratorError::io(path, source))?
+        .len();
+    if size > MAX_PROGRAM_BYTES {
+        return Err(WinAppMigratorError::pe(
+            path,
+            format!("it is {size} bytes, too large to be a program"),
+        ));
+    }
+    fs::read(path).map_err(|source| WinAppMigratorError::io(path, source))
+}
+
 pub fn read_pe_architecture(path: &Path) -> Result<AppArchitecture> {
-    let bytes = fs::read(path).map_err(|source| WinAppMigratorError::io(path, source))?;
+    let bytes = read_program(path)?;
     let pe = PeFile::from_bytes(&bytes)
         .map_err(|source| WinAppMigratorError::pe(path, source.to_string()))?;
     Ok(architecture_from_machine(pe.file_header().Machine))
@@ -94,8 +111,9 @@ pub fn read_pe_architecture(path: &Path) -> Result<AppArchitecture> {
 fn file_metadata(path: &Path, pe: &PeFile<'_>, bytes: &[u8]) -> Result<ExecutableMetadata> {
     let metadata = fs::metadata(path).map_err(|source| WinAppMigratorError::io(path, source))?;
     let modified_utc = metadata.modified().ok().and_then(format_system_time_utc);
-    let external_manifest =
-        external_manifest_path(path).filter(|manifest_path| manifest_path.exists());
+    // Only that it is there. Following a link to find out could connect to a share.
+    let external_manifest = external_manifest_path(path)
+        .filter(|manifest_path| fs::symlink_metadata(manifest_path).is_ok());
 
     let embedded_manifest_xml = read_embedded_manifest(pe);
     let requested_execution_level = embedded_manifest_xml

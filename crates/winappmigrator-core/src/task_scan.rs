@@ -6,7 +6,7 @@ use walkdir::WalkDir;
 use crate::models::{ScheduledTaskEntry, Warning, WarningSeverity};
 use crate::path_utils::{
     POWERSHELL_IMPORT_TASKS, POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command,
-    path_is_within,
+    path_is_strictly_inside,
 };
 use crate::restore_policy::{is_system_account, node_text};
 use crate::system_context::SystemContext;
@@ -15,9 +15,11 @@ use crate::system_context::SystemContext;
 const TASKS_SUBDIR: &str = r"System32\Tasks";
 const TASK_RESTORE_INSTRUCTIONS: &str =
     "Restore uses Register-ScheduledTask with the archived XML definition.";
-/// The Task Scheduler's own limit on a definition is far below this. Anything larger is not a
-/// task, and on a drive from elsewhere it could be made big enough to run this out of memory.
-const MAX_TASK_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// Far above any real definition. Anything larger is not a task, and on a drive from elsewhere it
+/// could be made big enough to run this out of memory, which is why there is a limit on how many
+/// one app can have kept too.
+const MAX_TASK_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_TASKS_OF_AN_APP: usize = 256;
 const UTF16_LE_BOM: [u8; 2] = [0xFF, 0xFE];
 const UTF16_BE_BOM: [u8; 2] = [0xFE, 0xFF];
 const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
@@ -94,13 +96,40 @@ pub fn scan_scheduled_tasks(
             )],
         );
     }
-    let (files, warnings) = read_task_files(&tasks_root);
     let expand = |text: &str| system.expand_source_variables(text);
     let windows_dir = system.logical_path(&system.windows_dir());
-    let tasks = files
-        .into_iter()
-        .filter_map(|file| task_entry(context, file, &expand, &windows_dir))
-        .collect();
+    let mut tasks = Vec::new();
+    let mut left_out = Vec::new();
+    let mut warnings = for_each_task_file(&tasks_root, &mut |file| {
+        let Some(task) = task_entry(context, &file, &expand, &windows_dir) else {
+            return;
+        };
+        // Machine-wide, but run as one person, and told what to do by them.
+        let someone_elses = task
+            .account
+            .as_deref()
+            .is_some_and(|account| system.is_another_persons_account(account));
+        if someone_elses || tasks.len() >= MAX_TASKS_OF_AN_APP {
+            left_out.push(format!("{}{}", task.task_path, task.task_name));
+        } else {
+            tasks.push(task);
+        }
+    });
+    warnings.extend(left_out.into_iter().map(|task| {
+        Warning::new(
+            "scheduled_task_left_out",
+            WarningSeverity::Warning,
+            format!(
+                "The scheduled task {task} was left out: it runs as another account than the one \
+                 whose settings are being included, or the app has too many to keep."
+            ),
+            Some(task),
+        )
+    }));
+    tasks.sort_by(|left, right| {
+        (left.task_path.as_str(), left.task_name.as_str())
+            .cmp(&(right.task_path.as_str(), right.task_name.as_str()))
+    });
     (one_entry_per_task(tasks), warnings)
 }
 
@@ -108,6 +137,16 @@ pub fn scan_scheduled_tasks(
 /// with it. Links are not followed, so a folder of tasks stays in itself, whatever is in it.
 pub fn read_task_files(tasks_root: &Path) -> (Vec<TaskFile>, Vec<Warning>) {
     let mut files = Vec::new();
+    let warnings = for_each_task_file(tasks_root, &mut |file| files.push(file));
+    files.sort_by(|left, right| {
+        (left.task_path.as_str(), left.task_name.as_str())
+            .cmp(&(right.task_path.as_str(), right.task_name.as_str()))
+    });
+    (files, warnings)
+}
+
+/// Hand over each task as it is read, with nothing kept that is not wanted, however many there are.
+fn for_each_task_file(tasks_root: &Path, visit: &mut dyn FnMut(TaskFile)) -> Vec<Warning> {
     let mut warnings = Vec::new();
     for entry in WalkDir::new(tasks_root).follow_links(false) {
         let entry = match entry {
@@ -126,7 +165,7 @@ pub fn read_task_files(tasks_root: &Path) -> (Vec<TaskFile>, Vec<Warning>) {
             continue;
         }
         match read_task_file(tasks_root, entry.path()) {
-            Ok(file) => files.push(file),
+            Ok(file) => visit(file),
             Err(reason) => warnings.push(Warning::new(
                 "scheduled_task_unreadable",
                 WarningSeverity::Warning,
@@ -139,11 +178,7 @@ pub fn read_task_files(tasks_root: &Path) -> (Vec<TaskFile>, Vec<Warning>) {
             )),
         }
     }
-    files.sort_by(|left, right| {
-        (left.task_path.as_str(), left.task_name.as_str())
-            .cmp(&(right.task_path.as_str(), right.task_name.as_str()))
-    });
-    (files, warnings)
+    warnings
 }
 
 fn read_task_file(tasks_root: &Path, path: &Path) -> Result<TaskFile, String> {
@@ -172,7 +207,7 @@ fn read_task_file(tasks_root: &Path, path: &Path) -> Result<TaskFile, String> {
 /// it has only the one definition, so it is one task.
 fn task_entry(
     context: &TaskScanContext,
-    file: TaskFile,
+    file: &TaskFile,
     expand: &dyn Fn(&str) -> String,
     windows_dir: &Path,
 ) -> Option<ScheduledTaskEntry> {
@@ -345,7 +380,7 @@ fn path_matches(context: &TaskScanContext, candidate: &Path) -> bool {
         || context
             .install_location
             .as_ref()
-            .is_some_and(|root| path_is_within(candidate, root))
+            .is_some_and(|root| path_is_strictly_inside(candidate, root))
 }
 
 #[cfg(test)]
@@ -387,7 +422,7 @@ mod tests {
     }
 
     fn entry_for(file: TaskFile) -> Option<ScheduledTaskEntry> {
-        task_entry(&context(), file, &no_variables, &windows())
+        task_entry(&context(), &file, &no_variables, &windows())
     }
 
     #[test]
@@ -405,6 +440,14 @@ mod tests {
             );
         }
         assert!(entry_for(task_with("Other", &[r#""C:\Program Files\Demos\x.exe""#])).is_none());
+        assert!(
+            entry_for(task_with(
+                "Climbs out",
+                &[r"C:\Program Files\Demo\..\..\Windows\x.exe"]
+            ))
+            .is_none(),
+            "a parent step does not make a path the app's"
+        );
     }
 
     #[test]

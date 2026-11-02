@@ -21,8 +21,8 @@ use winappmigrator_core::{
     AppSelection, BuildMonitor, BuildStep, InstalledApp, InstallerStub, PackageOptions,
     PackageResult, ProfileChoice, ProfilePicker, ProfileSurvey, ScanSource, SystemContext,
     VerificationOptions, VerificationReport, WinAppMigratorError, create_package_monitored,
-    hidden_command, list_installed_apps_from, survey_of, survey_profiles, sweep_leaked_hive_mounts,
-    verify_package,
+    hidden_command, list_installed_apps_from, looks_like_a_windows_drive, survey_of,
+    survey_profiles, sweep_leaked_hive_mounts, verify_package,
 };
 use winappmigrator_ui::theme::{self, Theme, ThemeMode};
 use winappmigrator_ui::widgets;
@@ -303,7 +303,7 @@ impl WinAppMigratorApp {
         // A Windows system volume has \Windows and \Users. Check those (which are
         // listable) rather than the registry hive file, whose ACL denies even an
         // existence check until we are elevated and reading it via backup mode.
-        if !(root.join("Windows").is_dir() && root.join("Users").is_dir()) {
+        if !looks_like_a_windows_drive(&root) {
             self.source_error = Some(format!(
                 "{} does not look like a Windows system drive (no \\Windows and \\Users). \
                  Pick the root of the drive from the other PC.",

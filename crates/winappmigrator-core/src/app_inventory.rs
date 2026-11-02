@@ -6,7 +6,7 @@ use winreg::RegKey;
 use winreg::enums::{KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{is_known_base_dir, known_base_dirs};
+use crate::file_discovery::{holds_a_known_base_dir, known_base_dirs};
 use crate::install_source::{ExecutableHints, is_usable_main_executable};
 use crate::models::{AppArchitecture, InstallScope, InstalledApp};
 use crate::path_utils::{
@@ -275,13 +275,17 @@ fn usable_install_location(
     } else {
         PathBuf::from(trimmed)
     };
+    if !system.may_read(&path) {
+        warn!(location = %path.display(), "ignoring an install location that may not be read");
+        return None;
+    }
     let windows_dir = system.windows_dir();
     let is_windows_host_dir = path_is_within(&path, &windows_dir)
         && ["System32", "SysWOW64"]
             .iter()
             .any(|name| path_is_within(&windows_dir.join(name), &path));
     if is_drive_root(&path)
-        || is_known_base_dir(&path, &inventory.known_base_dirs)
+        || holds_a_known_base_dir(&path, &inventory.known_base_dirs)
         || is_windows_host_dir
     {
         warn!(location = %path.display(), "ignoring an install location that is a shared folder");
@@ -316,7 +320,8 @@ fn guess_main_executable(
             inventory.hints.find(&names, install_location)
         })
         .or_else(|| {
-            install_location.and_then(|path| guess_executable_from_install_dir(path, display_name))
+            install_location
+                .and_then(|path| guess_executable_from_install_dir(path, display_name, system))
         })
         .or_else(|| resolved(&raw.uninstall_string))
 }
@@ -324,6 +329,7 @@ fn guess_main_executable(
 fn guess_executable_from_install_dir(
     install_location: &Path,
     display_name: &str,
+    system: &SystemContext,
 ) -> Option<PathBuf> {
     // Many modern installers place the launcher in a subdirectory (commonly
     // `bin`) rather than the install root, so check the root first and then a
@@ -333,7 +339,7 @@ fn guess_executable_from_install_dir(
     }
     for subdir in ["bin", "app", "Application", "program", "Programs"] {
         let candidate_dir = install_location.join(subdir);
-        if candidate_dir.is_dir()
+        if system.is_dir(&candidate_dir)
             && let Some(path) = find_executable_in_dir(&candidate_dir, display_name)
         {
             return Some(path);

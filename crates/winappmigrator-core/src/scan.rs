@@ -17,9 +17,9 @@ use crate::install_source::{
 };
 use crate::license_scan::{LicenseScanContext, scan_license_artifacts};
 use crate::models::{
-    AppSelection, DependencyEntry, DriverEntry, FileEntry, InstalledApp, RuntimePrerequisite,
-    RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport, ScheduledTaskEntry,
-    ServiceEntry, ShortcutEntry, Warning, WarningSeverity,
+    AppSelection, DependencyEntry, DriverEntry, FileEntry, InstallScope, InstalledApp,
+    RuntimePrerequisite, RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport,
+    ScheduledTaskEntry, ServiceEntry, ShortcutEntry, Warning, WarningSeverity,
 };
 use crate::path_utils::{is_drive_root, looks_like_executable};
 use crate::pe_scan::scan_pe;
@@ -74,6 +74,17 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         AppSelection::InstalledApp(app) => Some((**app).clone()),
         AppSelection::ExecutablePath(_) => None,
     };
+    // A selection came from a listing, and is asked about like anything else on a drive.
+    if let Some(app) = source_app.as_mut() {
+        app.install_location = app
+            .install_location
+            .take()
+            .filter(|location| system.may_read(location));
+        app.main_executable = app
+            .main_executable
+            .take()
+            .filter(|executable| system.may_read(executable));
+    }
     // Reverse-engineer how the app was installed; for MSI products this reads the
     // authoritative Windows Installer component database. That is slow, so it runs
     // once, here, and everything that needs the result is passed it.
@@ -83,12 +94,24 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     let executable_path = selected_executable_path(options, install_source.as_ref(), &system)?;
     let executable_path = install_source
         .as_ref()
-        .and_then(|source| squirrel_current_executable(&executable_path, source))
+        .and_then(|source| squirrel_current_executable(&executable_path, source, &system))
         .unwrap_or(executable_path);
     // Whatever led here, on a drive nothing is read through a link or from off the drive.
     if !system.may_read(&executable_path) {
         return Err(WinAppMigratorError::InvalidInput(format!(
             "{} goes through a link or is not on the connected drive, so it was not read.",
+            executable_path.display()
+        )));
+    }
+    // An uninstall entry in one account's own registry can be written with no rights at all, and
+    // could otherwise name another's folder as its app, for an administrator to package.
+    let installed_for_one_account = source_app
+        .as_ref()
+        .is_some_and(|app| app.install_scope == InstallScope::PerUser);
+    if installed_for_one_account && system.is_in_another_profile(&executable_path) {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "{} is in another account's folders, and this app was installed for one account, so \
+             it was not read.",
             executable_path.display()
         )));
     }
@@ -138,14 +161,15 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     };
     let (dependencies, resolver_warnings) =
         resolve_imports(&pe_scan.direct_imports, &context, &system);
-    let app_local_dlls = find_app_local_dlls(&executable_path)?;
+    let app_local_dlls = find_app_local_dlls(&executable_path, &system)?;
     let install_location = match (source_app.as_ref(), install_source.as_ref()) {
         (Some(app), Some(source)) => resolve_install_location(app, &executable_path, source),
         _ => executable_path
             .parent()
             .filter(|parent| !is_drive_root(parent))
             .map(Path::to_path_buf),
-    };
+    }
+    .filter(|location| !(installed_for_one_account && system.is_in_another_profile(location)));
     let recorded_location = source_app
         .as_ref()
         .and_then(|app| app.install_location.clone());

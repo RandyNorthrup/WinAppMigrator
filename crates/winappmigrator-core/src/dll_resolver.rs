@@ -133,7 +133,10 @@ pub fn resolve_imports(
     (dependencies, warnings)
 }
 
-pub fn find_app_local_dlls(executable_path: &Path) -> Result<Vec<FileEntry>> {
+pub fn find_app_local_dlls(
+    executable_path: &Path,
+    system: &SystemContext,
+) -> Result<Vec<FileEntry>> {
     let app_dir = executable_path.parent().ok_or_else(|| {
         WinAppMigratorError::InvalidInput(format!(
             "executable has no parent directory: {}",
@@ -147,7 +150,7 @@ pub fn find_app_local_dlls(executable_path: &Path) -> Result<Vec<FileEntry>> {
     for entry in entries {
         let entry = entry.map_err(|source| WinAppMigratorError::io(app_dir, source))?;
         let path = entry.path();
-        if !path_has_extension(&path, DLL_EXTENSION) {
+        if !path_has_extension(&path, DLL_EXTENSION) || !system.may_read(&path) {
             continue;
         }
         let size_bytes = entry.metadata().ok().map(|metadata| metadata.len());
@@ -216,8 +219,7 @@ fn resolve_one_import(
     // whoever made the program, and it could lead anywhere.
     let is_plain_name = !import.name.contains(['\\', '/', ':']);
     if is_known && is_plain_name {
-        let resolved = find_in_system_directories(&import.name, search_dirs)
-            .filter(|path| system.may_read(path));
+        let resolved = find_in_system_directories(&import.name, search_dirs, system);
         let architecture = resolved
             .as_deref()
             .and_then(|path| read_architecture_with_warning(path, warnings));
@@ -241,7 +243,7 @@ fn resolve_one_import(
 
     for search_dir in search_dirs.iter().filter(|_| is_plain_name) {
         let candidate = search_dir.path.join(&import.name);
-        if system.may_read(&candidate) && candidate.is_file() {
+        if system.is_file(&candidate) {
             let architecture = read_architecture_with_warning(&candidate, warnings)
                 .unwrap_or(AppArchitecture::Unknown);
             let system_provided = matches!(
@@ -336,6 +338,7 @@ fn build_search_directories(
             &mut seen,
             app_dir.to_path_buf(),
             DependencySourceCategory::AppLocal,
+            system,
         );
     }
 
@@ -347,12 +350,14 @@ fn build_search_directories(
                     &mut seen,
                     windows_dir.join(SYSWOW64_DIR),
                     DependencySourceCategory::SysWow64,
+                    system,
                 );
                 push_unique(
                     &mut directories,
                     &mut seen,
                     windows_dir.join(SYSTEM32_DIR),
                     DependencySourceCategory::System32,
+                    system,
                 );
             }
             AppArchitecture::X64 | AppArchitecture::Arm64 | AppArchitecture::Unknown => {
@@ -361,6 +366,7 @@ fn build_search_directories(
                     &mut seen,
                     windows_dir.join(SYSTEM32_DIR),
                     DependencySourceCategory::System32,
+                    system,
                 );
             }
         }
@@ -369,6 +375,7 @@ fn build_search_directories(
             &mut seen,
             windows_dir,
             DependencySourceCategory::Windows,
+            system,
         );
     } else {
         warnings.push(Warning::new(
@@ -390,6 +397,7 @@ fn build_search_directories(
             &mut seen,
             current_directory.clone(),
             DependencySourceCategory::CurrentDirectory,
+            system,
         );
     }
 
@@ -404,6 +412,7 @@ fn build_search_directories(
                 &mut seen,
                 path,
                 DependencySourceCategory::Path,
+                system,
             );
         }
     }
@@ -416,8 +425,9 @@ fn push_unique(
     seen: &mut BTreeSet<String>,
     path: PathBuf,
     category: DependencySourceCategory,
+    system: &SystemContext,
 ) {
-    if !path.is_dir() {
+    if !system.is_dir(&path) {
         return;
     }
     let key = path.to_string_lossy().to_ascii_lowercase();
@@ -435,7 +445,11 @@ fn windows_dir(system: &SystemContext) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn find_in_system_directories(name: &str, search_dirs: &[SearchDirectory]) -> Option<PathBuf> {
+fn find_in_system_directories(
+    name: &str,
+    search_dirs: &[SearchDirectory],
+    system: &SystemContext,
+) -> Option<PathBuf> {
     search_dirs
         .iter()
         .filter(|directory| {
@@ -447,7 +461,7 @@ fn find_in_system_directories(name: &str, search_dirs: &[SearchDirectory]) -> Op
             )
         })
         .map(|directory| directory.path.join(name))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| system.is_file(candidate))
 }
 
 fn read_architecture_with_warning(

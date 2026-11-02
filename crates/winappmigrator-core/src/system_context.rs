@@ -85,6 +85,11 @@ const USER_LABEL: &str = "USER_";
 const CLASSES_LABEL: &str = "CLASSES_";
 const LEASE_FILE: &str = "in-use.lock";
 const ERROR_SHARING_VIOLATION: i32 = 32;
+/// Windows will not load a hive anywhere near this. On a drive made to attack this, one could be
+/// made big enough to fill this PC's disk, for each account it says it has.
+const MAX_HIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_ACCOUNTS: usize = 64;
+const MAX_HIVE_BYTES_IN_ALL: u64 = 32 * 1024 * 1024 * 1024;
 const UNLOAD_ATTEMPTS: u32 = 20;
 const UNLOAD_RETRY_WAIT: Duration = Duration::from_millis(250);
 /// How many of the paths a drive named and this did not follow to list, of however many.
@@ -214,7 +219,9 @@ impl VolumeMap {
                 return false;
             }
             current.push(name);
-            let key = current.to_string_lossy().to_ascii_lowercase();
+            // As it is written. On NTFS a folder can be made case-sensitive, and on a drive made
+            // to attack this, `Data` and `DATA` can be a folder and a link.
+            let key = current.to_string_lossy().into_owned();
             if checked.contains(&key) {
                 continue;
             }
@@ -322,6 +329,7 @@ fn mounted_user_key(mount: &str, classes: Option<&str>, logical: &str) -> String
 struct HiveMounts {
     id: String,
     next_folder: usize,
+    copied_bytes: u64,
     mounts: Vec<String>,
     // In this order, because a field drops in the order it is declared, and the folder cannot
     // be removed while anything in it is held.
@@ -363,6 +371,7 @@ impl HiveMounts {
         Ok(Self {
             id,
             next_folder: 0,
+            copied_bytes: 0,
             mounts: Vec::new(),
             _lease: lease,
             folder,
@@ -371,9 +380,16 @@ impl HiveMounts {
 
     /// Copy a hive here and load the copy, returning the key under `HKEY_LOCAL_MACHINE`.
     fn load(&mut self, label: &str, hive_file: &Path) -> Result<String> {
+        if self.copied_bytes >= MAX_HIVE_BYTES_IN_ALL {
+            return Err(WinAppMigratorError::InvalidInput(format!(
+                "{} was not read: this drive's registry hives add up to too much to be real",
+                hive_file.display()
+            )));
+        }
         let copy_folder = self.folder.path().join(self.next_folder.to_string());
         self.next_folder += 1;
-        let copy = copy_hive(hive_file, &copy_folder)?;
+        let (copy, bytes) = copy_hive(hive_file, &copy_folder)?;
+        self.copied_bytes += bytes;
         let mount = format!("{MOUNT_PREFIX}{}_{label}", self.id);
         reg_load(&mount, &copy)?;
         self.mounts.push(mount.clone());
@@ -514,30 +530,38 @@ fn lease_is_held(lease: &Path) -> bool {
 /// copy replays them into the copy, so that what was on the drive is read in full and the drive
 /// is not written to. Failing to copy a log loses at most what it held, and says nothing is wrong
 /// with the hive.
-fn copy_hive(hive_file: &Path, into: &Path) -> Result<PathBuf> {
+fn copy_hive(hive_file: &Path, into: &Path) -> Result<(PathBuf, u64)> {
     let name = hive_file.file_name().ok_or_else(|| {
         WinAppMigratorError::InvalidInput(format!("not a hive file: {}", hive_file.display()))
     })?;
     fs::create_dir_all(into).map_err(|error| WinAppMigratorError::io(into, error))?;
     let copy = into.join(name);
-    copy_a_hive_file(hive_file, &copy)?;
+    let mut bytes = copy_a_hive_file(hive_file, &copy)?;
     for suffix in HIVE_LOG_SUFFIXES {
         let mut log_name = name.to_os_string();
         log_name.push(suffix);
         let log = hive_file.with_file_name(&log_name);
-        if fs::symlink_metadata(&log).is_ok_and(|metadata| metadata.is_file())
-            && let Err(error) = copy_a_hive_file(&log, &into.join(&log_name))
-        {
-            warn!(%error, log = %log.display(), "could not copy a hive's log");
+        if fs::symlink_metadata(&log).is_ok_and(|metadata| metadata.is_file()) {
+            match copy_a_hive_file(&log, &into.join(&log_name)) {
+                Ok(size) => bytes += size,
+                Err(error) => warn!(%error, log = %log.display(), "could not copy a hive's log"),
+            }
         }
     }
-    Ok(copy)
+    Ok((copy, bytes))
 }
 
 /// Hives are protected on a drive that kept its permissions, and its accounts are not this PC's,
 /// so a plain read may be refused where one in backup mode is not. A copy has to be writable to
 /// load, whatever the original was marked.
-fn copy_a_hive_file(source: &Path, destination: &Path) -> Result<()> {
+fn copy_a_hive_file(source: &Path, destination: &Path) -> Result<u64> {
+    let size = fs::symlink_metadata(source).map_or(0, |metadata| metadata.len());
+    if size > MAX_HIVE_BYTES {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "{} is {size} bytes, too large to be a registry hive",
+            source.display()
+        )));
+    }
     match fs::copy(source, destination) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -554,7 +578,7 @@ fn copy_a_hive_file(source: &Path, destination: &Path) -> Result<()> {
         fs::set_permissions(destination, permissions)
             .map_err(|error| WinAppMigratorError::io(destination, error))?;
     }
-    Ok(())
+    Ok(metadata.len())
 }
 
 /// The hives of a drive, and what could be read from them. Only `SOFTWARE` is required.
@@ -1089,6 +1113,11 @@ impl SystemContext {
                 }
             }
         }
+        if listed.len() > MAX_ACCOUNTS {
+            for profile in listed.drain(MAX_ACCOUNTS..) {
+                self.note_refused(&profile.dir);
+            }
+        }
         listed
     }
 
@@ -1160,7 +1189,7 @@ impl SystemContext {
                 if let Some(current) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
                     profiles.push(current.clone());
                     if let Some(users_root) = current.parent() {
-                        collect_profile_dirs(users_root, &mut profiles);
+                        collect_profile_dirs(users_root, &mut profiles, &Path::is_dir);
                     }
                 }
                 profiles
@@ -1169,9 +1198,10 @@ impl SystemContext {
                 let mut profiles = Vec::new();
                 let users_root = hives.map.volume_root.join("Users");
                 if self.may_read(&users_root) {
-                    collect_profile_dirs(&users_root, &mut profiles);
+                    collect_profile_dirs(&users_root, &mut profiles, &|path: &Path| {
+                        self.is_dir(path)
+                    });
                 }
-                profiles.retain(|profile| self.may_read(profile));
                 for profile in &self.listed {
                     if !profiles.contains(&profile.dir) {
                         profiles.push(profile.dir.clone());
@@ -1185,6 +1215,10 @@ impl SystemContext {
     /// Whether a folder belongs to an account other than the one this scan is about. Its data is
     /// that person's own, however a value on the PC came to name it.
     pub fn is_in_another_profile(&self, path: &Path) -> bool {
+        // Finding out looks through links. What may not be read is no one's to take anyway.
+        if !self.may_read(path) {
+            return true;
+        }
         let readers: Vec<String> = self
             .user_hives()
             .iter()
@@ -1197,6 +1231,24 @@ impl SystemContext {
             let real = resolved_location(&profile);
             !readers.contains(&comparison_key(&real)) && path_is_within(&path, &real)
         })
+    }
+
+    /// Whether an account a scheduled task runs as is a person other than the one this scan is
+    /// about. That is theirs, along with what it was told to do.
+    pub fn is_another_persons_account(&self, account: &str) -> bool {
+        let name = account.rsplit('\\').next().unwrap_or(account);
+        let is_the_one = self.user_hives().iter().any(|user| {
+            user.sid
+                .as_deref()
+                .is_some_and(|sid| sid.eq_ignore_ascii_case(account))
+                || user.name.eq_ignore_ascii_case(name)
+        });
+        !is_the_one
+            && (is_person_sid(account)
+                || self
+                    .listed
+                    .iter()
+                    .any(|profile| profile.name.eq_ignore_ascii_case(name)))
     }
 
     // ---- Path re-rooting ----------------------------------------------------
@@ -1233,6 +1285,17 @@ impl SystemContext {
             Ok(mut checked) => hives.map.may_read_noting(path, &mut checked),
             Err(_) => hives.map.may_read(path),
         }
+    }
+
+    /// Whether this is a folder, with no link on a drive followed to find that out. Looking at a
+    /// link to a share is enough to connect to it.
+    pub fn is_dir(&self, path: &Path) -> bool {
+        self.may_read(path) && path.is_dir()
+    }
+
+    /// Whether this is a file, with no link on a drive followed to find that out.
+    pub fn is_file(&self, path: &Path) -> bool {
+        self.may_read(path) && path.is_file()
     }
 
     /// What the PC itself calls a path that can be read here. It is the same path on this PC.
@@ -1351,6 +1414,15 @@ fn loaded_user(profile: &ListedProfile) -> Option<UserHive> {
 }
 
 // ---- Offline mounting -------------------------------------------------------
+
+/// Whether a folder chosen as a drive is laid out as a Windows install. It takes a `Windows` and a
+/// `Users` that are folders on it: looking through a link to find out could connect to a share.
+pub fn looks_like_a_windows_drive(root: &Path) -> bool {
+    ["Windows", "Users"].iter().all(|folder| {
+        fs::symlink_metadata(root.join(folder))
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    })
+}
 
 fn mount_machine_hives(volume_root: &Path, mounts: &mut HiveMounts) -> Result<OfflineHives> {
     let windows = volume_root.join(WINDOWS_FOLDER);
@@ -1601,13 +1673,17 @@ fn enumerate_user_hives(map: &VolumeMap) -> Vec<(String, PathBuf, PathBuf)> {
     hives
 }
 
-fn collect_profile_dirs(users_root: &Path, profiles: &mut Vec<PathBuf>) {
+fn collect_profile_dirs(
+    users_root: &Path,
+    profiles: &mut Vec<PathBuf>,
+    is_folder: &dyn Fn(&Path) -> bool,
+) {
     let Ok(entries) = fs::read_dir(users_root) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() && !is_non_user_profile(&path) && !profiles.contains(&path) {
+        if is_folder(&path) && !is_non_user_profile(&path) && !profiles.contains(&path) {
             profiles.push(path);
         }
     }
@@ -1821,6 +1897,107 @@ mod tests {
         assert!(map.may_read_noting(&app.join(r"real\ok.txt"), &mut checked));
         assert!(!map.may_read_noting(&app.join(r"linked\secret.txt"), &mut checked));
         assert!(map.may_read_noting(&app.join(r"real\ok.txt"), &mut checked));
+        Ok(())
+    }
+
+    #[test]
+    fn a_folder_and_a_link_that_differ_only_in_case_are_each_looked_at() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let volume = work.path().join("volume");
+        let tree = volume.join("Tree");
+        let outside = work.path().join("this PC");
+        fs::create_dir_all(tree.join("Data"))?;
+        fs::create_dir_all(&outside)?;
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(tree.join("Link"))
+            .arg(&outside)
+            .output()?;
+        assert!(made.status.success());
+        let map = VolumeMap {
+            volume_root: volume,
+            system_drive: 'C',
+        };
+        // What is checked is remembered as written, so that a link spelled like a folder that
+        // was looked at is looked at too. A case-sensitive folder takes more than this can make.
+        let mut checked = HashSet::new();
+        assert!(map.may_read_noting(&tree.join("Data"), &mut checked));
+        assert!(checked.iter().any(|key| key.ends_with(r"Tree\Data")));
+        assert!(!checked.iter().any(|key| key.ends_with(r"tree\data")));
+        assert!(!map.may_read_noting(&tree.join("Link"), &mut checked));
+        Ok(())
+    }
+
+    #[test]
+    fn a_task_for_another_person_is_told_from_one_for_the_account_being_read() {
+        let mut system = SystemContext::with_offline(hives("ControlSet001"));
+        system.users = Users::Fixed(vec![UserHive {
+            id: "S-1-5-21-1-2-3-1001".to_owned(),
+            sid: Some("S-1-5-21-1-2-3-1001".to_owned()),
+            name: "alice".to_owned(),
+            profile_dir: PathBuf::from(r"E:\Users\alice"),
+            kind: UserHiveKind::Loaded {
+                sid: "S-1-5-21-1-2-3-1001".to_owned(),
+            },
+        }]);
+        system.listed = vec![ListedProfile {
+            id: "S-1-5-21-1-2-3-1002".to_owned(),
+            sid: Some("S-1-5-21-1-2-3-1002".to_owned()),
+            name: "bob".to_owned(),
+            dir: PathBuf::from(r"E:\Users\bob"),
+        }];
+        for own_or_shared in [
+            "S-1-5-21-1-2-3-1001",
+            "s-1-5-21-1-2-3-1001",
+            "alice",
+            r"OLD-PC\Alice",
+            "S-1-5-18",
+            "SYSTEM",
+            r"NT AUTHORITY\LocalService",
+            "S-1-5-32-545",
+            "Users",
+        ] {
+            assert!(
+                !system.is_another_persons_account(own_or_shared),
+                "{own_or_shared}"
+            );
+        }
+        for someone_else in [
+            "S-1-5-21-1-2-3-1002",
+            "S-1-5-21-9-9-9-1001",
+            "S-1-12-1-1-2-3-4",
+            "bob",
+            r"OLD-PC\BOB",
+        ] {
+            assert!(
+                system.is_another_persons_account(someone_else),
+                "{someone_else}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_drive_has_to_have_real_folders_to_be_taken_for_a_windows_install() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        assert!(!looks_like_a_windows_drive(work.path()));
+        fs::create_dir(work.path().join("Users"))?;
+        assert!(!looks_like_a_windows_drive(work.path()));
+        let elsewhere = work.path().join("elsewhere");
+        fs::create_dir(&elsewhere)?;
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(work.path().join("Windows"))
+            .arg(&elsewhere)
+            .output()?;
+        assert!(made.status.success());
+        assert!(!looks_like_a_windows_drive(work.path()), "that is a link");
+        fs::remove_dir(work.path().join("Windows"))?;
+        fs::create_dir(work.path().join("Windows"))?;
+        assert!(looks_like_a_windows_drive(work.path()));
         Ok(())
     }
 

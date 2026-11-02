@@ -46,6 +46,9 @@ const LICENSE_REGISTRY_SIGNALS: &[&str] = &[
     "registrationcode",
     "licensekey",
 ];
+const MACHINE_ENVIRONMENT_KEY: &str =
+    r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+const USER_ENVIRONMENT_KEY: &str = "Environment";
 /// Cap on registry sub-keys enumerated per vendor key to keep the scan bounded.
 const MAX_VENDOR_SUBKEYS: usize = 256;
 
@@ -73,11 +76,7 @@ pub fn scan_license_artifacts(
 
     detect_license_files(context, &mut artifacts);
     detect_framework_stores(context, system, &mut artifacts);
-    // License environment variables can only be read from the live session; an
-    // offline disk's are captured (path-matched) by the environment scan instead.
-    if !system.is_offline() {
-        detect_license_env_vars(&mut artifacts);
-    }
+    detect_license_env_vars(system, &mut artifacts);
     detect_registry_licenses(
         context,
         system,
@@ -251,12 +250,19 @@ fn detect_framework_stores(
     }
 }
 
-fn detect_license_env_vars(artifacts: &mut Vec<LicenseArtifact>) {
-    for (name, value) in std::env::vars_os() {
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !is_license_env_var(name) {
+/// From the registry of the PC and of the account being scanned. This process's own could be
+/// another administrator's, named at the UAC prompt.
+fn detect_license_env_vars(system: &SystemContext, artifacts: &mut Vec<LicenseArtifact>) {
+    let mut keys: Vec<RegKey> = system
+        .open_hklm(MACHINE_ENVIRONMENT_KEY, KEY_READ)
+        .into_iter()
+        .collect();
+    for user in system.user_hives() {
+        keys.extend(user.open(USER_ENVIRONMENT_KEY, KEY_READ).ok());
+    }
+    let variables = keys.iter().flat_map(|key| key.enum_values().flatten());
+    for (name, value) in variables {
+        if !is_license_env_var(&name) {
             continue;
         }
         artifacts.push(LicenseArtifact {
@@ -266,7 +272,7 @@ fn detect_license_env_vars(artifacts: &mut Vec<LicenseArtifact>) {
             registry_location: None,
             detail: format!(
                 "License environment variable {name}={}",
-                value.to_string_lossy()
+                registry_value_text(&value)
             ),
             machine_bound: false,
             requires_admin: false,

@@ -72,6 +72,17 @@ const EXECUTABLE_FOLDER_NAMES: &[&str] = &[
     "program",
 ];
 
+/// Far more than the largest real one, which was tens of megabytes, on a VS Code with years of
+/// updates. On a drive from elsewhere, one could be made big enough to run this out of memory.
+const MAX_INSTALL_LOG_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_APPX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+
+/// A file read whole, if it is of a size that makes sense for it.
+fn read_within(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    let size = std::fs::metadata(path).ok()?.len();
+    (size <= limit).then(|| std::fs::read(path).ok()).flatten()
+}
+
 /// The result of reverse-engineering how and where an application was installed.
 #[derive(Debug, Clone)]
 pub struct InstallSource {
@@ -177,7 +188,7 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
             evidence.push("Squirrel per-user layout (Update.exe / app-*)".to_owned());
             if let Some(dir) = primary_install_dir(app) {
                 roots.push(dir.clone());
-                if let Some(app_dir) = latest_squirrel_app_dir(&dir) {
+                if let Some(app_dir) = latest_squirrel_app_dir(&dir, system) {
                     if let Some(version) = app_dir.file_name().and_then(|name| name.to_str()) {
                         evidence.push(format!("Squirrel current version: {version}"));
                     }
@@ -424,8 +435,10 @@ fn read_start_menu_shortcuts(system: &SystemContext) -> Vec<ShortcutHint> {
     if let Some(program_data) = system.program_data() {
         folders.push(program_data.join(START_MENU_PROGRAMS));
     }
-    for profile in system.user_profiles() {
-        folders.push(profile.join(USER_START_MENU_PROGRAMS));
+    // Only of the account this is about: another's shortcut says nothing about this one's apps,
+    // and following one would take that person's folder for the app's.
+    for user in system.user_hives() {
+        folders.push(user.profile_dir.join(USER_START_MENU_PROGRAMS));
     }
     let mut shortcuts = Vec::new();
     for folder in folders.into_iter().filter(|folder| system.may_read(folder)) {
@@ -490,7 +503,7 @@ pub fn primary_executable(
         .collect();
     if candidates.is_empty() {
         for dir in source.roots.iter().map(PathBuf::as_path).chain(location) {
-            collect_dir_executables(dir, &mut candidates);
+            collect_dir_executables(dir, &mut candidates, system);
         }
     }
     let usable = |path: &PathBuf| is_usable_main_executable(path, system);
@@ -524,12 +537,16 @@ pub fn primary_executable(
 /// A Squirrel app's folder holds a small stub that starts the real executable in
 /// `app-<version>`, and the stub's architecture and imports say nothing about the app.
 /// Returns the real one when `executable` is such a stub.
-pub fn squirrel_current_executable(executable: &Path, source: &InstallSource) -> Option<PathBuf> {
+pub fn squirrel_current_executable(
+    executable: &Path,
+    source: &InstallSource,
+    system: &SystemContext,
+) -> Option<PathBuf> {
     if source.method != InstallMethod::Squirrel {
         return None;
     }
-    let current = latest_squirrel_app_dir(executable.parent()?)?;
-    Some(current.join(executable.file_name()?)).filter(|path| path.is_file())
+    let current = latest_squirrel_app_dir(executable.parent()?, system)?;
+    Some(current.join(executable.file_name()?)).filter(|path| system.is_file(path))
 }
 
 /// An uninstaller or a cached installer, when that is all there is: architecture and
@@ -655,13 +672,13 @@ fn is_executable_path(path: &Path) -> bool {
     looks_like_executable(path) && path.is_file()
 }
 
-fn collect_dir_executables(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_dir_executables(dir: &Path, out: &mut Vec<PathBuf>, system: &SystemContext) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if is_executable_path(&path) {
+        if system.may_read(&path) && is_executable_path(&path) {
             out.push(path);
         }
     }
@@ -753,7 +770,8 @@ fn classify_method(
     if location.contains(r"\chocolatey\lib\") || uninstall.contains(r"\chocolatey\") {
         return InstallMethod::Chocolatey;
     }
-    if location.contains(r"\appdata\local\") && is_squirrel_layout(app.install_location.as_deref())
+    if location.contains(r"\appdata\local\")
+        && is_squirrel_layout(app.install_location.as_deref(), system)
     {
         return InstallMethod::Squirrel;
     }
@@ -842,7 +860,7 @@ struct InnoManifest {
 /// path corrupted by the byte after it. Such a path fails the existence check, so the
 /// result is an undercount and never a wrong file.
 fn inno_manifest(log_path: &Path, system: &SystemContext) -> InnoManifest {
-    let Ok(data) = std::fs::read(log_path) else {
+    let Some(data) = read_within(log_path, MAX_INSTALL_LOG_BYTES) else {
         return InnoManifest::default();
     };
     if !is_inno_log(&data) {
@@ -1086,7 +1104,7 @@ fn is_nsis_log_name(name: &str) -> bool {
 /// scans for resolved absolute path strings and keeps the ones that exist,
 /// which is robust across AdvUninstLog versions and UTF-16/ANSI encodings.
 fn nsis_manifest_files(log_path: &Path, system: &SystemContext) -> Vec<PathBuf> {
-    let Ok(data) = std::fs::read(log_path) else {
+    let Some(data) = read_within(log_path, MAX_INSTALL_LOG_BYTES) else {
         return Vec::new();
     };
     existing_files(scanned_path_strings(&data), system)
@@ -1266,11 +1284,11 @@ fn dedup_existing_dirs(roots: Vec<PathBuf>, system: &SystemContext) -> Vec<PathB
     output
 }
 
-fn is_squirrel_layout(install_location: Option<&Path>) -> bool {
+fn is_squirrel_layout(install_location: Option<&Path>, system: &SystemContext) -> bool {
     let Some(location) = install_location else {
         return false;
     };
-    if location.join("Update.exe").is_file() {
+    if system.is_file(&location.join("Update.exe")) {
         return true;
     }
     let Ok(entries) = std::fs::read_dir(location) else {
@@ -1278,7 +1296,7 @@ fn is_squirrel_layout(install_location: Option<&Path>) -> bool {
     };
     entries
         .flatten()
-        .any(|entry| entry.path().is_dir() && is_squirrel_app_dir(&entry.path()))
+        .any(|entry| system.is_dir(&entry.path()) && is_squirrel_app_dir(&entry.path()))
 }
 
 fn is_squirrel_app_dir(path: &Path) -> bool {
@@ -1290,12 +1308,12 @@ fn is_squirrel_app_dir(path: &Path) -> bool {
 /// The current Squirrel `app-<version>` directory (highest version) in an
 /// install location, if any. Versions are compared by their dotted numeric
 /// segments so `app-1.0.10` ranks above `app-1.0.9`.
-fn latest_squirrel_app_dir(install_dir: &Path) -> Option<PathBuf> {
+fn latest_squirrel_app_dir(install_dir: &Path, system: &SystemContext) -> Option<PathBuf> {
     let entries = std::fs::read_dir(install_dir).ok()?;
     entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && is_squirrel_app_dir(path))
+        .filter(|path| system.is_dir(path) && is_squirrel_app_dir(path))
         .max_by(|left, right| squirrel_version_key(left).cmp(&squirrel_version_key(right)))
 }
 
@@ -1316,7 +1334,7 @@ fn squirrel_version_key(app_dir: &Path) -> Vec<u64> {
 /// (for example `Microsoft.WindowsTerminal`). A targeted attribute scan avoids
 /// pulling in an XML dependency for a single well-known element.
 fn appx_identity_name(install_dir: &Path) -> Option<String> {
-    let data = std::fs::read(install_dir.join(APPX_MANIFEST)).ok()?;
+    let data = read_within(&install_dir.join(APPX_MANIFEST), MAX_APPX_MANIFEST_BYTES)?;
     let text = String::from_utf8_lossy(&data);
     let identity = &text[text.find("<Identity")?..];
     let after_name = &identity[identity.find("Name=\"")? + "Name=\"".len()..];
@@ -1339,7 +1357,7 @@ fn msix_package_data_roots(identity_name: &str, system: &SystemContext) -> Vec<P
             continue;
         };
         roots.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
-            path.is_dir()
+            system.is_dir(path)
                 && path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -2420,11 +2438,15 @@ mod tests {
         let stub = base.join("Demo.exe");
         std::fs::write(&stub, b"MZ")?;
 
-        let squirrel = squirrel_current_executable(&stub, &test_source(InstallMethod::Squirrel));
-        let other = squirrel_current_executable(&stub, &test_source(InstallMethod::Generic));
+        let system = SystemContext::live();
+        let squirrel =
+            squirrel_current_executable(&stub, &test_source(InstallMethod::Squirrel), &system);
+        let other =
+            squirrel_current_executable(&stub, &test_source(InstallMethod::Generic), &system);
         let unmatched = squirrel_current_executable(
             &base.join("Other.exe"),
             &test_source(InstallMethod::Squirrel),
+            &system,
         );
         let expected = base.join("app-3.5.11").join("Demo.exe");
         let _ = std::fs::remove_dir_all(&base);
@@ -3004,7 +3026,7 @@ mod tests {
         }
         std::fs::write(base.join("Update.exe"), b"x")?;
 
-        let latest = latest_squirrel_app_dir(&base);
+        let latest = latest_squirrel_app_dir(&base, &SystemContext::live());
         let expected = base.join("app-1.0.10");
         let _ = std::fs::remove_dir_all(&base);
 

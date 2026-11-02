@@ -17,8 +17,8 @@ use crate::models::{
 };
 use crate::path_utils::{
     UserAccount, file_name_string, is_auxiliary_executable, is_drive_root, path_has_extension,
-    path_is_strictly_inside, path_is_within, program_data_dir, public_profile_dir, signed_in_user,
-    strip_prefix_ignore_case, windows_build,
+    path_is_strictly_inside, path_is_within, program_data_dir, public_profile_dir,
+    resolved_location, signed_in_user, strip_prefix_ignore_case, windows_build,
 };
 use crate::privilege::{hold_folder, hold_real_folder, pin_held_folder};
 use crate::product_match::{MatchScope, ProductNames};
@@ -1036,9 +1036,10 @@ fn collect_roots(
     let mut seen_paths = BTreeSet::new();
     let mut roots: Vec<DiscoveryRoot> = Vec::new();
     for root in raw {
-        let is_for_this_scan = !root.path.exists()
-            || may_take_from(&root.path, context.install_location.as_deref(), system);
-        if !system.may_read(&root.path) || !is_for_this_scan {
+        let is_for_this_scan = system.may_read(&root.path)
+            && (!root.path.exists()
+                || may_take_from(&root.path, context.install_location.as_deref(), system));
+        if !is_for_this_scan {
             warnings.push(left_out_warning(&root.path));
             continue;
         }
@@ -1227,7 +1228,7 @@ pub(crate) fn user_folder_of(
         .as_ref()
         .and_then(|key| key.get_value::<String, _>(value_name).ok())
     else {
-        return Some(default_folder).filter(|folder| folder.is_dir());
+        return Some(default_folder).filter(|folder| system.is_dir(folder));
     };
     let environment = user.open(USER_ENVIRONMENT_KEY, KEY_READ).ok();
     let lookup = |name: &str| {
@@ -1239,7 +1240,7 @@ pub(crate) fn user_folder_of(
     let folder = expand_user_folder(&recorded, &logical_profile, &lookup)
         .and_then(|logical| system.resolve_source_path(&logical));
     match folder {
-        Some(folder) if folder.is_dir() => Some(folder),
+        Some(folder) if system.is_dir(&folder) => Some(folder),
         _ if system.is_offline() => {
             warnings.push(Warning::new(
                 "user_folder_out_of_reach",
@@ -1253,7 +1254,7 @@ pub(crate) fn user_folder_of(
             ));
             None
         }
-        _ => Some(default_folder).filter(|folder| folder.is_dir()),
+        _ => Some(default_folder).filter(|folder| system.is_dir(folder)),
     }
 }
 
@@ -1263,7 +1264,7 @@ fn public_documents_dir(system: &SystemContext) -> Option<PathBuf> {
     system
         .public_dir()
         .map(|base| base.join(DOCUMENTS_FALLBACK))
-        .filter(|path| path.is_dir())
+        .filter(|path| system.is_dir(path))
 }
 
 /// Expand `%VAR%` references using the current process environment. Unknown
@@ -1768,18 +1769,18 @@ fn is_walkable_app_dir(path: &Path, known_base_dirs: &[PathBuf], windows_dir: &P
     path.is_dir()
         && !is_drive_root(path)
         && !path_is_within(path, windows_dir)
-        && !is_known_base_dir(path, known_base_dirs)
+        && !holds_a_known_base_dir(path, known_base_dirs)
 }
 
-pub(crate) fn is_known_base_dir(path: &Path, known_base_dirs: &[PathBuf]) -> bool {
-    let normalized = path.to_string_lossy().to_ascii_lowercase();
-    let normalized = normalized.trim_end_matches('\\');
-    known_base_dirs.iter().any(|base| {
-        base.to_string_lossy()
-            .to_ascii_lowercase()
-            .trim_end_matches('\\')
-            == normalized
-    })
+/// Whether a folder is a known base, or has one inside it, which holds everything that one does: a
+/// profile can be directly in any folder, if the profile list says so. By where it really is too,
+/// since `C:\Users\BOB~1` is someone's whole profile. That looks through a link, so on a drive,
+/// ask only about a path that may be read.
+pub(crate) fn holds_a_known_base_dir(path: &Path, known_base_dirs: &[PathBuf]) -> bool {
+    let real = resolved_location(path);
+    known_base_dirs
+        .iter()
+        .any(|base| path_is_within(base, path) || path_is_within(base, &real))
 }
 
 /// Folders that hold other things side by side. None of them can be an app's own install
@@ -2517,6 +2518,28 @@ mod tests {
     }
 
     #[test]
+    fn a_short_name_or_a_folder_above_one_does_not_make_a_shared_folder_an_apps() -> Result<()> {
+        let base = temp_base()?;
+        let profiles = base.path().join("Profiles");
+        let bob = profiles.join("bob");
+        fs::create_dir_all(&bob).map_err(|error| WinAppMigratorError::io(&bob, error))?;
+        // A link stands in for a short name here. Each is another way to write the same place.
+        let other_name = base.path().join("BOB1");
+        assert!(make_junction(&other_name, &bob));
+        let bases = vec![bob.clone()];
+        assert!(holds_a_known_base_dir(&bob, &bases));
+        assert!(holds_a_known_base_dir(&profiles, &bases));
+        assert!(holds_a_known_base_dir(&other_name, &bases));
+        assert!(!holds_a_known_base_dir(&bob.join("Vendor"), &bases));
+        assert!(!is_walkable_app_dir(
+            &profiles,
+            &bases,
+            Path::new(r"C:\Windows")
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn nothing_past_a_link_on_a_drive_is_looked_at() -> Result<()> {
         let base = temp_base()?;
         let volume = base.path().join("volume");
@@ -2925,14 +2948,14 @@ mod tests {
         let system = SystemContext::live();
         let bases = known_base_dirs(&system);
         for profile in system.user_profiles() {
-            assert!(is_known_base_dir(
+            assert!(holds_a_known_base_dir(
                 &profile.join(r"AppData\Local\Programs\"),
                 &bases
             ));
         }
         for program_files in system.program_files_dirs() {
-            assert!(is_known_base_dir(&program_files, &bases));
-            assert!(is_known_base_dir(
+            assert!(holds_a_known_base_dir(&program_files, &bases));
+            assert!(holds_a_known_base_dir(
                 &program_files.join("Common Files"),
                 &bases
             ));
