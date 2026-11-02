@@ -132,10 +132,17 @@ original path), **User data** / **License** options — shown only when `Package
 or `included_program_data`, and `included_license_data`, are set — and a
 **Dependencies** list.
 
+Before anything is installed, a card lists what the package sets up beyond files: services,
+drivers, scheduled tasks, autostart entries, shortcuts, and `Path` changes, from
+`restore_review::system_changes`, which uses the same review as the install. It also lists what
+was refused. The window says whether the installer itself is signed and by whom, or "Not signed:
+publisher unknown". A package's own publisher name is not evidence of that, so the two are separate.
+
 **Install** and **Preview changes** unpack the package on a worker thread only at that
-point, then run `restore_package`. **Install** hash-checks the package before writing
-anything and verifies the result afterward. **Preview changes** only works out the changes
-and checks no hashes; it lists the first 300, files first. The result appears first in the
+point, then run `restore_package`. **Install** hash-checks each file before writing
+anything and verifies the result afterward. **Preview changes** only works out the changes,
+checking no file hashes beyond the package's own; it lists the first 300, with what reaches
+beyond files first. The result appears first in the
 window, and a clean install offers **Close** and **Open install folder**. Given command-line args it instead runs headlessly
 (`--target-root … --apply`) for automation and the end-to-end test. The stub reuses
 `winappmigrator-ui` for its look.

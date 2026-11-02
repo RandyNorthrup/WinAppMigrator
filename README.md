@@ -47,7 +47,9 @@ services, and runtimes, and packs them into a single `.exe`.
   installs without internet.
 - **Checks its work.** The installer checks its package's hashes before writing anything, then checks
   the files it installed.
-- **Previews first.** See what would change before installing.
+- **Says what it will do.** Before installing, it lists the services, drivers, scheduled tasks, autostart
+  entries, shortcuts, and `Path` changes it sets up, and whether it is signed and by whom. A preview goes
+  further, listing every change.
 
 ## How it works
 
@@ -81,7 +83,7 @@ click **Install**.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/installer-dark.png">
-    <img alt="The installer, showing the install location, restore options, and dependencies" src="docs/images/installer-light.png" width="600">
+    <img alt="The installer, showing the install location, whether it is signed, and what it sets up beyond files" src="docs/images/installer-light.png" width="600">
   </picture>
 </p>
 
@@ -123,7 +125,7 @@ Please read these before relying on it, especially on a one-way trip from a fail
   ProgramData go to their real locations.
 - **Hash checks have limits.** They catch damage, and tampering by anyone who does not also update the
   hashes. A preview checks only the installer's overall hash, not each file, and its window lists the first
-  300 changes, with files first, so on a larger app the registry, service, and task changes are not listed.
+  300 changes, with services, tasks, and shortcuts first, so on a larger app not every file is listed.
 - **An installer leaves out what no app should do.** That includes autostart entries that run something
   it does not install, such as a Run value that goes through `rundll32`. What it leaves out is listed in its
   window, and the rest of the install goes ahead.
@@ -136,8 +138,8 @@ The full list, with planned fixes, is in the [plan](docs/PLAN.md#open-issues-mos
 
 ## Security and signing
 
-- **Only run installers you trust.** An installer runs elevated and does what its package says. Its hash
-  checks catch damage, not tampering.
+- **Only run installers you trust.** An installer runs elevated and installs what its package holds. It
+  refuses what no app should do and lists what it will set up, but only a signature proves who made it.
 - **An installer can contain secrets.** It copies what the app keeps in its folders and registry keys,
   which can include license keys and tokens, even with the License option off. Share one accordingly.
 - **Signing.** Starting with the next release, the app is signed (publisher: Randy Northrup), and each

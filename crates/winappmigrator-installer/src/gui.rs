@@ -4,8 +4,9 @@
 //! hash-checked and its manifest read, without unpacking anything, and the installer's
 //! own file is held open so it cannot be swapped from then on. It then presents
 //! the app, the install location, and — only when they were captured at build time —
-//! checkboxes to restore user data and license data, lists the runtime dependencies
-//! it will install, then unpacks, reinstalls, and hash-verifies on click.
+//! checkboxes to restore user data and license data, lists what it will set up beyond
+//! its files, what it will leave out, whether the installer is signed, and the runtime
+//! dependencies it will install, then unpacks, reinstalls, and hash-verifies on click.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,12 +16,14 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Margin, RichText};
 
+use winappmigrator_core::archive::has_certificate_table;
+use winappmigrator_core::authenticode::read_signature;
 use winappmigrator_core::path_utils::system_root;
 use winappmigrator_core::prerequisites::spec_for_bundle;
 use winappmigrator_core::{
     EmbeddedPackage, PackageManifest, RestoreOptions, RestoreResult, RuntimePrerequisite,
-    RuntimePrerequisiteKind, WarningSeverity, hidden_command, read_embedded_manifest,
-    restore_package,
+    RuntimePrerequisiteKind, SystemChange, SystemChanges, WarningSeverity, hidden_command,
+    read_embedded_manifest, restore_package, system_changes,
 };
 use winappmigrator_ui::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
@@ -32,6 +35,10 @@ const WINDOW_TITLE: &str = "WinAppMigrator Installer";
 const BUSY_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 /// How many logged changes a preview lists before summarizing the rest.
 const MAX_LISTED_CHANGES: usize = 300;
+/// How many things left out are listed, so a package that asks for a great deal cannot
+/// push everything else off the screen.
+const MAX_LISTED_REFUSALS: usize = 20;
+const UNSIGNED_TEXT: &str = "Not signed: publisher unknown";
 
 pub fn run() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
@@ -92,6 +99,8 @@ struct Outcome {
     restore_valid: Option<bool>,
     reboot: bool,
     messages: Vec<(Role, String)>,
+    /// What the package asked for and the rules did not allow.
+    refused: Vec<String>,
 }
 
 impl Outcome {
@@ -103,11 +112,22 @@ impl Outcome {
     }
 }
 
+/// What Windows says about the installer's own signature.
+#[derive(Clone, PartialEq, Eq)]
+enum SignatureState {
+    Checking,
+    Unsigned,
+    Signed(String),
+    /// There is a signature, and it does not hold up. The reason is Windows' own status.
+    Invalid(String),
+}
+
 /// What the check behind the window found.
 enum Loaded {
-    Ready(Arc<EmbeddedPackage>, Box<PackageManifest>),
+    Ready(Arc<EmbeddedPackage>, Box<PackageManifest>, SystemChanges),
     NoPackage,
     Failed(String),
+    Signature(SignatureState),
 }
 
 enum Msg {
@@ -134,6 +154,9 @@ struct InstallerApp {
     restore_user_data: bool,
     restore_license: bool,
     prereqs: Vec<PrereqRow>,
+    /// What the package sets up beyond files, and what it asked for and will not get.
+    changes: SystemChanges,
+    signature: SignatureState,
 
     phase: Phase,
     applied_now: bool,
@@ -161,6 +184,8 @@ impl InstallerApp {
             restore_user_data: false,
             restore_license: false,
             prereqs: Vec::new(),
+            changes: SystemChanges::default(),
+            signature: SignatureState::Checking,
             phase: Phase::Idle,
             applied_now: false,
             detail: String::new(),
@@ -177,8 +202,19 @@ impl InstallerApp {
         self.load_receiver = Some(receiver);
         let ctx = ctx.clone();
         thread::spawn(move || {
-            let _ = sender.send(load_package());
+            let exe = std::env::current_exe();
+            let loaded = match exe.as_deref() {
+                Ok(exe) => load_package(exe),
+                Err(error) => Loaded::Failed(format!("Could not locate the installer: {error}")),
+            };
+            let _ = sender.send(loaded);
             ctx.request_repaint();
+            // Checking a signature can take as long as hashing the file, and the window has
+            // what it needs without waiting for it.
+            if let Ok(exe) = exe.as_deref() {
+                let _ = sender.send(Loaded::Signature(installer_signature(exe)));
+                ctx.request_repaint();
+            }
         });
     }
 
@@ -187,23 +223,23 @@ impl InstallerApp {
             return;
         };
         match receiver.try_recv() {
-            Ok(loaded) => {
-                self.load_receiver = None;
-                self.finish_load(loaded, ctx);
-            }
+            Ok(loaded) => self.finish_load(loaded, ctx),
             Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(BUSY_REPAINT_INTERVAL),
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.load_receiver = None;
-                self.screen = Screen::Failed("The check of the installer stopped.".to_owned());
+                if matches!(self.screen, Screen::Checking) {
+                    self.screen = Screen::Failed("The check of the installer stopped.".to_owned());
+                }
             }
         }
     }
 
     fn finish_load(&mut self, loaded: Loaded, ctx: &egui::Context) {
         match loaded {
-            Loaded::Ready(package, manifest) => {
+            Loaded::Ready(package, manifest, changes) => {
                 self.package = Some(package);
                 self.apply_manifest(&manifest);
+                self.changes = changes;
                 self.screen = Screen::Ready;
                 theme::add_fallback_fonts(
                     ctx,
@@ -218,6 +254,7 @@ impl InstallerApp {
             }
             Loaded::NoPackage => self.screen = Screen::NoPackage,
             Loaded::Failed(reason) => self.screen = Screen::Failed(reason),
+            Loaded::Signature(signature) => self.signature = signature,
         }
     }
 
@@ -351,21 +388,42 @@ struct RestoreChoices {
     restore_license: bool,
 }
 
-/// Hash-check the installer's package and read its manifest. The package stays held open
-/// from here on, so what Install unpacks later is what this checked.
-fn load_package() -> Loaded {
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(error) => return Loaded::Failed(format!("Could not locate the installer: {error}")),
-    };
-    let package = match EmbeddedPackage::open(&exe) {
+/// Hash-check the installer's package, read its manifest, and work out what it would do.
+/// The package stays held open from here on, so what Install unpacks later is what this
+/// checked. A package naming an unsafe path for a file offers nothing to install.
+fn load_package(exe: &Path) -> Loaded {
+    let package = match EmbeddedPackage::open(exe) {
         Ok(Some(package)) => package,
         Ok(None) => return Loaded::NoPackage,
         Err(error) => return Loaded::Failed(format!("Could not read the installer: {error}")),
     };
-    match read_embedded_manifest(&package) {
-        Ok(manifest) => Loaded::Ready(Arc::new(package), Box::new(manifest)),
-        Err(error) => Loaded::Failed(format!("Could not read the installer: {error}")),
+    let manifest = match read_embedded_manifest(&package) {
+        Ok(manifest) => manifest,
+        Err(error) => return Loaded::Failed(format!("Could not read the installer: {error}")),
+    };
+    match system_changes(&manifest) {
+        Ok(changes) => Loaded::Ready(Arc::new(package), Box::new(manifest), changes),
+        Err(error) => Loaded::Failed(format!(
+            "This installer's package asks for something unsafe, so it cannot be used: {error}"
+        )),
+    }
+}
+
+/// What Windows says about the installer file. Most have no signature, which can be seen
+/// at once. A signature takes Windows as long to check as hashing the whole file.
+fn installer_signature(exe: &Path) -> SignatureState {
+    match has_certificate_table(exe) {
+        Ok(false) => SignatureState::Unsigned,
+        Ok(true) => match read_signature(exe) {
+            Ok(signature) if signature.is_valid() => SignatureState::Signed(
+                signature
+                    .signer_name()
+                    .unwrap_or_else(|| "an unnamed publisher".to_owned()),
+            ),
+            Ok(signature) => SignatureState::Invalid(signature.status),
+            Err(reason) => SignatureState::Invalid(reason),
+        },
+        Err(error) => SignatureState::Invalid(error.to_string()),
     }
 }
 
@@ -546,8 +604,9 @@ impl InstallerApp {
         widgets::card_titled(ui, theme, &title, subtitle.as_deref(), |ui| {
             if !source_computer.is_empty() {
                 widgets::kv_row(ui, theme, "Captured from", &source_computer);
-                ui.add_space(SPACE_SM);
             }
+            signature_row(ui, theme, &self.signature);
+            ui.add_space(SPACE_SM);
             widgets::path_field(
                 ui,
                 theme,
@@ -578,6 +637,16 @@ impl InstallerApp {
                 );
             }
         });
+        widgets::section_gap(ui);
+
+        // Above the options, so it is in view next to the Install button.
+        widgets::card_titled(
+            ui,
+            theme,
+            "What this sets up beyond files",
+            Some("All of this is done with administrator rights."),
+            |ui| system_changes_ui(ui, theme, &self.changes),
+        );
         widgets::section_gap(ui);
 
         if self.show_user_data || self.show_license {
@@ -691,6 +760,80 @@ impl InstallerApp {
     }
 }
 
+/// Whether this installer proves who made it. The name a package gives for its publisher
+/// comes from the package and proves nothing, so this is said separately.
+fn signature_row(ui: &mut egui::Ui, theme: &Theme, signature: &SignatureState) {
+    match signature {
+        SignatureState::Checking => {
+            widgets::kv_row(ui, theme, "Installer", "Checking its signature…");
+        }
+        SignatureState::Unsigned => widgets::kv_row(ui, theme, "Installer", UNSIGNED_TEXT),
+        SignatureState::Signed(name) => {
+            widgets::kv_row(ui, theme, "Installer", &format!("Signed by {name}"));
+        }
+        SignatureState::Invalid(reason) => {
+            ui.add_space(SPACE_XS);
+            widgets::notice(
+                ui,
+                theme,
+                Role::Danger,
+                &format!(
+                    "This installer's signature is not valid ({reason}). It may have been changed \
+                     since it was signed."
+                ),
+            );
+        }
+    }
+}
+
+fn system_changes_ui(ui: &mut egui::Ui, theme: &Theme, changes: &SystemChanges) {
+    if changes.changes.is_empty() {
+        widgets::hint(
+            ui,
+            theme,
+            "Nothing: it only copies files and registry settings.",
+        );
+    }
+    for change in &changes.changes {
+        system_change_row(ui, theme, change);
+        ui.add_space(SPACE_XS);
+    }
+    refused_ui(ui, theme, &changes.refused);
+}
+
+fn system_change_row(ui: &mut egui::Ui, theme: &Theme, change: &SystemChange) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(&change.title).size(13.5).color(theme.text));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let role = if change.high_rights {
+                Role::Warning
+            } else {
+                Role::Accent
+            };
+            widgets::status_pill(ui, theme, change.kind.label(), role);
+        });
+    });
+    widgets::hint(ui, theme, &change.detail);
+}
+
+fn refused_ui(ui: &mut egui::Ui, theme: &Theme, refused: &[String]) {
+    for reason in refused.iter().take(MAX_LISTED_REFUSALS) {
+        ui.add_space(SPACE_XS);
+        widgets::notice(ui, theme, Role::Warning, reason);
+    }
+    if refused.len() > MAX_LISTED_REFUSALS {
+        ui.add_space(SPACE_XS);
+        widgets::hint(
+            ui,
+            theme,
+            &format!(
+                "and {} more were left out.",
+                refused.len() - MAX_LISTED_REFUSALS
+            ),
+        );
+    }
+}
+
 fn folder_has_files(folder: &Path) -> bool {
     std::fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_some())
 }
@@ -707,7 +850,12 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome) {
                 ui,
                 theme,
                 Role::Success,
-                "The application was installed and passed its hash check.",
+                if outcome.refused.is_empty() {
+                    "The application was installed and passed its hash check."
+                } else {
+                    "The application was installed and passed its hash check, without what is \
+                     listed as left out below."
+                },
             );
             ui.add_space(SPACE_SM);
         } else if outcome.applied {
@@ -792,6 +940,7 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome) {
             ui.add_space(SPACE_XS);
             widgets::notice(ui, theme, *role, message);
         }
+        refused_ui(ui, theme, &outcome.refused);
         if !outcome.changes.is_empty() {
             ui.add_space(SPACE_SM);
             egui::CollapsingHeader::new(
@@ -875,6 +1024,11 @@ fn outcome_from(result: &RestoreResult, applied: bool) -> Outcome {
         restore_valid,
         reboot,
         messages,
+        refused: result
+            .refused
+            .iter()
+            .map(|refused| refused.message.clone())
+            .collect(),
     }
 }
 
@@ -893,6 +1047,7 @@ mod tests {
     use egui_kittest::kittest::{NodeT, Queryable};
 
     use super::*;
+    use winappmigrator_core::SystemChangeKind;
 
     const PREVIEW_DIR_VARIABLE: &str = "WAM_UI_PREVIEW_DIR";
 
@@ -921,6 +1076,37 @@ mod tests {
                 role: Role::Success,
             },
         ];
+        app.signature = SignatureState::Unsigned;
+        app.changes = SystemChanges {
+            changes: vec![
+                SystemChange {
+                    kind: SystemChangeKind::Service,
+                    title: "Fabrikam Sync Service".to_owned(),
+                    detail: r"Runs FabrikamSync.exe as NT AUTHORITY\LocalService, starts automatic"
+                        .to_owned(),
+                    high_rights: false,
+                },
+                SystemChange {
+                    kind: SystemChangeKind::Autostart,
+                    title: "Fabrikam Tray".to_owned(),
+                    detail: "Runs when you sign in".to_owned(),
+                    high_rights: false,
+                },
+                SystemChange {
+                    kind: SystemChangeKind::Shortcut,
+                    title: "Fabrikam Data Sync".to_owned(),
+                    detail: "Opens Fabrikam.exe, for everyone on this PC".to_owned(),
+                    high_rights: false,
+                },
+                SystemChange {
+                    kind: SystemChangeKind::PathEntry,
+                    title: "Adds to Path".to_owned(),
+                    detail: r"The install folder\bin".to_owned(),
+                    high_rights: false,
+                },
+            ],
+            refused: Vec::new(),
+        };
         app
     }
 
@@ -944,6 +1130,7 @@ mod tests {
             } else {
                 Vec::new()
             },
+            refused: Vec::new(),
         }
     }
 
@@ -997,6 +1184,113 @@ mod tests {
             assert!(harness.query_by_label("User data").is_some());
             preview(&mut harness, &format!("ready-{name}"));
         }
+    }
+
+    #[test]
+    fn what_it_sets_up_beyond_files_is_listed_before_installing() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.changes.changes.push(SystemChange {
+            kind: SystemChangeKind::Driver,
+            title: "FabrikamFlt".to_owned(),
+            detail: "Loads flt.sys into Windows itself".to_owned(),
+            high_rights: true,
+        });
+        let harness = harness_for(app);
+        for label in [
+            "What this sets up beyond files",
+            "Fabrikam Sync Service",
+            "Service",
+            "Starts automatically",
+            "Shortcut",
+            "PATH",
+            "Driver",
+            "FabrikamFlt",
+        ] {
+            assert!(harness.query_by_label(label).is_some(), "{label}");
+        }
+        assert!(
+            harness
+                .query_by_label_contains(r"The install folder\bin")
+                .is_some()
+        );
+        assert!(harness.query_by_label("Install").is_some());
+    }
+
+    #[test]
+    fn a_package_with_nothing_beyond_files_says_so() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.changes = SystemChanges::default();
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .query_by_label_contains("only copies files")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn what_a_package_was_refused_is_listed_before_installing() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.changes.refused = (0..25)
+            .map(|index| {
+                format!("HKLM\\Evil{index} was left out: no app install should change this key.")
+            })
+            .collect();
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .query_by_label_contains("Evil0 was left out")
+                .is_some()
+        );
+        assert!(
+            harness
+                .query_by_label_contains("Evil19 was left out")
+                .is_some()
+        );
+        assert!(
+            harness
+                .query_by_label_contains("Evil20 was left out")
+                .is_none()
+        );
+        assert!(harness.query_by_label_contains("and 5 more").is_some());
+    }
+
+    #[test]
+    fn an_unsigned_installer_says_its_publisher_is_unknown() {
+        let harness = harness_for(sample_installer(ThemeMode::Dark));
+        assert!(harness.query_by_label(UNSIGNED_TEXT).is_some());
+    }
+
+    #[test]
+    fn a_signed_installer_says_by_whom() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.signature = SignatureState::Signed("Fabrikam, Inc.".to_owned());
+        let harness = harness_for(app);
+        assert!(harness.query_by_label("Signed by Fabrikam, Inc.").is_some());
+        assert!(harness.query_by_label(UNSIGNED_TEXT).is_none());
+    }
+
+    #[test]
+    fn a_bad_signature_does_not_pass_for_a_good_one() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.signature = SignatureState::Invalid("HashMismatch".to_owned());
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .query_by_label_contains("is not valid (HashMismatch)")
+                .is_some()
+        );
+        assert!(harness.query_by_label_contains("Signed by").is_none());
+    }
+
+    #[test]
+    fn a_file_with_no_signature_reads_as_unsigned_without_asking_powershell() -> std::io::Result<()>
+    {
+        let folder = tempfile::tempdir()?;
+        let file = folder.path().join("installer.exe");
+        std::fs::write(&file, b"MZ not a real program")?;
+        assert!(installer_signature(&file) == SignatureState::Unsigned);
+        Ok(())
     }
 
     #[test]
@@ -1055,6 +1349,26 @@ mod tests {
                 .is_some()
         );
         preview(&mut harness, "done-dark");
+    }
+
+    #[test]
+    fn a_clean_install_with_refusals_says_so_alongside_the_success() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.phase = Phase::Done;
+        let mut outcome = sample_outcome(true, 0);
+        outcome.refused = vec!["The service Evil was left out: it runs cmd.exe.".to_owned()];
+        app.outcome = Some(outcome);
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .query_by_label_contains("listed as left out")
+                .is_some()
+        );
+        assert!(
+            harness
+                .query_by_label_contains("The service Evil was left out")
+                .is_some()
+        );
     }
 
     #[test]

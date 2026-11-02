@@ -442,7 +442,8 @@ fn capsule(ui: &mut Ui, theme: &Theme, text: &str, color: Color32, dot: bool) {
         .layout_no_wrap(text.to_owned(), theme::regular(12.0), theme.text);
     let dot_space = if dot { DOT_SPACE } else { 0.0 };
     let size = vec2(galley.size().x + PADDING * 2.0 + dot_space, HEIGHT);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    response.widget_info(|| WidgetInfo::labeled(A11yRole::Label, true, text));
     let painter = ui.painter();
     painter.rect(
         rect,

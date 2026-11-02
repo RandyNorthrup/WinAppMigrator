@@ -4,6 +4,10 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **The installer says what it will do.** Before installing, its window lists the services, drivers,
+  scheduled tasks, autostart entries, shortcuts, and `Path` changes the package sets up, what the
+  rules left out, and whether the installer is signed and by whom, or "Not signed: publisher
+  unknown". A preview's list leads with those instead of showing them after thousands of files.
 - **An installer now checks what its package asks for.** A package can come from a hostile or
   odd source drive and nothing authenticates it, so the rules are applied when restoring, not
   just when scanning. What fails is left out, listed, and does not stop the rest of the install.

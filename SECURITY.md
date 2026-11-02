@@ -30,8 +30,9 @@ installer is about to trust, and an honest package reaching too far:
   other than a file the package installs. Which installer runs for a runtime, and how, is compiled
   in, and the file must be signed by Microsoft. What is refused is listed.
 - **The rules do not make a package safe.** A package may still run its own files, as a service
-  with full rights if it asks to. That is what installing an app is. The installer's window lists
-  what it will set up, so read it.
+  with full rights if it asks to. That is what installing an app is. Before anything happens, the
+  installer's window lists the services, drivers, scheduled tasks, autostart entries, shortcuts, and
+  `Path` changes it will set up, what it will leave out, and whether it is signed and by whom. Read it.
 - **While it runs,** its staging folder is writable only by administrators, its own file cannot be
   swapped, and it will not write through a link. Other programs on the PC can still reach an
   install location outside a protected folder, as below.
@@ -53,8 +54,7 @@ the installer stub must never be signed.
 
 ## Known gaps
 
-[docs/PLAN.md](docs/PLAN.md#open-issues-most-important-first) lists open issues, including
-restore-time allowlists.
+[docs/PLAN.md](docs/PLAN.md#open-issues-most-important-first) lists open issues.
 
 An install location outside a protected folder, such as `D:\Apps`, stays writable by other
 programs on the PC. Links are checked just before each file is written, but a program running

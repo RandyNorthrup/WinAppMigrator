@@ -44,6 +44,10 @@ Signer role on it. Anyone else passes their own `-Endpoint`, `-Account`, and
 Sign only installers you built from software you are entitled to redistribute, because your
 name goes on them. Do not offer signing as a service to others.
 
+An installer's window says who signed it, or "Not signed: publisher unknown". Signing is the only
+thing that proves where one came from. The SHA-256 in its footer is checked before anything is read,
+which catches a truncated copy or an edited manifest, but whoever edits a package can update that too.
+
 ## How release signing is set up
 
 Signing uses [Azure Artifact Signing][signing] with no stored password or certificate:

@@ -80,11 +80,11 @@ From the audit of 2026-11-01. Items are removed from this list as they are fixed
 
 **Security and data safety**
 
-4. **The package is not authenticated, and it directs an elevated process.** Its manifest
-   can name any registry key, service, scheduled task, or shortcut, and which prerequisite
-   to run. Hashes sit in the same archive they protect. Enforce app-scoped allowlists when
-   restoring, take prerequisite details from compiled specs, and show persistence items in
-   the preview.
+4. **An unsigned package still cannot be authenticated.** Restore rules limit what a package
+   can ask for, but it can run its own files with full rights, and its hashes travel with it.
+   Only signing a finished installer proves origin. An install location outside a protected
+   folder also stays writable by other programs on the PC, which can race the link checks and
+   change installed files afterward.
 5. **No rollback.** The first copy failure stops the install part-way, and existing files
    are overwritten with no backup.
 6. **Secrets.** All values under an app's registry keys and license files in its install

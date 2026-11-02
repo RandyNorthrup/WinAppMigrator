@@ -490,7 +490,7 @@ from the same review, so verification expects exactly what was allowed. What is 
 in `RestoreResult.refused`, and the rest of the install goes ahead.
 
 Any rule added for a new kind of capture belongs there too. Event log sources, for example, live
-under `SYSTEMCurrentControlSetServicesventLog`, which is refused today because nothing writes it.
+under `SYSTEM\CurrentControlSet\Services\EventLog`, which is refused today because nothing writes it.
 
 ## Known limitations
 
