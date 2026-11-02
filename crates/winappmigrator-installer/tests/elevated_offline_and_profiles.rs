@@ -24,6 +24,8 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use winappmigrator_core::path_utils::{POWERSHELL_UTF8_OUTPUT, signed_in_user};
@@ -327,16 +329,30 @@ fn tree_state(root: &str) -> TestResult<BTreeMap<String, String>> {
         .collect())
 }
 
-/// How many sessions this machine's own file server has taken since it started. It is the server
-/// that counts them, so it is nothing the client or this app has a say in.
-fn sessions_accepted() -> TestResult<u64> {
-    let shown = must("net.exe", &["statistics", "server"])?;
-    let line = shown
-        .lines()
-        .find(|line| line.trim_start().starts_with("Sessions accepted"))
-        .ok_or_else(|| format!("no count of sessions in: {shown}"))?;
-    let count = line.split_whitespace().last().unwrap_or_default();
-    Ok(count.parse()?)
+/// How many connections anything has made to this machine's SMB port since this began to watch it.
+/// A link to `\\\\127.0.0.1\\...` is followed to here, by Windows' own client, whatever made it do
+/// that, and it is this listener that counts them. The runner's Server service is not running, so the
+/// port is free, and no credentials go anywhere. One watcher for the process, since the port is one.
+fn smb_connections() -> TestResult<usize> {
+    static WATCH: OnceLock<Result<Arc<AtomicUsize>, String>> = OnceLock::new();
+    let watch = WATCH.get_or_init(|| {
+        let listener = std::net::TcpListener::bind("127.0.0.1:445").map_err(|error| {
+            format!("something has this machine's SMB port, so it cannot be watched: {error}")
+        })?;
+        let count = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&count);
+        std::thread::spawn(move || {
+            for connection in listener.incoming() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(connection);
+            }
+        });
+        Ok(count)
+    });
+    match watch {
+        Ok(count) => Ok(count.load(Ordering::SeqCst)),
+        Err(reason) => Err(reason.clone().into()),
+    }
 }
 
 /// What is different between two looks at a folder.
@@ -1245,6 +1261,10 @@ fn plant_the_links(paths: &Paths, program: &Path) -> TestResult {
         must("cmd", &["/C", "mklink", "/D", &link, HOST_SHARE])?;
         fs::create_dir(format!(r"\\?\{link}."))?;
     }
+    // The same under `Users` with a space, where the link reads as the real folder until something
+    // is asked for inside it.
+    fs::create_dir(format!(r"{DRIVE_FOLDER}\Users\spaced"))?;
+    std::os::windows::fs::symlink_dir(HOST_SHARE, format!(r"\\?\{DRIVE_FOLDER}\Users\spaced "))?;
     // A store with a real license, and a junction to this machine's marker beside it with its twin.
     fs::write(
         format!(r"{DRIVE_FOLDER}\ProgramData\FlexLM\real.lic"),
@@ -1952,8 +1972,8 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
     let source = ScanSource::offline(DRIVE);
     let before = tree_state(DRIVE_FOLDER)?;
     println!("{} entries on the drive", before.len());
-    let sessions_before = sessions_accepted()?;
-    println!("this machine's server has accepted {sessions_before} sessions");
+    let connections_before = smb_connections()?;
+    println!("connections to this machine's SMB port so far: {connections_before}");
 
     section("List what is on the drive, through the real code");
     let system = SystemContext::open(&source)?;
@@ -2192,24 +2212,14 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
     );
 
     section("No SMB connection was made to where a value or a link pointed");
-    let count_connections = "Import-Module SmbShare; \
-         Get-SmbConnection -ServerName 127.0.0.1 -ErrorAction SilentlyContinue | \
-         Measure-Object | ForEach-Object Count; exit 0";
-    let connections = powershell(count_connections)?;
-    println!("SMB connections to 127.0.0.1: {connections}");
+    let connections_after = smb_connections()?;
+    println!("connections to this machine's SMB port by now: {connections_after}");
     checks.same(
-        "this machine has no connection to its own share",
-        connections.trim(),
-        "0",
+        "none, in all that was read from the drive",
+        connections_after,
+        connections_before,
     );
-    let sessions_after = sessions_accepted()?;
-    println!("this machine's server has accepted {sessions_after} sessions");
-    checks.same(
-        "its server accepted none in all that was read from the drive",
-        sessions_after,
-        sessions_before,
-    );
-    // The same looks find one that really is made, through a link that was left there.
+    // The same look finds one that really is made, through a link that was left there.
     let looked = tool(
         "cmd",
         &[
@@ -2224,13 +2234,12 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
         text(&looked.stdout),
         text(&looked.stderr)
     );
-    let connections = powershell(count_connections)?;
-    let sessions_control = sessions_accepted()?;
-    println!("then, {connections} connections and {sessions_control} sessions accepted");
+    let connections_control = smb_connections()?;
+    println!("then, {connections_control}");
     checks.that(
-        "going through a link on purpose does show, so the two above mean something",
-        looked.status.success() && sessions_control > sessions_after,
-        format!("{sessions_control} after {sessions_after}"),
+        "going through a link on purpose does show, so the count above means something",
+        connections_control > connections_after,
+        format!("{connections_control} after {connections_after}"),
     );
 
     let target = default_install_location(&manifest)
@@ -2869,7 +2878,7 @@ fn what_can_name_another_accounts_folder(
         .to_string_lossy()
         .into_owned();
     let my_profile = PathBuf::from(std::env::var("USERPROFILE")?);
-    let sessions_before = sessions_accepted()?;
+    let connections_before = smb_connections()?;
 
     section("A value in another account's hive that names a share, when the app starts");
     let hive = other_profile.join("NTUSER.DAT").display().to_string();
@@ -2885,9 +2894,9 @@ fn what_can_name_another_accounts_folder(
     let apps = list_installed_apps_from(&SystemContext::live())?;
     println!("{:?}", survey.picker_for(&find_app(&apps, PROFILES_APP)?));
     checks.same(
-        "reading that connected to nothing, by this machine's own server",
-        sessions_accepted()?,
-        sessions_before,
+        "reading that connected to nothing, as this machine's SMB port saw it",
+        smb_connections()?,
+        connections_before,
     );
     edit_hive(&hive, |key| {
         reg_add(
@@ -2934,9 +2943,49 @@ fn what_can_name_another_accounts_folder(
     let holding = files_holding(&package.package_root, "private to theirs")?;
     checks.same("none of that account's data is in it", holding.trim(), "");
     checks.same(
-        "and nothing connected, by this machine's own server",
-        sessions_accepted()?,
-        sessions_before,
+        "and nothing connected, as this machine's SMB port saw it",
+        smb_connections()?,
+        connections_before,
+    );
+    reg_delete_key(entry);
+
+    section("A per-user entry whose location is a folder that is not this account's");
+    let not_mine = r"C:\WAM Not Mine";
+    fs::create_dir_all(not_mine)?;
+    fs::write(format!(r"{not_mine}\secret.txt"), "private to theirs")?;
+    must(
+        "icacls",
+        &[not_mine, "/setowner", "*S-1-5-18", "/T", "/C", "/Q"],
+    )?;
+    println!(
+        "owner: {}",
+        powershell(&format!(
+            "Import-Module Microsoft.PowerShell.Security; (Get-Acl -LiteralPath {}).Owner",
+            quoted(not_mine)
+        ))?
+    );
+    reg_add(entry, Some("DisplayName"), "REG_SZ", "WAM By A Share")?;
+    reg_add(
+        entry,
+        Some("DisplayIcon"),
+        "REG_SZ",
+        &exe.display().to_string(),
+    )?;
+    reg_add(entry, Some("InstallLocation"), "REG_SZ", not_mine)?;
+    let apps = list_installed_apps_from(&SystemContext::live())?;
+    let not_its_own = find_app(&apps, "WAM By A Share")?;
+    println!("it reads as {not_its_own:?}");
+    let package = create_package(&package_options(
+        &not_its_own,
+        &work.join("not mine"),
+        ScanSource::Live,
+        ProfileChoice::Default,
+    ))?;
+    let holding = files_holding(&package.package_root, "private to theirs")?;
+    checks.same(
+        "what is there is not in it, whatever the entry says",
+        holding.trim(),
+        "",
     );
     reg_delete_key(entry);
 
@@ -3213,6 +3262,39 @@ $items = foreach ($task in Get-ScheduledTask) {
 $items | ConvertTo-Json -Depth 4 -Compress
 "#;
 
+/// The commands in a task as `schtasks` writes it. By looking for them, since it writes `]]>` as it
+/// is in text, and a strict parser will not take that. This has no part in what is being tested.
+fn tasks_commands(task: &str, commands: &mut Vec<String>) -> TestResult {
+    let mut rest = task;
+    loop {
+        let start = [rest.find("<Exec>"), rest.find("<Exec ")]
+            .into_iter()
+            .flatten()
+            .min();
+        let Some(start) = start else {
+            return Ok(());
+        };
+        let (action, after) = rest[start..]
+            .split_once("</Exec>")
+            .ok_or("an action that does not end")?;
+        if let Some((_, command)) = action.split_once("<Command>") {
+            let (command, _) = command
+                .split_once("</Command>")
+                .ok_or("a command that does not end")?;
+            commands.push(
+                command
+                    .trim()
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .replace("&amp;", "&"),
+            );
+        }
+        rest = after;
+    }
+}
+
 /// The tasks `schtasks /query /xml` lists, with the commands in each, as it writes them.
 fn tasks_by_schtasks() -> TestResult<BTreeMap<String, Vec<String>>> {
     let shown = powershell(
@@ -3232,23 +3314,8 @@ fn tasks_by_schtasks() -> TestResult<BTreeMap<String, Vec<String>>> {
             break;
         };
         let end = close + "</Task>".len();
-        // It writes `]]>` as it is, in text, which a strict parser will not take.
-        let definition = after[open..end].to_owned();
-        let definition = if definition.contains("<![CDATA[") {
-            definition
-        } else {
-            definition.replace("]]>", "]]&gt;")
-        };
-        let document = roxmltree::Document::parse(&definition)?;
-        let commands = document
-            .descendants()
-            .filter(|node| node.tag_name().name() == "Exec")
-            .filter_map(|exec| {
-                exec.children()
-                    .find(|child| child.tag_name().name() == "Command")
-            })
-            .filter_map(|command| command.text().map(|text| text.trim().to_owned()))
-            .collect();
+        let mut commands = Vec::new();
+        tasks_commands(&after[open..end], &mut commands)?;
         tasks.insert(name.trim().to_owned(), commands);
         rest = &after[end..];
     }
