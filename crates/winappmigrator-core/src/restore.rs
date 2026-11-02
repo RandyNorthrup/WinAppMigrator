@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -18,36 +19,41 @@ use crate::file_discovery::{
     pin_path_below_root, safe_relative_path, split_user_data_relative, write_root_for,
 };
 use crate::hashing::sha256_file;
+use crate::integration_scan::{first_path_in, parse_firewall_rule};
 use crate::journal::{
     Change, ItemKind, Journal, QUIET_FLAG, STAGING_PREFIX, StoredValue, UNINSTALL_FLAG,
     find_backup, lock_state,
 };
 use crate::models::{
     DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry, FileClassification,
-    FileEntry, LicenseArtifact, PackageManifest, RegistryEntry, RegistryHive, RegistryValueKind,
-    RestoreOptions, RestoreResult, RuntimePrerequisite, ServiceEntry, VerificationOptions, Warning,
-    WarningSeverity,
+    FileEntry, FirewallRuleEntry, LicenseArtifact, PackageManifest, RegistryEntry, RegistryHive,
+    RegistryValueKind, RestoreOptions, RestoreResult, RuntimePrerequisite, ServiceEntry,
+    VerificationOptions, Warning, WarningSeverity,
 };
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_TASKS, POWERSHELL_IMPORT_UTILITY,
-    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, path_is_within, system_root,
+    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, path_is_strictly_inside,
+    path_is_within, system_root,
 };
 use crate::prerequisites::{
     PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
 };
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
 use crate::progress::{InstallMonitor, InstallPhase, InstallStep};
+use crate::registry_scan::registry_value_text;
 use crate::registry_target::{
     app_path_entries, environment_registry_target, is_path_variable, merge_path_entries,
     path_contains_entry, read_service_config, registry_hive_name, registry_raw_type, registry_root,
-    registry_value_name, service_image_path,
+    registry_value_name, service_image_path, stored_firewall_rules,
 };
 use crate::restore_policy::{
-    COM_SERVER_KEYS, ServiceAccount, com_class_key, com_server_refusal, existing_service_refusal,
-    existing_task_refusal, is_autostart_entry, is_com_server_entry, is_uninstall_entry_key,
-    restored_value_bytes, restored_value_text, service_image_path_value,
+    COM_SERVER_KEYS, EVENT_LOG_PREFIX, Registration, ServiceAccount, com_class_key,
+    com_server_refusal, existing_service_refusal, existing_task_refusal, firewall_fingerprint,
+    is_autostart_entry, is_com_server_entry, is_uninstall_entry_key, netsh_add_rule_arguments,
+    registration_of, registration_unit_of, restored_value_bytes, restored_value_name,
+    restored_value_text, service_image_path_value, stored_firewall_rule_matches,
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
@@ -85,13 +91,32 @@ const INSTALL_LOCATION_VALUE: &str = "InstallLocation";
 /// Failures found at the moment of installing that are the rules refusing something, and so
 /// are left out like any other refusal rather than failing the install. They depend on what
 /// is on this PC at that moment, so the review before the install could not see them.
-const REFUSALS_FOUND_WHEN_INSTALLING: [&str; 4] = [
+const REFUSALS_FOUND_WHEN_INSTALLING: [&str; 6] = [
     COM_CLASS_EXISTS_CODE,
+    REGISTRATION_EXISTS_CODE,
+    FIREWALL_RULE_EXISTS_CODE,
     "scheduled_task_exists_elsewhere",
     "service_exists_elsewhere",
     "driver_exists_elsewhere",
 ];
 const COM_CLASS_EXISTS_CODE: &str = "registry_com_class_exists";
+const REGISTRATION_EXISTS_CODE: &str = "registration_exists_elsewhere";
+const FIREWALL_RULE_EXISTS_CODE: &str = "firewall_rule_exists";
+const NETSH_EXE: &str = "netsh.exe";
+const SHELL_KEY_SEGMENT: &str = "shell";
+/// What is under `Classes` that is not a type or a protocol, and goes by rules of its own.
+const NOT_TYPES: &[&str] = &[
+    "appid",
+    "applications",
+    "clsid",
+    "interface",
+    "typelib",
+    "wow6432node",
+];
+const OPEN_VERB: &str = "open";
+const EVENT_LOG_KEY: &str = r"SYSTEM\CurrentControlSet\Services\EventLog";
+const EXISTING_IS_SOMETHING_ELSE: &str =
+    "this PC already has this, set to something else, which an install does not take over";
 const CANCELLED_CODE: &str = "install_cancelled";
 const JOURNAL_WRITE_FAILED_CODE: &str = "journal_write_failed";
 /// What PowerShell says can quote its script, on any language of Windows, and a script can hold
@@ -106,6 +131,9 @@ struct Changes {
     drivers: Vec<String>,
     tasks: Vec<String>,
     autostart: Vec<String>,
+    /// What goes into how Windows finds and starts things.
+    registrations: Vec<String>,
+    firewall: Vec<String>,
     shortcuts: Vec<String>,
     environment: Vec<String>,
     prerequisites: Vec<String>,
@@ -121,6 +149,8 @@ impl Changes {
             self.drivers,
             self.tasks,
             self.autostart,
+            self.registrations,
+            self.firewall,
             self.shortcuts,
             self.environment,
             self.prerequisites,
@@ -334,6 +364,7 @@ pub fn restore_package_monitored(
         errors: Vec::new(),
         refused: review.refused.clone(),
         com_classes_left_alone: Vec::new(),
+        registrations_left_alone: Vec::new(),
         cancelled: false,
         app_name: &app_name,
         manifest: &manifest,
@@ -622,6 +653,8 @@ struct Run<'a, 'p> {
     refused: Vec<Warning>,
     /// COM classes that belong to something else on this PC, each with why.
     com_classes_left_alone: Vec<(String, String)>,
+    /// What else this PC has that a package would have taken over.
+    registrations_left_alone: Vec<LeftAlone>,
     cancelled: bool,
 }
 
@@ -637,6 +670,7 @@ impl Run<'_, '_> {
         self.restore_services();
         self.restore_drivers();
         self.restore_registry();
+        self.restore_firewall_rules();
         self.restore_license();
         self.restore_scheduled_tasks();
         self.restore_shortcuts();
@@ -809,6 +843,18 @@ impl Run<'_, '_> {
     /// Before anything is done with a value or key: a new empty key can take over a class by
     /// itself, and a value beside a server can change what it does.
     fn is_left_alone_as_a_com_class(&mut self, entry: &RegistryEntry) -> bool {
+        if self
+            .registrations_left_alone
+            .iter()
+            .any(|left_alone| left_alone.covers(entry))
+        {
+            self.record_failure(registry_warning(
+                REGISTRATION_EXISTS_CODE,
+                entry,
+                EXISTING_IS_SOMETHING_ELSE,
+            ));
+            return true;
+        }
         let Some(class) = com_class_key(&entry.key_path) else {
             return false;
         };
@@ -835,6 +881,8 @@ impl Run<'_, '_> {
                 .copied()
                 .collect();
             self.com_classes_left_alone = com_classes_to_leave_alone(&entries, &review.map);
+            self.registrations_left_alone =
+                registrations_to_leave_alone(&entries, &review.map, &self.com_classes_left_alone);
         }
         for (done, entry) in review.registry.iter().enumerate() {
             if self.stopped() {
@@ -845,6 +893,7 @@ impl Run<'_, '_> {
                 continue;
             }
             let autostart = is_autostart_entry(entry);
+            let registers = registration_of(entry).is_some();
             let Some(journal) = self.journal.as_mut() else {
                 let message = format!(
                     "would restore registry {}\\{} {}",
@@ -854,6 +903,8 @@ impl Run<'_, '_> {
                 );
                 if autostart {
                     self.changes.autostart.push(message);
+                } else if registers {
+                    self.changes.registrations.push(message);
                 } else {
                     self.changes.registry.push(message);
                 }
@@ -866,6 +917,7 @@ impl Run<'_, '_> {
             };
             match apply_registry_entry(journal, entry, self.options.force, &review.map, item) {
                 Ok(message) if autostart => self.changes.autostart.push(message),
+                Ok(message) if registers => self.changes.registrations.push(message),
                 Ok(message) => self.changes.registry.push(message),
                 Err(warning) => self.record_failure(warning),
             }
@@ -877,6 +929,104 @@ impl Run<'_, '_> {
                 "Registry values were restored from the archived structured data with known app paths rewritten to the target root.",
                 None,
             ));
+        }
+    }
+
+    /// Each rule by what it is for, through `netsh`, which is what Windows Firewall itself goes by.
+    /// One already there is left as it is: the same rule needs nothing, and another of the same
+    /// name, way, and program is someone's that this does not change.
+    fn restore_firewall_rules(&mut self) {
+        let review = self.review;
+        for reviewed in &review.firewall_rules {
+            if self.stopped() {
+                return;
+            }
+            let rule = reviewed.entry;
+            let Some(journal) = self.journal.as_mut() else {
+                self.changes.firewall.push(format!(
+                    "would add firewall rule {} for {}",
+                    rule.name,
+                    reviewed.program.display()
+                ));
+                continue;
+            };
+            let failed = |code: &'static str, message: String| {
+                Warning::new(
+                    code,
+                    WarningSeverity::Error,
+                    message,
+                    Some(firewall_rule_item(&rule.name)),
+                )
+            };
+            let stored = match stored_firewall_rules() {
+                Ok(stored) => stored,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => {
+                    self.errors.push(failed(
+                        "firewall_rules_unreadable",
+                        format!("Windows Firewall's rules could not be read: {error}"),
+                    ));
+                    return;
+                }
+            };
+            let fingerprint = firewall_fingerprint(rule);
+            let existing: Vec<FirewallRuleEntry> = stored
+                .iter()
+                .filter(|text| {
+                    stored_firewall_rule_matches(
+                        text,
+                        &rule.name,
+                        &rule.direction,
+                        &reviewed.program,
+                    )
+                })
+                .filter_map(|text| parse_firewall_rule(text))
+                .collect();
+            if existing
+                .iter()
+                .any(|known| firewall_fingerprint(known) == fingerprint)
+            {
+                self.changes
+                    .firewall
+                    .push(format!("firewall rule {} is already there", rule.name));
+                continue;
+            }
+            if !existing.is_empty() {
+                self.record_failure(failed(
+                    FIREWALL_RULE_EXISTS_CODE,
+                    "a rule of this name for this program is already there, set to something \
+                     else, which an install does not change"
+                        .to_owned(),
+                ));
+                continue;
+            }
+            let noted = journal.note(Change::FirewallRule {
+                name: rule.name.trim().to_owned(),
+                direction: rule.direction.clone(),
+                program: reviewed.program.clone(),
+                fingerprint,
+            });
+            if let Err(error) = noted {
+                self.errors
+                    .push(failed(JOURNAL_WRITE_FAILED_CODE, error.to_string()));
+                return;
+            }
+            let added = run_checked(
+                hidden_command(NETSH_EXE).args(netsh_add_rule_arguments(rule, &reviewed.program)),
+                "firewall_rule_add_failed",
+                &firewall_rule_item(&rule.name),
+            );
+            match added {
+                Ok(()) => self.changes.firewall.push(format!(
+                    "added firewall rule {} for {}",
+                    rule.name,
+                    reviewed.program.display()
+                )),
+                Err(warning) => {
+                    self.errors.push(warning);
+                    return;
+                }
+            }
         }
     }
 
@@ -1850,7 +2000,8 @@ fn apply_registry_entry(
         ));
     }
 
-    let value_name = registry_value_name(entry.value_name.as_deref());
+    let value_name = restored_value_name(entry, map);
+    let value_name = value_name.as_ref();
     if !force && key.get_raw_value(value_name).is_ok() {
         return Err(Warning::new(
             "registry_value_exists",
@@ -1946,6 +2097,250 @@ fn com_classes_to_leave_alone(
         }
     }
     left_alone
+}
+
+/// Something this PC has that a package must not change, by the key it is under, and the one value
+/// of it if that is all it is. Comparing goes by a key's normalized name, so a 32-bit view and the
+/// 64-bit view are not taken for different things.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LeftAlone {
+    key: String,
+    value: Option<String>,
+}
+
+impl LeftAlone {
+    fn covers(&self, entry: &RegistryEntry) -> bool {
+        let key = plain_key(&entry.key_path);
+        let under = key
+            .strip_prefix(self.key.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\'));
+        under
+            && self.value.as_deref().is_none_or(|value| {
+                value == registry_value_name(entry.value_name.as_deref()).to_ascii_lowercase()
+            })
+    }
+}
+
+/// A key in lowercase, without what makes it the 32-bit view.
+fn plain_key(key_path: &str) -> String {
+    key_path
+        .split('\\')
+        .filter(|part| !part.is_empty() && !part.eq_ignore_ascii_case("wow6432node"))
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join("\\")
+}
+
+/// What an entry would change on this PC, if it is set to something else there, in either hive it
+/// would count for. One that is what would be written, or runs from the install location, as an
+/// earlier install of this at the same place would, is no one else's.
+fn differs_on_this_pc(entry: &RegistryEntry, map: &RestoreMap) -> bool {
+    let Ok(written) = registry_value_from_entry(entry, map) else {
+        return true;
+    };
+    let name = restored_value_name(entry, map);
+    let written = registry_value_text(&written);
+    hives_it_counts_for(&entry.hive).into_iter().any(|hive| {
+        let live = registry_root(hive)
+            .and_then(|root| root.open_subkey(&entry.key_path))
+            .and_then(|key| key.get_raw_value(name.as_ref()));
+        live.is_ok_and(|live| {
+            let live = registry_value_text(&live);
+            !live.trim().eq_ignore_ascii_case(written.trim())
+                && !runs_from_the_install_location(&live, map)
+        })
+    })
+}
+
+/// A per-user registration wins over the machine's, so a new one takes that over just as surely.
+fn hives_it_counts_for(hive: &RegistryHive) -> Vec<&'static RegistryHive> {
+    match hive {
+        RegistryHive::CurrentUser => {
+            vec![&RegistryHive::CurrentUser, &RegistryHive::LocalMachine]
+        }
+        RegistryHive::LocalMachine => vec![&RegistryHive::LocalMachine],
+    }
+}
+
+fn runs_from_the_install_location(text: &str, map: &RestoreMap) -> bool {
+    first_path_in(text).is_some_and(|path| path_is_strictly_inside(&path, map.target_root()))
+}
+
+/// The command something opens with on this PC, in a hive it counts for.
+fn live_open_command(hive: &RegistryHive, class_key: &str) -> Option<String> {
+    let classes = registry_root(hive).ok()?.open_subkey(class_key).ok()?;
+    let shell = classes.open_subkey(SHELL_KEY_SEGMENT).ok();
+    let default_verb = shell
+        .as_ref()
+        .and_then(|shell| shell.get_value::<String, _>("").ok())
+        .unwrap_or_default();
+    [default_verb.as_str(), OPEN_VERB]
+        .iter()
+        .filter(|verb| !verb.trim().is_empty())
+        .find_map(|verb| {
+            let shell = shell.as_ref()?;
+            shell
+                .open_subkey(format!(r"{}\command", verb.trim()))
+                .ok()?
+                .get_value::<String, _>("")
+                .ok()
+                .filter(|command| !command.trim().is_empty())
+        })
+}
+
+/// What in a package this PC already has as something else's: everything a package could take from
+/// another program by setting it, with the rest of the install going ahead. `--force` does not
+/// change this. It reads the live registry, and only for what a package asks for.
+fn registrations_to_leave_alone(
+    entries: &[&RegistryEntry],
+    map: &RestoreMap,
+    com_left_alone: &[(String, String)],
+) -> Vec<LeftAlone> {
+    let mut left_alone: Vec<LeftAlone> = Vec::new();
+    let mut leave = |key: String, value: Option<String>| {
+        let item = LeftAlone { key, value };
+        if !left_alone.contains(&item) {
+            left_alone.push(item);
+        }
+    };
+    // All of something goes together, and an event log source is by its name in any log.
+    let mut units: BTreeMap<String, Vec<&RegistryEntry>> = BTreeMap::new();
+    for entry in entries {
+        if com_class_key(&entry.key_path).is_none()
+            && let Some(unit) = registration_unit_of(entry)
+        {
+            units.entry(unit).or_default().push(entry);
+        }
+    }
+    for (unit, of_it) in &units {
+        let source_elsewhere = unit
+            .strip_prefix(EVENT_LOG_PREFIX)
+            .and_then(|rest| rest.split_once('\\'))
+            .is_some_and(|(log, source)| event_source_is_in_another_log(log, source));
+        if source_elsewhere || of_it.iter().any(|entry| differs_on_this_pc(entry, map)) {
+            leave(unit.clone(), None);
+        }
+    }
+    // A type or protocol, by what opening one runs. What is not the install location's is someone's.
+    // A verb is only its own, when that is all the package adds to the type.
+    let mut classes: BTreeMap<String, Vec<&RegistryEntry>> = BTreeMap::new();
+    for entry in entries {
+        let key = plain_key(&entry.key_path);
+        if let Some(rest) = key.strip_prefix(r"software\classes\") {
+            let top = rest.split('\\').next().unwrap_or_default();
+            if !NOT_TYPES.contains(&top) {
+                classes.entry(top.to_owned()).or_default().push(entry);
+            }
+        }
+    }
+    for (class, of_it) in &classes {
+        let class_key = format!(r"software\classes\{class}");
+        let is_extension = class.starts_with('.');
+        let shell_prefix = format!(r"{class_key}\shell\");
+        let open_prefix = format!(r"{class_key}\shell\{OPEN_VERB}");
+        let says_what_it_is = of_it.iter().any(|entry| {
+            let key = plain_key(&entry.key_path);
+            if key.starts_with(&open_prefix) {
+                return true;
+            }
+            !key.starts_with(&shell_prefix)
+                && key != format!(r"{class_key}\shell")
+                && !key.contains(r"\shellex")
+                && !key.contains(r"\openwithprogids")
+                && !key.contains(r"\openwithlist")
+                && !is_extension
+        });
+        let hives: BTreeSet<&'static str> = of_it
+            .iter()
+            .flat_map(|entry| hives_it_counts_for(&entry.hive))
+            .map(|hive| registry_hive_name(hive))
+            .collect();
+        let live_runs_elsewhere = hives.iter().any(|name| {
+            let hive = if *name == registry_hive_name(&RegistryHive::LocalMachine) {
+                &RegistryHive::LocalMachine
+            } else {
+                &RegistryHive::CurrentUser
+            };
+            live_open_command(hive, &class_key)
+                .is_some_and(|command| !runs_from_the_install_location(&command, map))
+        });
+        if says_what_it_is && live_runs_elsewhere {
+            leave(class_key.clone(), None);
+            continue;
+        }
+        for entry in of_it {
+            let key = plain_key(&entry.key_path);
+            if !differs_on_this_pc(entry, map) {
+                continue;
+            }
+            if let Some(rest) = key.strip_prefix(shell_prefix.as_str()) {
+                let verb = rest.split('\\').next().unwrap_or_default();
+                leave(format!("{shell_prefix}{verb}"), None);
+            } else if key.contains(r"\shellex") {
+                leave(key, None);
+            } else if is_extension {
+                // What it says it opens with may be a type of the install location's.
+                let current = registry_root(&entry.hive)
+                    .and_then(|root| root.open_subkey(&class_key))
+                    .and_then(|key| key.get_value::<String, _>(""))
+                    .unwrap_or_default();
+                let its_own = live_open_command(
+                    &entry.hive,
+                    &format!(r"software\classes\{}", current.trim()),
+                )
+                .is_some_and(|command| runs_from_the_install_location(&command, map));
+                if !its_own {
+                    leave(
+                        key,
+                        Some(registry_value_name(entry.value_name.as_deref()).to_ascii_lowercase()),
+                    );
+                }
+            } else {
+                leave(class_key.clone(), None);
+            }
+        }
+    }
+    // Lists where one name means one thing. A class left alone takes what names it with it.
+    for entry in entries {
+        match registration_of(entry) {
+            Some(Registration::ShellExtension { class, .. }) => {
+                let is_left_alone = class.as_deref().is_some_and(|class| {
+                    com_left_alone
+                        .iter()
+                        .any(|(key, _)| key.rsplit('\\').next() == Some(class))
+                });
+                if is_left_alone || differs_on_this_pc(entry, map) {
+                    leave(plain_key(&entry.key_path), None);
+                }
+            }
+            Some(Registration::Font { .. } | Registration::DefaultAppsEntry { .. })
+                if differs_on_this_pc(entry, map) =>
+            {
+                leave(
+                    plain_key(&entry.key_path),
+                    Some(registry_value_name(entry.value_name.as_deref()).to_ascii_lowercase()),
+                );
+            }
+            _ => {}
+        }
+    }
+    left_alone
+}
+
+/// A source's name means one thing wherever it is, so one in another log counts as being there.
+fn event_source_is_in_another_log(log: &str, source: &str) -> bool {
+    let Ok(logs) =
+        winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE).open_subkey(EVENT_LOG_KEY)
+    else {
+        return false;
+    };
+    logs.enum_keys().flatten().any(|other| {
+        !other.eq_ignore_ascii_case(log) && logs.open_subkey(format!(r"{other}\{source}")).is_ok()
+    })
+}
+
+fn firewall_rule_item(name: &str) -> String {
+    format!("The firewall rule {name}")
 }
 
 fn apply_environment_variable(
@@ -2651,6 +3046,7 @@ fn restore_requires_admin(review: &ReviewedPackage<'_>) -> bool {
         || !review.services.is_empty()
         || !review.drivers.is_empty()
         || !review.tasks.is_empty()
+        || !review.firewall_rules.is_empty()
         || review
             .shortcuts
             .iter()

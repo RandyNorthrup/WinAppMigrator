@@ -1163,6 +1163,7 @@ pub enum VerificationCategory {
     Driver,
     ScheduledTask,
     Shortcut,
+    FirewallRule,
     Prerequisite,
     License,
     /// Something the package asked for that the restore rules did not allow.

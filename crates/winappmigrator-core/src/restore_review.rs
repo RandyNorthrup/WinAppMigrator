@@ -5,7 +5,7 @@
 //! been chosen, so a few checks that depend on what is already at that location can only
 //! happen once one has: a task or COM class that belongs to something else is refused then.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use winreg::RegKey;
@@ -19,10 +19,11 @@ use crate::file_discovery::{
     user_data_base, user_folder_place,
 };
 use crate::journal::machine_state_root;
+use crate::license_scan::is_license_env_var;
 use crate::models::{
-    DriverEntry, EnvironmentScope, EnvironmentVariableEntry, FileClassification, FileEntry,
-    LicenseArtifact, PackageManifest, RegistryEntry, RegistryHive, ScheduledTaskEntry,
-    ServiceEntry, Warning, WarningSeverity,
+    CertificateEntry, DriverEntry, EnvironmentScope, EnvironmentVariableEntry, FileClassification,
+    FileEntry, FirewallRuleEntry, LeftOutItem, LicenseArtifact, PackageManifest, RegistryEntry,
+    RegistryHive, ScheduledTaskEntry, ServiceEntry, Warning, WarningSeverity,
 };
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
@@ -31,11 +32,12 @@ use crate::path_utils::{
 };
 use crate::registry_target::{app_path_entries, is_path_variable, service_image_path};
 use crate::restore_policy::{
-    KnownFolders, SERVICES_PREFIX, ServiceAccount, ShortcutPlacement, driver_destination,
-    environment_refusal, existing_service_refusal, install_location_refusal,
-    install_placement_refusal, is_autostart_entry, is_source_uninstall_value,
-    is_uninstall_entry_key, is_valid_service_name, license_destination, read_task_definition,
-    registry_refusal, shortcut_placement, task_refusal,
+    KnownFolders, PackageRegistrations, Registration, SERVICES_PREFIX, ServiceAccount,
+    ShortcutPlacement, driver_destination, environment_refusal, existing_service_refusal,
+    firewall_refusal, install_location_refusal, install_placement_refusal, is_autostart_entry,
+    is_source_uninstall_value, is_uninstall_entry_key, is_valid_service_name, license_destination,
+    read_task_definition, registered_value_refusal, registration_of, registration_refusal,
+    registration_unit_of, registry_refusal, shortcut_placement, task_refusal,
 };
 use crate::system_context::SystemContext;
 
@@ -107,6 +109,12 @@ pub(crate) struct UninstallKey {
     pub has_display_name: bool,
 }
 
+/// A firewall rule that is allowed, with the program it is for on this PC.
+pub(crate) struct ReviewedFirewallRule<'a> {
+    pub entry: &'a FirewallRuleEntry,
+    pub program: PathBuf,
+}
+
 /// What a package may do on this PC, and what it was refused.
 pub(crate) struct ReviewedPackage<'a> {
     pub map: RestoreMap,
@@ -124,11 +132,15 @@ pub(crate) struct ReviewedPackage<'a> {
     pub tasks: Vec<ReviewedTask<'a>>,
     pub shortcuts: Vec<ReviewedShortcut>,
     pub environment: Vec<&'a EnvironmentVariableEntry>,
+    pub firewall_rules: Vec<ReviewedFirewallRule<'a>>,
+    /// What the package registers, as a whole.
+    pub registrations: PackageRegistrations,
     /// What the package asked for and will not be given.
     pub refused: Vec<Warning>,
     /// Problems with the package short of a refusal.
     pub warnings: Vec<Warning>,
     user_account_known: bool,
+    manifest: &'a PackageManifest,
 }
 
 impl<'a> ReviewedPackage<'a> {
@@ -174,10 +186,13 @@ impl<'a> ReviewedPackage<'a> {
             tasks: Vec::new(),
             shortcuts: Vec::new(),
             environment: Vec::new(),
+            firewall_rules: Vec::new(),
+            registrations: PackageRegistrations::default(),
             refused: Vec::new(),
             warnings: Vec::new(),
             user_account_known: folders.user_account_known,
             map,
+            manifest,
         };
         if let Some(note) = folders.user_account_note.as_deref()
             && package_has_something_per_user(manifest)
@@ -196,12 +211,25 @@ impl<'a> ReviewedPackage<'a> {
         review.review_services(manifest, expand, existing_service);
         review.review_drivers(manifest, existing_service);
         let restored_services = review.restored_service_names();
-        review.review_registry(manifest, &restored_services, expand);
+        let refused_registrations = review.review_registrations(
+            manifest,
+            restored_license_entries(manifest, restore_license),
+            &restored_services,
+            expand,
+        );
+        review.review_registry(manifest, &restored_services, &refused_registrations, expand);
+        review.review_firewall_rules(manifest, &restored_services);
         review.review_tasks(manifest, expand);
         review.review_shortcuts(manifest, folders);
-        review.review_environment(manifest);
+        review.review_environment(manifest, restore_license);
         if restore_license {
-            review.review_license(manifest, restore_user_data, &restored_services, expand);
+            review.review_license(
+                manifest,
+                restore_user_data,
+                &restored_services,
+                &refused_registrations,
+                expand,
+            );
         }
         Ok(review)
     }
@@ -436,10 +464,94 @@ impl<'a> ReviewedPackage<'a> {
             .collect()
     }
 
+    /// What the package registers, as a whole, with what of it must all be left out and why.
+    /// A class means nothing without its server, and so on, and where a package asks for one part
+    /// of something it cannot have, it gets none of it.
+    fn review_registrations(
+        &mut self,
+        manifest: &'a PackageManifest,
+        license_entries: &'a [RegistryEntry],
+        restored_services: &HashSet<String>,
+        expand: &dyn Fn(&str) -> String,
+    ) -> HashMap<String, String> {
+        let entries: Vec<&RegistryEntry> = manifest
+            .registry_keys_exported
+            .iter()
+            .chain(license_entries)
+            .collect();
+        let destinations: Vec<&Path> = self
+            .files
+            .iter()
+            .filter_map(|file| self.map.destination_of(&file.original_path))
+            .collect();
+        self.registrations = PackageRegistrations::of(&entries, &destinations, &self.map, expand);
+        let mut units: HashMap<String, Vec<&RegistryEntry>> = HashMap::new();
+        for entry in &entries {
+            if let Some(unit) = registration_unit_of(entry) {
+                units.entry(unit).or_default().push(entry);
+            }
+        }
+        units
+            .into_iter()
+            .filter_map(|(unit, of_it)| {
+                registration_refusal(
+                    &unit,
+                    &of_it,
+                    &self.map,
+                    &self.registrations,
+                    restored_services,
+                    expand,
+                    system_root(),
+                )
+                .map(|reason| (unit, reason))
+            })
+            .collect()
+    }
+
+    /// Why this must be left out, if so, by every rule there is. All that is restored as a value
+    /// comes through here, by whichever list it came in.
+    fn registry_problem(
+        &self,
+        entry: &RegistryEntry,
+        restored_services: &HashSet<String>,
+        refused_registrations: &HashMap<String, String>,
+        expand: &dyn Fn(&str) -> String,
+    ) -> Option<String> {
+        registry_refusal(entry, &self.map, restored_services, expand)
+            .or_else(|| {
+                registration_unit_of(entry)
+                    .and_then(|unit| refused_registrations.get(&unit).cloned())
+            })
+            .or_else(|| registered_value_refusal(entry, &self.map, &self.registrations, expand))
+    }
+
+    fn review_firewall_rules(
+        &mut self,
+        manifest: &'a PackageManifest,
+        restored_services: &HashSet<String>,
+    ) {
+        for rule in &manifest.firewall_rules_detected {
+            let item = format!("The firewall rule {}", rule.name);
+            if let Some(reason) = firewall_refusal(rule, &self.map, restored_services) {
+                self.refuse(item, reason);
+                continue;
+            }
+            let Some(program) = self.map.destination_of(&rule.program) else {
+                continue;
+            };
+            let program = program.to_path_buf();
+            self.firewall_rules.push(ReviewedFirewallRule {
+                entry: rule,
+                program,
+            });
+        }
+    }
+
     fn review_registry(
         &mut self,
         manifest: &'a PackageManifest,
         restored_services: &HashSet<String>,
+        refused_registrations: &HashMap<String, String>,
         expand: &dyn Fn(&str) -> String,
     ) {
         for entry in &manifest.registry_keys_exported {
@@ -449,7 +561,7 @@ impl<'a> ReviewedPackage<'a> {
             ) {
                 continue;
             }
-            match registry_refusal(entry, &self.map, restored_services, expand) {
+            match self.registry_problem(entry, restored_services, refused_registrations, expand) {
                 None => {
                     self.note_uninstall_entry(entry);
                     // How to remove it from the PC it came from. The install sets its own.
@@ -488,6 +600,7 @@ impl<'a> ReviewedPackage<'a> {
         manifest: &'a PackageManifest,
         restore_user_data: bool,
         restored_services: &HashSet<String>,
+        refused_registrations: &HashMap<String, String>,
         expand: &dyn Fn(&str) -> String,
     ) {
         for artifact in manifest
@@ -535,7 +648,7 @@ impl<'a> ReviewedPackage<'a> {
             ) {
                 continue;
             }
-            match registry_refusal(entry, &self.map, restored_services, expand) {
+            match self.registry_problem(entry, restored_services, refused_registrations, expand) {
                 None if is_source_uninstall_value(entry) => {}
                 None => self.license_registry.push(entry),
                 Some(reason) => self.refuse(registry_item(entry), reason),
@@ -623,8 +736,12 @@ impl<'a> ReviewedPackage<'a> {
         }
     }
 
-    fn review_environment(&mut self, manifest: &'a PackageManifest) {
+    fn review_environment(&mut self, manifest: &'a PackageManifest, restore_license: bool) {
         for variable in &manifest.environment_variables_detected {
+            // It says where a license is, so it goes by what the license goes by.
+            if !restore_license && is_license_env_var(&variable.name) {
+                continue;
+            }
             if self.left_out_for_no_account(
                 variable.scope == EnvironmentScope::User,
                 format!("The environment variable {}", variable.name),
@@ -641,6 +758,15 @@ impl<'a> ReviewedPackage<'a> {
                 }
             }
         }
+    }
+}
+
+/// What of a package is restored as license values, for what the rest goes by.
+fn restored_license_entries(manifest: &PackageManifest, restore_license: bool) -> &[RegistryEntry] {
+    if restore_license {
+        &manifest.license_registry_entries
+    } else {
+        &[]
     }
 }
 
@@ -758,6 +884,24 @@ pub enum SystemChangeKind {
     Shortcut,
     PathEntry,
     EnvironmentVariable,
+    /// Loads into Explorer, for everyone who uses it.
+    ShellExtension,
+    /// A command on the menu of files or folders.
+    ShellCommand,
+    /// Links of a kind open with the app.
+    UrlProtocol,
+    FileType,
+    /// Windows starts it when another program asks for one of its classes.
+    ComServer,
+    FirewallRule,
+    EventLogSource,
+    Font,
+    OdbcDriver,
+    OdbcSource,
+    CompatibilitySetting,
+    DefaultApps,
+    /// A name for the program that Run and other programs can find it by.
+    ProgramName,
 }
 
 impl SystemChangeKind {
@@ -771,6 +915,19 @@ impl SystemChangeKind {
             Self::Shortcut => "Shortcut",
             Self::PathEntry => "PATH",
             Self::EnvironmentVariable => "Environment variable",
+            Self::ShellExtension => "Shell extension",
+            Self::ShellCommand => "Menu command",
+            Self::UrlProtocol => "Link type",
+            Self::FileType => "File type",
+            Self::ComServer => "COM",
+            Self::FirewallRule => "Firewall rule",
+            Self::EventLogSource => "Event log source",
+            Self::Font => "Font",
+            Self::OdbcDriver => "ODBC driver",
+            Self::OdbcSource => "ODBC data source",
+            Self::CompatibilitySetting => "Compatibility setting",
+            Self::DefaultApps => "Default apps",
+            Self::ProgramName => "Program name",
         }
     }
 }
@@ -988,6 +1145,17 @@ fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
             });
         }
     }
+    changes.extend(describe_firewall_rules(&review.firewall_rules));
+    changes.extend(describe_registrations(review));
+    let mut notes: Vec<String> = review
+        .warnings
+        .iter()
+        .filter(|warning| {
+            warning.code == USER_ACCOUNT_NOTE_CODE || warning.code == USER_FOLDER_ELSEWHERE_CODE
+        })
+        .map(|warning| warning.message.clone())
+        .collect();
+    notes.extend(notes_on_what_is_left_out(review.manifest));
     SystemChanges {
         changes,
         refused: review
@@ -995,15 +1163,268 @@ fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
             .iter()
             .map(|warning| warning.message.clone())
             .collect(),
-        notes: review
-            .warnings
-            .iter()
-            .filter(|warning| {
-                warning.code == USER_ACCOUNT_NOTE_CODE || warning.code == USER_FOLDER_ELSEWHERE_CODE
-            })
-            .map(|warning| warning.message.clone())
-            .collect(),
+        notes,
     }
+}
+
+fn describe_firewall_rules(rules: &[ReviewedFirewallRule<'_>]) -> Vec<SystemChange> {
+    rules
+        .iter()
+        .map(|rule| {
+            let entry = rule.entry;
+            let is_in = entry.direction.eq_ignore_ascii_case("in");
+            let allows = entry.action.eq_ignore_ascii_case("allow");
+            let verb = if allows { "Allows" } else { "Blocks" };
+            let way = if is_in { "incoming" } else { "outgoing" };
+            let ports = if entry.local_ports.is_empty() {
+                "connections".to_owned()
+            } else {
+                format!("connections on {}", entry.local_ports.join(", "))
+            };
+            let profiles = if entry.profiles.is_empty() {
+                "every network".to_owned()
+            } else {
+                format!("{} networks", entry.profiles.join(", "))
+            };
+            SystemChange {
+                kind: SystemChangeKind::FirewallRule,
+                title: entry.name.clone(),
+                detail: format!(
+                    "{verb} {way} {ports} for {}, on {profiles}",
+                    file_name_text(&rule.program)
+                ),
+                high_rights: is_in && allows,
+            }
+        })
+        .collect()
+}
+
+/// What the package registers, with no more than a line for each thing, however many values or
+/// classes it takes.
+fn describe_registrations(review: &ReviewedPackage<'_>) -> Vec<SystemChange> {
+    let mut changes = Vec::new();
+    let mut listed: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut classes_by_server: BTreeMap<String, usize> = BTreeMap::new();
+    let mut support = (0_usize, 0_usize, 0_usize);
+    let mut settings = 0_usize;
+    let server_of = |class: Option<&str>| {
+        class
+            .and_then(|class| review.registrations.server_of_class(class))
+            .map_or_else(|| "a file it installs".to_owned(), str::to_owned)
+    };
+    let everyone_or_you = |entry: &RegistryEntry| match entry.hive {
+        RegistryHive::LocalMachine => "for everyone on this PC",
+        RegistryHive::CurrentUser => "for you",
+    };
+    for entry in review.registry.iter().chain(&review.license_registry) {
+        let Some(registration) = registration_of(entry) else {
+            continue;
+        };
+        let (kind, title, detail, high_rights) = match registration {
+            Registration::ShellExtension { name, class } => (
+                SystemChangeKind::ShellExtension,
+                name,
+                format!(
+                    "Loads {} into Explorer, {}",
+                    server_of(class.as_deref()),
+                    everyone_or_you(entry)
+                ),
+                true,
+            ),
+            Registration::ShellCommand { on, verb } => (
+                SystemChangeKind::ShellCommand,
+                verb,
+                format!(
+                    "Adds a command to the menu of {on}, {}",
+                    everyone_or_you(entry)
+                ),
+                false,
+            ),
+            Registration::UrlProtocol { name } => (
+                SystemChangeKind::UrlProtocol,
+                format!("{name}:"),
+                format!(
+                    "Links of this kind open with the app, {}",
+                    everyone_or_you(entry)
+                ),
+                false,
+            ),
+            Registration::FileType { extension } => (
+                SystemChangeKind::FileType,
+                extension,
+                format!(
+                    "Files of this type open with the app, {}",
+                    everyone_or_you(entry)
+                ),
+                false,
+            ),
+            Registration::ComClass { class } => {
+                *classes_by_server
+                    .entry(server_of(Some(&class)))
+                    .or_default() += 1;
+                continue;
+            }
+            Registration::TypeLibrary => {
+                support.0 += 1;
+                continue;
+            }
+            Registration::Interface => {
+                support.1 += 1;
+                continue;
+            }
+            Registration::AppId => {
+                support.2 += 1;
+                continue;
+            }
+            Registration::EventLogSource { log, source } => (
+                SystemChangeKind::EventLogSource,
+                source,
+                format!("Can write to the {log} log, with messages from its own files"),
+                false,
+            ),
+            Registration::Font { name } => (
+                SystemChangeKind::Font,
+                name,
+                format!(
+                    "Loads from the install folder when you sign in, {}",
+                    everyone_or_you(entry)
+                ),
+                false,
+            ),
+            Registration::OdbcDriver { name } => (
+                SystemChangeKind::OdbcDriver,
+                name,
+                "Loads into programs that use ODBC to reach a database".to_owned(),
+                true,
+            ),
+            Registration::OdbcSource { name } => (
+                SystemChangeKind::OdbcSource,
+                name,
+                format!("A database connection, {}", everyone_or_you(entry)),
+                false,
+            ),
+            Registration::CompatibilitySetting => {
+                settings += 1;
+                continue;
+            }
+            Registration::DefaultAppsEntry { name } => (
+                SystemChangeKind::DefaultApps,
+                name,
+                "Can be chosen in Default apps. Nothing is changed to it".to_owned(),
+                false,
+            ),
+            Registration::ProgramName { name } => (
+                SystemChangeKind::ProgramName,
+                name,
+                format!(
+                    "Run and other programs can find it by this name, {}",
+                    everyone_or_you(entry)
+                ),
+                false,
+            ),
+        };
+        if listed.insert((kind.label().to_owned(), title.clone())) {
+            changes.push(SystemChange {
+                kind,
+                title,
+                detail,
+                high_rights,
+            });
+        }
+    }
+    for (server, count) in classes_by_server {
+        changes.push(SystemChange {
+            kind: SystemChangeKind::ComServer,
+            title: format!("COM in {server}"),
+            detail: format!("{count} settings of the classes other programs can start"),
+            high_rights: false,
+        });
+    }
+    let (libraries, interfaces, app_ids) = support;
+    if libraries + interfaces + app_ids > 0 {
+        changes.push(SystemChange {
+            kind: SystemChangeKind::ComServer,
+            title: "COM type libraries, interfaces, and AppIDs".to_owned(),
+            detail: format!(
+                "{libraries} and {interfaces} and {app_ids} settings of each, which go with its classes"
+            ),
+            high_rights: false,
+        });
+    }
+    if settings > 0 {
+        changes.push(SystemChange {
+            kind: SystemChangeKind::CompatibilitySetting,
+            title: "How its programs start".to_owned(),
+            detail: format!("{settings} compatibility settings for programs it installs"),
+            high_rights: false,
+        });
+    }
+    changes
+}
+
+/// How many names to put in a sentence. The rest are in the report in the package.
+const MOST_NAMES_IN_A_NOTE: usize = 8;
+
+fn some_names(names: Vec<String>) -> String {
+    let total = names.len();
+    let mut shown: Vec<String> = names.into_iter().take(MOST_NAMES_IN_A_NOTE).collect();
+    if total > shown.len() {
+        shown.push(format!("and {} more", total - shown.len()));
+    }
+    shown.join(", ")
+}
+
+fn names_of_left_out(items: &[LeftOutItem]) -> String {
+    some_names(items.iter().map(|item| item.name.clone()).collect())
+}
+
+/// What a person ought to know is not coming, and why. Certificates are only ever this: which to
+/// trust is for them to decide.
+fn notes_on_what_is_left_out(manifest: &PackageManifest) -> Vec<String> {
+    let mut notes = Vec::new();
+    if !manifest.secrets_left_out.is_empty() {
+        notes.push(format!(
+            "Not in this installer, because they look like credentials: {}. What is on this PC \
+             of them stays as it is, and you may have to enter them again.",
+            names_of_left_out(&manifest.secrets_left_out)
+        ));
+    }
+    if !manifest.licenses_left_out.is_empty() {
+        notes.push(format!(
+            "Not in this installer, because the License option was off when it was built: {}.",
+            names_of_left_out(&manifest.licenses_left_out)
+        ));
+    }
+    if !manifest.certificates_reported.is_empty() {
+        notes.push(format!(
+            "The app seems to rely on certificates that were trusted on its PC, and they are not \
+             installed: {}. Whether to trust them here is for you to decide.",
+            some_names(
+                manifest
+                    .certificates_reported
+                    .iter()
+                    .map(certificate_label)
+                    .collect()
+            )
+        ));
+    }
+    if !manifest.fonts_reported.is_empty() {
+        notes.push(format!(
+            "These fonts go by the app's name, and nothing says they are its own, so they are not \
+             installed: {}.",
+            some_names(manifest.fonts_reported.clone())
+        ));
+    }
+    notes
+}
+
+fn certificate_label(certificate: &CertificateEntry) -> String {
+    let name = if certificate.subject.is_empty() {
+        &certificate.thumbprint
+    } else {
+        &certificate.subject
+    };
+    format!("{name} in {}", certificate.store)
 }
 
 fn file_name_text(path: &Path) -> String {
@@ -1017,8 +1438,8 @@ fn file_name_text(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::models::{
-        DriverKind, EnvironmentScope, FileClassification, LicenseArtifactKind, LicenseFramework,
-        MatchConfidence, RegistryValueKind, ShortcutEntry, TransferableHint,
+        DriverKind, EnvironmentScope, FileClassification, FirewallRuleEntry, LicenseArtifactKind,
+        LicenseFramework, MatchConfidence, RegistryValueKind, ShortcutEntry, TransferableHint,
     };
 
     const SOURCE: &str = r"C:\Program Files\Acme";
@@ -2017,6 +2438,272 @@ mod tests {
             vec![service("AcmeSync", r"C:\Program Files\Acme\bin\svc.exe")];
         let changes = system_changes(&manifest)?;
         assert_eq!(changes.changes.len(), 1);
+        Ok(())
+    }
+
+    // ---- What goes into how Windows finds and starts things -------------------------------
+
+    const ACME_CLASS: &str = "{5a7e6e0c-e2e0-4000-8000-000000000001}";
+    const MACHINE: RegistryHive = RegistryHive::LocalMachine;
+
+    fn with_integrations() -> PackageManifest {
+        let mut manifest = acme_manifest();
+        manifest.file_inventory.push(file(r"bin\shell.dll"));
+        let server = format!(r"{SOURCE}\bin\shell.dll");
+        let exe = format!(r"{SOURCE}\acme.exe");
+        manifest.registry_keys_exported = vec![
+            value(
+                MACHINE,
+                &format!(r"Software\Classes\CLSID\{ACME_CLASS}\InprocServer32"),
+                "(Default)",
+                &server,
+            ),
+            value(
+                MACHINE,
+                r"Software\Classes\*\shellex\ContextMenuHandlers\Acme",
+                "(Default)",
+                ACME_CLASS,
+            ),
+            value(
+                MACHINE,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved",
+                ACME_CLASS,
+                "Acme menu",
+            ),
+            value(MACHINE, r"Software\Classes\acme", "URL Protocol", ""),
+            value(
+                MACHINE,
+                r"Software\Classes\acme\shell\open\command",
+                "(Default)",
+                &format!("\"{exe}\" \"%1\""),
+            ),
+            value(MACHINE, r"Software\Classes\.acme", "(Default)", "Acme.File"),
+            value(
+                MACHINE,
+                r"SYSTEM\CurrentControlSet\Services\EventLog\Application\Acme",
+                "EventMessageFile",
+                &server,
+            ),
+            value(
+                MACHINE,
+                r"Software\Microsoft\Windows NT\CurrentVersion\Fonts",
+                "Acme (TrueType)",
+                &server,
+            ),
+            value(
+                MACHINE,
+                r"Software\ODBC\ODBCINST.INI\Acme Driver",
+                "Driver",
+                &server,
+            ),
+            value(
+                MACHINE,
+                r"Software\ODBC\ODBC.INI\Acme DB",
+                "Driver",
+                &server,
+            ),
+            value(
+                MACHINE,
+                r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+                &exe,
+                "~ RUNASADMIN",
+            ),
+            value(
+                MACHINE,
+                r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\acme.exe",
+                "(Default)",
+                &exe,
+            ),
+        ];
+        manifest.firewall_rules_detected = vec![FirewallRuleEntry {
+            name: "Acme Web".to_owned(),
+            description: None,
+            direction: "In".to_owned(),
+            action: "Allow".to_owned(),
+            enabled: true,
+            program: PathBuf::from(exe),
+            service: None,
+            protocol: Some("6".to_owned()),
+            local_ports: vec!["80".to_owned()],
+            remote_ports: Vec::new(),
+            local_addresses: Vec::new(),
+            remote_addresses: Vec::new(),
+            profiles: Vec::new(),
+            not_carried: Vec::new(),
+        }];
+        manifest
+    }
+
+    #[test]
+    fn everything_a_package_registers_is_in_what_a_person_is_asked_about() -> Result<()> {
+        let manifest = with_integrations();
+        let reviewed = review(&manifest)?;
+        assert!(reviewed.refused.is_empty(), "{:?}", reviewed.refused);
+        let changes = describe(&reviewed, Path::new(TARGET)).changes;
+        let kinds: Vec<SystemChangeKind> = changes.iter().map(|change| change.kind).collect();
+        for wanted in [
+            SystemChangeKind::ShellExtension,
+            SystemChangeKind::UrlProtocol,
+            SystemChangeKind::FileType,
+            SystemChangeKind::ComServer,
+            SystemChangeKind::FirewallRule,
+            SystemChangeKind::EventLogSource,
+            SystemChangeKind::Font,
+            SystemChangeKind::OdbcDriver,
+            SystemChangeKind::OdbcSource,
+            SystemChangeKind::CompatibilitySetting,
+            SystemChangeKind::ProgramName,
+        ] {
+            assert!(kinds.contains(&wanted), "{wanted:?} in {changes:?}");
+        }
+        let extension = changes
+            .iter()
+            .find(|change| change.kind == SystemChangeKind::ShellExtension);
+        assert!(
+            extension
+                .is_some_and(|change| change.high_rights && change.detail.contains("shell.dll")),
+            "{extension:?}"
+        );
+        let rule = changes
+            .iter()
+            .find(|change| change.kind == SystemChangeKind::FirewallRule);
+        assert!(
+            rule.is_some_and(|change| change.high_rights && change.detail.contains("80")),
+            "{rule:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_part_of_something_that_cannot_be_had_takes_all_of_it_and_what_names_it() -> Result<()> {
+        let mut manifest = with_integrations();
+        // Its server is somewhere else, so all of this class goes, and the extension that loads it.
+        for entry in &mut manifest.registry_keys_exported {
+            if entry.key_path.ends_with("InprocServer32") {
+                entry.value_data = Some(r"\\server\share\evil.dll".to_owned());
+            }
+        }
+        let reviewed = review(&manifest)?;
+        let kept: Vec<&str> = reviewed
+            .registry
+            .iter()
+            .map(|entry| entry.key_path.as_str())
+            .collect();
+        assert!(!kept.iter().any(|key| key.contains("CLSID")), "{kept:?}");
+        assert!(!kept.iter().any(|key| key.contains("shellex")), "{kept:?}");
+        assert!(!kept.iter().any(|key| key.contains("Approved")), "{kept:?}");
+        assert!(
+            kept.iter().any(|key| key.contains(r"Classes\acme")),
+            "{kept:?}"
+        );
+        assert_eq!(reviewed.refused.len(), 3, "{:?}", reviewed.refused);
+        Ok(())
+    }
+
+    #[test]
+    fn a_license_value_cannot_get_past_what_any_other_value_goes_by() -> Result<()> {
+        let mut manifest = acme_manifest();
+        manifest.license_registry_entries = vec![value(
+            RegistryHive::CurrentUser,
+            r"Software\Classes\*\shellex\ContextMenuHandlers\Evil",
+            "(Default)",
+            "{5a7e6e0c-e2e0-4000-8000-00000000dead}",
+        )];
+        let reviewed = review(&manifest)?;
+        assert!(reviewed.license_registry.is_empty());
+        assert_eq!(reviewed.refused.len(), 1, "{:?}", reviewed.refused);
+        Ok(())
+    }
+
+    #[test]
+    fn a_firewall_rule_that_cannot_be_had_is_said_and_others_go_ahead() -> Result<()> {
+        let mut manifest = with_integrations();
+        let good = manifest.firewall_rules_detected[0].clone();
+        manifest.firewall_rules_detected.push(FirewallRuleEntry {
+            name: "Every program".to_owned(),
+            program: PathBuf::new(),
+            ..good.clone()
+        });
+        manifest.firewall_rules_detected.push(FirewallRuleEntry {
+            name: "Not installed".to_owned(),
+            program: PathBuf::from(r"C:\Windows\System32\svchost.exe"),
+            ..good
+        });
+        let reviewed = review(&manifest)?;
+        assert_eq!(reviewed.firewall_rules.len(), 1);
+        assert_eq!(
+            reviewed.firewall_rules[0].program,
+            PathBuf::from(r"D:\Apps\Acme\acme.exe")
+        );
+        let refused: Vec<&str> = reviewed
+            .refused
+            .iter()
+            .map(|item| item.message.as_str())
+            .collect();
+        assert_eq!(refused.len(), 2, "{refused:?}");
+        assert!(refused.iter().any(|item| item.contains("Every program")));
+        assert!(refused.iter().any(|item| item.contains("Not installed")));
+        Ok(())
+    }
+
+    #[test]
+    fn a_person_is_told_what_was_left_out_by_name_and_never_what_it_held() {
+        let mut manifest = empty_manifest();
+        manifest.secrets_left_out = vec![LeftOutItem {
+            name: r"HKLM\Software\Acme\ApiKey".to_owned(),
+            why: "it looks like a credential".to_owned(),
+        }];
+        manifest.licenses_left_out = vec![LeftOutItem {
+            name: r"C:\Program Files\Acme\license.lic".to_owned(),
+            why: "the License option is off".to_owned(),
+        }];
+        manifest.certificates_reported = vec![CertificateEntry {
+            store: "ROOT".to_owned(),
+            hive: RegistryHive::LocalMachine,
+            thumbprint: "ABC".to_owned(),
+            subject: "CN=Acme Root".to_owned(),
+            why: "named for it".to_owned(),
+        }];
+        manifest.fonts_reported = vec!["Acme Icons (TrueType)".to_owned()];
+        let notes = notes_on_what_is_left_out(&manifest);
+        assert_eq!(notes.len(), 4, "{notes:?}");
+        assert!(notes[0].contains("ApiKey"), "{}", notes[0]);
+        assert!(notes[1].contains("license.lic"), "{}", notes[1]);
+        assert!(notes[2].contains("CN=Acme Root in ROOT"), "{}", notes[2]);
+        assert!(notes[3].contains("Acme Icons"), "{}", notes[3]);
+    }
+
+    #[test]
+    fn a_long_list_of_names_says_how_many_more_there_are() {
+        let names: Vec<String> = (0..MOST_NAMES_IN_A_NOTE + 3)
+            .map(|number| number.to_string())
+            .collect();
+        assert!(some_names(names).ends_with("and 3 more"));
+        assert_eq!(some_names(vec!["a".to_owned(), "b".to_owned()]), "a, b");
+    }
+
+    #[test]
+    fn with_no_license_to_be_restored_the_variable_that_says_where_it_is_stays_out() -> Result<()> {
+        let mut manifest = empty_manifest();
+        manifest.environment_variables_detected = vec![EnvironmentVariableEntry {
+            scope: EnvironmentScope::Machine,
+            name: "ACME_LICENSE_FILE".to_owned(),
+            value: format!(r"{SOURCE}\license.lic"),
+            value_kind: crate::models::RegistryValueKind::String,
+            requires_admin: true,
+            confidence: crate::models::MatchConfidence::High,
+        }];
+        let with_it = ReviewedPackage::with_folders(
+            &manifest,
+            Path::new(TARGET),
+            false,
+            false,
+            &folders(),
+            &|text| text.to_owned(),
+            &|_| Ok(None),
+        )?;
+        assert!(with_it.environment.is_empty());
+        assert_eq!(review(&manifest)?.environment.len(), 1);
         Ok(())
     }
 }

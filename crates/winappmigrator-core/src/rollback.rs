@@ -57,12 +57,16 @@ use crate::privilege::{confirm_protected_folder, hold_folder, hold_real_folder, 
 use crate::progress::{InstallMonitor, InstallPhase, InstallStep};
 use crate::registry_target::{
     environment_location, registry_hive_name, remove_path_entries, service_image_path,
+    stored_firewall_rules,
 };
 use crate::restore::{
     SC_EXE, encode_utf16_nul, make_replaceable, register_task_script, run_checked,
     run_powershell_script, sc_start_type, write_partial_copy, write_task_definition,
 };
 use crate::restore_policy::{ServiceAccount, existing_task_refusal, image_path_matches};
+use crate::restore_policy::{
+    firewall_fingerprint, netsh_delete_rule_arguments, stored_firewall_rule_matches,
+};
 use crate::task_scan::live_task_xml;
 
 const STOP_SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -445,6 +449,12 @@ impl Undoer<'_> {
                 prior_xml.as_deref(),
                 written_xml.as_deref(),
             ),
+            Change::FirewallRule {
+                name,
+                direction,
+                program,
+                fingerprint,
+            } => self.undo_firewall_rule(name, direction, program, fingerprint),
             Change::Prerequisite { name } => self.report.left_behind.push(format!(
                 "{name} was installed, or may have been, and stays, because other programs may \
                  be using it."
@@ -1096,6 +1106,54 @@ impl Undoer<'_> {
                 "The service {name} ran as {account}. Its password is not kept, so set its \
                  account again in Services."
             ));
+        }
+    }
+
+    /// Take out a rule this install added. One that says something else by now is someone's, unless
+    /// the install failed just now, and a rule of the same name for anything else is not touched.
+    fn undo_firewall_rule(
+        &mut self,
+        name: &str,
+        direction: &str,
+        program: &Path,
+        fingerprint: &str,
+    ) {
+        let label = format!("The firewall rule {name}");
+        let stored = match stored_firewall_rules() {
+            Ok(stored) => stored,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                self.failed(format!("{label} could not be read: {error}."));
+                return;
+            }
+        };
+        let found: Vec<&String> = stored
+            .iter()
+            .filter(|rule| stored_firewall_rule_matches(rule, name, direction, program))
+            .collect();
+        if found.is_empty() {
+            return;
+        }
+        let as_it_was = found.iter().any(|rule| {
+            crate::integration_scan::parse_firewall_rule(rule)
+                .is_some_and(|rule| firewall_fingerprint(&rule) == fingerprint)
+        });
+        if !as_it_was && !matches!(self.mode, UndoMode::Rollback) {
+            self.note_kept_text(&program.display().to_string());
+            self.kept(format!(
+                "{label} stays, because it has changed since it was installed."
+            ));
+            return;
+        }
+        let deleted = hidden_command("netsh.exe")
+            .args(netsh_delete_rule_arguments(name, direction, program))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match deleted {
+            Ok(status) if status.success() => self.undone(format!("Removed {label}")),
+            Ok(status) => self.failed(format!("{label} could not be removed: {status}.")),
+            Err(error) => self.failed(format!("{label} could not be removed: {error}.")),
         }
     }
 

@@ -116,6 +116,20 @@ pub(crate) fn service_object_name(service_name: &str) -> Option<String> {
         .ok()
 }
 
+const FIREWALL_RULES_KEY: &str =
+    r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules";
+
+/// Every rule Windows Firewall has stored on this PC, as it stores them. `netsh` says what it has in
+/// the language of the PC, and this is the same in all of them.
+pub(crate) fn stored_firewall_rules() -> std::io::Result<Vec<String>> {
+    let key = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(FIREWALL_RULES_KEY)?;
+    Ok(key
+        .enum_values()
+        .flatten()
+        .map(|(_, value)| crate::registry_scan::registry_value_text(&value))
+        .collect())
+}
+
 /// `Path` and `PSModulePath` are shared with everything else on the machine, so they are
 /// merged entry by entry instead of being replaced with the source machine's value.
 pub(crate) fn is_path_variable(name: &str) -> bool {

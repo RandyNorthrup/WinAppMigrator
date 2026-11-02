@@ -22,12 +22,12 @@ use crate::path_utils::{
 use crate::prerequisites::{is_present, spec_for_bundle};
 use crate::registry_target::{
     app_path_entries, environment_registry_target, is_path_variable, path_contains_entry,
-    registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
-    service_object_name,
+    registry_hive_name, registry_raw_type, registry_root, service_image_path, service_object_name,
+    stored_firewall_rules,
 };
 use crate::restore_policy::{
     ServiceAccount, image_path_matches, paths_equal, read_task_definition, restored_value_bytes,
-    restored_value_text,
+    restored_value_name, restored_value_text, stored_firewall_rule_matches,
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedLicense, ReviewedPackage, ReviewedService, ReviewedShortcut,
@@ -273,6 +273,7 @@ fn verify_restored_target(
     );
     verify_registry_entries(review.registry.iter().copied(), &review.map, items, errors);
     verify_environment_variables(&review.environment, target_root, &review.map, items, errors);
+    verify_firewall_rules(&review, items, errors);
     verify_services(&review.services, &review.map, items, warnings, errors);
     verify_drivers(&review, items, warnings, errors);
     verify_scheduled_tasks(&review.tasks, items, warnings, errors);
@@ -762,8 +763,8 @@ fn verify_registry_entry(
         ));
     }
 
-    let value_name = registry_value_name(entry.value_name.as_deref());
-    let actual = key.get_raw_value(value_name).map_err(|error| {
+    let value_name = restored_value_name(entry, map);
+    let actual = key.get_raw_value(value_name.as_ref()).map_err(|error| {
         registry_warning(
             "verification_registry_value_missing",
             entry,
@@ -784,6 +785,47 @@ fn verify_registry_entry(
             "Registry value does not match archived data.",
             Some(registry_entry_name(entry)),
         ))
+    }
+}
+
+/// Each rule by what Windows Firewall has stored. What it says it has in the PC's language.
+fn verify_firewall_rules(
+    review: &ReviewedPackage<'_>,
+    items: &mut Vec<VerificationItem>,
+    errors: &mut Vec<Warning>,
+) {
+    if review.firewall_rules.is_empty() {
+        return;
+    }
+    let stored = stored_firewall_rules().unwrap_or_default();
+    for reviewed in &review.firewall_rules {
+        let rule = reviewed.entry;
+        let name = format!("The firewall rule {}", rule.name);
+        let there = stored.iter().any(|text| {
+            stored_firewall_rule_matches(text, &rule.name, &rule.direction, &reviewed.program)
+        });
+        if there {
+            items.push(passed_item(
+                VerificationCategory::FirewallRule,
+                name.clone(),
+                "Windows Firewall has this rule.",
+                Some(name),
+            ));
+        } else {
+            let message = "Windows Firewall does not have this rule.";
+            errors.push(Warning::new(
+                "verification_firewall_rule_missing",
+                WarningSeverity::Error,
+                message,
+                Some(name.clone()),
+            ));
+            items.push(failed_item(
+                VerificationCategory::FirewallRule,
+                name.clone(),
+                message,
+                Some(name),
+            ));
+        }
     }
 }
 

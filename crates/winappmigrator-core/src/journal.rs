@@ -261,6 +261,15 @@ pub enum Change {
         task_name: String,
         xml: String,
     },
+    /// A rule about to be added to Windows Firewall. What identifies it is known before it is
+    /// added, so what was cut off right after can still be found.
+    FirewallRule {
+        name: String,
+        direction: String,
+        program: PathBuf,
+        /// What it does, for telling whether it is still as it was added.
+        fingerprint: String,
+    },
     /// A runtime about to be installed. It may then be in use by anything, so it is only
     /// reported.
     Prerequisite {

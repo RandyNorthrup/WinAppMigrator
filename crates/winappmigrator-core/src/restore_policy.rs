@@ -9,14 +9,20 @@
 //! The rules are written to let a real app's own items through: a service or Run key that
 //! belongs to the app must keep working.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf, Prefix};
 
 use crate::errors::Result;
 use crate::file_discovery::{
     has_reserved_device_name, is_reserved_device_name, restore_destination, safe_relative_path,
 };
-use crate::models::{DriverEntry, RegistryEntry, RegistryHive, RegistryValueKind};
+use crate::integration_scan::{
+    EVENT_LOG_FILE_VALUES, EVENT_LOG_OTHER_VALUES, ODBC_DRIVER_LIST, ODBC_SOURCE_LIST,
+    first_path_in, parse_firewall_rule,
+};
+use crate::models::{
+    DriverEntry, FirewallRuleEntry, RegistryEntry, RegistryHive, RegistryValueKind,
+};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     is_drive_root, path_has_extension, path_is_strictly_inside, path_is_within, sanitize_filename,
@@ -307,6 +313,9 @@ const REFUSED_SOFTWARE_KEYS: &[&str] = &[
     r"software\microsoft\windows\currentversion\explorer\shellexecutehooks",
     r"software\microsoft\windows\currentversion\explorer\browser helper objects",
     r"software\microsoft\windows\currentversion\explorer\sharedtaskscheduler",
+    // What stops an extension loading, and what Explorer remembers about those it has.
+    r"software\microsoft\windows\currentversion\shell extensions\blocked",
+    r"software\microsoft\windows\currentversion\shell extensions\cached",
     r"software\microsoft\command processor",
     r"software\microsoft\netsh",
     r"software\microsoft\windows defender",
@@ -370,6 +379,8 @@ const SHARED_CLASSES: &[&str] = &[
     "folder",
     "http",
     "https",
+    "libraryfolder",
+    r"libraryfolder\background",
 ];
 const OPEN_WITH_PREFIX: &str = "openwith";
 /// `Folder\shell\open` decides what opening any folder runs.
@@ -395,6 +406,80 @@ pub(crate) const COM_SERVER_KEYS: &[&str] = &[
 ];
 const CLSID_PREFIX: &str = r"software\classes\clsid\";
 pub(crate) const SERVICES_PREFIX: &str = r"system\currentcontrolset\services\";
+pub(crate) const EVENT_LOG_PREFIX: &str = r"system\currentcontrolset\services\eventlog\";
+/// Who wrote to this one is what an auditor goes by. Windows would not let an app do it anyway.
+const SECURITY_LOG: &str = "security";
+const INTERFACE_PREFIX: &str = r"software\classes\interface\";
+const TYPE_LIBRARY_PREFIX: &str = r"software\classes\typelib\";
+const APP_ID_PREFIX: &str = r"software\classes\appid\";
+const ODBC_DRIVERS_KEY: &str = r"software\odbc\odbcinst.ini";
+const ODBC_SOURCES_KEY: &str = r"software\odbc\odbc.ini";
+const FONTS_KEY: &str = r"software\microsoft\windows nt\currentversion\fonts";
+const COMPATIBILITY_LAYERS_KEY: &str =
+    r"software\microsoft\windows nt\currentversion\appcompatflags\layers";
+const ICON_OVERLAYS_KEY: &str =
+    r"software\microsoft\windows\currentversion\explorer\shelliconoverlayidentifiers";
+const APPROVED_EXTENSIONS_KEY: &str =
+    r"software\microsoft\windows\currentversion\shell extensions\approved";
+const NAMESPACE_KEYS: &[&str] = &[
+    r"software\microsoft\windows\currentversion\explorer\desktop\namespace",
+    r"software\microsoft\windows\currentversion\explorer\mycomputer\namespace",
+];
+const REGISTERED_APPLICATIONS_KEY: &str = r"software\registeredapplications";
+const CLIENTS_KEY: &str = r"software\clients";
+const SHELL_EXTENSIONS_SEGMENT: &str = r"\shellex";
+const OPEN_COMMAND_TAIL: &str = r"\command";
+const SHELL_SEGMENT: &str = r"\shell\";
+const URL_PROTOCOL_VALUE: &str = "url protocol";
+/// A class's own values that can make it something else's.
+const COM_REDIRECT_KEYS: &[&str] = &["treatas", "autotreatas"];
+/// What makes a call to an interface go through a type library, which any app's can use.
+const AUTOMATION_MARSHALERS: &[&str] = &[
+    "{00020420-0000-0000-c000-000000000046}",
+    "{00020424-0000-0000-c000-000000000046}",
+];
+const PROXY_STUB_KEYS: &[&str] = &["proxystubclsid32", "proxystubclsid"];
+const TYPE_LIBRARY_BUILDS: &[&str] = &["win32", "win64", "arm64"];
+const VERB_HANDLER_VALUES: &[&str] = &["explorercommandhandler", "delegateexecute"];
+/// Protocols that are not any one app's. Any app can be the one that opens them, and what a page
+/// on the web can ask for is what these open. See [`class_command_refusal`].
+const SHARED_PROTOCOLS: &[&str] = &[
+    "about",
+    "callto",
+    "file",
+    "ftp",
+    "ftps",
+    "http",
+    "https",
+    "javascript",
+    "ldap",
+    "mailto",
+    "news",
+    "nntp",
+    "res",
+    "sms",
+    "snews",
+    "ssh",
+    "tel",
+    "telnet",
+];
+const INTERACTIVE_USER: &str = "interactive user";
+const APP_ID_RUN_AS_VALUE: &str = "runas";
+const APP_ID_SURROGATE_VALUE: &str = "dllsurrogate";
+const APP_ID_SERVICE_VALUE: &str = "localservice";
+const APP_ID_LINK_VALUE: &str = "appid";
+/// What makes a class run somewhere else than this PC.
+const APP_ID_REMOTE_VALUES: &[&str] = &["remoteservername", "activateatstorage"];
+const ODBC_DRIVER_FILE_VALUES: &[&str] = &["driver", "setup"];
+/// A rule asks for nothing more than this of what is in it, and what is passed to `netsh` as one
+/// word goes by it, so that what a package says cannot be read as another option.
+const FIREWALL_DIRECTIONS: &[&str] = &["in", "out"];
+const FIREWALL_ACTIONS: &[&str] = &["allow", "block"];
+const FIREWALL_PROFILES: &[&str] = &["domain", "private", "public"];
+const FIREWALL_RULE_NAME_LIMIT: usize = 200;
+/// `netsh` reads this name as every rule on the PC, for a delete.
+const FIREWALL_RESERVED_NAME: &str = "all";
+const FIREWALL_DESCRIPTION_LIMIT: usize = 1024;
 /// What a package may write for a service it restores. The rest of a service's key, such
 /// as its `ImagePath` and account, is set through `sc.exe` and these rules.
 const SERVICE_SUBKEYS: &[&str] = &["parameters", "instances"];
@@ -800,6 +885,9 @@ fn system_key_refusal(
     if key_is_within(key, ENVIRONMENT_KEY) {
         return Some("environment variables are restored by their own rules".to_owned());
     }
+    if let Some(rest) = key.strip_prefix(EVENT_LOG_PREFIX) {
+        return event_log_value_refusal(rest, entry, map, expand);
+    }
     let Some(rest) = key.strip_prefix(SERVICES_PREFIX) else {
         return Some("no app install should change this key".to_owned());
     };
@@ -823,6 +911,1019 @@ fn system_key_refusal(
         }
     }
     None
+}
+
+/// Under `EventLog`, only a source's own values. A log's key says where that log is kept and who
+/// may read it. Every file a source takes its messages from has to be one this package installs,
+/// since whatever reads the log loads them. Whether it has one at all, and whether one of that name
+/// is on this PC, is asked of the whole source.
+fn event_log_value_refusal(
+    rest: &str,
+    entry: &RegistryEntry,
+    map: &RestoreMap,
+    expand: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    let mut parts = rest.split('\\');
+    let (Some(log), Some(_source), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Some("only an event log source's own values can be restored".to_owned());
+    };
+    if log == SECURITY_LOG {
+        return Some("no app writes to the Security log".to_owned());
+    }
+    let name = entry
+        .value_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if EVENT_LOG_FILE_VALUES
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(&name))
+    {
+        let files = expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default()));
+        return files
+            .split(';')
+            .map(str::trim)
+            .any(|file| !map.is_restored_file(Path::new(file)))
+            .then(|| {
+                "its messages would come from a file this package does not install".to_owned()
+            });
+    }
+    (!EVENT_LOG_OTHER_VALUES
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(&name)))
+    .then(|| "only an event log source's own values can be restored".to_owned())
+}
+
+/// What a whole package says about what it registers, for what one entry has to go by.
+#[derive(Debug, Clone, Default)]
+pub struct PackageRegistrations {
+    /// COM classes, by lowercase id, whose server is a file this package installs.
+    classes: HashSet<String>,
+    /// Which of its files each runs, for saying so.
+    class_servers: HashMap<String, String>,
+    type_libraries: HashSet<String>,
+    odbc_drivers: HashSet<String>,
+    odbc_sources: HashSet<String>,
+    /// The lowercase name of every file this package installs, which `AppID\<name>` goes by.
+    file_names: HashSet<String>,
+    /// Classes that say they are a URL protocol, by lowercase name.
+    url_protocols: HashSet<String>,
+    /// Classes that open with a file this package installs, by lowercase name.
+    classes_that_run_it: HashSet<String>,
+    /// Every key the package writes to, and all those above them, for what names one of them.
+    keys: HashSet<String>,
+}
+
+impl PackageRegistrations {
+    pub fn of(
+        entries: &[&RegistryEntry],
+        file_destinations: &[&Path],
+        map: &RestoreMap,
+        expand: &dyn Fn(&str) -> String,
+    ) -> Self {
+        let mut known = Self {
+            file_names: file_destinations
+                .iter()
+                .filter_map(|path| path.file_name())
+                .map(|name| name.to_string_lossy().to_ascii_lowercase())
+                .collect(),
+            ..Self::default()
+        };
+        for entry in entries {
+            let key = normalized_key(&entry.key_path);
+            let mut above = key.as_str();
+            loop {
+                known.keys.insert(above.to_owned());
+                match above.rsplit_once('\\') {
+                    Some((parent, _)) => above = parent,
+                    None => break,
+                }
+            }
+            let name = entry.value_name.as_deref().unwrap_or_default();
+            if let Some(class) = key.strip_prefix(CLASSES_PREFIX)
+                && name.eq_ignore_ascii_case(URL_PROTOCOL_VALUE)
+                && !class.contains('\\')
+            {
+                known.url_protocols.insert(class.to_owned());
+            }
+            if let Some(class) = key.strip_prefix(CLASSES_PREFIX)
+                && class.contains(SHELL_SEGMENT)
+                && class.ends_with(OPEN_COMMAND_TAIL)
+                && is_default_value(entry.value_name.as_deref())
+                && command_runs_restored_file(
+                    &expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default())),
+                    map,
+                )
+            {
+                known
+                    .classes_that_run_it
+                    .insert(class.split('\\').next().unwrap_or_default().to_owned());
+            }
+            if let Some(rest) = key.strip_prefix(CLSID_PREFIX)
+                && let Some(file) = restored_server_of(rest, entry, map, expand)
+            {
+                let class = rest.split('\\').next().unwrap_or_default().to_owned();
+                known.classes.insert(class.clone());
+                known.class_servers.entry(class).or_insert(file);
+            }
+            if let Some(rest) = key.strip_prefix(TYPE_LIBRARY_PREFIX)
+                && restored_type_library_file(rest, entry, map, expand)
+            {
+                known
+                    .type_libraries
+                    .insert(rest.split('\\').next().unwrap_or_default().to_owned());
+            }
+            if let Some(rest) = key.strip_prefix(&format!(r"{ODBC_DRIVERS_KEY}\"))
+                && !rest.contains('\\')
+                && name.eq_ignore_ascii_case(ODBC_DRIVER_FILE_VALUES[0])
+                && odbc_file_is_restored(entry, map, expand)
+            {
+                known.odbc_drivers.insert(rest.to_owned());
+            }
+            if let Some(rest) = key.strip_prefix(&format!(r"{ODBC_SOURCES_KEY}\"))
+                && !rest.contains('\\')
+                && !rest.eq_ignore_ascii_case(ODBC_SOURCE_LIST)
+            {
+                known.odbc_sources.insert(rest.to_owned());
+            }
+        }
+        known
+    }
+
+    /// The file a class in this package runs, if it runs one of its own.
+    pub(crate) fn server_of_class(&self, class: &str) -> Option<&str> {
+        self.class_servers
+            .get(&class.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+}
+
+/// A class's server, if this says its server is a file this package installs. `rest` is the key
+/// below `CLSID`.
+fn restored_server_of(
+    rest: &str,
+    entry: &RegistryEntry,
+    map: &RestoreMap,
+    expand: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    let mut parts = rest.split('\\');
+    let _class = parts.next();
+    let server = parts.next()?;
+    if !matches!(server, "inprocserver32" | "localserver32") || parts.next().is_some() {
+        return None;
+    }
+    let name = entry.value_name.as_deref();
+    let text = expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default()));
+    let path = if is_default_value(name)
+        || name.is_some_and(|name| name.eq_ignore_ascii_case("ServerExecutable"))
+    {
+        text
+    } else if name.is_some_and(|name| name.eq_ignore_ascii_case("CodeBase")) {
+        text.get(FILE_URL_PREFIX.len()..)
+            .filter(|_| text.to_ascii_lowercase().starts_with(FILE_URL_PREFIX))
+            .map(|path| path.replace('/', "\\"))?
+    } else {
+        return None;
+    };
+    command_runs_restored_file(&path, map)
+        .then(|| first_path_in(&path))
+        .flatten()
+        .map(|path| file_name_of(&path))
+}
+
+const FILE_URL_PREFIX: &str = "file:///";
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+}
+
+/// A key below `TypeLib`: `{guid}\<version>\<language>\<build>`.
+fn restored_type_library_file(
+    rest: &str,
+    entry: &RegistryEntry,
+    map: &RestoreMap,
+    expand: &dyn Fn(&str) -> String,
+) -> bool {
+    let parts: Vec<&str> = rest.split('\\').collect();
+    parts.len() == 4
+        && TYPE_LIBRARY_BUILDS.contains(&parts[3])
+        && is_default_value(entry.value_name.as_deref())
+        && map.is_restored_file(Path::new(
+            expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default()))
+                .trim()
+                .trim_matches('"'),
+        ))
+}
+
+fn odbc_file_is_restored(
+    entry: &RegistryEntry,
+    map: &RestoreMap,
+    expand: &dyn Fn(&str) -> String,
+) -> bool {
+    map.is_restored_file(Path::new(
+        expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default()))
+            .trim()
+            .trim_matches('"'),
+    ))
+}
+
+/// A registry value that is a CLSID, in lowercase, whatever it holds besides.
+fn class_named_by(text: &str) -> String {
+    text.trim().to_ascii_lowercase()
+}
+
+fn is_braced_id(text: &str) -> bool {
+    text.len() == 38 && text.starts_with('{') && text.ends_with('}')
+}
+
+/// What can be said about one thing a package registers, which is all of it or none of it. A
+/// class's values mean nothing without its server, and one wrong value is a reason not to take the
+/// rest of what came with it.
+pub fn registration_unit_of(entry: &RegistryEntry) -> Option<String> {
+    let key = normalized_key(&entry.key_path);
+    if key.strip_prefix(CLSID_PREFIX).is_some() {
+        return com_class_key(&entry.key_path);
+    }
+    for prefix in [INTERFACE_PREFIX, TYPE_LIBRARY_PREFIX, APP_ID_PREFIX] {
+        if let Some(rest) = key.strip_prefix(prefix) {
+            return Some(format!(
+                "{prefix}{}",
+                rest.split('\\').next().unwrap_or_default()
+            ));
+        }
+    }
+    if let Some(rest) = key.strip_prefix(EVENT_LOG_PREFIX) {
+        let mut parts = rest.split('\\');
+        let (log, source) = (parts.next()?, parts.next()?);
+        return Some(format!("{EVENT_LOG_PREFIX}{log}\\{source}"));
+    }
+    for (keys, list) in [
+        (ODBC_DRIVERS_KEY, ODBC_DRIVER_LIST),
+        (ODBC_SOURCES_KEY, ODBC_SOURCE_LIST),
+    ] {
+        if let Some(rest) = key.strip_prefix(&format!(r"{keys}\")) {
+            let first = rest.split('\\').next().unwrap_or_default();
+            let name = if first.eq_ignore_ascii_case(list) {
+                entry
+                    .value_name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+            } else {
+                first.to_owned()
+            };
+            return Some(format!("{keys}\\{name}"));
+        }
+    }
+    None
+}
+
+/// Why all of one thing a package registers must be left out, if so. `entries` are all of it.
+pub fn registration_refusal(
+    unit: &str,
+    entries: &[&RegistryEntry],
+    map: &RestoreMap,
+    known: &PackageRegistrations,
+    restored_services: &HashSet<String>,
+    expand: &dyn Fn(&str) -> String,
+    windows_dir: &Path,
+) -> Option<String> {
+    let of_unit = |prefix: &str| unit.strip_prefix(prefix).map(str::to_owned);
+    let value_is = |entry: &RegistryEntry, name: &str| {
+        entry
+            .value_name
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case(name))
+    };
+    if normalized_key(unit).strip_prefix(CLSID_PREFIX).is_some() {
+        return com_class_refusal(entries, map, known, expand, windows_dir);
+    }
+    if let Some(interface) = of_unit(INTERFACE_PREFIX) {
+        return interface_refusal(&interface, entries, known);
+    }
+    if of_unit(TYPE_LIBRARY_PREFIX).is_some() {
+        return entries.iter().find_map(|entry| {
+            let key = normalized_key(&entry.key_path);
+            let rest = key.strip_prefix(TYPE_LIBRARY_PREFIX)?;
+            let parts: Vec<&str> = rest.split('\\').collect();
+            let names_a_file = parts.len() == 4 && TYPE_LIBRARY_BUILDS.contains(&parts[3]);
+            (names_a_file && !restored_type_library_file(rest, entry, map, expand))
+                .then(|| "its type library is not a file this package installs".to_owned())
+        });
+    }
+    if let Some(name) = of_unit(APP_ID_PREFIX) {
+        return app_id_refusal(&name, entries, map, known, restored_services, expand);
+    }
+    if of_unit(EVENT_LOG_PREFIX).is_some() {
+        let has_a_message_file = entries.iter().any(|entry| {
+            EVENT_LOG_FILE_VALUES
+                .iter()
+                .any(|name| value_is(entry, name))
+        });
+        return (!has_a_message_file)
+            .then(|| "an event log source has to take its messages from a file".to_owned());
+    }
+    if let Some(name) = of_unit(&format!(r"{ODBC_DRIVERS_KEY}\")) {
+        return odbc_driver_refusal(&name, entries, map, known, expand);
+    }
+    if let Some(name) = of_unit(&format!(r"{ODBC_SOURCES_KEY}\")) {
+        return odbc_source_refusal(&name, entries, map, known, expand, windows_dir);
+    }
+    None
+}
+
+/// A class's server has to be a file this package installs, or be Windows' own, such as
+/// `mscoree.dll` for a .NET class. A share, or anywhere else on the PC, is neither. What takes a
+/// class over from something else on this PC can only be seen when installing.
+fn com_class_refusal(
+    entries: &[&RegistryEntry],
+    map: &RestoreMap,
+    known: &PackageRegistrations,
+    expand: &dyn Fn(&str) -> String,
+    windows_dir: &Path,
+) -> Option<String> {
+    entries.iter().find_map(|entry| {
+        let key = normalized_key(&entry.key_path);
+        let rest = key.strip_prefix(CLSID_PREFIX)?;
+        let subkey = rest.split('\\').nth(1)?;
+        if !is_default_value(entry.value_name.as_deref())
+            || entry.value_kind == Some(RegistryValueKind::None)
+        {
+            return None;
+        }
+        let text = expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default()));
+        if COM_REDIRECT_KEYS.contains(&subkey) {
+            return (!known.classes.contains(&class_named_by(&text))).then(|| {
+                "it would make this class something this package does not install".to_owned()
+            });
+        }
+        if !COM_SERVER_KEYS.contains(&subkey) || text.trim().is_empty() {
+            return None;
+        }
+        let restored = command_runs_restored_file(&text, map);
+        let windows_own = first_path_in(&text).is_some_and(|path| {
+            !path.is_absolute() && path.components().count() == 1
+                || path_is_within(&path, windows_dir)
+        });
+        (!restored && !windows_own).then(|| {
+            "it runs something that is neither a file this package installs nor part of Windows"
+                .to_owned()
+        })
+    })
+}
+
+/// How calls to an interface cross processes is decided here for every program that uses it, so it
+/// has to be by a class this package installs, or by Windows' marshaler and a type library this
+/// package installs.
+fn interface_refusal(
+    interface: &str,
+    entries: &[&RegistryEntry],
+    known: &PackageRegistrations,
+) -> Option<String> {
+    let default_of = |subkeys: &[&str]| -> Option<String> {
+        entries.iter().find_map(|entry| {
+            let key = normalized_key(&entry.key_path);
+            let leaf = key.rsplit('\\').next()?;
+            (subkeys.contains(&leaf) && is_default_value(entry.value_name.as_deref()))
+                .then(|| class_named_by(entry.value_data.as_deref().unwrap_or_default()))
+        })
+    };
+    let stub = default_of(PROXY_STUB_KEYS);
+    let library = default_of(&["typelib"]);
+    let stub_is_restored = stub
+        .as_ref()
+        .is_some_and(|stub| known.classes.contains(stub));
+    let by_marshaler = stub
+        .as_deref()
+        .is_some_and(|stub| AUTOMATION_MARSHALERS.contains(&stub));
+    let library_is_restored = library
+        .as_ref()
+        .is_some_and(|library| known.type_libraries.contains(library));
+    (!(stub_is_restored || (by_marshaler && library_is_restored)) && !interface.is_empty()).then(
+        || {
+            "it would decide how calls to an interface are made, with something this package \
+             does not install"
+                .to_owned()
+        },
+    )
+}
+
+/// An AppID is how a class is started and who may ask. It can name a surrogate and a service to
+/// host it, and either has to be this package's. `AppID\<program>` applies to a program by its file
+/// name alone, so that has to be a file of this package. It cannot run as an account, which would
+/// take a password, and cannot run on another PC.
+fn app_id_refusal(
+    name: &str,
+    entries: &[&RegistryEntry],
+    map: &RestoreMap,
+    known: &PackageRegistrations,
+    restored_services: &HashSet<String>,
+    expand: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    if !is_braced_id(name) && !known.file_names.contains(name) {
+        return Some(format!(
+            "it would change how {name} is started, which this package does not install"
+        ));
+    }
+    entries.iter().find_map(|entry| {
+        let value = entry
+            .value_name
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let text = entry.value_data.as_deref().unwrap_or_default().trim();
+        match value.as_str() {
+            APP_ID_SURROGATE_VALUE => (!text.is_empty()
+                && !map.is_restored_file(Path::new(expand(&map.rewrite(text)).trim_matches('"'))))
+            .then(|| "it would be hosted by a program this package does not install".to_owned()),
+            APP_ID_SERVICE_VALUE => (!restored_services.contains(&text.to_ascii_lowercase()))
+                .then(|| "it would run in a service this package does not restore".to_owned()),
+            APP_ID_RUN_AS_VALUE => (!text.eq_ignore_ascii_case(INTERACTIVE_USER))
+                .then(|| "it would run as an account of its own".to_owned()),
+            APP_ID_LINK_VALUE => {
+                (!is_braced_id(text)).then(|| "it does not name an AppID".to_owned())
+            }
+            other if APP_ID_REMOTE_VALUES.contains(&other) => {
+                Some("it would run somewhere other than this PC".to_owned())
+            }
+            _ => None,
+        }
+    })
+}
+
+/// An ODBC driver loads into anything that uses ODBC, so its driver and setup have to be files this
+/// package installs.
+fn odbc_driver_refusal(
+    name: &str,
+    entries: &[&RegistryEntry],
+    map: &RestoreMap,
+    known: &PackageRegistrations,
+    expand: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    if !known.odbc_drivers.contains(name) {
+        return Some("its driver is not a file this package installs".to_owned());
+    }
+    entries.iter().find_map(|entry| {
+        let is_a_file = entry.value_name.as_deref().is_some_and(|value| {
+            ODBC_DRIVER_FILE_VALUES.contains(&value.to_ascii_lowercase().as_str())
+        }) && normalized_key(&entry.key_path).ends_with(&format!("\\{name}"));
+        (is_a_file && !odbc_file_is_restored(entry, map, expand))
+            .then(|| "it would load a file this package does not install".to_owned())
+    })
+}
+
+/// A data source names the driver it uses. That can be Windows' own, or one this package installs,
+/// by its path or by name.
+fn odbc_source_refusal(
+    name: &str,
+    entries: &[&RegistryEntry],
+    map: &RestoreMap,
+    known: &PackageRegistrations,
+    expand: &dyn Fn(&str) -> String,
+    windows_dir: &Path,
+) -> Option<String> {
+    if !known.odbc_sources.contains(name) {
+        return Some("it lists a data source this package does not have".to_owned());
+    }
+    entries.iter().find_map(|entry| {
+        let key = normalized_key(&entry.key_path);
+        let is_its_driver = key.ends_with(&format!("\\{name}"))
+            && entry
+                .value_name
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case(ODBC_DRIVER_FILE_VALUES[0]));
+        if !is_its_driver {
+            return None;
+        }
+        let text = expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default()));
+        let path = Path::new(text.trim().trim_matches('"'));
+        let fine = map.is_restored_file(path)
+            || path_is_within(path, windows_dir)
+            || known
+                .odbc_drivers
+                .contains(&text.trim().to_ascii_lowercase());
+        (!fine).then(|| {
+            "its driver is neither a file this package installs nor part of Windows".to_owned()
+        })
+    })
+}
+
+/// Why one value of something that goes into how Windows finds and starts things must be left out,
+/// if so. What goes for all of a class or the like is [`registration_refusal`]. What depends on
+/// what is on this PC is only asked when installing.
+pub fn registered_value_refusal(
+    entry: &RegistryEntry,
+    map: &RestoreMap,
+    known: &PackageRegistrations,
+    expand: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    let key = normalized_key(&entry.key_path);
+    let default_text = || expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default()));
+    let is_default = is_default_value(entry.value_name.as_deref());
+    let holds_something = entry.value_kind != Some(RegistryValueKind::None);
+    let extension_refusal = || {
+        "it would load a shell extension that is not a file this package installs into Explorer"
+            .to_owned()
+    };
+
+    if let Some(rest) = key.strip_prefix(CLASSES_PREFIX)
+        && let Some(at) = rest.find(SHELL_EXTENSIONS_SEGMENT)
+        && (rest[at + SHELL_EXTENSIONS_SEGMENT.len()..].is_empty()
+            || rest[at + SHELL_EXTENSIONS_SEGMENT.len()..].starts_with('\\'))
+    {
+        let leaf = rest.rsplit('\\').next().unwrap_or_default();
+        let by_value = class_named_by(entry.value_data.as_deref().unwrap_or_default());
+        let class = if is_braced_id(&by_value) {
+            by_value
+        } else {
+            leaf.to_owned()
+        };
+        return (!known.classes.contains(&class)).then(extension_refusal);
+    }
+    if key_is_within(&key, ICON_OVERLAYS_KEY) && key != ICON_OVERLAYS_KEY {
+        return (is_default
+            && holds_something
+            && !known.classes.contains(&class_named_by(
+                entry.value_data.as_deref().unwrap_or_default(),
+            )))
+        .then(extension_refusal);
+    }
+    if key == APPROVED_EXTENSIONS_KEY {
+        return (!entry
+            .value_name
+            .as_deref()
+            .is_some_and(|name| known.classes.contains(&name.to_ascii_lowercase())))
+        .then(extension_refusal);
+    }
+    for namespace in NAMESPACE_KEYS {
+        if let Some(rest) = key.strip_prefix(&format!("{namespace}\\")) {
+            let class = rest.split('\\').next().unwrap_or_default();
+            return (!known.classes.contains(class)).then(extension_refusal);
+        }
+    }
+    if key == FONTS_KEY {
+        return (!map.is_restored_file(Path::new(default_text().trim()))).then(|| {
+            "it would register a font this package does not install, or one in the Windows folder"
+                .to_owned()
+        });
+    }
+    if key == COMPATIBILITY_LAYERS_KEY {
+        let program = expand(&map.rewrite(entry.value_name.as_deref().unwrap_or_default()));
+        return (!map.is_restored_file(Path::new(program.trim()))).then(|| {
+            "it would change how a program runs that this package does not install".to_owned()
+        });
+    }
+    if key == REGISTERED_APPLICATIONS_KEY {
+        let capabilities = normalized_key(entry.value_data.as_deref().unwrap_or_default());
+        return (!known.keys.contains(&capabilities))
+            .then(|| "it lists an app whose details are not in this package".to_owned());
+    }
+    if let Some(rest) = key.strip_prefix(&format!("{CLIENTS_KEY}\\"))
+        && !rest.contains('\\')
+        && is_default
+        && holds_something
+    {
+        return Some("it would change which program opens things by default".to_owned());
+    }
+    if let Some(class) = key.strip_prefix(CLASSES_PREFIX)
+        && !class.contains('\\')
+        && entry
+            .value_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(URL_PROTOCOL_VALUE))
+    {
+        return (!known.classes_that_run_it.contains(class)).then(|| {
+            "it says it is a link type, and opens with nothing this package installs".to_owned()
+        });
+    }
+    if key.starts_with(CLASSES_PREFIX) || key.starts_with(&format!("{CLIENTS_KEY}\\")) {
+        return class_command_refusal(&key, entry, map, known, expand);
+    }
+    None
+}
+
+/// A verb's command, or the class that handles it. Under a URL protocol, or one every app shares,
+/// it has to run a file this package installs: a page on the web can ask for one. For a file type
+/// of its own, an app can run something through Windows, and the command has to name such a file.
+/// A class it names has to be one this package installs.
+fn class_command_refusal(
+    key: &str,
+    entry: &RegistryEntry,
+    map: &RestoreMap,
+    known: &PackageRegistrations,
+    expand: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    let text = expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default()));
+    let name = entry
+        .value_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if key.contains(SHELL_SEGMENT) && VERB_HANDLER_VALUES.contains(&name.as_str()) {
+        return (!known.classes.contains(&class_named_by(&text))).then(|| {
+            "it adds a command handled by something this package does not install".to_owned()
+        });
+    }
+    let class = key.strip_prefix(CLASSES_PREFIX).unwrap_or_default();
+    if class
+        .strip_suffix(r"\clsid")
+        .is_some_and(|prog_id| !prog_id.contains('\\'))
+        && is_default_value(entry.value_name.as_deref())
+        && entry.value_kind != Some(RegistryValueKind::None)
+    {
+        return (!known.classes.contains(&class_named_by(&text)))
+            .then(|| "it would create a class this package does not install".to_owned());
+    }
+    if !key.contains(SHELL_SEGMENT)
+        || !key.ends_with(OPEN_COMMAND_TAIL)
+        || !is_default_value(entry.value_name.as_deref())
+        || entry.value_kind == Some(RegistryValueKind::None)
+    {
+        return None;
+    }
+    let top = class.split('\\').next().unwrap_or_default();
+    let must_run_it = known.url_protocols.contains(top) || SHARED_PROTOCOLS.contains(&top);
+    if command_runs_restored_file(&text, map) {
+        return None;
+    }
+    if must_run_it {
+        return Some("it opens links with something this package does not install".to_owned());
+    }
+    (!command_names_a_restored_file(&text, map))
+        .then(|| "it opens files with something this package does not install".to_owned())
+}
+
+/// Whether a command gives a file this package installs to whatever it runs, in quotes or by itself.
+fn command_names_a_restored_file(command: &str, map: &RestoreMap) -> bool {
+    command
+        .split('"')
+        .enumerate()
+        .flat_map(|(index, part)| {
+            if index % 2 == 1 {
+                vec![part]
+            } else {
+                part.split_whitespace().collect()
+            }
+        })
+        .any(|word| map.is_restored_file(Path::new(trim_icon_suffix(word))))
+}
+
+/// The name a value has on the target. A compatibility setting's name is the program it is for.
+pub fn restored_value_name<'a>(
+    entry: &'a RegistryEntry,
+    map: &RestoreMap,
+) -> std::borrow::Cow<'a, str> {
+    let name = crate::registry_target::registry_value_name(entry.value_name.as_deref());
+    if normalized_key(&entry.key_path) == COMPATIBILITY_LAYERS_KEY {
+        std::borrow::Cow::Owned(map.rewrite(name))
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    }
+}
+
+/// What a value registers, for the list of what an install will set up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Registration {
+    /// A shell extension, by what it is called and the class that it is.
+    ShellExtension {
+        name: String,
+        class: Option<String>,
+    },
+    /// A command on the menu of a file type or folder.
+    ShellCommand {
+        on: String,
+        verb: String,
+    },
+    UrlProtocol {
+        name: String,
+    },
+    FileType {
+        extension: String,
+    },
+    ComClass {
+        class: String,
+    },
+    TypeLibrary,
+    Interface,
+    AppId,
+    EventLogSource {
+        log: String,
+        source: String,
+    },
+    Font {
+        name: String,
+    },
+    OdbcDriver {
+        name: String,
+    },
+    OdbcSource {
+        name: String,
+    },
+    CompatibilitySetting,
+    DefaultAppsEntry {
+        name: String,
+    },
+    ProgramName {
+        name: String,
+    },
+}
+
+/// What one value is part of, if it is part of something an install sets up beyond its files.
+pub fn registration_of(entry: &RegistryEntry) -> Option<Registration> {
+    let key = normalized_key(&entry.key_path);
+    let original = entry.key_path.split('\\').collect::<Vec<_>>();
+    let leaf = original.last().copied().unwrap_or_default().to_owned();
+    let value_name = entry.value_name.clone().unwrap_or_default();
+    if let Some(rest) = key.strip_prefix(CLSID_PREFIX) {
+        return Some(Registration::ComClass {
+            class: rest.split('\\').next().unwrap_or_default().to_owned(),
+        });
+    }
+    if key.starts_with(INTERFACE_PREFIX) {
+        return Some(Registration::Interface);
+    }
+    if key.starts_with(TYPE_LIBRARY_PREFIX) {
+        return Some(Registration::TypeLibrary);
+    }
+    if key.starts_with(APP_ID_PREFIX) {
+        return Some(Registration::AppId);
+    }
+    if let Some(rest) = key.strip_prefix(EVENT_LOG_PREFIX) {
+        let mut parts = rest.split('\\');
+        return Some(Registration::EventLogSource {
+            log: parts.next().unwrap_or_default().to_owned(),
+            source: parts.next().unwrap_or_default().to_owned(),
+        });
+    }
+    if key == FONTS_KEY {
+        return Some(Registration::Font { name: value_name });
+    }
+    if key == COMPATIBILITY_LAYERS_KEY {
+        return Some(Registration::CompatibilitySetting);
+    }
+    if key == REGISTERED_APPLICATIONS_KEY {
+        return Some(Registration::DefaultAppsEntry { name: value_name });
+    }
+    if key_is_within(&key, ICON_OVERLAYS_KEY) && key != ICON_OVERLAYS_KEY {
+        return Some(Registration::ShellExtension {
+            name: leaf,
+            class: Some(class_named_by(
+                entry.value_data.as_deref().unwrap_or_default(),
+            )),
+        });
+    }
+    if key == APPROVED_EXTENSIONS_KEY {
+        return Some(Registration::ShellExtension {
+            name: value_name.clone(),
+            class: Some(class_named_by(&value_name)),
+        });
+    }
+    for namespace in NAMESPACE_KEYS {
+        if let Some(rest) = key.strip_prefix(&format!("{namespace}\\")) {
+            let class = rest.split('\\').next().unwrap_or_default().to_owned();
+            return Some(Registration::ShellExtension {
+                name: class.clone(),
+                class: Some(class),
+            });
+        }
+    }
+    if key_is_within(&key, ODBC_DRIVERS_KEY) && key != ODBC_DRIVERS_KEY {
+        let rest = key.strip_prefix(&format!("{ODBC_DRIVERS_KEY}\\"))?;
+        let name = if rest.eq_ignore_ascii_case(ODBC_DRIVER_LIST) {
+            value_name
+        } else {
+            rest.split('\\').next().unwrap_or_default().to_owned()
+        };
+        return Some(Registration::OdbcDriver { name });
+    }
+    if key_is_within(&key, ODBC_SOURCES_KEY) && key != ODBC_SOURCES_KEY {
+        let rest = key.strip_prefix(&format!("{ODBC_SOURCES_KEY}\\"))?;
+        let name = if rest.eq_ignore_ascii_case(ODBC_SOURCE_LIST) {
+            value_name
+        } else {
+            rest.split('\\').next().unwrap_or_default().to_owned()
+        };
+        return Some(Registration::OdbcSource { name });
+    }
+    if let Some(rest) = key.strip_prefix(&format!("{APP_PATHS_KEY}\\")) {
+        return Some(Registration::ProgramName {
+            name: rest.split('\\').next().unwrap_or_default().to_owned(),
+        });
+    }
+    let class = key.strip_prefix(CLASSES_PREFIX)?;
+    if let Some(at) = class.find(SHELL_EXTENSIONS_SEGMENT) {
+        let by_value = class_named_by(entry.value_data.as_deref().unwrap_or_default());
+        return Some(Registration::ShellExtension {
+            name: format!("{} on {}", leaf, &class[..at]),
+            class: Some(if is_braced_id(&by_value) {
+                by_value
+            } else {
+                leaf.to_ascii_lowercase()
+            }),
+        });
+    }
+    if value_name.eq_ignore_ascii_case(URL_PROTOCOL_VALUE) && !class.contains('\\') {
+        return Some(Registration::UrlProtocol {
+            name: class.to_owned(),
+        });
+    }
+    if class.starts_with('.')
+        && !class.contains('\\')
+        && is_default_value(entry.value_name.as_deref())
+    {
+        return Some(Registration::FileType {
+            extension: class.to_owned(),
+        });
+    }
+    if let Some(at) = class.find(SHELL_SEGMENT)
+        && class.ends_with(OPEN_COMMAND_TAIL)
+    {
+        let on = class[..at].to_owned();
+        let verb = class[at + SHELL_SEGMENT.len()..]
+            .split('\\')
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        return Some(Registration::ShellCommand { on, verb });
+    }
+    None
+}
+
+/// Why a firewall rule must not be restored, if so. It has to be for one program, which is a file
+/// this package installs: never every program, which a rule with none is. It cannot override other
+/// rules: what a rule with `AllowBypass` does. And it has to be something `netsh` can set again as
+/// it was, or it would mean something else: `Edge` lets things in through NAT, and `Security` and the
+/// rest change who it applies to. Every part goes to `netsh` as a word, so each is held to what such
+/// a part can be.
+pub fn firewall_refusal(
+    rule: &FirewallRuleEntry,
+    map: &RestoreMap,
+    restored_services: &HashSet<String>,
+) -> Option<String> {
+    let name = rule.name.trim();
+    if name.is_empty()
+        || name.eq_ignore_ascii_case(FIREWALL_RESERVED_NAME)
+        || name.len() > FIREWALL_RULE_NAME_LIMIT
+        || name
+            .chars()
+            .any(|character| character.is_control() || character == '"')
+    {
+        return Some("its name is not one this can pass on".to_owned());
+    }
+    if rule.description.as_deref().is_some_and(|text| {
+        text.len() > FIREWALL_DESCRIPTION_LIMIT
+            || text
+                .chars()
+                .any(|character| character.is_control() || character == '"')
+    }) {
+        return Some("its description is not one this can pass on".to_owned());
+    }
+    if rule.program.as_os_str().is_empty() {
+        return Some("it applies to every program, and a rule can only be for one".to_owned());
+    }
+    if map.destination_of(&rule.program).is_none() {
+        return Some(format!(
+            "it is for {}, which this package does not install",
+            rule.program.display()
+        ));
+    }
+    if !FIREWALL_DIRECTIONS.contains(&rule.direction.to_ascii_lowercase().as_str()) {
+        return Some("it does not say a direction this can set".to_owned());
+    }
+    if !FIREWALL_ACTIONS.contains(&rule.action.to_ascii_lowercase().as_str()) {
+        return Some("it would override other rules, which no app's rule should".to_owned());
+    }
+    if let Some(reach) = rule.not_carried.first() {
+        return Some(format!(
+            "it says {reach}, which could not be set as it was, or would weaken what other rules \
+             do"
+        ));
+    }
+    if rule
+        .service
+        .as_deref()
+        .is_some_and(|service| !restored_services.contains(&service.to_ascii_lowercase()))
+    {
+        return Some("it is for a service this package does not restore".to_owned());
+    }
+    let is_word = |text: &str| {
+        !text.is_empty()
+            && text
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-.:/".contains(character))
+    };
+    let parts_fine = rule.protocol.iter().all(|protocol| is_word(protocol))
+        && rule
+            .local_ports
+            .iter()
+            .chain(&rule.remote_ports)
+            .chain(&rule.local_addresses)
+            .chain(&rule.remote_addresses)
+            .all(|part| is_word(part))
+        && rule
+            .profiles
+            .iter()
+            .all(|profile| FIREWALL_PROFILES.contains(&profile.to_ascii_lowercase().as_str()));
+    (!parts_fine).then(|| "part of it is not what a firewall rule can say".to_owned())
+}
+
+/// What a rule does, in the terms Windows has for it, to tell whether a rule is still as written.
+/// The same rule set again, or read back, comes out the same.
+pub fn firewall_fingerprint(rule: &FirewallRuleEntry) -> String {
+    let sorted = |parts: &[String]| {
+        let mut parts: Vec<String> = parts.iter().map(|part| part.to_ascii_lowercase()).collect();
+        parts.sort_unstable();
+        parts.join(",")
+    };
+    format!(
+        "{}|{}|{}|{}|{}",
+        rule.action.to_ascii_lowercase(),
+        rule.enabled,
+        rule.protocol
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+        sorted(&rule.local_ports),
+        sorted(&rule.remote_ports)
+    )
+}
+
+/// What to give `netsh advfirewall firewall add rule`. Each is one argument, which is how it reads
+/// them whatever they hold, and [`firewall_refusal`] has held them to what a rule can say.
+pub fn netsh_add_rule_arguments(rule: &FirewallRuleEntry, program: &Path) -> Vec<String> {
+    let list = |parts: &[String]| parts.join(",").to_ascii_lowercase();
+    let mut arguments = vec![
+        "advfirewall".to_owned(),
+        "firewall".to_owned(),
+        "add".to_owned(),
+        "rule".to_owned(),
+        format!("name={}", rule.name.trim()),
+        format!("dir={}", rule.direction.to_ascii_lowercase()),
+        format!("action={}", rule.action.to_ascii_lowercase()),
+        format!("program={}", program.display()),
+        format!("enable={}", if rule.enabled { "yes" } else { "no" }),
+        format!(
+            "profile={}",
+            if rule.profiles.is_empty() {
+                "any".to_owned()
+            } else {
+                list(&rule.profiles)
+            }
+        ),
+        format!(
+            "protocol={}",
+            rule.protocol
+                .as_deref()
+                .unwrap_or("any")
+                .to_ascii_lowercase()
+        ),
+    ];
+    for (name, parts) in [
+        ("localport", &rule.local_ports),
+        ("remoteport", &rule.remote_ports),
+        ("localip", &rule.local_addresses),
+        ("remoteip", &rule.remote_addresses),
+    ] {
+        if !parts.is_empty() {
+            arguments.push(format!("{name}={}", list(parts)));
+        }
+    }
+    if let Some(service) = rule.service.as_deref() {
+        arguments.push(format!("service={service}"));
+    }
+    if let Some(description) = rule.description.as_deref() {
+        arguments.push(format!("description={description}"));
+    }
+    arguments
+}
+
+/// What to give `netsh` to take out what an install added, and nothing else: a rule of the same name
+/// for another program or the other way stays.
+pub fn netsh_delete_rule_arguments(name: &str, direction: &str, program: &Path) -> Vec<String> {
+    vec![
+        "advfirewall".to_owned(),
+        "firewall".to_owned(),
+        "delete".to_owned(),
+        "rule".to_owned(),
+        format!("name={name}"),
+        format!("dir={}", direction.to_ascii_lowercase()),
+        format!("program={}", program.display()),
+    ]
+}
+
+/// Whether what Windows has stored is the same rule: the same name, direction, and program.
+pub fn stored_firewall_rule_matches(
+    stored: &str,
+    name: &str,
+    direction: &str,
+    program: &Path,
+) -> bool {
+    parse_firewall_rule(stored).is_some_and(|rule| {
+        rule.name.eq_ignore_ascii_case(name)
+            && rule.direction.eq_ignore_ascii_case(direction)
+            && paths_equal(&rule.program, program)
+    })
 }
 
 /// Why overwriting a COM server already registered on this PC must be refused, if so.
@@ -2515,5 +3616,755 @@ mod tests {
             assert!(place(bad, false).is_err(), "{bad}");
             assert!(place(bad, true).is_err(), "{bad}");
         }
+    }
+
+    // ---- What goes into how Windows finds and starts things -------------------------------
+
+    const SERVER: &str = r"C:\Program Files\Acme\bin\host.dll";
+    const CLASS: &str = "{5a7e6e0c-e2e0-4000-8000-000000000001}";
+    const OTHER_CLASS: &str = "{5a7e6e0c-e2e0-4000-8000-00000000dead}";
+
+    fn no_expanding(text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn string_value(
+        hive: RegistryHive,
+        key: &str,
+        name: Option<&str>,
+        data: &str,
+    ) -> RegistryEntry {
+        RegistryEntry {
+            hive,
+            key_path: key.to_owned(),
+            value_name: name.map(ToOwned::to_owned),
+            value_data: Some(data.to_owned()),
+            value_kind: Some(RegistryValueKind::String),
+            value_bytes_hex: None,
+            confidence: MatchConfidence::High,
+            requires_admin: false,
+        }
+    }
+
+    fn machine(key: &str, name: Option<&str>, data: &str) -> RegistryEntry {
+        string_value(RegistryHive::LocalMachine, key, name, data)
+    }
+
+    /// A package with one class, whose server is a file it installs.
+    fn known_of(extra: &[RegistryEntry]) -> PackageRegistrations {
+        let class = machine(
+            &format!(r"Software\Classes\CLSID\{CLASS}\InprocServer32"),
+            None,
+            SERVER,
+        );
+        let mut entries: Vec<&RegistryEntry> = vec![&class];
+        entries.extend(extra);
+        let destinations = [Path::new(r"D:\Apps\Acme\acme.exe")];
+        PackageRegistrations::of(&entries, &destinations, &app_map(), &no_expanding)
+    }
+
+    fn value_refusal(entry: &RegistryEntry) -> Option<String> {
+        registered_value_refusal(entry, &app_map(), &known_of(&[]), &no_expanding)
+    }
+
+    fn unit_refusal(entries: &[RegistryEntry]) -> Option<String> {
+        let of_it: Vec<&RegistryEntry> = entries.iter().collect();
+        let known = known_of(entries);
+        let unit = registration_unit_of(entries.first()?)?;
+        registration_refusal(
+            &unit,
+            &of_it,
+            &app_map(),
+            &known,
+            &HashSet::from(["acmesvc".to_owned()]),
+            &no_expanding,
+            Path::new(WINDOWS),
+        )
+    }
+
+    #[test]
+    fn a_class_runs_a_file_of_the_package_or_something_of_windows_own() {
+        let server = |key: &str, data: &str| {
+            machine(
+                &format!(r"Software\Classes\CLSID\{CLASS}\{key}"),
+                None,
+                data,
+            )
+        };
+        for fine in [
+            server("InprocServer32", SERVER),
+            server("InprocServer32", &format!("\"{SERVER}\"")),
+            server(
+                "LocalServer32",
+                r#""C:\Program Files\Acme\acme.exe" /automation"#,
+            ),
+            // What .NET has as the server of every class it hosts.
+            server("InprocServer32", "mscoree.dll"),
+            server("InprocServer32", r"C:\Windows\System32\mscoree.dll"),
+            server("InprocHandler32", "ole32.dll"),
+        ] {
+            assert_eq!(unit_refusal(std::slice::from_ref(&fine)), None, "{fine:?}");
+        }
+        for refused in [
+            server("InprocServer32", r"\\server\share\evil.dll"),
+            server("InprocServer32", r"C:\Elsewhere\evil.dll"),
+            server("LocalServer32", r"C:\ProgramData\evil.exe"),
+            server("TreatAs", OTHER_CLASS),
+        ] {
+            assert!(
+                unit_refusal(std::slice::from_ref(&refused)).is_some(),
+                "{refused:?}"
+            );
+        }
+        assert_eq!(
+            unit_refusal(&[server("TreatAs", CLASS)]),
+            None,
+            "it can be another of its own"
+        );
+    }
+
+    #[test]
+    fn all_of_a_class_goes_with_the_part_that_cannot_be_had() {
+        let bad = machine(
+            &format!(r"Software\Classes\CLSID\{OTHER_CLASS}\InprocServer32"),
+            None,
+            r"\\server\share\evil.dll",
+        );
+        let beside_it = machine(
+            &format!(r"Software\Classes\CLSID\{OTHER_CLASS}\InprocServer32"),
+            Some("ThreadingModel"),
+            "Apartment",
+        );
+        let unit = registration_unit_of(&bad);
+        assert_eq!(unit, registration_unit_of(&beside_it));
+        assert!(unit_refusal(&[bad, beside_it]).is_some());
+    }
+
+    #[test]
+    fn a_32_bit_class_is_its_own_and_goes_by_the_same_rules() {
+        let wow = machine(
+            &format!(r"Software\Classes\WOW6432Node\CLSID\{OTHER_CLASS}\InprocServer32"),
+            None,
+            r"C:\Elsewhere\evil.dll",
+        );
+        assert!(unit_refusal(&[wow]).is_some());
+    }
+
+    #[test]
+    fn how_calls_to_an_interface_are_made_has_to_be_the_packages() {
+        let iid = "{5a7e6e0c-e2e0-4000-8000-0000000000aa}";
+        let library = "{5a7e6e0c-e2e0-4000-8000-0000000000bb}";
+        let key = |tail: &str| format!(r"Software\Classes\Interface\{iid}\{tail}");
+        let stub = |class: &str| machine(&key("ProxyStubClsid32"), None, class);
+        assert_eq!(unit_refusal(&[stub(CLASS)]), None);
+        assert!(
+            unit_refusal(&[stub(OTHER_CLASS)]).is_some(),
+            "this is how a DLL gets loaded into every program using a Windows interface"
+        );
+        assert!(
+            unit_refusal(&[stub("{00020424-0000-0000-C000-000000000046}")]).is_some(),
+            "Windows' marshaler, and no type library of its own"
+        );
+        let with_library = [
+            stub("{00020424-0000-0000-C000-000000000046}"),
+            machine(&key("TypeLib"), None, library),
+            machine(
+                &format!(r"Software\Classes\TypeLib\{library}\1.0\0\win64"),
+                None,
+                SERVER,
+            ),
+        ];
+        assert_eq!(unit_refusal(&with_library), None);
+    }
+
+    #[test]
+    fn a_type_library_is_a_file_of_the_package() {
+        let library = |path: &str| {
+            machine(
+                &format!(r"Software\Classes\TypeLib\{CLASS}\1.0\0\win64"),
+                None,
+                path,
+            )
+        };
+        assert_eq!(unit_refusal(&[library(SERVER)]), None);
+        assert!(unit_refusal(&[library(r"C:\Windows\System32\stdole2.tlb")]).is_some());
+        assert_eq!(
+            unit_refusal(&[machine(
+                &format!(r"Software\Classes\TypeLib\{CLASS}\1.0\HELPDIR"),
+                None,
+                r"C:\Anywhere",
+            )]),
+            None,
+            "this names a folder for help, and nothing loads from it"
+        );
+    }
+
+    #[test]
+    fn an_app_id_cannot_reach_past_the_package() {
+        let of_id = |name: &str, data: &str| {
+            machine(
+                &format!(r"Software\Classes\AppID\{CLASS}"),
+                Some(name),
+                data,
+            )
+        };
+        for fine in [
+            of_id("DllSurrogate", ""),
+            of_id("DllSurrogate", r"C:\Program Files\Acme\acme.exe"),
+            of_id("LocalService", "AcmeSvc"),
+            of_id("RunAs", "Interactive User"),
+            of_id("AccessPermission", "x"),
+        ] {
+            assert_eq!(unit_refusal(std::slice::from_ref(&fine)), None, "{fine:?}");
+        }
+        for refused in [
+            of_id("DllSurrogate", r"C:\Windows\System32\cmd.exe"),
+            of_id("LocalService", "Spooler"),
+            of_id("RunAs", "nt authority\\system"),
+            of_id("RunAs", r"CONTOSO\admin"),
+            of_id("RemoteServerName", "evil.example"),
+            of_id("ActivateAtStorage", "Y"),
+        ] {
+            assert!(
+                unit_refusal(std::slice::from_ref(&refused)).is_some(),
+                "{refused:?}"
+            );
+        }
+        let by_program = |program: &str| {
+            machine(
+                &format!(r"Software\Classes\AppID\{program}"),
+                Some("AppID"),
+                CLASS,
+            )
+        };
+        assert_eq!(unit_refusal(&[by_program("acme.exe")]), None);
+        assert!(
+            unit_refusal(&[by_program("explorer.exe")]).is_some(),
+            "that would change how Explorer is started, by its file name alone"
+        );
+    }
+
+    #[test]
+    fn an_event_log_source_is_only_a_new_one_with_its_own_message_files() {
+        let source = r"SYSTEM\CurrentControlSet\Services\EventLog\Application\Acme";
+        let services = HashSet::new();
+        let refusal =
+            |entry: &RegistryEntry| registry_refusal(entry, &app_map(), &services, &no_expanding);
+        assert_eq!(
+            refusal(&machine(source, Some("EventMessageFile"), SERVER)),
+            None
+        );
+        assert_eq!(
+            refusal(&machine(
+                source,
+                Some("CategoryMessageFile"),
+                &format!(r"{SERVER};C:\Program Files\Acme\acme.exe")
+            )),
+            None
+        );
+        for refused in [
+            machine(
+                source,
+                Some("EventMessageFile"),
+                r"C:\Windows\System32\evil.dll",
+            ),
+            machine(
+                source,
+                Some("EventMessageFile"),
+                &format!(r"{SERVER};C:\Elsewhere\evil.dll"),
+            ),
+            machine(source, Some("ImagePath"), r"C:\Windows\System32\cmd.exe"),
+            machine(source, Some("CustomSD"), "O:BAG:SYD:(A;;0x3;;;WD)"),
+            // The log itself says where it is kept and who may read it.
+            machine(
+                r"SYSTEM\CurrentControlSet\Services\EventLog\Application",
+                Some("File"),
+                r"C:\Evil.evtx",
+            ),
+            machine(
+                r"SYSTEM\CurrentControlSet\Services\EventLog\Security\Acme",
+                Some("EventMessageFile"),
+                SERVER,
+            ),
+            machine(
+                &format!(r"{source}\Deeper"),
+                Some("EventMessageFile"),
+                SERVER,
+            ),
+        ] {
+            assert!(refusal(&refused).is_some(), "{refused:?}");
+        }
+        assert!(
+            unit_refusal(&[machine(source, Some("TypesSupported"), "7")]).is_some(),
+            "a source with no message file of its own is not one"
+        );
+        assert_eq!(
+            unit_refusal(&[
+                machine(source, Some("TypesSupported"), "7"),
+                machine(source, Some("EventMessageFile"), SERVER),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_protocol_runs_a_file_of_the_package_and_a_file_type_at_least_names_one() {
+        let refusal = |name: &str, tail: &str, data: &str, is_protocol: bool| {
+            let entry = machine(&format!(r"Software\Classes\{name}\{tail}"), None, data);
+            let mark = machine(
+                &format!(r"Software\Classes\{name}"),
+                Some("URL Protocol"),
+                "",
+            );
+            let extra = if is_protocol { vec![mark] } else { Vec::new() };
+            registered_value_refusal(&entry, &app_map(), &known_of(&extra), &no_expanding)
+        };
+        const COMMAND: &str = r"shell\open\command";
+        let run_it = r#""C:\Program Files\Acme\acme.exe" "%1""#;
+        let through_windows =
+            r#"C:\Windows\System32\wscript.exe "C:\Program Files\Acme\My Tools\run.cmd" "%1""#;
+        assert_eq!(refusal("acme", COMMAND, run_it, true), None);
+        assert_eq!(refusal("http", COMMAND, run_it, false), None);
+        assert!(refusal("acme", COMMAND, r"C:\Windows\System32\cmd.exe /c %1", true).is_some());
+        assert!(
+            refusal("acme", COMMAND, through_windows, true).is_some(),
+            "what a page on the web can ask for runs the app itself or nothing"
+        );
+        assert!(refusal("http", COMMAND, r"C:\Windows\System32\cmd.exe /c %1", false).is_some());
+        assert!(refusal("mailto", COMMAND, "cmd.exe /c %1", false).is_some());
+        let mark = machine(r"Software\Classes\acme", Some("URL Protocol"), "");
+        assert!(
+            value_refusal(&mark).is_some(),
+            "it says it is a protocol, with nothing of the package to open it"
+        );
+        let opens = machine(r"Software\Classes\acme\shell\open\command", None, run_it);
+        assert_eq!(
+            registered_value_refusal(
+                &mark,
+                &app_map(),
+                &known_of(std::slice::from_ref(&opens)),
+                &no_expanding
+            ),
+            None
+        );
+        assert_eq!(refusal("Acme.File", COMMAND, run_it, false), None);
+        assert_eq!(
+            refusal("Acme.File", COMMAND, through_windows, false),
+            None,
+            "a type of its own can run through Windows, given a file of its own"
+        );
+        assert!(
+            refusal(
+                "Acme.File",
+                COMMAND,
+                r"C:\Windows\System32\cmd.exe /c del %1",
+                false
+            )
+            .is_some()
+        );
+        assert!(
+            refusal("Acme.File", "CLSID", OTHER_CLASS, false).is_some(),
+            "it would create what this package does not install"
+        );
+        assert_eq!(refusal("Acme.File", "CLSID", CLASS, false), None);
+    }
+
+    #[test]
+    fn a_shell_extension_points_at_a_file_of_the_package() {
+        let handlers = r"Software\Classes\*\shellex\ContextMenuHandlers";
+        for fine in [
+            machine(&format!(r"{handlers}\Acme"), None, CLASS),
+            machine(&format!(r"{handlers}\{CLASS}"), None, ""),
+            machine(
+                r"Software\Classes\.acme\shellex\{e357fccd-a995-4576-b01f-234630154e96}",
+                None,
+                CLASS,
+            ),
+            machine(
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Acme",
+                None,
+                CLASS,
+            ),
+            machine(
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved",
+                Some(CLASS),
+                "Acme menu",
+            ),
+            machine(
+                &format!(
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{CLASS}"
+                ),
+                None,
+                "Acme",
+            ),
+        ] {
+            assert_eq!(value_refusal(&fine), None, "{fine:?}");
+        }
+        for refused in [
+            machine(&format!(r"{handlers}\Evil"), None, OTHER_CLASS),
+            machine(&format!(r"{handlers}\{OTHER_CLASS}"), None, ""),
+            machine(&format!(r"{handlers}\Evil"), None, "not a class"),
+            machine(
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Evil",
+                None,
+                OTHER_CLASS,
+            ),
+            machine(
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved",
+                Some(OTHER_CLASS),
+                "Evil",
+            ),
+            machine(
+                &format!(
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\NameSpace\{OTHER_CLASS}"
+                ),
+                None,
+                "Evil",
+            ),
+        ] {
+            assert!(value_refusal(&refused).is_some(), "{refused:?}");
+        }
+        for blocked in [
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked",
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Cached",
+        ] {
+            let entry = machine(blocked, Some(OTHER_CLASS), "x");
+            assert!(
+                registry_refusal(&entry, &app_map(), &HashSet::new(), &no_expanding).is_some(),
+                "{blocked}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_font_is_registered_by_a_path_the_package_installs() {
+        const FONTS: &str = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts";
+        assert_eq!(
+            value_refusal(&machine(
+                FONTS,
+                Some("Acme (TrueType)"),
+                r"C:\Program Files\Acme\acme.exe"
+            )),
+            None
+        );
+        for refused in [
+            // Relative to the Windows folder, which this never writes to.
+            "arial.ttf",
+            r"C:\Windows\Fonts\arial.ttf",
+            r"\\server\share\evil.ttf",
+            r"C:\Elsewhere\evil.ttf",
+        ] {
+            assert!(
+                value_refusal(&machine(FONTS, Some("Arial (TrueType)"), refused)).is_some(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compatibility_setting_is_for_a_program_of_the_package_under_the_name_it_has_there() {
+        const LAYERS: &str = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
+        let setting = |program: &str| machine(LAYERS, Some(program), "~ RUNASADMIN");
+        assert_eq!(
+            value_refusal(&setting(r"C:\Program Files\Acme\acme.exe")),
+            None
+        );
+        assert!(value_refusal(&setting(r"C:\Windows\System32\cmd.exe")).is_some());
+        assert_eq!(
+            restored_value_name(&setting(r"C:\Program Files\Acme\acme.exe"), &app_map()),
+            r"D:\Apps\Acme\acme.exe"
+        );
+        assert_eq!(
+            restored_value_name(
+                &machine(
+                    r"Software\Acme",
+                    Some(r"C:\Program Files\Acme\acme.exe"),
+                    "x"
+                ),
+                &app_map()
+            ),
+            r"C:\Program Files\Acme\acme.exe",
+            "any other value's name is just a name"
+        );
+    }
+
+    #[test]
+    fn being_listed_in_default_apps_takes_what_it_says_being_in_the_package() {
+        let listed = machine(
+            r"Software\RegisteredApplications",
+            Some("Acme"),
+            r"Software\Acme\Capabilities",
+        );
+        let capability = machine(
+            r"Software\Acme\Capabilities",
+            Some("ApplicationName"),
+            "Acme",
+        );
+        let known = known_of(std::slice::from_ref(&capability));
+        assert_eq!(
+            registered_value_refusal(&listed, &app_map(), &known, &no_expanding),
+            None
+        );
+        assert!(value_refusal(&listed).is_some());
+        assert!(
+            value_refusal(&machine(
+                r"Software\Clients\StartMenuInternet",
+                None,
+                "Evil"
+            ))
+            .is_some(),
+            "that says which browser is the default"
+        );
+    }
+
+    #[test]
+    fn an_odbc_driver_loads_what_the_package_installs_and_a_source_uses_it_or_windows() {
+        let driver_key = r"Software\ODBC\ODBCINST.INI\Acme Driver";
+        assert_eq!(
+            unit_refusal(&[
+                machine(driver_key, Some("Driver"), SERVER),
+                machine(driver_key, Some("Setup"), SERVER),
+                machine(driver_key, Some("APILevel"), "2"),
+                machine(
+                    r"Software\ODBC\ODBCINST.INI\ODBC Drivers",
+                    Some("Acme Driver"),
+                    "Installed"
+                ),
+            ]),
+            None
+        );
+        assert!(
+            unit_refusal(&[machine(
+                driver_key,
+                Some("Driver"),
+                r"C:\Elsewhere\evil.dll"
+            )])
+            .is_some()
+        );
+        assert!(
+            unit_refusal(&[
+                machine(driver_key, Some("Driver"), SERVER),
+                machine(driver_key, Some("Setup"), r"C:\Elsewhere\evil.dll"),
+            ])
+            .is_some()
+        );
+        assert!(
+            unit_refusal(&[machine(
+                r"Software\ODBC\ODBCINST.INI\ODBC Drivers",
+                Some("Other Driver"),
+                "Installed"
+            )])
+            .is_some(),
+            "it lists one it does not have"
+        );
+        let source = r"Software\ODBC\ODBC.INI\Acme DB";
+        for fine in [SERVER, r"C:\Windows\System32\sqlsrv32.dll"] {
+            assert_eq!(unit_refusal(&[machine(source, Some("Driver"), fine)]), None);
+        }
+        assert!(
+            unit_refusal(&[machine(source, Some("Driver"), r"C:\Elsewhere\evil.dll")]).is_some()
+        );
+    }
+
+    fn firewall_rule(program: &str) -> FirewallRuleEntry {
+        FirewallRuleEntry {
+            name: "Acme Web".to_owned(),
+            description: None,
+            direction: "In".to_owned(),
+            action: "Allow".to_owned(),
+            enabled: true,
+            program: PathBuf::from(program),
+            service: None,
+            protocol: Some("6".to_owned()),
+            local_ports: vec!["80".to_owned(), "443".to_owned()],
+            remote_ports: Vec::new(),
+            local_addresses: Vec::new(),
+            remote_addresses: vec!["LocalSubnet".to_owned()],
+            profiles: vec!["Private".to_owned()],
+            not_carried: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_firewall_rule_is_for_one_program_of_the_package_and_touches_nothing_else() {
+        const PROGRAM: &str = r"C:\Program Files\Acme\acme.exe";
+        let services = HashSet::new();
+        let refusal = |rule: &FirewallRuleEntry| firewall_refusal(rule, &app_map(), &services);
+        assert_eq!(refusal(&firewall_rule(PROGRAM)), None);
+        let block = FirewallRuleEntry {
+            action: "Block".to_owned(),
+            ..firewall_rule(PROGRAM)
+        };
+        assert_eq!(refusal(&block), None, "it is only about its own program");
+
+        for (why, rule) in [
+            ("every program", firewall_rule("")),
+            (
+                "not installed",
+                firewall_rule(r"C:\Windows\System32\svchost.exe"),
+            ),
+            (
+                "overrides other rules",
+                FirewallRuleEntry {
+                    action: "AllowBypass".to_owned(),
+                    ..firewall_rule(PROGRAM)
+                },
+            ),
+            (
+                "through NAT",
+                FirewallRuleEntry {
+                    not_carried: vec!["Edge".to_owned()],
+                    ..firewall_rule(PROGRAM)
+                },
+            ),
+            (
+                "a name that means every rule",
+                FirewallRuleEntry {
+                    name: "ALL".to_owned(),
+                    ..firewall_rule(PROGRAM)
+                },
+            ),
+            (
+                "a name that is another option",
+                FirewallRuleEntry {
+                    name: "x\" dir=in".to_owned(),
+                    ..firewall_rule(PROGRAM)
+                },
+            ),
+            (
+                "a port that is another option",
+                FirewallRuleEntry {
+                    local_ports: vec!["80 program=any".to_owned()],
+                    ..firewall_rule(PROGRAM)
+                },
+            ),
+            (
+                "a service it does not restore",
+                FirewallRuleEntry {
+                    service: Some("Spooler".to_owned()),
+                    ..firewall_rule(PROGRAM)
+                },
+            ),
+            (
+                "no direction",
+                FirewallRuleEntry {
+                    direction: "both".to_owned(),
+                    ..firewall_rule(PROGRAM)
+                },
+            ),
+            (
+                "not a profile",
+                FirewallRuleEntry {
+                    profiles: vec!["everywhere".to_owned()],
+                    ..firewall_rule(PROGRAM)
+                },
+            ),
+        ] {
+            assert!(refusal(&rule).is_some(), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_rule_reaches_netsh_as_it_was_and_comes_back_the_same() {
+        let rule = firewall_rule(r"C:\Program Files\Acme\acme.exe");
+        let program = Path::new(r"D:\My Apps\acme.exe");
+        let arguments = netsh_add_rule_arguments(&rule, program);
+        for wanted in [
+            "name=Acme Web",
+            "dir=in",
+            "action=allow",
+            r"program=D:\My Apps\acme.exe",
+            "enable=yes",
+            "profile=private",
+            "protocol=6",
+            "localport=80,443",
+            "remoteip=localsubnet",
+        ] {
+            assert!(
+                arguments.iter().any(|argument| argument == wanted),
+                "{arguments:?}"
+            );
+        }
+        assert_eq!(
+            netsh_delete_rule_arguments("Acme Web", "In", program)[4..],
+            [
+                "name=Acme Web".to_owned(),
+                "dir=in".to_owned(),
+                r"program=D:\My Apps\acme.exe".to_owned()
+            ]
+        );
+        let stored = r"v2.33|Action=Allow|Active=TRUE|Dir=In|Protocol=6|Profile=Private|LPort=443|LPort=80|RA4=LocalSubnet|App=D:\My Apps\acme.exe|Name=Acme Web|";
+        assert!(stored_firewall_rule_matches(
+            stored, "acme web", "in", program
+        ));
+        assert!(!stored_firewall_rule_matches(
+            stored, "Acme Web", "out", program
+        ));
+        assert!(!stored_firewall_rule_matches(
+            stored, "Other", "in", program
+        ));
+        assert!(!stored_firewall_rule_matches(
+            stored,
+            "Acme Web",
+            "in",
+            Path::new(r"C:\Other\acme.exe")
+        ));
+        let read_back = parse_firewall_rule(stored);
+        assert_eq!(
+            read_back.as_ref().map(firewall_fingerprint),
+            Some(firewall_fingerprint(&rule)),
+            "the order Windows lists its ports in says nothing"
+        );
+    }
+
+    #[test]
+    fn what_a_value_registers_is_told_by_where_it_is() {
+        let of =
+            |key: &str, name: Option<&str>, data: &str| registration_of(&machine(key, name, data));
+        assert_eq!(
+            of(r"Software\Classes\vscode", Some("URL Protocol"), ""),
+            Some(Registration::UrlProtocol {
+                name: "vscode".to_owned()
+            })
+        );
+        assert_eq!(
+            of(r"Software\Classes\.acme", None, "Acme.File"),
+            Some(Registration::FileType {
+                extension: ".acme".to_owned()
+            })
+        );
+        assert_eq!(
+            of(
+                r"Software\Classes\Directory\shell\git_shell\command",
+                None,
+                "x"
+            ),
+            Some(Registration::ShellCommand {
+                on: "directory".to_owned(),
+                verb: "git_shell".to_owned()
+            })
+        );
+        assert_eq!(
+            of(
+                r"SYSTEM\CurrentControlSet\Services\EventLog\Application\Acme",
+                Some("EventMessageFile"),
+                "x"
+            ),
+            Some(Registration::EventLogSource {
+                log: "application".to_owned(),
+                source: "acme".to_owned()
+            })
+        );
+        assert_eq!(
+            of(
+                r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\acme.exe",
+                None,
+                "x"
+            ),
+            Some(Registration::ProgramName {
+                name: "acme.exe".to_owned()
+            })
+        );
+        assert_eq!(of(r"Software\Acme", Some("Theme"), "dark"), None);
     }
 }

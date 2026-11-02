@@ -16,7 +16,8 @@ use winappmigrator_core::rollback::report_lines;
 use winappmigrator_core::{
     EmbeddedPackage, InstallMonitor, PackageManifest, RestoreOptions, Result, VerificationOptions,
     WinAppMigratorError, default_install_location, has_embedded_self_archive,
-    install_location_problem, read_embedded_manifest, restore_package_monitored, verify_package,
+    install_location_problem, read_embedded_manifest, restore_package_monitored, system_changes,
+    verify_package,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -154,6 +155,21 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
         if applied { "applied" } else { "previewed" }
     );
     println!("Changes logged: {}", result.changes_logged.len());
+    // The same list the window asks about, so that a script can read what it agreed to.
+    if let Ok(changes) = system_changes(&manifest) {
+        println!("Sets up: {}", changes.changes.len());
+        for change in &changes.changes {
+            println!(
+                "  {}: {}: {}",
+                change.kind.label(),
+                change.title,
+                change.detail
+            );
+        }
+        for note in &changes.notes {
+            println!("  Note: {note}");
+        }
+    }
     // The restore logs are in the staging folder, which is removed when this returns, so
     // this is the only place automation can see what went wrong.
     println!("Warnings: {}", result.warnings.len());
