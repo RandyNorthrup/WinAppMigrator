@@ -63,7 +63,8 @@ installing services both need it.
 ### 1. Pick an app
 
 Choose **This PC** or **Connected drive…**, then search or sort the list. Optionally include the
-app's license data and user data.
+app's license data and user data. An installer holds one account's data, so if more than one account has
+data for the app, you choose whose.
 
 ### 2. Build the installer
 
@@ -137,14 +138,24 @@ Please read these before relying on it, especially on a one-way trip from a fail
   its own, they are not kept.
 - **An uninstaller shows "Unknown publisher" at its UAC prompt,** even for an installer you signed, because
   [the stub must never be signed](docs/signing.md).
-- **Building from a connected drive captures less than building from the running PC.** COM, file
-  associations, Run keys, and environment variables often do not match, shortcuts are not recreated, and
-  the default install location keeps the drive's letter, so change it. Windows may also write to a
-  drive's registry files while loading them, so **image a failing drive first** and scan the image.
+- **A connected drive only gives what is on it.** Nothing it says is followed off it, and no link on it is
+  followed at all, because a link on another PC's disk leads to this PC's files. So an app or data kept on
+  another of that PC's disks, or reached through a link, stays behind, and the build says so. A connected
+  drive can be read by a build but not checked to be what it says, so build only from one you have reason to
+  trust, and read what it lists.
+- **The app does not write to a connected drive,** which reads a copy of its registry files. Windows itself
+  can still update last-access times and its own records on any disk it mounts, and reading a failing drive
+  can finish it off, so **image a failing drive first**, and scan the image.
 - **Some things are not captured:** URL protocols, shell extensions, firewall rules, fonts, certificates,
   and ODBC sources. Microsoft Store apps are not listed.
-- **Documents and Saved Games** restore under the install folder, not your user folders. AppData and
-  ProgramData go to their real locations.
+- **An installer holds one account's data.** It is read from whoever is signed in, or from the account you
+  choose, and goes to whoever is signed in where the installer runs. That is so even if another
+  administrator was named at the UAC prompt, and if who is signed in cannot be told, it says so and leaves
+  per-user data and settings out rather than guessing.
+- **Documents or Saved Games outside your profile are not written to,** since an elevated installer writes
+  wherever those settings point, and anyone can change them. Moved somewhere inside it, as OneDrive does,
+  they work as usual. Otherwise those files go under the install folder, in `_external`, and the installer
+  says so before it starts.
 - **Hash checks have limits.** They catch damage, and tampering by anyone who does not also update the
   hashes. A preview checks only the installer's overall hash, not each file, and its window lists the first
   300 changes, with services, tasks, and shortcuts first, so on a larger app not every file is listed.
@@ -197,7 +208,7 @@ prints usage.
 | `--apply` | Actually install. Without it nothing is installed: the package is unpacked to a temporary folder, which is then removed |
 | `--dry-run` | Preview, stated explicitly |
 | `--force` | Replace existing files, registry values, services, tasks, shortcuts, and environment variables. Without it, an existing file stops the install before anything changes |
-| `--restore-user-data` | Put user data in the real AppData and ProgramData folders, not under the target |
+| `--restore-user-data` | Put user data in the real AppData, Documents, Saved Games, and ProgramData folders of whoever is signed in, not under the target |
 | `--no-restore-license` | Skip captured license data, which is otherwise restored |
 | `--log <FILE>` | Also write the log to this file, which must not exist yet |
 

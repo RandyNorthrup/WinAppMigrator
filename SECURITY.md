@@ -40,6 +40,44 @@ installer is about to trust, and an honest package reaching too far:
   renamed and replaced, and it will not write through a link at or below the install location. From
   the moment it opens its own file, that cannot be changed or swapped.
 
+## A drive from another PC
+
+The app runs elevated and reads a drive it has no reason to trust, which may be from a machine someone else
+controlled. So:
+
+- **What a drive says is only ever a path on that drive.** One thing maps a recorded path to where it is now.
+  Only a full path on the source's Windows drive has an answer, in ordinary names. A rooted or relative path
+  would depend on where this process is, `..` could climb out of a volume mounted on a folder, and a share would
+  hand its server this account's password hash. All of those are left unread, and the build lists them.
+- **No link on the drive is followed.** A junction or symbolic link on another PC's disk is resolved against this
+  PC when opened, whatever it looked like there. Each path is checked from the drive's root down when it is found
+  and again just before it is read. The Windows folder, the hives, and the profiles are checked too.
+- **The drive is not written to.** Loading a registry hive can replay its logs into it, so hives are copied to an
+  administrators-only folder under `%ProgramData%\WinAppMigrator\hives`, and the copies are loaded. They can hold
+  secrets, and are removed afterward. A run that dies leaves them, and hives loaded, so the app sweeps those when
+  it starts. It goes by a lease each run holds, so it leaves another run's alone, and it only touches a key named
+  the way this app names one.
+- **Loading a hive runs Windows' own parser on it.** A drive made to attack that parser needs no bug here, and this
+  project cannot do anything about one. Read a drive from someone you do not trust on a machine you can lose.
+
+## Another account's data
+
+An installer holds one account's data. A scan loads only the hive of that account, and leaves out what is in
+another's folder, unless it is where the app itself is installed, however a value came to name it. A folder name is
+what is compared, by where it really is, so a short name or a redirected folder that points at another account's
+is left out too.
+
+An elevated process can be run by another administrator than the person at the PC, whose `%APPDATA%` and
+`HKEY_CURRENT_USER` are not that person's. So who a scan or an install is for comes from the owner of this session's
+real `explorer.exe`, and what is written goes to their folders and hive. With more than one owner, or none and a
+system account running this, it could not be told, and per-user data and settings are left out and it says so. With
+no desktop in the session at all, as under a scheduled task, it is the account running this.
+
+The folders are the ones the registry records for that account, which it can change with no rights at all, and an
+elevated process writes wherever they point. So each has to be inside the profile, which only administrators can
+change. Documents and Saved Games also cannot be under `AppData`, where a file can run by itself. What cannot go to
+one goes under the install location, and the installer says so before it starts.
+
 ## Undoing an install
 
 A rollback and an uninstall both run elevated, and do what a record says, on locations other programs
@@ -90,8 +128,8 @@ Treat an installer as being as sensitive as the PC it came from. WinAppMigrator 
 for secrets, but it copies what an app keeps in its own folders and registry keys, which can
 include license keys, tokens, and saved passwords. That happens even with the License option
 off, for example a license file in the install folder or a value under the app's registry key.
-The User data option adds settings and documents. The package also records the name of the
-computer that built it.
+The User data option adds one account's settings and documents. The package also records the
+name of the computer the app was on, and the name of that account's profile folder.
 
 ## How the executables protect themselves
 

@@ -49,10 +49,17 @@ an uninstall run from the command line Windows has for it, with and without thin
 changed in between, a failure late in an install, and an installer killed part-way and while undoing
 that. A real account that is not an administrator tries to change what an uninstaller trusts.
 
-It does nothing unless `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`, and
-`WAM_ELEVATED_E2E=1` are all set, and with them set it fails if it is not elevated. **Never set those
-on a real PC.** Without them it skips, so it is safe to run locally, and that shows only that it
-compiles.
+Its sibling, `elevated_offline_and_profiles.rs`, has a job of its own, so that it stands on a clean
+runner. It makes a real NTFS VHD from what is really on the runner, laid out as a Windows install, with
+hives `reg save` wrote and edited to be another PC's. Its values point at a marker on the runner in every
+way they can be written, and links on it lead back there. The app is taken off the runner before the drive
+is scanned at another letter, the drive's tree is hashed before and after, and a scan is killed with hives
+loaded to see the next start sweep them. It also makes a second real account with a real profile, whose hive
+is not loaded, and compares what the task reader says of every real task with `schtasks`.
+
+They do nothing unless `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`, and
+`WAM_ELEVATED_E2E=1` are all set, and with them set they fail if not elevated. **Never set those on a real
+PC.** Without them they skip, so they are safe to run locally, and that shows only that they compile.
 
 When you change how something is restored, record what it replaces in the journal, teach
 `rollback.rs` to undo it, extend this test, and push to see it run. What it cannot do: load a driver,

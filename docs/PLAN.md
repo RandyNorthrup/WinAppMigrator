@@ -25,10 +25,13 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   build self-extracting installer, with progress and cancel. Self-extracting output
   is mandatory.
 - Scan source selector: **this PC or a connected offline drive** (a disk from
-  another PC). Offline reads load the disk's registry hives with `reg load`, read
-  scheduled tasks from the on-disk Task XML, and re-root recorded paths onto the
-  volume. The app writes nothing to the drive, though Windows may replay a hive's
-  transaction logs on load. The app runs elevated, so there is no mid-task UAC prompt.
+  another PC). Offline reads load copies of the disk's registry hives, compare what
+  its registry says with what that PC called things, and map a path to the volume in one
+  place, which will not lead off it. The app writes nothing to the drive. The app runs
+  elevated, so there is no mid-task UAC prompt.
+- One account's data in an installer: whoever is signed in, or the account chosen when
+  more than one has data, going to whoever is signed in where it runs. Documents and Saved
+  Games go to their real folders.
 - Installer stub: hash-check the package → reinstall → hash-verify the reinstalled
   files, with progress and cancel; non-zero exit on any mismatch.
 - A change journal for each install, in an admin-only folder, with rollback on any failure,
@@ -45,7 +48,9 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   headless UI tests drive the real screens of the app and the installer.
 - Elevated round trip (`crates/winappmigrator-installer/tests/elevated_round_trip.rs`), run only by
   its own CI job on GitHub's throwaway runner: scan, package, remove, and reinstall a fake app, then
-  check the machine with Windows' own tools, and undo it every way that can happen. See
+  check the machine with Windows' own tools, and undo it every way that can happen. Its sibling
+  (`elevated_offline_and_profiles.rs`) does the same from a real NTFS drive made hostile on purpose,
+  with real second accounts, and against every real scheduled task. See
   [CONTRIBUTING](../CONTRIBUTING.md).
 - Dev/release build profiles tuned (deps + first-party optimized in dev for fast
   tests; LTO + single codegen unit + strip in release).
@@ -76,43 +81,34 @@ From the audit of 2026-11-01. Items are removed from this list as they are fixed
 
 **Accuracy**
 
-1. **Offline builds.** Registry values hold `C:\` paths but the scan compares them with
-   `E:\` paths, so COM, file associations, Run keys, App Paths, and environment variables
-   do not match. The installer also defaults to the `E:\` location, and `UsrClass.dat` is
-   not mounted.
-2. **Missing integrations.** URL protocols, shell extensions, TypeLib/AppID, firewall rules,
+1. **Missing integrations.** URL protocols, shell extensions, TypeLib/AppID, firewall rules,
    fonts, certificates, ODBC, event log sources, and 32-bit Run and App Paths keys.
-3. **User data routing.** Documents and Saved Games restore under the install folder, not
-   to the user's folders, and every profile's data collapses into one account's.
 
 **Security and data safety**
 
-4. **An unsigned package still cannot be authenticated.** Restore rules limit what a package
+2. **An unsigned package still cannot be authenticated.** Restore rules limit what a package
    can ask for, but it can run its own files with full rights, and its hashes travel with it.
    Only signing a finished installer proves origin. An install location outside a protected
    folder also stays writable by other programs on the PC, which can race the link checks and
    change installed files afterward. A program already on the PC can swap a running installer's
    file in the moment before it opens it, which a handle to the running image would close.
-5. **Secrets.** All values under an app's registry keys and license files in its install
+3. **Secrets.** All values under an app's registry keys and license files in its install
    folder are captured even with the license option off. Apply the license classifiers
    when opted out, and redact secret-named values.
 
 **Performance**
 
-6. Every byte is read about five times to build and four times to install. Hash while
+4. Every byte is read about five times to build and four times to install. Hash while
    copying, in parallel.
-7. Compression is single-threaded, and recompresses formats that are already compressed.
-8. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
-   lost if one contains a character that breaks the JSON. The offline XML reader could
-   serve live scans too.
+5. Compression is single-threaded, and recompresses formats that are already compressed.
 
 **Features**
 
-9. Footprint preview with include and exclude before building, offering folders that nearly
+6. Footprint preview with include and exclude before building, offering folders that nearly
    match the product's name, which are now left out.
-10. Size and free-space check before building.
-11. A way past the 4 GiB limit: a small loader plus a data file beside it.
-12. Target OS and architecture check.
+7. Size and free-space check before building.
+8. A way past the 4 GiB limit: a small loader plus a data file beside it.
+9. Target OS and architecture check.
 
 ## Not in scope for this release line
 

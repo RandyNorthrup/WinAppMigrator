@@ -244,9 +244,8 @@ file inventory plus a `FootprintLocation` summary. Roots come from:
   dirs, app shortcut targets, the uninstaller directory, App Paths dirs, and the
   roots from layer 2 (MSI, Inno, NSIS, Squirrel, MSIX).
 - Directories named for the product under `Program Files`, `Program Files (x86)`,
-  `ProgramW6432`, `ProgramData`, every readable user profile's
-  `AppData\{Roaming,Local,LocalLow}`, the current user's `Documents` (including
-  `My Games\<App>`) and `Saved Games`, and Public Documents.
+  `ProgramW6432`, `ProgramData`, the `AppData\{Roaming,Local,LocalLow}` of the account being
+  scanned, its `Documents` (including `My Games\<App>`) and `Saved Games`, and Public Documents.
 
 ### Matching
 
@@ -278,6 +277,10 @@ version of its own (`Adobe Photoshop 2024`, `Python311`).
 - A name is ignored when it is too generic to identify anything (`GENERIC_NAMES`: `bin`,
   `x64`, `launcher`, `installer`).
 
+A folder that refuses to be listed is reported, unless it is a link. Those are the junctions
+Windows keeps for old programs (`Application Data`, `Documents and Settings`, `My Music`), which
+refuse everyone on purpose and hold nothing of an app's.
+
 Volatile directories (`Temp`, `Cache`, `*cache`, crash dumps, logs) are skipped during
 matching and pruned when walking a data folder. They are not pruned inside an install folder:
 the same names there can be files the app shipped with, like VS Code's
@@ -305,12 +308,40 @@ an app's own tree is.
   precise reinstall guidance.
 - `WindowsSystem` / others — reported, not copied.
 
-Per-user `Documents`/`Saved Games` are resolved through the `User Shell Folders`
+Per-user `Documents`/`Saved Games` are resolved through that account's `User Shell Folders`
 registry key first (so OneDrive/folder-redirection targets are followed) before
-falling back to the profile path. **Online-only cloud placeholders** (OneDrive
-Files On-Demand, detected via the `OFFLINE`/`RECALL_ON_DATA_ACCESS` file
-attributes) are reported but never copied, so a backup cannot silently hydrate
-or fail on files whose data is not present locally.
+falling back to the profile path. A variable in that value means what it means for that account,
+and not what it means to this process. A file in one records which of the two it is under and
+where (`FileEntry::user_folder`), since a redirected folder's path says nothing about that.
+**Online-only cloud placeholders** (OneDrive Files On-Demand, detected via the
+`OFFLINE`/`RECALL_ON_DATA_ACCESS` file attributes) are reported but never copied, so a backup
+cannot silently hydrate or fail on files whose data is not present locally.
+
+## Whose data
+
+A scan reads one account (`ScanOptions.user_profile`, a `ProfileChoice`), since they all land in
+one account's on the target, and one person's files are no part of another's app.
+`SystemContext::open_for_scan` loads only that account's hive, so another's cannot come along by
+accident. `Default` means, in order, the account an app was installed for (`InstalledApp.owner_profile`,
+which picks no one else's), on this PC whoever is signed in, and on a drive whoever last signed in
+there (`LastLoggedOnUserSID`) or the only account it has.
+
+**Who is signed in** (`path_utils::signed_in_user`) is the owner of this session's real
+`explorer.exe`, not the account running this. An elevated process can be run by another administrator,
+named at the UAC prompt, whose `%APPDATA%` and `HKEY_CURRENT_USER` are not those of the person at the PC.
+Reading goes through `HKEY_USERS\<SID>` and that account's profile from `ProfileList`, and a hive that
+is not loaded is copied and loaded. With more than one owner, or none and a system account running this,
+it could not be told: no one's is read, and it says so. With no desktop in the session, as under a
+scheduled task, SSH, or a build agent, there is no one else it could be meant for, and it is the
+account running this.
+
+A folder in another account's profile is left out, by where it really is, however a value came to name
+it, unless it is where the app itself is installed. A Burn bundle or a hostile uninstall string can name
+one.
+
+`profile_survey.rs` finds out who has data for an app, so that the app can ask. It loads every hive once,
+when the list of apps is read, and keeps only the names of keys under `Software`. Asking about an app
+then looks at some folders.
 
 `FootprintLocation { path, kind, scope, file_count, total_bytes,
 copyable_bytes, included }` groups the inventory by root for the report.
@@ -347,9 +378,14 @@ copyable_bytes, included }` groups the inventory by root for the report.
   `parse_image_path` reads an `ImagePath` however it is written: quoted or not, `\??\` and
   other NT forms, or relative to the Windows folder. A service hosted by `svchost.exe` is not
   captured: its binary is Windows', and only its `ServiceDll` would be the app's.
-- `task_scan.rs` captures scheduled tasks whose actions point at the app, through
-  PowerShell on a live scan and from the Task XML files on a drive.
-- `shortcut_scan.rs` captures Start Menu and Desktop shortcuts on a live scan.
+- `task_scan.rs` captures scheduled tasks with any program that is the app's, from the Task XML
+  files under `Windows\System32\Tasks`, whichever PC they are on. The Task Scheduler only knows this
+  PC, and asking it through PowerShell took one call per task and lost them all to one that broke the
+  JSON. A file that cannot be read now costs a warning for that task and no others, and it reads
+  UTF-16, with or without a byte order mark, and UTF-8. A task with two programs is one task.
+- `shortcut_scan.rs` captures the Start Menu and Desktop shortcuts of the account being scanned and
+  of everyone. On this PC, WScript.Shell reads them. On a drive, the `.lnk` files are parsed directly,
+  since COM would resolve what it found against this PC.
 - `env_scan.rs` captures environment variables whose value contains the app's path. A
   captured `Path` is merged on restore: only entries under the install location are added
   to the target's value, which is otherwise left alone.
@@ -402,44 +438,70 @@ prefixes also match Windows' own `msvcrt.dll`.
 
 ## Scanning an offline volume (a disk from another PC)
 
-Discovery normally reads the live OS through two seams: the live registry
-(`RegKey::predef(HKLM/HKCU)`) and known folders (`std::env::var_os(…)` +
-`path.exists()`). `system_context.rs` funnels both through one `SystemContext`
-so the same scanners work against a **mounted disk from another machine** (a
-failing PC). `ScanSource` is `Live` or `OfflineVolume { volume_root }` (e.g.
-`E:\`), threaded via `ScanOptions`/`PackageOptions`.
+Discovery normally reads the live OS through two seams: the live registry and known
+folders. `system_context.rs` funnels both through one `SystemContext` so the same scanners
+work against a **mounted disk from another machine** (a failing PC). `ScanSource` is `Live` or
+`OfflineVolume { volume_root }` (e.g. `E:\`), threaded via `ScanOptions`/`PackageOptions`.
 
-For an offline volume, `SystemContext::open`:
+For an offline volume, `SystemContext`:
 
-- **Loads the disk's hives** with `reg load HKLM\WAM_<pid>_… <hive>` for `SOFTWARE`,
-  `SYSTEM`, and each `Users\<name>\NTUSER.DAT`. `reg load` uses the process's
-  backup/restore privileges (present when elevated), so the ACL on a foreign `config` hive
-  doesn't block it. A drop guard `reg unload`s every mount; logical `HKLM\…` paths are
-  mapped onto the mounts, resolving `SYSTEM\CurrentControlSet` to the disk's active set
-  from `SYSTEM\Select\Current` (there is no live `CurrentControlSet` symlink offline).
-- **Derives known-folder bases** (`Program Files`, `ProgramData`, `Public`,
-  `Windows`, and every `Users\*` profile) from `volume_root` instead of the live
-  environment, and enumerates **all** user hives (not just the current user).
-- **Re-roots** absolute source paths — a registry-recorded `C:\Program Files\App`
-  becomes `<volume_root>\Program Files\App` (`resolve_source_path`).
+- **Copies the disk's hives and loads the copies** with `reg load HKLM\WAM_<run>_…`:
+  `SOFTWARE`, `SYSTEM`, each profile's `NTUSER.DAT`, and for a scan its `UsrClass.dat`, which is what
+  appears under `Software\Classes` once an account signs in. Each comes with its `.LOG1` and `.LOG2`,
+  so what was last written is read, into the copy. They go in an administrators-only folder under
+  `%ProgramData%\WinAppMigrator\hives`. Logical `HKLM\…` paths are mapped onto the mounts, resolving
+  `SYSTEM\CurrentControlSet` to the disk's active set from `SYSTEM\Select\Current`.
+- **Knows the drive by a `VolumeMap`**, with the letter its Windows was on from its own `SystemRoot`.
+  That is the one place a path recorded on the source PC becomes where it can be read
+  (`to_volume`), and the other way (`to_logical`).
+- **Lists its accounts from `ProfileList`** in its `SOFTWARE` hive. A profile folder with a hive and no
+  record is kept too, known by its name, since this may be the only chance at it.
+- **Reads its computer name and Windows version** from those hives, for the manifest.
 
-Scanner coverage offline: app inventory, registry, environment, license, and
-install-source read the mounted hives; services/drivers read the offline `SYSTEM`
-hive; **scheduled tasks are parsed from the disk's `Windows\System32\Tasks` XML**
-(the same schema `Export-ScheduledTask` emits) because the live Task Scheduler
-can't see another disk. Prerequisite *presence* on the source is left unknown
-offline (the `is_present` probe reads the live registry).
+Paths come in two kinds. **Logical** paths are what the source PC called things: what its registry
+holds, what a value is compared with, and everything in the report and manifest, including the install
+location an installer offers. **On-volume** paths are where something can be read now. Scanners work on
+disk with the second and compare with the first, and `use_what_the_source_pc_calls_things` turns a scan's
+results into the first in one place. Only `FileEntry::path` keeps where it could be read, and the manifest
+drops that too.
 
-**Requirements and safety:** offline scanning requires **elevation** (for `reg load` and
-backup reads). The app writes nothing to the drive and never changes ownership or
-permissions (no `takeown`/`icacls`); files whose ACL denies a plain read are copied at
-package time via `robocopy /B` (backup semantics). Note that `reg load` is not a read-only
-mount: when Windows loads a hive it may replay the hive's transaction logs, which can
-write to it. **For a failing drive, image it first and scan the image.**
+### A drive is not trusted
 
-Restore re-anchoring is unaffected: user-data paths still split on their
-`\appdata\roaming\`-style markers, so data re-homes to the *target's* `%APPDATA%`
-regardless of the source drive letter.
+What a value on a drive says is only ever a path on that drive. Only a full path on the source's Windows
+drive maps to one, in ordinary names:
+
+| A value of | Is |
+| --- | --- |
+| `C:\Program Files\App` | `E:\Program Files\App` |
+| `\Windows\x`, `x\y`, `C:x` | not followed: it would mean somewhere on this PC |
+| `C:\a\..\b`, `C:\a\.. \b` | not followed: it could climb out of a volume mounted on a folder |
+| `D:\Games\App` | not followed: it was on another disk of that PC, and something else has that letter here |
+| `\\server\x`, `\\?\UNC\…`, `\\.\x` | not followed: a server would get this account's password hash |
+| `C:\a\NUL`, `C:\a:stream` | not followed |
+
+**No link on a drive is followed,** since a junction or symbolic link on another PC's disk resolves against
+this PC. `VolumeMap::may_read` walks from the drive's root to a path, and everything that opens a file or
+folder there asks it first: each base folder, each root, each hive, each log and shortcut, each candidate for
+the main executable, and again just before each copy. A walk does not go through a link it finds.
+
+What was not followed is listed in a warning, `drive_paths_not_followed`. A variable in a value means what it
+would on that PC (`expand_source_variables`), and not what it means here: only the folders every Windows has
+are known, and the rest stay as they are, and match nothing.
+
+**The drive is not written to.** Loading a hive where it is can replay its logs into it, which is why the
+copies exist. Windows itself can still update last-access times and its own NTFS logs on any disk it mounts.
+
+A crash can leave hives loaded and copies behind, which can hold secrets. A run holds a lease, a file in its
+folder open with no sharing, for as long as it lives. `sweep_leaked_hive_mounts` runs when the app starts and
+before anything is mounted: it unloads what has no lease held, removes those folders, leaves another run's
+alone, and only touches a key named the way this app names one.
+
+Prerequisite *presence* on the source is left unknown offline (the `is_present` probe reads the live
+registry).
+
+Scanning a drive needs **elevation**, for `reg load` and for reading files through backup privilege. The app
+never changes ownership or permissions (no `takeown`/`icacls`); files whose ACL denies a plain read are copied at
+package time via `robocopy /B`. **For a failing drive, image it first and scan the image.**
 
 ## Restoring user data to real locations
 
@@ -453,30 +515,34 @@ option is on by default whenever data was captured. Turning it off still writes 
 under the install folder.
 
 Opting in, with `--restore-user-data` or that option, re-anchors each user-data file to
-the **target machine's** equivalent base, derived from its archived source path:
+the **target machine's** equivalent base (`USER_DATA_ANCHORS`), from where it came from:
 
 | Source anchor | Target base |
 | --- | --- |
-| `…\AppData\Roaming\…` | `%APPDATA%` |
-| `…\AppData\Local\…` | `%LOCALAPPDATA%` |
-| `…\AppData\LocalLow\…` | `%USERPROFILE%\AppData\LocalLow` |
-| `…\ProgramData\…` | `%ProgramData%` |
-| `…\Users\Public\…` | `%PUBLIC%` |
+| `…\AppData\Roaming\…` | That account's `AppData` |
+| `…\AppData\Local\…` | That account's `Local AppData` |
+| `…\AppData\LocalLow\…` | That account's LocalLow |
+| `…\ProgramData\…` | `ProgramData`, from the admin-only registry |
+| `…\Users\Public\…` | `Public`, from the admin-only registry |
+| Documents, directly in a profile, or recorded as such | That account's `Personal` |
+| Saved Games, directly in a profile, or recorded as such | That account's Saved Games |
 
-Everything else stays under `target_root`, including **Documents and Saved Games**, which
-land in `<target_root>\_external\…`. App-owned install-directory files always restore under
-`target_root`. Routing is centralized in `file_discovery::restore_destination_for_entry`
-(with `split_user_data_relative` doing the anchor split) so restore and verification
-resolve identical destinations.
+App-owned install-directory files always restore under `target_root`. Routing is centralized in
+`file_discovery::restore_destination_for_entry` (with `data_location_of` saying where a file came from) so
+restore and verification resolve identical destinations.
 
-The profile name is discarded, so data captured from several accounts lands in the one
-running the installer, and when the same file exists in two accounts the last one wins.
-Elevating with a different administrator account means that account's `%APPDATA%`.
+**That account is whoever is signed in,** by the same rule as for a scan, whichever account the data came
+from and whichever account is running the installer. Its per-user folders come from its `User Shell Folders`
+under `HKEY_USERS\<SID>`, so a folder moved by OneDrive is where it goes. Its per-user settings go to that hive,
+and the journal records whose it was. If who is signed in cannot be told, per-user settings are left out and
+listed, and user data goes under `target_root`.
 
-The target's folders come from `user_data_base`: `ProgramData` and `Public` from the admin-only
-registry, and the per-user folders from their variables only while those stay inside this account's
-profile, as the registry records it. An elevated process cannot otherwise trust them, since a program
-that is not elevated can set them.
+Those values are that account's to change with no rights at all, and an elevated process writes wherever they
+point, so **each folder has to be inside the profile**, as `ProfileList`, which only administrators can change,
+records it. For AppData, one that is not gets the usual folder in the profile. **Documents or Saved Games that are
+not, or are under `AppData`, are not written to,** and neither is one with a variable that cannot be told. Those
+files stay under `target_root`, in `_external`, and the review says so, which an installer's window shows before
+anything happens.
 
 Safety: ProgramData (and other machine-wide protected roots) require elevation on apply —
 `privilege::destination_requires_admin` gates this; a re-anchored destination's path cannot
@@ -513,12 +579,10 @@ The ones that most affect what gets captured:
 - **An app made of several packages only gets its own.** NVIDIA App's `NvContainer` and
   `NvTelemetry` are separate entries in the Uninstall key, marked as system components, so an
   installer built from NVIDIA App alone does not have them.
-- **Offline path mismatches.** Registry values hold the source's `C:\` paths but are
-  compared with paths re-rooted to the drive (`E:\`), so COM registrations, file
-  associations, Run keys, App Paths, and environment variables do not match. Shortcuts are
-  not read from a drive, so such an installer recreates none, and the installer's default
-  location starts with the drive's letter. `UsrClass.dat` is not loaded, so per-user classes
-  are missed. Offline known-folder redirection (OneDrive Documents, etc.) uses the default
-  profile-relative folders rather than each `NTUSER.DAT`'s `User Shell Folders`.
+- **A connected drive only gives what is on it.** An app or data on another of that PC's disks,
+  or reached through a link, stays behind, and the build lists what it did not follow. Only the
+  folders every Windows has are known for a `%Variable%` in a value on a drive.
+- **Shortcuts on a drive with no file path.** An MSI's "advertised" shortcut names none, so whether it
+  opens the app cannot be told without Windows' help, and it is counted and left out.
 - **Size.** Windows cannot start an executable of 4 GiB or more, so a larger package fails
   the build with that reason.

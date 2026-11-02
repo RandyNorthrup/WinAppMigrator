@@ -4,6 +4,38 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **Building from a connected drive works, and has been run for real.** It compared the registry's `C:\` paths
+  with `E:\` paths, so COM classes, file associations, Run keys, App Paths, and environment variables never
+  matched, and it had never been tried on a real drive. They are compared as the source PC called them now, so
+  all of that comes along. So do per-user classes, from `UsrClass.dat`, and shortcuts, whose `.lnk` files are
+  parsed. A service or scheduled task from a drive used to be refused for running a file the package did not
+  install, because the two were called different things, and that is fixed too. The installer offers the app's
+  location on its PC instead of the drive's letter, and the manifest gives that PC's name and Windows version.
+- **A connected drive is not trusted.** What it says can only be a path on it, and nothing on it can lead a scan
+  to this PC's files or to the network. A rooted, relative, `..`, other-drive, or UNC path is not followed, and
+  neither is any link on the drive. This also closes reading an uninstall string as it was, which opened a file on
+  this PC or on any server it named. What was not followed is listed.
+- **The app no longer writes to a connected drive.** Loading a hive where it is can replay its logs into it, so the
+  hives are copied to an administrators-only folder and the copies are loaded. The same is done for an account on
+  this PC that is not signed in. A run that dies with hives loaded is swept when the app next starts, and only what
+  this app named and no other run is using.
+- **Documents and Saved Games go to the real folders,** wherever the registry says they are, including moved by
+  OneDrive, and uninstalling and rolling back cover them. A folder of either outside your profile is not written
+  to: those files go under the install folder, and the installer says so before it starts. Files in PowerShell's
+  profile folders in Documents are refused, as a Startup folder is, because PowerShell runs them.
+- **An installer holds one account's data.** Every profile's data used to collapse into one. A scan reads whoever is
+  signed in, the app's owner if it was installed for one account, or whoever you choose in **Whose data**, which only
+  appears when there is a choice. Another account's folders are left out, however a value came to name them.
+- **Another administrator at the UAC prompt no longer gets the data.** Reading and restoring used that account's
+  `%APPDATA%` and `HKEY_CURRENT_USER`, not those of the person at the PC. Both now go by whoever is signed in, through
+  `HKEY_USERS\<SID>`, and the installer says so when that is not the account running it. If it cannot be told, it
+  says that, and per-user data and settings are left out rather than guessed at.
+- **Scheduled tasks are read from their files, on a live scan too.** They went through PowerShell one at a time, and
+  one character that broke the JSON lost all of them. A task that cannot be read now costs a warning for that task.
+  A task whose second program is the app's is found, where only the first used to be looked at on a drive.
+- **Fourteen warnings about old folder names are gone.** Every elevated scan warned about `Application Data`, `My
+  Music`, and the junctions like them, and every installer repeated it. A folder that really cannot be read is still
+  reported.
 - **An install can be undone.** It keeps a journal, in an admin-only folder of its own under
   `%ProgramData%\WinAppMigrator\installs`, recording what each change replaces before making it, with files
   it overwrites kept as backups.

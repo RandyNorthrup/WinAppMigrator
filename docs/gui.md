@@ -64,7 +64,13 @@ visibly off-center.
    the selection and Ctrl+F focuses the search.
 2. **Choose what to include**: optionally back up the app's license/activation data,
    and optionally its user data (settings, Documents, Saved Games, ProgramData).
-   Program files are always included.
+   Program files are always included. An installer holds one account's data. With User data
+   on and more than one account to offer, a **Whose data** row of `segmented` controls appears,
+   starting at the signed-in user. On a connected drive, the only account with data needs no
+   asking, and otherwise it starts at whoever last signed in there. If who is signed in cannot
+   be told, a notice says so and no one is chosen until someone is. Selecting an app looks this
+   up on a worker thread, because it reads folders that may be on a failing drive. What it needs
+   from each account's registry was read once, when the list of apps was.
 3. **Create the installer.** One background pipeline reverse-engineers the app
    (analysis is part of building, not a separate step), copies its files, embeds
    everything in a self-extracting `.exe`, and hash-verifies the package. A
@@ -97,7 +103,7 @@ apps are read from:
   (e.g. `E:\`). Picking a folder validates it is a Windows volume (`\Windows` and
   `\Users` exist) before use.
 
-Scanning a connected drive **requires administrator rights** (to mount the
+Scanning a connected drive **requires administrator rights** (to mount copies of the
 drive's registry hives and read protected files). The app already runs elevated:
 both executables embed a `requireAdministrator` manifest in every build (see their
 `build.rs`), so Windows prompts once via UAC at launch and the whole session is
@@ -137,8 +143,10 @@ or `included_program_data`, and `included_license_data`, are set — and a
 Before anything is installed, a card lists what the package sets up beyond files: services,
 drivers, scheduled tasks, autostart entries, shortcuts, and `Path` changes, from
 `restore_review::system_changes`, which uses the same review as the install. It also lists what
-was refused. The window says whether the installer itself is signed and by whom, or "Not signed:
-publisher unknown". A package's own publisher name is not evidence of that, so the two are separate.
+was refused, and when it matters, whose folders and settings per-user data goes to, and where
+Documents or Saved Games go if they are somewhere it will not write. The window says whether the
+installer itself is signed and by whom, or "Not signed: publisher unknown". A package's own publisher
+name is not evidence of that, so the two are separate.
 The package also suggests the install location, so **Install** stays disabled while it is a whole
 drive, the Windows folder, or a folder such as `Program Files` that holds other things side by side.
 
