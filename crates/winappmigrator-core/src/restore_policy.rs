@@ -21,7 +21,8 @@ use crate::integration_scan::{
     first_path_in, parse_firewall_rule,
 };
 use crate::models::{
-    DriverEntry, FirewallRuleEntry, RegistryEntry, RegistryHive, RegistryValueKind,
+    AppArchitecture, DriverEntry, FirewallRuleEntry, ProgramNeed, ProgramRole, RegistryEntry,
+    RegistryHive, RegistryValueKind, SourcePlatform,
 };
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
@@ -2790,6 +2791,552 @@ pub fn license_destination(
     real().unwrap_or_else(|| {
         Err("it is outside the install location and every known data folder".to_owned())
     })
+}
+
+/// What a program is to Windows, by the machine its headers name.
+pub const MACHINE_X86: u16 = 0x014C;
+pub const MACHINE_X64: u16 = 0x8664;
+pub const MACHINE_ARM64: u16 = 0xAA64;
+/// 32-bit Arm, in the form Windows ran.
+pub const MACHINE_ARM32: u16 = 0x01C4;
+/// Windows on Arm first ran x64 programs in this build, which was Windows 11. On an Arm64 PC that is
+/// older, they do not start at all.
+const FIRST_ARM_BUILD_WITH_X64_EMULATION: u32 = 22000;
+/// Windows on Arm dropped 32-bit Arm programs in this build.
+const LAST_ARM_BUILD_BEFORE_NO_ARM32: u32 = 26100;
+/// How many names to put in a sentence about a program.
+const MOST_PROGRAMS_NAMED: usize = 3;
+
+/// The Windows an install is deciding about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsHere {
+    /// `None` if it could not be told.
+    pub build: Option<u32>,
+    pub version: Option<(u16, u16)>,
+    pub architecture: AppArchitecture,
+}
+
+/// Whether a program can start on some Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Starts {
+    /// As itself, or as a 32-bit program on 64-bit Windows, which is what that is built to do.
+    Natively,
+    /// Through an emulator, which most programs are fine with and which some are not.
+    Emulated,
+    Not,
+    /// It could not be told.
+    Unknown,
+}
+
+/// What the architecture of a Windows is called, from what it records.
+pub fn architecture_from_name(name: &str) -> AppArchitecture {
+    match name.trim().to_ascii_uppercase().as_str() {
+        "AMD64" | "X64" => AppArchitecture::X64,
+        "X86" => AppArchitecture::X86,
+        "ARM64" => AppArchitecture::Arm64,
+        _ => AppArchitecture::Unknown,
+    }
+}
+
+fn architecture_text(architecture: &AppArchitecture) -> &'static str {
+    match architecture {
+        AppArchitecture::X86 => "32-bit x86",
+        AppArchitecture::X64 => "x64",
+        AppArchitecture::Arm64 => "Arm64",
+        AppArchitecture::Unknown => "an unknown architecture",
+    }
+}
+
+fn machine_text(machine: u16) -> String {
+    match machine {
+        MACHINE_X86 => "32-bit x86".to_owned(),
+        MACHINE_X64 => "x64".to_owned(),
+        MACHINE_ARM64 => "Arm64".to_owned(),
+        MACHINE_ARM32 => "32-bit Arm".to_owned(),
+        other => format!("machine type {other:#06x}"),
+    }
+}
+
+/// Whether a program built for this machine starts on this Windows. A managed program with a 32-bit
+/// header says nothing about what it runs on: .NET runs it as whatever Windows is.
+pub fn how_it_starts(machine: u16, is_managed: bool, windows: &WindowsHere) -> Starts {
+    if is_managed && machine == MACHINE_X86 {
+        return Starts::Natively;
+    }
+    match windows.architecture {
+        AppArchitecture::Unknown => Starts::Unknown,
+        AppArchitecture::X86 => match machine {
+            MACHINE_X86 => Starts::Natively,
+            _ => Starts::Not,
+        },
+        AppArchitecture::X64 => match machine {
+            MACHINE_X86 | MACHINE_X64 => Starts::Natively,
+            _ => Starts::Not,
+        },
+        AppArchitecture::Arm64 => match machine {
+            MACHINE_ARM64 => Starts::Natively,
+            MACHINE_X86 => Starts::Emulated,
+            MACHINE_X64 => match windows.build {
+                Some(build) if build < FIRST_ARM_BUILD_WITH_X64_EMULATION => Starts::Not,
+                _ => Starts::Emulated,
+            },
+            MACHINE_ARM32 => match windows.build {
+                Some(build) if build >= LAST_ARM_BUILD_BEFORE_NO_ARM32 => Starts::Not,
+                _ => Starts::Emulated,
+            },
+            _ => Starts::Not,
+        },
+    }
+}
+
+/// A driver runs in the kernel, where nothing is emulated, so it has to be for exactly this Windows.
+fn driver_starts(machine: u16, windows: &WindowsHere) -> Starts {
+    let native = match windows.architecture {
+        AppArchitecture::Unknown => return Starts::Unknown,
+        AppArchitecture::X86 => MACHINE_X86,
+        AppArchitecture::X64 => MACHINE_X64,
+        AppArchitecture::Arm64 => MACHINE_ARM64,
+    };
+    if machine == native {
+        Starts::Natively
+    } else {
+        Starts::Not
+    }
+}
+
+/// What came of asking whether an app can run on this Windows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlatformFit {
+    /// Why it cannot, which stops an install before anything changes.
+    pub refusal: Option<String>,
+    /// Why it may not, for the person installing to decide about.
+    pub warnings: Vec<String>,
+}
+
+fn leaf_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+fn some_programs(programs: &[&ProgramNeed]) -> String {
+    let mut names: Vec<String> = programs
+        .iter()
+        .take(MOST_PROGRAMS_NAMED)
+        .map(|program| leaf_name(&program.path))
+        .collect();
+    if programs.len() > names.len() {
+        names.push(format!("and {} more", programs.len() - names.len()));
+    }
+    names.join(", ")
+}
+
+/// What an app needs to run, whatever else it has: its main program, its services, and its drivers.
+/// A helper or an updater for some other PC is common, and is not the app.
+fn is_essential(program: &ProgramNeed) -> bool {
+    matches!(
+        program.role,
+        ProgramRole::Main | ProgramRole::Service | ProgramRole::Driver
+    )
+}
+
+/// Whether this app can run on this Windows, from what its programs say of themselves.
+///
+/// It is refused if Windows would not start it: its main program or a service built for an
+/// architecture this Windows cannot run, a driver for any other architecture, or one of those saying it
+/// needs a newer Windows than this. If it has no main program to go by, it is refused if nothing it
+/// has could start. Windows holds a program to the version in its headers, so that is what counts as
+/// what it needs, and a Windows older than the one it came from is only a reason to warn: what
+/// it found on that newer Windows may not be here, and that cannot be told from its headers. Running
+/// through an emulator is the same: most programs are fine, and some are not, and the person
+/// installing can decide that.
+pub fn platform_fit(
+    source: Option<&SourcePlatform>,
+    programs: &[ProgramNeed],
+    windows: &WindowsHere,
+) -> PlatformFit {
+    let mut fit = PlatformFit::default();
+    let here = architecture_text(&windows.architecture);
+    if programs.is_empty() {
+        fit.warnings.push(
+            "This installer does not say what its programs need, so whether they can run on this \
+             PC was not checked."
+                .to_owned(),
+        );
+    }
+    if windows.architecture == AppArchitecture::Unknown && !programs.is_empty() {
+        fit.warnings.push(
+            "Which architecture this PC is could not be told, so whether this app's programs can \
+             run on it was not checked."
+                .to_owned(),
+        );
+    }
+    if !programs.is_empty()
+        && !programs
+            .iter()
+            .any(|program| program.role == ProgramRole::Main)
+    {
+        fit.warnings.push(
+            "This installer does not say what its main program needs, so what is said here goes \
+             by the rest of what it has."
+                .to_owned(),
+        );
+    }
+    let starts_of = |program: &ProgramNeed| {
+        if program.role == ProgramRole::Driver {
+            driver_starts(program.machine, windows)
+        } else {
+            how_it_starts(program.machine, program.is_managed, windows)
+        }
+    };
+    // A driver for another architecture first, since no other could be what is wrong with it.
+    if let Some(driver) = programs
+        .iter()
+        .find(|program| program.role == ProgramRole::Driver && starts_of(program) == Starts::Not)
+    {
+        fit.refusal = Some(format!(
+            "its driver {} is built for {}, and this PC is {here}. A driver has to match Windows \
+             exactly, so this app cannot run here",
+            leaf_name(&driver.path),
+            machine_text(driver.machine),
+        ));
+        return fit;
+    }
+    let cannot_start: Vec<&ProgramNeed> = programs
+        .iter()
+        .filter(|program| starts_of(program) == Starts::Not)
+        .collect();
+    if let Some(program) = cannot_start.iter().find(|program| is_essential(program)) {
+        fit.refusal = Some(format!(
+            "{} is built for {}, and this PC is {here}, so Windows would not start it",
+            leaf_name(&program.path),
+            machine_text(program.machine),
+        ));
+        return fit;
+    }
+    let has_main = programs.iter().any(is_essential);
+    if !programs.is_empty() && !has_main && cannot_start.len() == programs.len() {
+        fit.refusal = Some(format!(
+            "none of its programs can start on this PC, which is {here}: {}",
+            some_programs(&cannot_start),
+        ));
+        return fit;
+    }
+    if !cannot_start.is_empty() {
+        fit.warnings.push(format!(
+            "Some of this app's programs are built for another architecture and will not start on \
+             this PC, which is {here}: {}. The rest of the app can, so this may not matter.",
+            some_programs(&cannot_start),
+        ));
+    }
+    let emulated: Vec<&ProgramNeed> = programs
+        .iter()
+        .filter(|program| starts_of(program) == Starts::Emulated)
+        .collect();
+    if !emulated.is_empty() {
+        fit.warnings.push(format!(
+            "This PC is {here}, so Windows would run these through an emulator: {}. Most programs \
+             are fine that way, and some are not.",
+            some_programs(&emulated),
+        ));
+    }
+    if let Some(version) = windows.version {
+        let too_new: Vec<&ProgramNeed> = programs
+            .iter()
+            .filter(|program| (program.min_windows_major, program.min_windows_minor) > version)
+            .collect();
+        if let Some(program) = too_new.iter().find(|program| is_essential(program)) {
+            fit.refusal = Some(format!(
+                "{} says it needs Windows {}.{} or newer, and this PC runs {}.{}, so Windows would \
+                 not start it",
+                leaf_name(&program.path),
+                program.min_windows_major,
+                program.min_windows_minor,
+                version.0,
+                version.1,
+            ));
+            return fit;
+        }
+        if !too_new.is_empty() {
+            fit.warnings.push(format!(
+                "Some of this app's programs say they need a newer Windows than this and will not \
+                 start here: {}.",
+                some_programs(&too_new),
+            ));
+        }
+    }
+    match (
+        source.and_then(|source| source.windows_build),
+        windows.build,
+    ) {
+        (Some(from), Some(here)) if here < from => fit.warnings.push(format!(
+            "This app was on Windows build {from}, and this PC runs build {here}. Its programs say \
+             they can start on this Windows, so it may work, but what it relied on there may not \
+             be here."
+        )),
+        (_, None) => fit.warnings.push(
+            "Which build of Windows this is could not be told, so it was not compared with the \
+             one this app was on."
+                .to_owned(),
+        ),
+        _ => {}
+    }
+    fit
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+
+    fn windows(architecture: AppArchitecture, build: u32) -> WindowsHere {
+        WindowsHere {
+            build: Some(build),
+            version: Some((10, 0)),
+            architecture,
+        }
+    }
+
+    fn program(name: &str, role: ProgramRole, machine: u16) -> ProgramNeed {
+        ProgramNeed {
+            path: PathBuf::from(name),
+            role,
+            machine,
+            min_windows_major: 6,
+            min_windows_minor: 1,
+            is_managed: false,
+        }
+    }
+
+    fn source(build: u32) -> SourcePlatform {
+        SourcePlatform {
+            windows_build: Some(build),
+            architecture: AppArchitecture::X64,
+        }
+    }
+
+    #[test]
+    fn what_each_windows_can_start() {
+        use AppArchitecture::{Arm64, X64, X86};
+        let cases = [
+            (X86, MACHINE_X86, Starts::Natively),
+            (X86, MACHINE_X64, Starts::Not),
+            (X86, MACHINE_ARM64, Starts::Not),
+            (X64, MACHINE_X86, Starts::Natively),
+            (X64, MACHINE_X64, Starts::Natively),
+            (X64, MACHINE_ARM64, Starts::Not),
+            (X64, MACHINE_ARM32, Starts::Not),
+            (Arm64, MACHINE_ARM64, Starts::Natively),
+            (Arm64, MACHINE_X86, Starts::Emulated),
+            (Arm64, MACHINE_X64, Starts::Emulated),
+            (X64, 0x0200, Starts::Not),
+        ];
+        for (architecture, machine, expected) in cases {
+            assert_eq!(
+                how_it_starts(machine, false, &windows(architecture.clone(), 26100)),
+                expected,
+                "{machine:#x} on {architecture:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn emulation_on_arm_goes_by_which_build_it_is() {
+        let early = windows(AppArchitecture::Arm64, 19045);
+        assert_eq!(how_it_starts(MACHINE_X64, false, &early), Starts::Not);
+        assert_eq!(how_it_starts(MACHINE_X86, false, &early), Starts::Emulated);
+        assert_eq!(
+            how_it_starts(MACHINE_ARM32, false, &early),
+            Starts::Emulated
+        );
+        let later = windows(AppArchitecture::Arm64, 26100);
+        assert_eq!(how_it_starts(MACHINE_X64, false, &later), Starts::Emulated);
+        assert_eq!(how_it_starts(MACHINE_ARM32, false, &later), Starts::Not);
+    }
+
+    #[test]
+    fn a_managed_program_with_a_32_bit_header_runs_on_anything_that_has_net() {
+        for architecture in [
+            AppArchitecture::X86,
+            AppArchitecture::X64,
+            AppArchitecture::Arm64,
+        ] {
+            assert_eq!(
+                how_it_starts(MACHINE_X86, true, &windows(architecture, 26100)),
+                Starts::Natively
+            );
+        }
+        // One built for x64 says so, managed or not.
+        assert_eq!(
+            how_it_starts(MACHINE_X64, true, &windows(AppArchitecture::X86, 26100)),
+            Starts::Not
+        );
+    }
+
+    #[test]
+    fn x64_on_x86_is_refused_before_anything_changes() {
+        let fit = platform_fit(
+            Some(&source(26100)),
+            &[program("app.exe", ProgramRole::Main, MACHINE_X64)],
+            &windows(AppArchitecture::X86, 19045),
+        );
+        let refusal = fit.refusal.unwrap_or_default();
+        assert!(refusal.contains("app.exe"), "{refusal}");
+        assert!(refusal.contains("x64"), "{refusal}");
+    }
+
+    #[test]
+    fn a_service_of_another_architecture_stops_it_as_its_main_program_would() {
+        let fit = platform_fit(
+            None,
+            &[
+                program("app.exe", ProgramRole::Main, MACHINE_X86),
+                program("svc.exe", ProgramRole::Service, MACHINE_ARM64),
+            ],
+            &windows(AppArchitecture::X64, 26100),
+        );
+        assert!(
+            fit.refusal
+                .is_some_and(|refusal| refusal.contains("svc.exe"))
+        );
+    }
+
+    #[test]
+    fn a_driver_for_another_architecture_is_refused_even_where_programs_are_emulated() {
+        for (machine, here) in [
+            (MACHINE_X86, AppArchitecture::X64),
+            (MACHINE_X64, AppArchitecture::Arm64),
+            (MACHINE_ARM64, AppArchitecture::X64),
+            (MACHINE_X64, AppArchitecture::X86),
+        ] {
+            let fit = platform_fit(
+                None,
+                &[
+                    program("app.exe", ProgramRole::Main, MACHINE_X86),
+                    program("flt.sys", ProgramRole::Driver, machine),
+                ],
+                &windows(here.clone(), 26100),
+            );
+            assert!(
+                fit.refusal
+                    .as_deref()
+                    .is_some_and(|text| text.contains("flt.sys")),
+                "{machine:#x} on {here:?}: {fit:?}"
+            );
+        }
+        let fit = platform_fit(
+            None,
+            &[program("flt.sys", ProgramRole::Driver, MACHINE_X64)],
+            &windows(AppArchitecture::X64, 26100),
+        );
+        assert_eq!(fit.refusal, None);
+    }
+
+    #[test]
+    fn x64_on_arm_warns_and_goes_ahead() {
+        let fit = platform_fit(
+            Some(&source(26100)),
+            &[program("app.exe", ProgramRole::Main, MACHINE_X64)],
+            &windows(AppArchitecture::Arm64, 26100),
+        );
+        assert_eq!(fit.refusal, None);
+        assert_eq!(fit.warnings.len(), 1, "{fit:?}");
+        assert!(fit.warnings[0].contains("emulator"), "{fit:?}");
+        assert!(fit.warnings[0].contains("app.exe"), "{fit:?}");
+    }
+
+    #[test]
+    fn a_helper_for_another_architecture_is_only_worth_saying() {
+        let fit = platform_fit(
+            None,
+            &[
+                program("app.exe", ProgramRole::Main, MACHINE_X64),
+                program(r"arm64\helper.exe", ProgramRole::Other, MACHINE_ARM64),
+            ],
+            &windows(AppArchitecture::X64, 26100),
+        );
+        assert_eq!(fit.refusal, None);
+        assert!(
+            fit.warnings.iter().any(|text| text.contains("helper.exe")),
+            "{fit:?}"
+        );
+    }
+
+    #[test]
+    fn with_no_main_program_it_takes_nothing_that_could_start_to_refuse_it() {
+        let helpers = [
+            program("a.exe", ProgramRole::Other, MACHINE_ARM64),
+            program("b.exe", ProgramRole::Other, MACHINE_ARM64),
+        ];
+        let here = windows(AppArchitecture::X64, 26100);
+        assert!(platform_fit(None, &helpers, &here).refusal.is_some());
+        let mut mixed = helpers.to_vec();
+        mixed.push(program("c.exe", ProgramRole::Other, MACHINE_X64));
+        let fit = platform_fit(None, &mixed, &here);
+        assert_eq!(fit.refusal, None);
+        assert!(
+            fit.warnings
+                .iter()
+                .any(|text| text.contains("main program")),
+            "what could not be read of it is said: {fit:?}"
+        );
+    }
+
+    #[test]
+    fn a_windows_older_than_its_headers_allow_is_refused() {
+        let mut needs_newer = program("app.exe", ProgramRole::Main, MACHINE_X64);
+        needs_newer.min_windows_major = 11;
+        needs_newer.min_windows_minor = 0;
+        let fit = platform_fit(None, &[needs_newer], &windows(AppArchitecture::X64, 26100));
+        assert!(fit.refusal.is_some_and(|text| text.contains("11.0")));
+    }
+
+    #[test]
+    fn a_windows_older_than_the_source_but_not_its_headers_warns() {
+        let fit = platform_fit(
+            Some(&source(26100)),
+            &[program("app.exe", ProgramRole::Main, MACHINE_X64)],
+            &windows(AppArchitecture::X64, 20348),
+        );
+        assert_eq!(fit.refusal, None);
+        assert_eq!(fit.warnings.len(), 1, "{fit:?}");
+        assert!(fit.warnings[0].contains("26100"), "{fit:?}");
+        assert!(fit.warnings[0].contains("20348"), "{fit:?}");
+
+        let newer = platform_fit(
+            Some(&source(20348)),
+            &[program("app.exe", ProgramRole::Main, MACHINE_X64)],
+            &windows(AppArchitecture::X64, 26100),
+        );
+        assert_eq!(newer, PlatformFit::default());
+    }
+
+    #[test]
+    fn what_cannot_be_told_is_said_and_stops_nothing() {
+        let here = WindowsHere {
+            build: None,
+            version: None,
+            architecture: AppArchitecture::Unknown,
+        };
+        let fit = platform_fit(
+            Some(&source(26100)),
+            &[program("app.exe", ProgramRole::Main, MACHINE_ARM64)],
+            &here,
+        );
+        assert_eq!(fit.refusal, None);
+        assert_eq!(fit.warnings.len(), 2, "{fit:?}");
+        let fit = platform_fit(None, &[], &windows(AppArchitecture::X64, 26100));
+        assert_eq!(fit.refusal, None);
+        assert_eq!(fit.warnings.len(), 1, "{fit:?}");
+    }
+
+    #[test]
+    fn architecture_names_read_as_windows_records_them() {
+        assert_eq!(architecture_from_name("AMD64"), AppArchitecture::X64);
+        assert_eq!(architecture_from_name("x86"), AppArchitecture::X86);
+        assert_eq!(architecture_from_name("ARM64"), AppArchitecture::Arm64);
+        assert_eq!(architecture_from_name("IA64"), AppArchitecture::Unknown);
+    }
 }
 
 #[cfg(test)]

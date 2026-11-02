@@ -156,6 +156,32 @@ pub fn windows_build() -> u32 {
     })
 }
 
+/// Which version of Windows this is by its own numbering, from the admin-only registry. `None` if
+/// that cannot be read.
+pub fn windows_version_numbers() -> Option<(u16, u16)> {
+    let key = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(WINDOWS_VERSION_KEY)
+        .ok()?;
+    let number = |name: &str| {
+        key.get_value::<u32, _>(name)
+            .ok()
+            .and_then(|value| u16::try_from(value).ok())
+    };
+    Some((
+        number("CurrentMajorVersionNumber")?,
+        number("CurrentMinorVersionNumber")?,
+    ))
+}
+
+/// `PROCESSOR_ARCHITECTURE` as Windows itself records it. The variable of that name says what this
+/// process is emulated as, and anyone can set it.
+pub fn windows_architecture_name() -> Option<String> {
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+        .and_then(|key| key.get_value::<String, _>("PROCESSOR_ARCHITECTURE"))
+        .ok()
+}
+
 /// `ProgramData`, from the admin-only registry.
 pub fn program_data_dir() -> Option<&'static Path> {
     static FOLDER: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -562,6 +588,9 @@ pub const DEEPEST_WALK: usize = 64;
 pub struct WalkedEntry {
     pub path: PathBuf,
     pub file_type: std::fs::FileType,
+    /// What the listing said of it, which takes nothing more to find out. A size here can lag behind
+    /// a file that is open for writing, so it is not to be taken as what would be read.
+    pub metadata: Option<std::fs::Metadata>,
 }
 
 /// A folder a walk could not read.
@@ -653,7 +682,11 @@ impl<F: FnMut(&Path, bool) -> bool> Iterator for AskingWalk<F> {
             if file_type.is_dir() && self.open.len() < self.max_depth {
                 self.enter(&path);
             }
-            return Some(Ok(WalkedEntry { path, file_type }));
+            return Some(Ok(WalkedEntry {
+                path,
+                file_type,
+                metadata: entry.metadata().ok(),
+            }));
         }
     }
 }

@@ -58,7 +58,7 @@ use crate::restore_policy::{
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
-    STATE_ROOT_REFUSAL, install_location_problem, overlaps_state_root,
+    STATE_ROOT_REFUSAL, install_location_problem, overlaps_state_root, refuse_what_cannot_run_here,
 };
 use crate::rollback::{
     interrupted_installs, put_back_backup, recover_interrupted_installs, roll_back,
@@ -223,7 +223,21 @@ pub fn restore_package_monitored(
     // Read once. Everything below works from this copy, so nothing can change between
     // the hash check and the install, even if the file on disk does.
     let manifest = read_manifest(&effective_options.package_root)?;
-    let mut recovered_warnings = Vec::new();
+    // What cannot run here stops here, before the record of an install is begun, let alone anything
+    // it would change. What may not run is said along with everything else.
+    let fit = refuse_what_cannot_run_here(&manifest)?;
+    let mut recovered_warnings: Vec<Warning> = fit
+        .warnings
+        .iter()
+        .map(|warning| {
+            Warning::new(
+                "platform_may_not_fit",
+                WarningSeverity::Warning,
+                warning.clone(),
+                None,
+            )
+        })
+        .collect();
     let mut busy_lock = None;
     if options.apply {
         monitor.report(InstallStep::new(InstallPhase::CheckingPackage, 0, 0));
@@ -3864,6 +3878,8 @@ mod tests {
             schema_version: crate::models::PACKAGE_SCHEMA_VERSION.to_owned(),
             source_computer_name: None,
             source_windows_version: None,
+            source_platform: None,
+            program_needs: Vec::new(),
             scan_timestamp_utc: String::new(),
             main_executable_path: PathBuf::from(r"C:\Program Files\Acme\acme.exe"),
             application_metadata: None,

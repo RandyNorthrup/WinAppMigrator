@@ -47,8 +47,8 @@ pub use profile_survey::{ProfilePicker, ProfileRow, ProfileSurvey, survey_of, su
 pub use progress::{BuildMonitor, BuildStep, InstallMonitor, InstallPhase, InstallStep, Monitor};
 pub use restore::{default_install_location, restore_package, restore_package_monitored};
 pub use restore_review::{
-    SystemChange, SystemChangeKind, SystemChanges, install_location_problem, system_changes,
-    system_changes_restoring,
+    SystemChange, SystemChangeKind, SystemChanges, install_location_problem,
+    refuse_what_cannot_run_here, system_changes, system_changes_restoring,
 };
 pub use system_context::{
     ProfileChoice, ScanSource, SystemContext, looks_like_a_windows_drive, sweep_leaked_hive_mounts,

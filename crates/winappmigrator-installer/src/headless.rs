@@ -16,8 +16,8 @@ use winappmigrator_core::rollback::report_lines;
 use winappmigrator_core::{
     EmbeddedPackage, InstallMonitor, PackageManifest, RestoreOptions, Result, VerificationOptions,
     WinAppMigratorError, default_install_location, has_embedded_self_archive,
-    install_location_problem, read_embedded_manifest, restore_package_monitored,
-    system_changes_restoring, verify_package,
+    install_location_problem, read_embedded_manifest, refuse_what_cannot_run_here,
+    restore_package_monitored, system_changes_restoring, verify_package,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -129,6 +129,9 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
                 .to_owned(),
         )
     })?;
+
+    // An app that cannot run here stops here, with nothing unpacked for it.
+    refuse_what_cannot_run_here(&manifest)?;
 
     // Remove extraction directories from previous or crashed runs first.
     crate::cleanup::sweep_stale_extractions(executable);

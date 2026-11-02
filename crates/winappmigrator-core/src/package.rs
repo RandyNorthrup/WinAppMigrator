@@ -191,6 +191,8 @@ pub fn create_package_monitored(
         schema_version: PACKAGE_SCHEMA_VERSION.to_owned(),
         source_computer_name: report.source_computer_name.clone(),
         source_windows_version: report.source_windows_version.clone(),
+        source_platform: report.source_platform.clone(),
+        program_needs: report.program_needs.clone(),
         scan_timestamp_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,
         main_executable_path: report.main_executable.path.clone(),
         application_metadata: report.source_app.clone(),

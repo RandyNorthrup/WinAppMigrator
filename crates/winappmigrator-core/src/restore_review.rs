@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use winreg::RegKey;
 use winreg::enums::{HKEY_USERS, KEY_READ};
 
-use crate::errors::Result;
+use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
     DESKTOP_FALLBACK, DESKTOP_VALUE, START_MENU_FALLBACK, START_MENU_VALUE, UserDataAnchor,
     UserFolderPlace, account_shell_folder, data_location_of, expand_env_vars, first_link_to,
@@ -21,21 +21,24 @@ use crate::file_discovery::{
 use crate::journal::machine_state_root;
 use crate::license_scan::is_license_env_var;
 use crate::models::{
-    CertificateEntry, DriverEntry, EnvironmentScope, EnvironmentVariableEntry, FileClassification,
+    AppArchitecture, CertificateEntry, DriverEntry, EnvironmentScope, EnvironmentVariableEntry,
+    FileClassification,
     FileEntry, FirewallRuleEntry, LeftOutItem, LicenseArtifact, PackageManifest, RegistryEntry,
     RegistryHive, ScheduledTaskEntry, ServiceEntry, Warning, WarningSeverity,
 };
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     SignedInUser, current_user_sid, path_is_within, resolved_location, signed_in_user,
-    strip_prefix_ignore_case, system_root,
+    strip_prefix_ignore_case, system_root, windows_architecture_name, windows_build,
+    windows_version_numbers,
 };
 use crate::registry_target::{app_path_entries, is_path_variable, service_image_path};
 use crate::restore_policy::{
-    KnownFolders, PackageRegistrations, Registration, SERVICES_PREFIX, ServiceAccount,
-    ShortcutPlacement, driver_destination, environment_refusal, existing_service_refusal,
-    firewall_refusal, install_location_refusal, install_placement_refusal, is_autostart_entry,
-    is_source_uninstall_value, is_uninstall_entry_key, is_valid_service_name, license_destination,
+    KnownFolders, PackageRegistrations, PlatformFit, Registration, SERVICES_PREFIX, ServiceAccount,
+    ShortcutPlacement, WindowsHere, architecture_from_name, driver_destination,
+    environment_refusal, existing_service_refusal, firewall_refusal, install_location_refusal,
+    install_placement_refusal, is_autostart_entry, is_source_uninstall_value,
+    is_uninstall_entry_key, is_valid_service_name, license_destination, platform_fit,
     read_task_definition, registered_value_refusal, registration_of, registration_refusal,
     registration_unit_of, registry_refusal, shortcut_placement, task_refusal,
 };
@@ -965,6 +968,7 @@ pub fn system_changes_restoring(
     manifest: &PackageManifest,
     restore_license: bool,
 ) -> Result<SystemChanges> {
+    let fit = refuse_what_cannot_run_here(manifest)?;
     let target = PathBuf::from(NO_TARGET_YET);
     let review = ReviewedPackage::with_folders(
         manifest,
@@ -976,7 +980,38 @@ pub fn system_changes_restoring(
         // Whether an existing service may be replaced depends on where it is being installed.
         &|_| Ok(None),
     )?;
-    Ok(describe(&review, &target))
+    let mut changes = describe(&review, &target);
+    changes.notes.extend(fit.warnings);
+    Ok(changes)
+}
+
+/// The Windows this is running on, from what it records about itself, which only an administrator
+/// can change. What a process's environment says of its architecture is what it is emulated as.
+pub fn windows_here() -> WindowsHere {
+    WindowsHere {
+        build: Some(windows_build()).filter(|build| *build != 0),
+        version: windows_version_numbers(),
+        architecture: windows_architecture_name()
+            .as_deref()
+            .map_or(AppArchitecture::Unknown, architecture_from_name),
+    }
+}
+
+/// Whether what this package holds can run on this PC, as far as can be told. An app that cannot is
+/// refused here, before anything of it is unpacked, and what is left is what may not work, for the
+/// person installing to read.
+pub fn refuse_what_cannot_run_here(manifest: &PackageManifest) -> Result<PlatformFit> {
+    let fit = platform_fit(
+        manifest.source_platform.as_ref(),
+        &manifest.program_needs,
+        &windows_here(),
+    );
+    match fit.refusal.as_deref() {
+        Some(refusal) => Err(WinAppMigratorError::InvalidInput(format!(
+            "this app cannot run on this PC, so nothing was changed: {refusal}"
+        ))),
+        None => Ok(fit),
+    }
 }
 
 /// Why this install location must not be used on this PC, if so.
@@ -1485,6 +1520,8 @@ mod tests {
             schema_version: String::new(),
             source_computer_name: None,
             source_windows_version: None,
+            source_platform: None,
+            program_needs: Vec::new(),
             scan_timestamp_utc: String::new(),
             main_executable_path: PathBuf::from(SOURCE).join("acme.exe"),
             application_metadata: None,

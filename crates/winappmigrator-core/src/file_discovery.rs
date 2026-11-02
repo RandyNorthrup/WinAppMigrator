@@ -132,6 +132,7 @@ pub fn discover_files(
         context.include_program_data,
         "Selected main executable",
         None,
+        None,
         system,
         &mut warnings,
     );
@@ -151,6 +152,7 @@ pub fn discover_files(
             context.include_user_data,
             context.include_program_data,
             "File named by the install record",
+            None,
             None,
             system,
             &mut warnings,
@@ -192,12 +194,7 @@ pub fn discover_files(
         });
     }
 
-    files.sort_by(|left, right| {
-        left.original_path
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .cmp(&right.original_path.to_string_lossy().to_ascii_lowercase())
-    });
+    files.sort_by_cached_key(|file| file.original_path.to_string_lossy().to_ascii_lowercase());
     locations.sort_by_key(|location| std::cmp::Reverse(location.total_bytes));
 
     (files, locations, warnings)
@@ -1522,6 +1519,7 @@ fn discover_tree(
                 include_program_data,
                 discovery_reason(&root.kind),
                 root.user_folder.as_ref(),
+                entry.metadata.as_ref(),
                 system,
                 warnings,
             );
@@ -1567,6 +1565,7 @@ fn add_file(
     include_program_data: bool,
     reason: &str,
     user_folder: Option<&(UserDataAnchor, PathBuf)>,
+    listed: Option<&fs::Metadata>,
     system: &SystemContext,
     warnings: &mut Vec<Warning>,
 ) {
@@ -1575,7 +1574,9 @@ fn add_file(
         return;
     }
 
-    let metadata = match fs::metadata(path) {
+    // What a folder's listing said, if this came from one. Asking again for every file of a large
+    // app takes as long as the rest of the walk.
+    let metadata = match listed.map_or_else(|| fs::metadata(path), |listed| Ok(listed.clone())) {
         Ok(metadata) => metadata,
         Err(error) => {
             warnings.push(Warning::new(

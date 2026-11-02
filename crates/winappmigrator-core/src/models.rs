@@ -171,6 +171,12 @@ pub struct ScanReport {
     /// The version of Windows the app was on.
     #[serde(default)]
     pub source_windows_version: Option<String>,
+    /// Which build and architecture of Windows the app was on.
+    #[serde(default)]
+    pub source_platform: Option<SourcePlatform>,
+    /// What each of the app's programs and drivers needs from Windows.
+    #[serde(default)]
+    pub program_needs: Vec<ProgramNeed>,
     /// The account whose per-user data and settings were read, if any.
     #[serde(default)]
     pub user_data_profile: Option<String>,
@@ -300,6 +306,12 @@ pub struct PackageManifest {
     pub schema_version: String,
     pub source_computer_name: Option<String>,
     pub source_windows_version: Option<String>,
+    /// Which build and architecture of Windows the app was on, as that PC recorded them.
+    #[serde(default)]
+    pub source_platform: Option<SourcePlatform>,
+    /// What each of the app's programs and drivers needs from Windows, from its own headers.
+    #[serde(default)]
+    pub program_needs: Vec<ProgramNeed>,
     pub scan_timestamp_utc: String,
     pub main_executable_path: PathBuf,
     pub application_metadata: Option<InstalledApp>,
@@ -361,6 +373,41 @@ pub struct PackageManifest {
     /// The account on the source PC whose per-user data and settings are in the package.
     #[serde(default)]
     pub user_data_profile: Option<String>,
+}
+
+/// Which Windows an app was on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourcePlatform {
+    /// Its build number, such as 26100.
+    #[serde(default)]
+    pub windows_build: Option<u32>,
+    pub architecture: AppArchitecture,
+}
+
+/// What a program or a driver of an app is to Windows.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgramRole {
+    Main,
+    Service,
+    Driver,
+    Other,
+}
+
+/// What one of an app's programs needs from Windows, from what its own headers say.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProgramNeed {
+    /// As the PC it was on called it.
+    pub path: PathBuf,
+    pub role: ProgramRole,
+    /// The PE machine type, such as `0x8664`.
+    pub machine: u16,
+    /// The oldest Windows it says it will start on, which Windows holds it to.
+    pub min_windows_major: u16,
+    pub min_windows_minor: u16,
+    /// Managed code: a 32-bit header on one says little about what it runs on.
+    #[serde(default)]
+    pub is_managed: bool,
 }
 
 /// A rule in Windows Firewall, as much of it as can be set again. Everything here comes from a

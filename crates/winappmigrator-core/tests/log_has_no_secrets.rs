@@ -49,6 +49,8 @@ fn manifest_for(files: Vec<FileEntry>) -> PackageManifest {
         schema_version: PACKAGE_SCHEMA_VERSION.to_owned(),
         source_computer_name: None,
         source_windows_version: None,
+        source_platform: None,
+        program_needs: Vec::new(),
         scan_timestamp_utc: String::new(),
         main_executable_path: Path::new(INSTALLED_FROM).join("acme.exe"),
         application_metadata: None,

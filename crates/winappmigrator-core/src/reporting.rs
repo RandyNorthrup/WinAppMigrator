@@ -685,6 +685,8 @@ mod tests {
             other_accounts: Default::default(),
             source_computer_name: None,
             source_windows_version: None,
+            source_platform: None,
+            program_needs: Vec::new(),
             user_data_profile: None,
             source_app: None,
             main_executable: ExecutableMetadata {

@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -9,7 +10,8 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::errors::{Result, WinAppMigratorError};
 use crate::models::{
-    AppArchitecture, ExecutableMetadata, FileVersionInfo, SignatureStatus, Warning, WarningSeverity,
+    AppArchitecture, ExecutableMetadata, FileVersionInfo, ProgramNeed, ProgramRole,
+    SignatureStatus, Warning, WarningSeverity,
 };
 use crate::path_utils::file_name_string;
 
@@ -86,8 +88,10 @@ fn merge_delay_imports(imports: &mut Vec<ImportedDll>, delay: Vec<ImportedDll>) 
     });
 }
 
-/// A program's file, read whole. Windows will not start one of this size, and on a drive from
-/// elsewhere, one could be made big enough to run this out of memory.
+/// A program's file, as far as anything here looks at it. Windows will not start one of the size
+/// this refuses, and on a drive from elsewhere, one could be made big enough to run this out of memory.
+/// Most of a large program is code, which nothing here reads, and reading it would be the second or
+/// third time that file was read for a build.
 fn read_program(path: &Path) -> Result<Vec<u8>> {
     let size = fs::metadata(path)
         .map_err(|source| WinAppMigratorError::io(path, source))?
@@ -98,7 +102,192 @@ fn read_program(path: &Path) -> Result<Vec<u8>> {
             format!("it is {size} bytes, too large to be a program"),
         ));
     }
+    if size > READ_WHOLE_UP_TO_BYTES
+        && let Some(bytes) = read_what_is_looked_at(path, size)
+    {
+        return Ok(bytes);
+    }
     fs::read(path).map_err(|source| WinAppMigratorError::io(path, source))
+}
+
+/// A program of this size or less is read whole, as it costs next to nothing.
+const READ_WHOLE_UP_TO_BYTES: u64 = 8 * 1024 * 1024;
+const IMPORT_DIRECTORY_INDEX: usize = 1;
+const RESOURCE_DIRECTORY_INDEX: usize = 2;
+const SECURITY_DIRECTORY_INDEX: usize = 4;
+const IMPORT_DESCRIPTOR_BYTES: usize = 20;
+const IMPORT_DESCRIPTOR_NAME_FIELD: usize = 12;
+const DELAY_DESCRIPTOR_NAME_FIELD: usize = 4;
+const MOST_DESCRIPTORS_FOLLOWED: usize = 4096;
+
+/// One section of a program, as its headers say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SectionPlace {
+    rva: u32,
+    virtual_size: u32,
+    file_offset: u64,
+    file_size: u64,
+}
+
+/// Where a program keeps things, from its headers alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProgramLayout {
+    sections: Vec<SectionPlace>,
+    /// The address and size of each data directory.
+    directories: Vec<(u32, u32)>,
+}
+
+impl ProgramLayout {
+    fn section_of(&self, rva: u32) -> Option<&SectionPlace> {
+        self.sections.iter().find(|section| {
+            let size = section
+                .virtual_size
+                .max(u32::try_from(section.file_size).unwrap_or(u32::MAX));
+            rva >= section.rva && u64::from(rva) < u64::from(section.rva) + u64::from(size)
+        })
+    }
+
+    fn file_offset_of(&self, rva: u32) -> Option<usize> {
+        let section = self.section_of(rva)?;
+        let into = u64::from(rva - section.rva);
+        (into < section.file_size)
+            .then(|| usize::try_from(section.file_offset + into).ok())
+            .flatten()
+    }
+}
+
+/// Read a program's section table. `None` if it is not all here, or it is not a program.
+fn program_layout(start: &[u8]) -> Option<ProgramLayout> {
+    const SECTION_HEADER_BYTES: usize = 40;
+    const SECTION_COUNT_FIELD: usize = 6;
+    const OPTIONAL_HEADER_SIZE_FIELD: usize = 20;
+    const SECTION_VIRTUAL_SIZE_FIELD: usize = 8;
+    const SECTION_RVA_FIELD: usize = 12;
+    const SECTION_RAW_SIZE_FIELD: usize = 16;
+    const SECTION_RAW_POINTER_FIELD: usize = 20;
+    const PE32_DIRECTORY_COUNT_FIELD: usize = 92;
+    const PE32_PLUS_DIRECTORY_COUNT_FIELD: usize = 108;
+    header_facts(start)?;
+    let pe = usize::try_from(u32_at(start, PE_OFFSET_FIELD)?).ok()?;
+    let sections_in_all = usize::from(u16_at(start, pe + SECTION_COUNT_FIELD)?);
+    let optional_size = usize::from(u16_at(start, pe + OPTIONAL_HEADER_SIZE_FIELD)?);
+    let optional = pe + PE_SIGNATURE.len() + COFF_HEADER_BYTES;
+    let (count_field, first_directory) = match u16_at(start, optional)? {
+        OPTIONAL_MAGIC_PE32 => (PE32_DIRECTORY_COUNT_FIELD, PE32_DIRECTORIES_FIELD),
+        OPTIONAL_MAGIC_PE32_PLUS => (PE32_PLUS_DIRECTORY_COUNT_FIELD, PE32_PLUS_DIRECTORIES_FIELD),
+        _ => return None,
+    };
+    let directory_count = usize::try_from(u32_at(start, optional + count_field)?).ok()?;
+    let mut directories = Vec::new();
+    for index in 0..directory_count.min(16) {
+        let entry = optional + first_directory + index * DIRECTORY_ENTRY_BYTES;
+        directories.push((u32_at(start, entry)?, u32_at(start, entry + 4)?));
+    }
+    let table = optional + optional_size;
+    let mut sections = Vec::with_capacity(sections_in_all);
+    for index in 0..sections_in_all {
+        let header = table + index * SECTION_HEADER_BYTES;
+        sections.push(SectionPlace {
+            rva: u32_at(start, header + SECTION_RVA_FIELD)?,
+            virtual_size: u32_at(start, header + SECTION_VIRTUAL_SIZE_FIELD)?,
+            file_offset: u64::from(u32_at(start, header + SECTION_RAW_POINTER_FIELD)?),
+            file_size: u64::from(u32_at(start, header + SECTION_RAW_SIZE_FIELD)?),
+        });
+    }
+    Some(ProgramLayout {
+        sections,
+        directories,
+    })
+}
+
+/// A program's file with only what is looked at in it read, and zeros in the rest, which is memory
+/// nothing touches. That is its headers, the sections with its import tables, the names those give,
+/// its resources, and its signature. A managed program's metadata can be anywhere, so that is read
+/// whole, as is anything that does not read as expected. `None` means to read it whole.
+fn read_what_is_looked_at(path: &Path, size: u64) -> Option<Vec<u8>> {
+    let mut file = fs::File::open(path).ok()?;
+    let start = read_start_of(path).ok()?;
+    let layout = program_layout(&start)?;
+    if header_facts(&start)?.is_managed {
+        return None;
+    }
+    let mut bytes = vec![0_u8; usize::try_from(size).ok()?];
+    bytes.get_mut(..start.len())?.copy_from_slice(&start);
+    let mut read_section = |bytes: &mut Vec<u8>, section: &SectionPlace| -> Option<()> {
+        let from = section.file_offset;
+        let to = from.checked_add(section.file_size)?.min(size);
+        if from >= to {
+            return Some(());
+        }
+        file.seek(SeekFrom::Start(from)).ok()?;
+        let place = bytes.get_mut(usize::try_from(from).ok()?..usize::try_from(to).ok()?)?;
+        file.read_exact(place).ok()
+    };
+    let mut loaded: Vec<u32> = Vec::new();
+    let mut load = |bytes: &mut Vec<u8>, rva: u32| -> Option<()> {
+        let Some(section) = layout.section_of(rva) else {
+            return Some(());
+        };
+        if !loaded.contains(&section.rva) {
+            loaded.push(section.rva);
+            read_section(bytes, section)?;
+        }
+        Some(())
+    };
+    let directory = |index: usize| {
+        layout
+            .directories
+            .get(index)
+            .copied()
+            .filter(|(address, size)| *address != 0 && *size != 0)
+    };
+    if let Some((address, _)) = directory(RESOURCE_DIRECTORY_INDEX) {
+        load(&mut bytes, address)?;
+    }
+    // Each table, then the names it gives, which a linker can put in another section.
+    for (index, entry_bytes, name_field) in [
+        (
+            IMPORT_DIRECTORY_INDEX,
+            IMPORT_DESCRIPTOR_BYTES,
+            IMPORT_DESCRIPTOR_NAME_FIELD,
+        ),
+        (
+            DELAY_IMPORT_DIRECTORY_INDEX,
+            DELAY_DESCRIPTOR_BYTES,
+            DELAY_DESCRIPTOR_NAME_FIELD,
+        ),
+    ] {
+        let Some((address, _)) = directory(index) else {
+            continue;
+        };
+        load(&mut bytes, address)?;
+        let Some(mut entry) = layout.file_offset_of(address) else {
+            continue;
+        };
+        for _ in 0..MOST_DESCRIPTORS_FOLLOWED {
+            let Some(descriptor) = bytes.get(entry..entry + entry_bytes) else {
+                break;
+            };
+            if descriptor.iter().all(|byte| *byte == 0) {
+                break;
+            }
+            if let Some(name) = u32_at(&bytes, entry + name_field) {
+                load(&mut bytes, name)?;
+            }
+            entry += entry_bytes;
+        }
+    }
+    // A signature is by where it is in the file, past the sections.
+    if let Some((offset, table_size)) = directory(SECURITY_DIRECTORY_INDEX) {
+        let from = u64::from(offset);
+        let to = from.checked_add(u64::from(table_size))?.min(size);
+        if from < to {
+            file.seek(SeekFrom::Start(from)).ok()?;
+            let place = bytes.get_mut(usize::try_from(from).ok()?..usize::try_from(to).ok()?)?;
+            file.read_exact(place).ok()?;
+        }
+    }
+    Some(bytes)
 }
 
 /// What a program needs in order to run, read from nothing but its own file.
@@ -136,11 +325,119 @@ pub(crate) fn read_program_needs(path: &Path) -> Result<ProgramNeeds> {
     })
 }
 
+/// Which architecture a program is built for, from its headers alone.
 pub fn read_pe_architecture(path: &Path) -> Result<AppArchitecture> {
-    let bytes = read_program(path)?;
-    let pe = PeFile::from_bytes(&bytes)
-        .map_err(|source| WinAppMigratorError::pe(path, source.to_string()))?;
-    Ok(architecture_from_machine(pe.file_header().Machine))
+    let start = read_start_of(path)?;
+    let facts = header_facts(&start)
+        .ok_or_else(|| WinAppMigratorError::pe(path, "it has no PE headers".to_owned()))?;
+    Ok(architecture_from_machine(facts.machine))
+}
+
+/// How much of a program's file holds its headers, nearly always. One that puts them further along
+/// is read as far as that takes.
+const HEADER_BYTES: usize = 4096;
+/// Where a PE says its headers start, in the DOS header.
+const PE_OFFSET_FIELD: usize = 0x3C;
+/// The furthest along a real linker puts them. Any further is not a program worth believing.
+const MOST_PE_OFFSET: usize = 1024 * 1024;
+const PE_SIGNATURE: &[u8] = b"PE\0\0";
+const COFF_HEADER_BYTES: usize = 20;
+/// Offsets from the start of the optional header, the same in both formats up to the directories.
+const OPTIONAL_SUBSYSTEM_MAJOR_FIELD: usize = 48;
+const OPTIONAL_SUBSYSTEM_MINOR_FIELD: usize = 50;
+const OPTIONAL_MAGIC_PE32: u16 = 0x10B;
+const OPTIONAL_MAGIC_PE32_PLUS: u16 = 0x20B;
+const PE32_DIRECTORIES_FIELD: usize = 96;
+const PE32_PLUS_DIRECTORIES_FIELD: usize = 112;
+const DIRECTORY_ENTRY_BYTES: usize = 8;
+
+/// What a program's headers say of what it needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeaderFacts {
+    pub machine: u16,
+    pub subsystem_major: u16,
+    pub subsystem_minor: u16,
+    pub is_managed: bool,
+}
+
+fn u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
+    let found = bytes.get(offset..end)?;
+    Some(u16::from_le_bytes([found[0], found[1]]))
+}
+
+fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    let found = bytes.get(offset..end)?;
+    Some(u32::from_le_bytes([found[0], found[1], found[2], found[3]]))
+}
+
+/// Read a program's headers out of however much of its start is here. `None` if they are not all
+/// here, or it is not a program.
+pub(crate) fn header_facts(bytes: &[u8]) -> Option<HeaderFacts> {
+    if bytes.get(..2) != Some(b"MZ".as_slice()) {
+        return None;
+    }
+    let pe = usize::try_from(u32_at(bytes, PE_OFFSET_FIELD)?).ok()?;
+    if bytes.get(pe..pe.checked_add(PE_SIGNATURE.len())?) != Some(PE_SIGNATURE) {
+        return None;
+    }
+    let machine = u16_at(bytes, pe + PE_SIGNATURE.len())?;
+    let optional = pe + PE_SIGNATURE.len() + COFF_HEADER_BYTES;
+    let directories = match u16_at(bytes, optional)? {
+        OPTIONAL_MAGIC_PE32 => optional + PE32_DIRECTORIES_FIELD,
+        OPTIONAL_MAGIC_PE32_PLUS => optional + PE32_PLUS_DIRECTORIES_FIELD,
+        _ => return None,
+    };
+    let descriptor = directories + COM_DESCRIPTOR_DIRECTORY_INDEX * DIRECTORY_ENTRY_BYTES;
+    Some(HeaderFacts {
+        machine,
+        subsystem_major: u16_at(bytes, optional + OPTIONAL_SUBSYSTEM_MAJOR_FIELD)?,
+        subsystem_minor: u16_at(bytes, optional + OPTIONAL_SUBSYSTEM_MINOR_FIELD)?,
+        // A short directory table means no such entry, not a damaged program.
+        is_managed: u32_at(bytes, descriptor).is_some_and(|address| address != 0),
+    })
+}
+
+/// The first part of a file, enough for its headers.
+fn read_start_of(path: &Path) -> Result<Vec<u8>> {
+    let mut file = fs::File::open(path).map_err(|source| WinAppMigratorError::io(path, source))?;
+    let mut bytes = Vec::with_capacity(HEADER_BYTES);
+    (&mut file)
+        .take(HEADER_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|source| WinAppMigratorError::io(path, source))?;
+    if bytes.len() == HEADER_BYTES
+        && header_facts(&bytes).is_none()
+        && let Some(offset) = u32_at(&bytes, PE_OFFSET_FIELD)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .filter(|offset| (HEADER_BYTES..=MOST_PE_OFFSET).contains(offset))
+    {
+        bytes.clear();
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| WinAppMigratorError::io(path, source))?;
+        file.take((offset + HEADER_BYTES) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|source| WinAppMigratorError::io(path, source))?;
+    }
+    Ok(bytes)
+}
+
+/// What a program needs from Windows, from its headers. `None` if it is not a program.
+pub(crate) fn read_program_need(
+    readable_at: &Path,
+    logical: &Path,
+    role: ProgramRole,
+) -> Option<ProgramNeed> {
+    let facts = header_facts(&read_start_of(readable_at).ok()?)?;
+    Some(ProgramNeed {
+        path: logical.to_path_buf(),
+        role,
+        machine: facts.machine,
+        min_windows_major: facts.subsystem_major,
+        min_windows_minor: facts.subsystem_minor,
+        is_managed: facts.is_managed,
+    })
 }
 
 fn file_metadata(path: &Path, pe: &PeFile<'_>, bytes: &[u8]) -> Result<ExecutableMetadata> {
@@ -684,6 +981,155 @@ fn architecture_from_machine(machine: u16) -> AppArchitecture {
 fn format_system_time_utc(value: SystemTime) -> Option<String> {
     let datetime: OffsetDateTime = value.into();
     datetime.format(&Rfc3339).ok()
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    /// What a scan takes from a program. Compared whole, since anything left out of a partial read
+    /// would show up here as a missing import or version.
+    fn what_a_scan_finds(path: &Path, bytes: &[u8]) -> Option<String> {
+        let pe = PeFile::from_bytes(bytes).ok()?;
+        let mut warnings = Vec::new();
+        let imports = read_imports(path, &pe, &mut warnings);
+        let delay = read_delay_imports(&pe, bytes, &mut warnings);
+        let manifest = read_embedded_manifest(&pe);
+        let version = read_version_info(&pe);
+        let signature = signature_status(&pe);
+        Some(format!(
+            "{:?} {:?} {manifest:?} {version:?} {signature:?} {warnings:?}",
+            imports
+                .iter()
+                .map(|import| import.name.clone())
+                .collect::<Vec<_>>(),
+            delay
+                .iter()
+                .map(|import| import.name.clone())
+                .collect::<Vec<_>>(),
+        ))
+    }
+
+    /// Real programs of Windows' own, which every PC this builds on has.
+    #[test]
+    fn reading_part_of_a_program_finds_all_that_reading_it_whole_does() -> Result<()> {
+        let folder = crate::path_utils::system_root().join("System32");
+        let mut programs: Vec<PathBuf> = fs::read_dir(&folder)
+            .map_err(|error| WinAppMigratorError::io(&folder, error))?
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "dll" || extension == "exe")
+            })
+            .collect();
+        programs.sort();
+        let mut compared = 0;
+        let mut partial_was_less = 0;
+        for program in programs.iter().step_by(25).take(120) {
+            let Ok(whole) = fs::read(program) else {
+                continue;
+            };
+            let Some(part) = read_what_is_looked_at(program, whole.len() as u64) else {
+                continue;
+            };
+            let nonzero = part.iter().filter(|byte| **byte != 0).count();
+            let nonzero_whole = whole.iter().filter(|byte| **byte != 0).count();
+            partial_was_less += usize::from(nonzero < nonzero_whole);
+            assert_eq!(
+                what_a_scan_finds(program, &part),
+                what_a_scan_finds(program, &whole),
+                "{}",
+                program.display()
+            );
+            compared += 1;
+        }
+        assert!(compared > 10, "only {compared} programs were compared");
+        assert!(
+            partial_was_less > 10,
+            "only {partial_was_less} of them left anything out"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_managed_program_is_read_whole() {
+        // Its metadata can be anywhere, so nothing short of all of it will do. A file that is not
+        // read as a program comes to the same thing.
+        let mut bytes = vec![0_u8; 0x400];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        bytes[PE_OFFSET_FIELD] = 0x80;
+        bytes[0x80..0x84].copy_from_slice(PE_SIGNATURE);
+        bytes[0x84..0x86].copy_from_slice(&0x8664_u16.to_le_bytes());
+        let optional = 0x80 + 4 + COFF_HEADER_BYTES;
+        bytes[optional..optional + 2].copy_from_slice(&OPTIONAL_MAGIC_PE32_PLUS.to_le_bytes());
+        bytes[optional + PE32_PLUS_DIRECTORIES_FIELD + 14 * DIRECTORY_ENTRY_BYTES] = 1;
+        assert!(header_facts(&bytes).is_some_and(|facts| facts.is_managed));
+    }
+
+    #[test]
+    fn a_real_program_has_what_it_says_read_from_its_start_alone() -> Result<()> {
+        let exe = std::env::current_exe()
+            .map_err(|error| WinAppMigratorError::io("current executable", error))?;
+        let start = read_start_of(&exe)?;
+        assert!(start.len() <= HEADER_BYTES);
+        let facts = header_facts(&start).ok_or_else(|| {
+            WinAppMigratorError::pe(&exe, "these headers should have been readable".to_owned())
+        })?;
+        let whole = fs::read(&exe).map_err(|error| WinAppMigratorError::io(&exe, error))?;
+        let pe = PeFile::from_bytes(&whole)
+            .map_err(|error| WinAppMigratorError::pe(&exe, error.to_string()))?;
+        assert_eq!(facts.machine, pe.file_header().Machine);
+        assert_eq!(facts.is_managed, is_dotnet_image(&pe));
+        assert!(facts.subsystem_major >= 5, "{facts:?}");
+        assert_eq!(read_pe_architecture(&exe)?, AppArchitecture::X64);
+        Ok(())
+    }
+
+    #[test]
+    fn what_is_not_a_program_has_no_headers() {
+        assert_eq!(header_facts(b""), None);
+        assert_eq!(header_facts(b"MZ"), None);
+        assert_eq!(header_facts(&[b'M'; 4096]), None);
+        let mut cut_off = vec![0_u8; 0x40];
+        cut_off[0] = b'M';
+        cut_off[1] = b'Z';
+        cut_off[PE_OFFSET_FIELD] = 0x40;
+        assert_eq!(header_facts(&cut_off), None, "they start past the end");
+        cut_off[PE_OFFSET_FIELD..PE_OFFSET_FIELD + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(header_facts(&cut_off), None, "nowhere at all");
+    }
+
+    #[test]
+    fn a_header_says_what_a_small_table_of_directories_does_not_hold() {
+        let mut bytes = vec![0_u8; 0x200];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        bytes[PE_OFFSET_FIELD] = 0x80;
+        bytes[0x80..0x84].copy_from_slice(PE_SIGNATURE);
+        bytes[0x84..0x86].copy_from_slice(&0xAA64_u16.to_le_bytes());
+        let optional = 0x80 + 4 + COFF_HEADER_BYTES;
+        bytes[optional..optional + 2].copy_from_slice(&OPTIONAL_MAGIC_PE32_PLUS.to_le_bytes());
+        bytes[optional + OPTIONAL_SUBSYSTEM_MAJOR_FIELD] = 10;
+        let facts = header_facts(&bytes);
+        assert_eq!(
+            facts,
+            Some(HeaderFacts {
+                machine: 0xAA64,
+                subsystem_major: 10,
+                subsystem_minor: 0,
+                is_managed: false,
+            })
+        );
+        let descriptor = optional + PE32_PLUS_DIRECTORIES_FIELD + 14 * DIRECTORY_ENTRY_BYTES;
+        bytes[descriptor] = 1;
+        assert!(header_facts(&bytes).is_some_and(|facts| facts.is_managed));
+        assert!(
+            header_facts(&bytes[..descriptor]).is_some_and(|facts| !facts.is_managed),
+            "cut off before that entry"
+        );
+    }
 }
 
 #[cfg(test)]

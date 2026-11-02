@@ -52,7 +52,7 @@ use crate::package::copy_file_backup_mode;
 use crate::path_utils::{
     SignedInUser, file_name_string, has_parent_step, hidden_command, is_on_a_local_disk,
     is_person_sid, location_can_be_told, path_is_within, resolved_location, signed_in_user,
-    strip_prefix_ignore_case, system_root, windows_build,
+    strip_prefix_ignore_case, system_root, windows_architecture_name, windows_build,
 };
 use crate::privilege::{
     ProtectedFolder, confirm_protected_folder, ensure_protected_folder, is_elevated, owner_of,
@@ -302,6 +302,9 @@ fn is_ordinary_name(name: &OsStr) -> bool {
 pub struct SourceIdentity {
     pub computer_name: Option<String>,
     pub windows_version: Option<String>,
+    pub windows_build: Option<u32>,
+    /// `PROCESSOR_ARCHITECTURE`, as that PC recorded it.
+    pub architecture_name: Option<String>,
 }
 
 /// A profile a PC records.
@@ -1562,6 +1565,8 @@ impl SystemContext {
             None => SourceIdentity {
                 computer_name: std::env::var("COMPUTERNAME").ok(),
                 windows_version: live_windows_version(),
+                windows_build: Some(windows_build()).filter(|build| *build != 0),
+                architecture_name: windows_architecture_name(),
             },
         }
     }
@@ -1735,6 +1740,7 @@ fn system_drive_of(system_root: &str) -> char {
 /// Without the `Software` that is the hive's own root.
 const CURRENT_VERSION_KEY_IN_HIVE: &str = r"Microsoft\Windows NT\CurrentVersion";
 const COMPUTER_NAME_KEY_IN_CONTROL_SET: &str = r"Control\ComputerName\ComputerName";
+const ENVIRONMENT_KEY_IN_CONTROL_SET: &str = r"Control\Session Manager\Environment";
 
 /// What the drive's own registry says about its PC, rather than what this PC says about itself.
 fn read_identity(
@@ -1751,25 +1757,41 @@ fn read_identity(
             .and_then(|key| key.get_value::<String, _>("ComputerName"))
             .ok()
     });
-    let version = RegKey::predef(HKEY_LOCAL_MACHINE)
+    let architecture_name = system_mount.and_then(|mount| {
+        RegKey::predef(HKEY_LOCAL_MACHINE)
+            .open_subkey_with_flags(
+                format!(r"{mount}\{control_set}\{ENVIRONMENT_KEY_IN_CONTROL_SET}"),
+                KEY_READ,
+            )
+            .and_then(|key| key.get_value::<String, _>("PROCESSOR_ARCHITECTURE"))
+            .ok()
+    });
+    let version_key = RegKey::predef(HKEY_LOCAL_MACHINE)
         .open_subkey_with_flags(
             join_mount(software_mount, CURRENT_VERSION_KEY_IN_HIVE),
             KEY_READ,
         )
-        .ok()
-        .and_then(|key| {
+        .ok();
+    let build: Option<String> = version_key
+        .as_ref()
+        .and_then(|key| key.get_value("CurrentBuildNumber").ok());
+    let version = version_key
+        .as_ref()
+        .zip(build.as_deref())
+        .map(|(key, build)| {
             let number = |name: &str| key.get_value::<u32, _>(name).ok();
-            let build: String = key.get_value("CurrentBuildNumber").ok()?;
-            Some(windows_version_text(
+            windows_version_text(
                 number("CurrentMajorVersionNumber").unwrap_or(10),
                 number("CurrentMinorVersionNumber").unwrap_or(0),
-                &build,
+                build,
                 number("UBR").unwrap_or(0),
-            ))
+            )
         });
     SourceIdentity {
         computer_name: computer_name.map(|name| bounded_text(&name)),
         windows_version: version.map(|version| bounded_text(&version)),
+        windows_build: build.and_then(|build| build.trim().parse().ok()),
+        architecture_name: architecture_name.map(|name| bounded_text(&name)),
     }
 }
 

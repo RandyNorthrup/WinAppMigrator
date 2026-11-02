@@ -21,19 +21,20 @@ use crate::license_scan::{
 };
 use crate::models::{
     AppArchitecture, AppSelection, DependencyEntry, DotNetFlavor, DriverEntry, FileEntry,
-    InstallScope, InstalledApp, RuntimePrerequisite, RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION,
-    ScanOptions, ScanReport, ScheduledTaskEntry, ServiceEntry, ShortcutEntry, Warning,
-    WarningSeverity,
+    InstallScope, InstalledApp, ProgramNeed, ProgramRole, RuntimePrerequisite,
+    RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport, ScheduledTaskEntry,
+    ServiceEntry, ShortcutEntry, SourcePlatform, Warning, WarningSeverity,
 };
 use crate::path_utils::{
     is_drive_root, is_really_within, looks_like_executable, path_is_within, resolved_location,
 };
-use crate::pe_scan::scan_pe;
+use crate::pe_scan::{read_program_need, scan_pe};
 use crate::registry_scan::{
     RegistryScanContext, context_product_names, recorded_keys_of_one_account,
     scan_registry_artifacts,
 };
 use crate::reporting::{artifact_paths, write_scan_reports};
+use crate::restore_policy::architecture_from_name;
 use crate::runtime_detection::{AppRuntimes, ArchitectureKey, DotNetNeed, inspect_app_runtimes};
 use crate::secret_rules::{
     LeftOut, ScannedSettings, is_license_registry_entry, take_licenses_from_settings,
@@ -58,6 +59,9 @@ const SXS_DEPENDENCY_PENALTY: i32 = 2;
 const MAX_SXS_DEPENDENCY_PENALTY: i32 = 8;
 const MIN_CONFIDENCE_SCORE: i32 = 0;
 const MAX_CONFIDENCE_SCORE: i32 = 100;
+/// How many of an app's programs to record what they need of. Its main program, its services, and
+/// its drivers always are, and they come first.
+const MOST_PROGRAMS_RECORDED: usize = 2000;
 
 #[derive(Debug, Clone)]
 struct ConfidenceInputs<'a> {
@@ -72,6 +76,70 @@ struct ConfidenceInputs<'a> {
     scheduled_task_count: usize,
     admin_registry_count: usize,
     files_not_copied_count: usize,
+}
+
+/// What each of an app's programs needs from Windows, from the headers of each. Its main program,
+/// its services, and the drivers it owns are what it cannot do without, so they come first. By
+/// where each is read from now and by what its PC called it, since on a drive those differ.
+fn read_program_needs_of(
+    files: &[FileEntry],
+    main_program: &Path,
+    services: &[ServiceEntry],
+    drivers: &[DriverEntry],
+    system: &SystemContext,
+    warnings: &mut Vec<Warning>,
+) -> Vec<ProgramNeed> {
+    let mut needs = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut note = |readable: &Path, logical: &Path, role: ProgramRole| {
+        if !seen.insert(logical.to_string_lossy().to_ascii_lowercase()) {
+            return;
+        }
+        let need = system
+            .may_read(readable)
+            .then(|| read_program_need(readable, logical, role))
+            .flatten();
+        // A helper that is not really a program is nothing to say. What the app cannot do without is.
+        if need.is_none() && role != ProgramRole::Other {
+            warnings.push(Warning::new(
+                "program_needs_unreadable",
+                WarningSeverity::Warning,
+                "What this needs from Windows could not be read, so whether it can run on the other \
+                 PC will not be checked.",
+                Some(logical.display().to_string()),
+            ));
+        }
+        needs.extend(need);
+    };
+    let copied = |logical: &Path| {
+        files
+            .iter()
+            .find(|file| file.should_copy && file.original_path.as_path() == logical)
+            .map(|file| file.path.clone())
+    };
+    if let Some(readable) =
+        copied(main_program).or_else(|| system.resolve_source_path(main_program))
+    {
+        note(&readable, main_program, ProgramRole::Main);
+    }
+    for service in services {
+        if let Some(readable) = copied(&service.binary_path) {
+            note(&readable, &service.binary_path, ProgramRole::Service);
+        }
+    }
+    for driver in drivers.iter().filter(|driver| driver.app_owned) {
+        if let Some(readable) = system.resolve_source_path(&driver.image_path) {
+            note(&readable, &driver.image_path, ProgramRole::Driver);
+        }
+    }
+    let others = files
+        .iter()
+        .filter(|file| file.should_copy && looks_like_executable(&file.original_path))
+        .take(MOST_PROGRAMS_RECORDED);
+    for file in others {
+        note(&file.path, &file.original_path, ProgramRole::Other);
+    }
+    needs
 }
 
 pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
@@ -485,6 +553,21 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     });
 
     let identity = system.source_identity();
+    let source_platform = Some(SourcePlatform {
+        windows_build: identity.windows_build,
+        architecture: identity
+            .architecture_name
+            .as_deref()
+            .map_or(AppArchitecture::Unknown, architecture_from_name),
+    });
+    let program_needs = read_program_needs_of(
+        &file_inventory,
+        &logical_executable,
+        &services,
+        &drivers,
+        &system,
+        &mut warnings,
+    );
     let user_data_profile = system.user_hives().into_iter().next().map(|user| user.name);
     let mut report = ScanReport {
         schema_version: SCAN_SCHEMA_VERSION.to_owned(),
@@ -505,6 +588,8 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         ),
         source_computer_name: identity.computer_name,
         source_windows_version: identity.windows_version,
+        source_platform,
+        program_needs,
         user_data_profile,
         source_app,
         main_executable: pe_scan.metadata,
