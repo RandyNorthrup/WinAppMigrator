@@ -191,6 +191,24 @@ pub(crate) fn install_placement_refusal(
     if path_is_within(target_root, windows_dir) || path_is_within(windows_dir, target_root) {
         return Some("it cannot be the Windows folder".to_owned());
     }
+    let lower = format!(
+        "{}\\",
+        target_root
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .replace('/', "\\")
+    );
+    let runs_by_itself = lower.contains(STARTUP_FOLDER)
+        || REFUSED_DATA_FOLDERS
+            .iter()
+            .filter(|folder| !FINE_FOR_AN_INSTALL_LOCATION.contains(folder))
+            .any(|folder| lower.contains(&format!("\\{folder}")));
+    if runs_by_itself {
+        return Some(
+            "it is a folder that belongs to Windows, or whose contents run or load by themselves"
+                .to_owned(),
+        );
+    }
     shared_folders
         .iter()
         .any(|folder| paths_equal(folder, target_root))
@@ -436,6 +454,12 @@ const START_MENU_MARKER: &str = r"\start menu\";
 const DESKTOP_MARKER: &str = r"\desktop\";
 const STARTUP_TAIL: &str = r"programs\startup\";
 const STARTUP_FOLDER: &str = r"start menu\programs\startup\";
+/// Of [`REFUSED_DATA_FOLDERS`], what only matters for where data goes. A whole app can be in a
+/// folder of that name anywhere else, including one that is this program.
+const FINE_FOR_AN_INSTALL_LOCATION: &[&str] = &[r"desktop\", r"start menu\", r"winappmigrator\"];
+/// The handler COM itself provides, which any class can name. Nothing about whose a class is
+/// follows from it.
+const COM_DEFAULT_HANDLER: &str = "ole32.dll";
 const SHORTCUT_EXTENSION: &str = "lnk";
 /// A real data location an app's user data has no business in, whichever base it is under.
 const REFUSED_DATA_FOLDERS: &[&str] = &[
@@ -807,7 +831,10 @@ pub fn com_server_refusal(
     windows_dir: &Path,
 ) -> Option<String> {
     let existing = existing.trim();
-    if existing.is_empty() || existing.eq_ignore_ascii_case(new_value.trim()) {
+    if existing.is_empty()
+        || existing.eq_ignore_ascii_case(new_value.trim())
+        || existing.eq_ignore_ascii_case(COM_DEFAULT_HANDLER)
+    {
         return None;
     }
     let server = parse_image_path(existing, windows_dir).path;
@@ -818,15 +845,17 @@ pub fn com_server_refusal(
     })
 }
 
-/// The key of the COM class a registry key is part of, in lowercase, if it is part of one.
+/// The key of the COM class a registry key is part of, if it is part of one, in lowercase and as
+/// it is in the registry, since a 32-bit class is not the 64-bit one of that name.
 pub fn com_class_key(key_path: &str) -> Option<String> {
-    let key = normalized_key(key_path);
-    let class = key
-        .strip_prefix(CLSID_PREFIX)?
-        .split('\\')
-        .next()
-        .filter(|class| !class.is_empty())?;
-    Some(format!("{CLSID_PREFIX}{class}"))
+    normalized_key(key_path).strip_prefix(CLSID_PREFIX)?;
+    let lower = key_path.to_ascii_lowercase();
+    let parts: Vec<&str> = lower.split('\\').filter(|part| !part.is_empty()).collect();
+    let class = parts.iter().position(|part| *part == "clsid")? + 1;
+    parts
+        .get(class)
+        .is_some()
+        .then(|| parts[..=class].join("\\"))
 }
 
 /// True for a value naming what COM loads for a class.
@@ -1231,6 +1260,76 @@ mod tests {
             install_location_refusal(Path::new(r"C:\Apps\Acme 2.0"), Path::new(WINDOWS), &[]),
             None
         );
+    }
+
+    #[test]
+    fn a_class_is_the_key_it_is_in_the_registry() {
+        const CLASS: &str = r"software\classes\clsid\{a}";
+        assert_eq!(
+            com_class_key(r"SOFTWARE\Classes\CLSID\{A}\InprocServer32").as_deref(),
+            Some(CLASS)
+        );
+        assert_eq!(
+            com_class_key(r"SOFTWARE\Classes\CLSID\{A}").as_deref(),
+            Some(CLASS)
+        );
+        assert_eq!(
+            com_class_key(r"SOFTWARE\WOW6432Node\Classes\CLSID\{A}\ProgID").as_deref(),
+            Some(r"software\wow6432node\classes\clsid\{a}")
+        );
+        assert_eq!(com_class_key(r"SOFTWARE\Classes\CLSID"), None);
+        assert_eq!(com_class_key(r"SOFTWARE\Acme\CLSID\{A}"), None);
+    }
+
+    #[test]
+    fn what_com_gives_every_class_says_nothing_about_whose_it_is() {
+        let target = Path::new(r"C:\Apps\Acme");
+        for own in ["ole32.dll", "OLE32.DLL", " ole32.dll "] {
+            assert_eq!(
+                com_server_refusal(own, r"C:\Apps\Acme\a.dll", target, Path::new(WINDOWS)),
+                None
+            );
+        }
+        assert!(
+            com_server_refusal(
+                r"C:\Other\b.dll",
+                r"C:\Apps\Acme\a.dll",
+                target,
+                Path::new(WINDOWS)
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn a_folder_whose_contents_run_by_themselves_is_not_an_install_location() {
+        let windows = Path::new(WINDOWS);
+        for bad in [
+            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup",
+            r"C:\Users\me\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Acme",
+            r"C:\Users\me\AppData\Local\Microsoft\WindowsApps",
+            r"C:\Users\me\AppData\Roaming\Microsoft\Word\STARTUP\Acme",
+            r"C:\Users\me\AppData\Roaming\Microsoft\Excel\XLSTART",
+            r"C:\Program Files\Common Files\Oracle\Java\javapath",
+        ] {
+            assert!(
+                install_location_refusal(Path::new(bad), windows, &[]).is_some(),
+                "{bad}"
+            );
+        }
+        for good in [
+            r"C:\Users\me\AppData\Local\Microsoft\OneDrive",
+            r"C:\Users\me\AppData\Local\Programs\Acme",
+            r"C:\Program Files\WinAppMigrator",
+            r"D:\Desktop\Acme",
+            r"C:\Program Files\Start Menu Fixer",
+        ] {
+            assert_eq!(
+                install_location_refusal(Path::new(good), windows, &[]),
+                None,
+                "{good}"
+            );
+        }
     }
 
     #[test]

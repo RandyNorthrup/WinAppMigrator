@@ -2554,13 +2554,22 @@ fn uninstall_puts_the_machine_back(
 
     let run = uninstall_quietly(checks, &id, " --remove-user-data")?;
     checks.that("the uninstall succeeded", run.success, &run.output);
+    // The service and task that were kept only had their arguments changed, so they still run
+    // the program. It stays with them: without it, they would be set to run a file that has gone,
+    // from a folder others may be able to put another one in.
+    let program = Path::new(&app_exe(TARGET_ROOT))
+        .strip_prefix(TARGET_ROOT)?
+        .display()
+        .to_string();
+    let mut wanted = vec![r"conf\app.conf".to_owned(), "notes.txt".to_owned(), program];
+    wanted.sort();
     checks.same(
-        "only the file that was changed and the one that was added stay",
+        "only the changed file, the added one, and what is still used stay",
         tree_hashes(TARGET_ROOT)?
             .keys()
             .cloned()
             .collect::<Vec<_>>(),
-        vec![r"conf\app.conf".to_owned(), "notes.txt".to_owned()],
+        wanted,
     );
     checks.same(
         "what the user wrote in that file is still there",
@@ -2614,6 +2623,10 @@ fn uninstall_puts_the_machine_back(
     );
     for (what, wanted) in [
         ("the changed file", "app.conf stays"),
+        (
+            "the program",
+            "stays, because something that stays still uses it",
+        ),
         ("the folder", "stays, because it holds files"),
         ("the value", r"InstallDir stays"),
         ("the environment variable", "WAM_E2E_HOME stays"),
@@ -3742,6 +3755,41 @@ fn a_location_is_where_it_is_however_it_is_written(checks: &mut Checks) -> TestR
         locations.push(format!(r"{short_program_data}\WinAppMigrator\{LEAF}"));
     }
     let on_record = installs_on_record()?;
+    // Under a link to a plain folder, which nothing else is wrong with.
+    let plain = format!(r"{PROGRAM_FILES}\WAM E2E Plain Folder");
+    fs::create_dir_all(&plain)?;
+    let link_to_plain = format!(r"{PROGRAM_FILES}\WAM E2E Link To Plain Folder");
+    junction(&link_to_plain, &plain)?;
+    let run = run_installer(
+        &installer,
+        &[
+            "--target-root",
+            &format!(r"{link_to_plain}\{LEAF}"),
+            "--apply",
+        ],
+    )?;
+    checks.that(
+        "a location under a link is refused, and it says which",
+        !run.success && run.output.contains("is a link to somewhere else"),
+        &run.output,
+    );
+    checks.same(
+        "with nothing put where it leads",
+        fs::read_dir(&plain)?.count(),
+        0,
+    );
+    fs::remove_dir(&link_to_plain)?;
+    fs::remove_dir(&plain)?;
+    let startup = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup";
+    let run = run_installer(
+        &installer,
+        &["--target-root", &format!(r"{startup}\{LEAF}"), "--apply"],
+    )?;
+    checks.that(
+        "a Startup folder is refused as a location",
+        !run.success && !Path::new(startup).join(LEAF).exists(),
+        &run.output,
+    );
     for location in &locations {
         let run = run_installer(&installer, &["--target-root", location, "--apply"])?;
         checks.that(&format!("{location} is refused"), !run.success, &run.output);

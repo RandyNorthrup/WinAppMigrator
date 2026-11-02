@@ -18,8 +18,8 @@ All notable project changes are tracked here.
   - Runtimes it installed stay, and are reported as left behind.
   - Without the record being safe to keep, an install no longer starts, and only one install or uninstall
     runs at a time.
-  - An install on a drive that is no longer connected does not stop the next install. It is undone when the
-    drive is back.
+  - An install on a drive that is no longer connected does not stop the next install. The rest of it is undone
+    right away, and what is on that drive when it is back.
 - **An app installed this way has an uninstaller.** Its entry in Settings runs a bare copy of the stub kept
   in that same folder, never in the install folder, and with `QuietUninstallString`, no window. It undoes
   only what the journal says that install did: a file or value that has changed since is kept and reported,
@@ -32,10 +32,18 @@ All notable project changes are tracked here.
 - **An install location is judged by where it really is.** `C:\.\Windows\x`, `\\?\C:\Windows\x`, a short name,
   and a link could all pass for somewhere else. **A network share is now refused,** since it can be this PC's
   own drive by another name, and so is a part Windows would read differently, such as one ending in a dot.
+  **A location under a link is now refused too,** where it used to be a warning, since whoever can write
+  beside the link can change where it leads while an install is running. So is a data folder under one, which
+  fails the install. Use the place it leads to. A volume mounted on a folder is still fine. So is a Startup
+  folder, or any folder that belongs to Windows or whose contents run by themselves.
 - **Writing a file can no longer be led somewhere else by making it wait.** Each file is written with the
   way there held, and with something held open in the last folder, so that none of them can become a link.
-- **A COM class that belongs to something else is now left alone whole.** A value beside a refused server,
-  such as `ThreadingModel`, could still be written over it.
+- **A COM class that belongs to something else is now left alone whole,** in the 32-bit registry and in a
+  package's license data as well. A value beside a refused server, such as `ThreadingModel`, could still be
+  written over it. Each server is compared with what the package has for that server, so installing an app
+  again over itself is not refused because of another of its servers, or `ole32.dll` as a handler.
+- **An uninstall keeps a file that what it kept still uses.** A service, task, or value that has changed since
+  is kept, and a file it names now stays with it, instead of leaving it set to run a file that has gone.
 - **A source PC's `DisplayIcon` on a network share is dropped however it is written,** with quotes, leading
   spaces, or forward slashes.
 - **Logs are kept,** in `%ProgramData%\WinAppMigrator\logs`, which only administrators can read, with a limit

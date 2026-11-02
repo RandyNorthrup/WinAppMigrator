@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +28,7 @@ use winreg::enums::RegType;
 
 use crate::archive::EmbeddedPackage;
 use crate::errors::{Result, WinAppMigratorError};
+use crate::file_discovery::{first_link_to, hold_root, link_refusal};
 use crate::hashing::hex_lower;
 use crate::models::{EnvironmentScope, RegistryHive};
 use crate::path_utils::{
@@ -268,6 +269,13 @@ pub enum Change {
     PrerequisiteSkipped {
         name: String,
     },
+    /// All of it was undone but for what is under these folders, whose drive was not connected,
+    /// and the app's entry in Settings if that is to be finished from there. What was undone
+    /// must not be undone again: another install may have written the same thing since.
+    OnlyLeftOn {
+        roots: Vec<PathBuf>,
+        keeps_entry: bool,
+    },
 }
 
 /// What a journal is about.
@@ -316,6 +324,8 @@ pub struct Journal {
     /// A record could not be written whole, so what comes next would join it and be lost.
     broken: bool,
     known_roots: HashSet<String>,
+    /// So that nothing above each of them can change. See [`Journal::note_root`].
+    root_holds: Vec<File>,
     known_folders: HashSet<String>,
     known_keys: HashSet<String>,
     known_task_folders: HashSet<String>,
@@ -413,6 +423,7 @@ impl Journal {
             since_flush: 0,
             broken: false,
             known_roots: HashSet::new(),
+            root_holds: Vec::new(),
             known_folders: HashSet::new(),
             known_keys: HashSet::new(),
             known_task_folders: HashSet::new(),
@@ -491,15 +502,25 @@ impl Journal {
         self.write(&Record::Change(change), Durability::Soon)
     }
 
-    /// Record once where a folder paths are checked against really is.
+    /// Record once where a folder paths are checked against really is. It must not be, or be
+    /// under, a link, which whoever can write beside it could point elsewhere at any moment. It
+    /// is held from here on, and with it in them, the folders above it cannot be emptied and
+    /// become links either.
     pub(crate) fn note_root(&mut self, root: &Path) -> Result<()> {
-        if self.known_roots.insert(folded(root)) {
-            let real = real_path(root).map_err(|error| WinAppMigratorError::io(root, error))?;
-            self.note_new(Change::Root {
-                path: root.to_path_buf(),
-                real,
-            })?;
+        if self.known_roots.contains(&folded(root)) {
+            return Ok(());
         }
+        if let Some(link) = first_link_to(root) {
+            return Err(WinAppMigratorError::InvalidInput(link_refusal(&link)));
+        }
+        let hold = hold_root(root).map_err(|error| WinAppMigratorError::io(root, error))?;
+        let real = real_path(root).map_err(|error| WinAppMigratorError::io(root, error))?;
+        self.note_new(Change::Root {
+            path: root.to_path_buf(),
+            real,
+        })?;
+        self.known_roots.insert(folded(root));
+        self.root_holds.push(hold);
         Ok(())
     }
 
@@ -660,8 +681,10 @@ impl Journal {
         self.write(&Record::Committed, Durability::Now)
     }
 
-    /// Read back what has been recorded, while still holding it.
+    /// Read back what has been recorded, while still holding it, to undo it. The folders it was
+    /// all under are let go of, since some of them may have to be taken back.
     pub(crate) fn read_back(&mut self) -> Result<ReadJournal> {
+        self.root_holds.clear();
         self.file
             .sync_all()
             .map_err(|error| WinAppMigratorError::io(self.folder.join(JOURNAL_FILE), error))?;
@@ -670,6 +693,22 @@ impl Journal {
 
     /// Give up the journal, so that its folder can be removed.
     pub(crate) fn close(self) {}
+}
+
+impl Change {
+    /// Part of the app's entry in Settings, which is what an uninstall is run from.
+    pub(crate) fn is_uninstall_entry(&self) -> bool {
+        matches!(
+            self,
+            Change::RegistryValue {
+                item: ItemKind::UninstallEntry,
+                ..
+            } | Change::RegistryKeyCreated {
+                item: ItemKind::UninstallEntry,
+                ..
+            }
+        )
+    }
 }
 
 /// Held by whatever is installing or uninstalling, so that two never change the same things at
@@ -864,6 +903,15 @@ impl ReadJournal {
                         settled.remove(index);
                     }
                 }
+                Change::OnlyLeftOn { roots, keeps_entry } => {
+                    let is_left = |root: &Path| roots.iter().any(|left| paths_equal(left, root));
+                    settled.retain(|earlier| match earlier {
+                        Change::Root { path: root, .. }
+                        | Change::File { root, .. }
+                        | Change::FolderCreated { root, .. } => is_left(root),
+                        other => *keeps_entry && other.is_uninstall_entry(),
+                    });
+                }
                 other => settled.push(other.clone()),
             }
         }
@@ -943,7 +991,26 @@ pub struct InstallSummary {
 /// A journal locked against being written to or undone by anyone else. A failure with
 /// [`is_in_use`] means another installer or uninstaller has it.
 pub(crate) struct JournalLock {
-    _file: File,
+    file: File,
+}
+
+impl JournalLock {
+    /// Add to a record that is held and being undone. What was last written may have been cut
+    /// off, and must not be joined to this.
+    pub(crate) fn note(&mut self, change: Change) -> io::Result<()> {
+        let mut line = Vec::new();
+        self.file.seek(SeekFrom::End(-1))?;
+        let mut last = [0; 1];
+        self.file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            line.push(b'\n');
+        }
+        line.extend(serde_json::to_vec(&Record::Change(change)).map_err(io::Error::other)?);
+        line.push(b'\n');
+        self.file.seek(SeekFrom::End(0))?;
+        self.file.write_all(&line)?;
+        self.file.sync_all()
+    }
 }
 
 pub(crate) fn lock_journal(folder: &Path) -> io::Result<JournalLock> {
@@ -951,7 +1018,7 @@ pub(crate) fn lock_journal(folder: &Path) -> io::Result<JournalLock> {
         OpenOptions::new().read(true).write(true),
         &folder.join(JOURNAL_FILE),
     )?;
-    Ok(JournalLock { _file: file })
+    Ok(JournalLock { file })
 }
 
 pub(crate) fn is_in_use(error: &io::Error) -> bool {

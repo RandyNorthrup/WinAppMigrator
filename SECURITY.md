@@ -55,13 +55,17 @@ may be able to write to.
   it is closed to everyone else. None of that goes in a log, which holds paths and key names only, and
   which only administrators can read. A file it replaced is moved aside with the permissions it had, so
   whoever could read it before still can, by a path they would have to know.
-- **Links.** For each delete and restore, and each file an install writes, it holds every folder on the
-  way and keeps a hidden file open in the last one until it is done. A held folder cannot be moved, and a
-  folder with something held in it cannot be emptied, which it would have to be to become a link, so making
-  what it does wait does not let anyone lead it somewhere else. With that in place, it checks that none of them
-  is a link, and that the folder it is all under still leads where it did during the install. Whatever fails
-  that is left alone and reported, even if what is at the other end is byte for byte what it would have
-  removed. The file goes in by a path, so see [known gaps](#known-gaps).
+- **Links.** An install location that is a link or under one is refused, and so is a data folder it would
+  write to, because whoever can write beside a link can change where it leads at any moment, with no need
+  to empty anything. Use the place it leads to instead. A volume mounted on a folder is fine. For each
+  delete and restore, and each file an install writes, it holds every folder on the way and keeps a hidden
+  file open in the last one until it is done. A held folder cannot be moved, and a folder with something held
+  in it cannot be emptied, which it would have to be to become a link. The folder it is all under is held
+  for the whole install, so what is above it cannot change, and it is checked to be real again for each file.
+  So making what it does wait, which whoever can write to a file can do to a rename, does not let anyone lead
+  it somewhere else. An uninstall also checks that the folder still leads where it did during the install.
+  Whatever fails any of that is left alone and reported, even if what is at the other end is byte for byte
+  what it would have removed. The hidden file goes in by a path, so see [known gaps](#known-gaps).
 - **Only what it did.** An uninstall, and undoing an install that never finished, delete a file only if it is
   still what the install wrote, and put back a value only if it still holds what the install wrote. They
   remove only the entries added to `Path`, a key or folder only if it is empty, and a service or task only if
@@ -100,12 +104,18 @@ that matter most for deciding whether to run an installer:
 - An install location outside a protected folder, such as `D:\Apps`, stays writable by other
   programs on the PC, which can change the installed files afterward. Choose a location under
   `C:\Program Files` for anything that installs a service or a driver. While one is being installed or
-  undone, what could go wrong is much narrower: [each folder is pinned](#undoing-an-install), and it
-  is only in the moment the pin goes in that a program could get past that, by turning a folder into a
-  link and back several times, between checks microseconds apart, with nothing to make any of them
-  wait. Closing that needs acting through a handle to the folder rather than by a path, which this
-  project's rules on `unsafe` code do not allow. A power cut in that moment leaves an empty hidden
-  `.wam-pin-` file, which does nothing, and goes if the folder it is in does.
+  undone, [each folder is pinned](#undoing-an-install), and a program running with ordinary rights has one way
+  left past that, which is to win a race. It has to turn an empty folder on the way into a link just as the
+  hidden file goes in, so that it lands elsewhere, then read that file's name, turn the folder back, and
+  put a file of that name there, all before the next check a few microseconds later. An oplock
+  cannot pause the steps it has to beat: on Windows 11 we measured the file going in, and the checks on the
+  folder and the file, none of them waiting, though a rename's source did wait for over 5 seconds.
+  But an oplock on the folder does tell it the moment the file goes in, and a program keeping every CPU
+  busy could stretch that gap, so this has not been shown to be impossible. An install stops at the first
+  sign of it, and so does an uninstall for that folder, so each run gives it one try. Closing it needs
+  acting through a handle to the folder rather than by a path, which this project's rules on `unsafe` code do
+  not allow. A power cut in that moment leaves an empty hidden `.wam-pin-` file, which does nothing, and
+  goes if the folder it is in does.
 - A file or folder in an install that someone else can write to can be kept open to make an undo fail. It
   is reported and can be tried again, and an install that never finished stops the next install until it
   can be undone. If that cannot ever happen, an administrator removes its folder under

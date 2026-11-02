@@ -304,22 +304,72 @@ pub(crate) fn hold_path_below_root(root: &Path, candidate: &Path) -> Result<Vec<
     Ok(holds)
 }
 
-/// Make a missing folder on the way down. It is what will keep its parent from being emptied
-/// once it is held, so until then, that is the pin's job.
-fn make_folder_in_held_parent(folder: &Path, parent_hold: Option<&fs::File>) -> Result<()> {
+/// Whether a link leads back to the folder it is, as a volume mounted on a folder does. That
+/// does not lead anywhere else.
+fn leads_to_itself(path: &Path) -> bool {
+    fs::canonicalize(path)
+        .is_ok_and(|real| path_is_within(&real, path) && path_is_within(path, &real))
+}
+
+/// The outermost link on the way to `path`, `path` included. Whoever can write beside a link can
+/// change where it leads at any moment, and with no need for it to be empty, so what is done
+/// through one with full rights can be sent anywhere that way.
+pub(crate) fn first_link_to(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .filter(|ancestor| {
+            fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && !leads_to_itself(ancestor)
+        })
+        .last()
+        .map(Path::to_path_buf)
+}
+
+/// What to say about [`first_link_to`].
+pub(crate) fn link_refusal(link: &Path) -> String {
+    format!(
+        "{} is a link to somewhere else, and others may be able to change where it leads. Use \
+         the place it leads to",
+        link.display()
+    )
+}
+
+/// Hold a folder paths are checked against, which must be what has that name and not a link to
+/// something else. This is asked each time, because whoever can write to it can empty it and
+/// turn it into a link, and a hold from before does not stop that.
+pub(crate) fn hold_root(root: &Path) -> std::io::Result<fs::File> {
+    match hold_real_folder(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::Other && leads_to_itself(root) => {
+            hold_folder(root)
+        }
+        held => held,
+    }
+}
+
+/// [`std::io::ErrorKind::Other`] is what holding or pinning says of a folder that turned out to
+/// be a link, or to have become one. Anything else is only something that went wrong.
+fn refusal_or_io(path: &Path, error: std::io::Error) -> WinAppMigratorError {
+    if error.kind() == std::io::ErrorKind::Other {
+        WinAppMigratorError::InvalidInput(format!("refusing to go through a link: {error}"))
+    } else {
+        WinAppMigratorError::io(path, error)
+    }
+}
+
+/// Make a missing folder on the way down, and hold it. Once held, it is what keeps its parent
+/// from being emptied, so until then, that is the pin's job.
+fn make_and_hold_folder(folder: &Path, parent_hold: &fs::File) -> Result<fs::File> {
     let parent = folder.parent().ok_or_else(|| {
         WinAppMigratorError::InvalidInput(format!("{} has no parent folder", folder.display()))
     })?;
-    let parent_hold = parent_hold
-        .ok_or_else(|| WinAppMigratorError::InvalidInput("nothing is held".to_owned()))?;
-    let _pin = pin_held_folder(parent, parent_hold)
-        .map_err(|error| WinAppMigratorError::io(parent, error))?;
-    match fs::create_dir(folder) {
-        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
-            Err(WinAppMigratorError::io(folder, error))
-        }
-        _ => Ok(()),
+    let pin = pin_held_folder(parent, parent_hold).map_err(|error| refusal_or_io(parent, error))?;
+    if let Err(error) = fs::create_dir(folder)
+        && error.kind() != std::io::ErrorKind::AlreadyExists
+    {
+        return Err(WinAppMigratorError::io(folder, error));
     }
+    let hold = hold_real_folder(folder).map_err(|error| refusal_or_io(folder, error))?;
+    drop(pin);
+    Ok(hold)
 }
 
 /// A path that stays where it leads for as long as this is alive. See [`pin_path_below_root`].
@@ -334,8 +384,9 @@ pub(crate) struct PinnedPath {
 /// none of them can be emptied, and the last has a file held open in it for the same reason, so
 /// none can be turned into a link. Only then is the path checked, with
 /// [`ensure_within_root`], so that what it found is still so when what the caller does has
-/// been made to wait, which whoever can write to these folders can arrange. A link at or above
-/// `root` is the caller's business, as there.
+/// been made to wait, which whoever can write to these folders can arrange. `root` must not be
+/// a link. What is above it has to be kept from changing by holding it for longer than this,
+/// as [`ensure_target_root`] and `Journal::note_root` do, or checked again after this.
 pub(crate) fn pin_path_below_root(root: &Path, candidate: &Path) -> Result<PinnedPath> {
     let relative = strip_prefix_ignore_case(candidate, root)
         .filter(|relative| !relative.as_os_str().is_empty())
@@ -345,33 +396,30 @@ pub(crate) fn pin_path_below_root(root: &Path, candidate: &Path) -> Result<Pinne
                 candidate.display()
             ))
         })?;
-    let mut holds = vec![hold_folder(root).map_err(|error| WinAppMigratorError::io(root, error))?];
+    let mut last_hold = hold_root(root).map_err(|error| refusal_or_io(root, error))?;
+    let mut holds = Vec::new();
     let mut current = root.to_path_buf();
     if let Some(folders) = relative.parent() {
         for component in folders.components() {
             current.push(component);
             let held = match hold_real_folder(&current) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    make_folder_in_held_parent(&current, holds.last())?;
-                    hold_real_folder(&current)
+                    make_and_hold_folder(&current, &last_hold)?
                 }
-                held => held,
+                Err(_) => {
+                    return Err(WinAppMigratorError::InvalidInput(format!(
+                        "refusing to go through a link: {}",
+                        current.display()
+                    )));
+                }
+                Ok(held) => held,
             };
-            holds.push(held.map_err(|_| {
-                WinAppMigratorError::InvalidInput(format!(
-                    "refusing to go through a link: {}",
-                    current.display()
-                ))
-            })?);
+            holds.push(std::mem::replace(&mut last_hold, held));
         }
     }
-    let pin = holds
-        .last()
-        .ok_or_else(|| WinAppMigratorError::InvalidInput("nothing is held".to_owned()))
-        .and_then(|hold| {
-            pin_held_folder(&current, hold)
-                .map_err(|error| WinAppMigratorError::io(&current, error))
-        })?;
+    let pin =
+        pin_held_folder(&current, &last_hold).map_err(|error| refusal_or_io(&current, error))?;
+    holds.push(last_hold);
     ensure_within_root(root, candidate)?;
     Ok(PinnedPath {
         _holds: holds,
@@ -379,10 +427,12 @@ pub(crate) fn pin_path_below_root(root: &Path, candidate: &Path) -> Result<Pinne
     })
 }
 
-/// Create the install location, hold it open, and confirm it is a real folder. Run once,
-/// before anything is written: a junction planted there would carry the whole install
-/// somewhere else. The result keeps it and the folders above it from being renamed and
-/// replaced, so keep it until the install is finished.
+/// Create the install location, hold it open, and confirm that it is a real folder with no link
+/// above it. Run once, before anything is written: a junction planted there would carry the
+/// whole install somewhere else. Once held, it cannot be renamed, and with it in them, the
+/// folders above it cannot be emptied and turned into links, so keep the result until the install
+/// is finished. It can still be emptied and turned into a link itself, which
+/// [`pin_path_below_root`] refuses, for each file.
 pub fn ensure_target_root(target_root: &Path) -> Result<fs::File> {
     if !target_root.is_absolute() {
         return Err(WinAppMigratorError::InvalidInput(format!(
@@ -392,15 +442,18 @@ pub fn ensure_target_root(target_root: &Path) -> Result<fs::File> {
     }
     fs::create_dir_all(target_root)
         .map_err(|source| WinAppMigratorError::io(target_root, source))?;
-    let hold =
-        hold_folder(target_root).map_err(|source| WinAppMigratorError::io(target_root, source))?;
-    let metadata = fs::symlink_metadata(target_root)
-        .map_err(|source| WinAppMigratorError::io(target_root, source))?;
-    if metadata.file_type().is_symlink() {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "the install location is a link to somewhere else: {}",
-            target_root.display()
-        )));
+    let hold = hold_root(target_root).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::Other {
+            WinAppMigratorError::InvalidInput(format!(
+                "the install location is a link to somewhere else: {}",
+                target_root.display()
+            ))
+        } else {
+            WinAppMigratorError::io(target_root, source)
+        }
+    })?;
+    if let Some(link) = first_link_to(target_root) {
+        return Err(WinAppMigratorError::InvalidInput(link_refusal(&link)));
     }
     Ok(hold)
 }
@@ -1657,12 +1710,45 @@ mod tests {
         // In the folder itself as well.
         drop(pin_path_below_root(&root, &root.join("file.txt"))?);
 
+        // And the folder it is all under must not be a link either.
+        assert!(pin_path_below_root(&root.join("linked"), &root.join(r"linked\file.txt")).is_err());
         assert!(pin_path_below_root(&root, &root.join(r"linked\file.txt")).is_err());
         assert!(pin_path_below_root(&root, &root.join(r"linked\new\file.txt")).is_err());
         assert_eq!(fs::read_dir(&elsewhere).map_or(1, Iterator::count), 0);
         assert!(pin_path_below_root(&root, &root.join("linked")).is_err());
         assert!(pin_path_below_root(&root, &root).is_err());
         assert!(pin_path_below_root(&root, &elsewhere.join("file.txt")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_link_anywhere_on_the_way_is_found_and_what_is_real_is_not() -> Result<()> {
+        let base = temp_base()?;
+        let real = base.path().join(r"real\deep");
+        fs::create_dir_all(&real).map_err(|error| WinAppMigratorError::io(&real, error))?;
+        let link = base.path().join("link");
+        let made = crate::path_utils::hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&link)
+            .arg(base.path().join("real"))
+            .output()
+            .map_err(|error| WinAppMigratorError::io(&link, error))?;
+        assert!(made.status.success());
+
+        assert_eq!(first_link_to(&real), None);
+        assert_eq!(first_link_to(&real.join("not there")), None);
+        assert_eq!(first_link_to(&link).as_deref(), Some(link.as_path()));
+        assert_eq!(
+            first_link_to(&link.join("deep")).as_deref(),
+            Some(link.as_path())
+        );
+        assert_eq!(
+            first_link_to(&link.join(r"deep\not there")).as_deref(),
+            Some(link.as_path())
+        );
+        assert!(ensure_target_root(&link.join("new")).is_err());
         Ok(())
     }
 

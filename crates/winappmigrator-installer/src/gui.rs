@@ -156,6 +156,7 @@ enum Msg {
 }
 
 struct InstallerApp {
+    checked_target: std::cell::RefCell<Option<(String, Option<String>)>>,
     theme: Theme,
     screen: Screen,
     /// The package, checked and held open. Every read goes through this.
@@ -202,6 +203,7 @@ impl InstallerApp {
             publisher: String::new(),
             version: String::new(),
             source_computer: String::new(),
+            checked_target: std::cell::RefCell::new(None),
             target_root: String::new(),
             show_user_data: false,
             show_license: false,
@@ -334,8 +336,19 @@ impl InstallerApp {
         self.target_problem().is_none()
     }
 
+    /// Asked on every frame, and it looks at the disk, so it is only asked again once the text
+    /// has changed. What is really done with it is checked again then.
     fn target_problem(&self) -> Option<String> {
-        install_location_problem(Path::new(self.target_root.trim()))
+        let text = self.target_root.trim();
+        let mut checked = self.checked_target.borrow_mut();
+        if let Some((checked_text, problem)) = checked.as_ref()
+            && checked_text == text
+        {
+            return problem.clone();
+        }
+        let problem = install_location_problem(Path::new(text));
+        *checked = Some((text.to_owned(), problem.clone()));
+        problem
     }
 
     fn start(&mut self, apply: bool, ctx: &egui::Context) {
@@ -1028,7 +1041,7 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
             ui.add_space(SPACE_SM);
         } else if outcome.applied {
             let (role, text) = match outcome.rollback.as_ref() {
-                Some(report) if !report.failed.is_empty() || report.waiting_for_a_drive => (
+                Some(report) if !report.failed.is_empty() || report.waits_for_a_drive() => (
                     Role::Danger,
                     "The install failed, and not all of what it changed could be put back. What \
                      is left is listed below, and the next install tries again.",

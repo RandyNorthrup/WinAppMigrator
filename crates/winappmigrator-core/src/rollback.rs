@@ -19,7 +19,9 @@
 //!
 //! Whoever can write to a folder can act between a check and what follows it, and can make what
 //! follows it wait. So a delete or a restore is done with the way there pinned, in
-//! [`pin_path_below_root`], which keeps it from becoming a link for as long as that takes.
+//! [`pin_path_below_root`], which keeps it from becoming a link for as long as that takes. If
+//! pinning finds a folder changing under it, nothing more is done under that root in this run,
+//! because trying again and again is what a race needs.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -45,9 +47,9 @@ use crate::journal::{
 use crate::models::{EnvironmentScope, RegistryHive, UndoReport};
 use crate::path_utils::{
     POWERSHELL_IMPORT_UTILITY, current_user_sid, escape_powershell_single, hidden_command,
-    path_is_within, system_root,
+    path_is_within, system_root, text_mentions_path,
 };
-use crate::privilege::{PIN_FILE_PREFIX, confirm_protected_folder, hold_folder, hold_real_folder};
+use crate::privilege::{confirm_protected_folder, hold_folder, hold_real_folder, is_pin_file_name};
 use crate::progress::{InstallMonitor, InstallPhase, InstallStep};
 use crate::registry_target::{
     environment_location, registry_hive_name, registry_root, remove_path_entries,
@@ -232,6 +234,12 @@ struct Undoer<'a> {
     kept_folders: Vec<PathBuf>,
     damaged: bool,
     roots_left_unseen: HashSet<String>,
+    /// Under these, a folder changed while it was being made safe to act in.
+    roots_being_changed: HashSet<String>,
+    /// What stays, as text, because it has changed since: a service's command, a task, a value.
+    /// A file any of it names stays too, or it would be left calling for a file that is gone,
+    /// from a folder others may be able to write to.
+    kept_mentions: Vec<String>,
     report: UndoReport,
 }
 
@@ -251,29 +259,13 @@ pub(crate) fn undo_journal(
     phase: InstallPhase,
 ) -> UndoReport {
     let changes = journal.settled_changes();
-    let mut undoer = Undoer {
-        folder: &journal.folder,
-        target_root: &journal.header.target_root,
-        mode,
-        user_sid: journal.header.user_sid.as_deref(),
-        roots: changes
-            .iter()
-            .filter_map(|change| match change {
-                Change::Root { path, real } => Some((root_key(path), real.clone())),
-                _ => None,
-            })
-            .collect(),
-        kept_folders: Vec::new(),
-        damaged: journal.damaged,
-        roots_left_unseen: HashSet::new(),
-        report: UndoReport::default(),
-    };
+    let mut undoer = undoer_for(journal, &changes, mode);
     if journal.damaged {
         // Said, and not held against it. It cannot get better by trying again, and it must
         // not stop every later install.
         undoer.kept(format!(
             "Part of the record of {} could not be read, so anything it described is still in \
-             place.",
+             place, and a file it replaced may not come back.",
             journal.header.app_name
         ));
     }
@@ -281,7 +273,7 @@ pub(crate) fn undo_journal(
     // that could not finish can be run again from where it was started.
     let (entry_changes, other_changes): (Vec<&Change>, Vec<&Change>) = changes
         .iter()
-        .partition(|change| is_uninstall_entry(change));
+        .partition(|change| change.is_uninstall_entry());
     let total = changes.len();
     let mut done = 0;
     for change in other_changes.into_iter().rev() {
@@ -289,7 +281,12 @@ pub(crate) fn undo_journal(
         undoer.undo(change);
         done += 1;
     }
-    if undoer.report.failed.is_empty() && !undoer.report.waiting_for_a_drive {
+    // An install that never finished is finished by the next install, not from Settings, and what
+    // it wrote there must not be left for it to take for its own.
+    let run_again_from_settings = matches!(mode, UndoMode::Uninstall { .. });
+    if undoer.report.failed.is_empty()
+        && !(undoer.report.waits_for_a_drive() && run_again_from_settings)
+    {
         for change in entry_changes.into_iter().rev() {
             monitor.report(InstallStep::new(phase, done, total));
             undoer.undo(change);
@@ -305,17 +302,35 @@ pub(crate) fn undo_journal(
     undoer.report
 }
 
-fn is_uninstall_entry(change: &Change) -> bool {
-    matches!(
-        change,
-        Change::RegistryValue {
-            item: ItemKind::UninstallEntry,
-            ..
-        } | Change::RegistryKeyCreated {
-            item: ItemKind::UninstallEntry,
-            ..
-        }
-    )
+/// What to add to a record after undoing all of it that could be reached, if some could not. It
+/// stays on record for that, and the rest must not be undone again when it is back.
+fn what_is_left_of(report: &UndoReport, mode: UndoMode) -> Option<Change> {
+    (report.failed.is_empty() && report.waits_for_a_drive()).then(|| Change::OnlyLeftOn {
+        roots: report.drives_waited_for.clone(),
+        keeps_entry: matches!(mode, UndoMode::Uninstall { .. }),
+    })
+}
+
+fn undoer_for<'a>(journal: &'a ReadJournal, changes: &[Change], mode: UndoMode) -> Undoer<'a> {
+    Undoer {
+        folder: &journal.folder,
+        target_root: &journal.header.target_root,
+        mode,
+        user_sid: journal.header.user_sid.as_deref(),
+        roots: changes
+            .iter()
+            .filter_map(|change| match change {
+                Change::Root { path, real } => Some((root_key(path), real.clone())),
+                _ => None,
+            })
+            .collect(),
+        kept_folders: Vec::new(),
+        damaged: journal.damaged,
+        roots_left_unseen: HashSet::new(),
+        roots_being_changed: HashSet::new(),
+        kept_mentions: Vec::new(),
+        report: UndoReport::default(),
+    }
 }
 
 impl Undoer<'_> {
@@ -347,7 +362,9 @@ impl Undoer<'_> {
     fn undo(&mut self, change: &Change) {
         match change {
             Change::Root { .. } | Change::FileWritten { .. } | Change::FileUndone { .. } => {}
-            Change::TaskWritten { .. } | Change::PrerequisiteSkipped { .. } => {}
+            Change::TaskWritten { .. }
+            | Change::PrerequisiteSkipped { .. }
+            | Change::OnlyLeftOn { .. } => {}
             Change::FolderCreated { path, root, item } => self.undo_folder(path, root, *item),
             Change::File {
                 path,
@@ -438,6 +455,13 @@ impl Undoer<'_> {
     /// the same for what is below. A folder that is not there means what was in it has gone,
     /// unless it is a whole drive that is not there, in which case it may come back.
     fn guard(&self, root: &Path, path: &Path) -> std::result::Result<Guard, String> {
+        if self.roots_being_changed.contains(&root_key(root)) {
+            return Err(format!(
+                "something was changing {} while this ran, so nothing more was done in it. Close \
+                 what is doing that, and run this again",
+                root.display()
+            ));
+        }
         let hold = match hold_folder(root) {
             Ok(hold) => hold,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -475,11 +499,27 @@ impl Undoer<'_> {
     }
 
     /// Pin the way to `path` for what is about to be done there. With everything on the way
-    /// held, the folder it is all under cannot move either, so that is asked last.
-    fn pin(&self, root: &Path, path: &Path) -> std::result::Result<PinnedPath, String> {
-        let pinned = pin_path_below_root(root, path).map_err(|refusal| refusal.to_string())?;
+    /// held, the folder it is all under cannot move either, so that is asked last. [`Self::guard`]
+    /// found no link here a moment ago, so one found now means someone is changing this as it
+    /// runs, and it is not given another try.
+    fn pin(&mut self, root: &Path, path: &Path) -> std::result::Result<PinnedPath, String> {
+        let pinned = pin_path_below_root(root, path).map_err(|refusal| {
+            if matches!(refusal, WinAppMigratorError::InvalidInput(_)) {
+                self.roots_being_changed.insert(root_key(root));
+            }
+            refusal.to_string()
+        })?;
         self.confirm_root_is_where_it_was(root)?;
         Ok(pinned)
+    }
+
+    /// Whether what stays still names this file.
+    fn is_still_named(&self, path: &Path) -> bool {
+        !matches!(self.mode, UndoMode::Rollback)
+            && self
+                .kept_mentions
+                .iter()
+                .any(|text| text_mentions_path(text, path, true))
     }
 
     /// Whether what is under `root` has to be left without looking at it. Said once for each
@@ -487,7 +527,14 @@ impl Undoer<'_> {
     fn left_unseen(&mut self, guard: &Guard, root: &Path) -> bool {
         let text = match guard {
             Guard::DriveGone => {
-                self.report.waiting_for_a_drive = true;
+                if !self
+                    .report
+                    .drives_waited_for
+                    .iter()
+                    .any(|left| left == root)
+                {
+                    self.report.drives_waited_for.push(root.to_path_buf());
+                }
                 format!(
                     "What this install put in {} is on a drive that is not connected. Connect \
                      it, and this can be finished.",
@@ -631,6 +678,20 @@ impl Undoer<'_> {
                 unchanged,
             },
         );
+        if matches!(action, FileAction::Delete | FileAction::PutBackBackup)
+            && self.is_still_named(path)
+        {
+            self.kept(format!(
+                "{} stays, because something that stays still uses it.{}",
+                path.display(),
+                if found_backup.is_some() {
+                    " The file it replaced is not being put back."
+                } else {
+                    ""
+                }
+            ));
+            return;
+        }
         match action {
             FileAction::Nothing => {}
             FileAction::Delete => {
@@ -806,9 +867,14 @@ impl Undoer<'_> {
         };
         match value_action(current.as_ref(), written, prior) {
             ValueAction::Nothing => {}
-            ValueAction::Keep => self.kept(format!(
-                "{label} stays, because it has changed since it was installed."
-            )),
+            ValueAction::Keep => {
+                if let Some(Ok(value)) = current.as_ref().map(StoredValue::to_reg) {
+                    self.kept_mentions.push(value.to_string());
+                }
+                self.kept(format!(
+                    "{label} stays, because it has changed since it was installed."
+                ));
+            }
             ValueAction::PutBack => {
                 let Some(handle) = handle else {
                     return;
@@ -921,6 +987,7 @@ impl Undoer<'_> {
         };
         if !image_path_matches(&current, binary, arguments, system_root()) {
             if prior.is_none_or(|prior| prior.image_path != current) {
+                self.kept_mentions.push(current);
                 self.kept(format!(
                     "The {kind} {name} stays, because it has changed since it was installed."
                 ));
@@ -940,6 +1007,7 @@ impl Undoer<'_> {
                 false
             }
         };
+        let failed_before = self.report.failed.len();
         match prior {
             Some(prior) => {
                 self.restore_service(name, kind, driver, prior);
@@ -950,6 +1018,10 @@ impl Undoer<'_> {
                 }
             }
             None => self.delete_service(name, kind),
+        }
+        // Still set to run that, until this is tried again.
+        if self.report.failed.len() > failed_before {
+            self.kept_mentions.push(current);
         }
     }
 
@@ -1058,9 +1130,15 @@ impl Undoer<'_> {
             .is_some_and(|xml| existing_task_refusal(xml, self.target_root).is_none());
         match task_action(live.as_deref(), written, prior, runs_only_the_app) {
             TaskAction::Nothing => {}
-            TaskAction::Keep => self.kept(format!(
-                "The task {label} stays, because it has changed since it was installed."
-            )),
+            TaskAction::Keep => {
+                if let Some(xml) = live.as_deref() {
+                    // A path in a task's definition is followed by the tag that ends it.
+                    self.kept_mentions.push(xml.replace('<', "\""));
+                }
+                self.kept(format!(
+                    "The task {label} stays, because it has changed since it was installed."
+                ));
+            }
             TaskAction::Delete => {
                 match run_powershell_script(&unregister_task_script(task_path, task_name)) {
                     Ok(()) => self.undone(format!("Removed the task {label}")),
@@ -1169,7 +1247,7 @@ fn remove_folder_if_nothing_real_is_in_it(path: &Path) -> io::Result<()> {
                     .collect();
                 let only_pins = pins.iter().all(|file| {
                     file.file_name()
-                        .is_some_and(|name| name.to_string_lossy().starts_with(PIN_FILE_PREFIX))
+                        .is_some_and(|name| is_pin_file_name(&name.to_string_lossy()))
                 });
                 if !only_pins {
                     return Err(error);
@@ -1348,8 +1426,13 @@ pub(crate) fn roll_back(mut journal: Journal, monitor: &InstallMonitor) -> UndoR
         monitor,
         InstallPhase::RollingBack,
     );
+    if let Some(left) = what_is_left_of(&report, UndoMode::Rollback)
+        && let Err(error) = journal.note(left)
+    {
+        warn!(%error, "could not record what is left of a rollback");
+    }
     journal.close();
-    if report.failed.is_empty() && !report.waiting_for_a_drive {
+    if report.failed.is_empty() && !report.waits_for_a_drive() {
         remove_install_folder(&read.folder);
     }
     report
@@ -1443,7 +1526,7 @@ pub(crate) fn recover_interrupted_installs(
     });
     let mut recovered = Vec::new();
     let mut stuck = Vec::new();
-    for (lock, journal) in interrupted {
+    for (mut lock, journal) in interrupted {
         info!(id = %journal.header.id, app = %journal.header.app_name, "undoing an install that never finished");
         let report = undo_journal(
             &journal,
@@ -1460,12 +1543,16 @@ pub(crate) fn recover_interrupted_installs(
                 report.failed.join(" "),
                 journal.folder.display()
             ));
-        } else if !report.waiting_for_a_drive {
+        } else if let Some(left) = what_is_left_of(&report, UndoMode::Recovery) {
+            // Waiting for a drive stops nothing else, and what is there is looked at when it is
+            // back. Only that stays on record.
+            if let Err(error) = lock.note(left) {
+                warn!(folder = %journal.folder.display(), %error, "could not record what is left of an install");
+            }
+        } else {
             drop(lock);
             remove_install_folder(&journal.folder);
         }
-        // Waiting for a drive stops nothing else, and what it finds there is checked when it is
-        // back. It stays on record until then.
         recovered.push(RecoveredInstall {
             app_name: journal.header.app_name.clone(),
             report,
@@ -1548,7 +1635,7 @@ impl OpenInstall {
     pub fn uninstall(self, remove_user_data: bool, monitor: &InstallMonitor) -> UninstallOutcome {
         let Self {
             journal,
-            lock,
+            mut lock,
             state_root,
         } = self;
         let _busy = match lock_state(&state_root) {
@@ -1571,7 +1658,12 @@ impl OpenInstall {
         info!(id = %journal.header.id, app = %journal.header.app_name, "uninstalling");
         let report = undo_journal(&journal, mode, monitor, InstallPhase::Uninstalling);
         remove_staging_left_behind(&journal);
-        let finished = report.failed.is_empty() && !report.waiting_for_a_drive;
+        let finished = report.failed.is_empty() && !report.waits_for_a_drive();
+        if let Some(left) = what_is_left_of(&report, mode)
+            && let Err(error) = lock.note(left)
+        {
+            warn!(%error, "could not record what is left of an uninstall");
+        }
         drop(lock);
         let remove_after_exit = if finished {
             remove_record_of_install(&journal.folder)
@@ -1953,9 +2045,77 @@ mod tests {
             &InstallMonitor::default(),
             InstallPhase::RollingBack,
         );
-        assert!(report.waiting_for_a_drive);
+        assert!(report.waits_for_a_drive());
+        assert_eq!(report.drives_waited_for, [root]);
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert!(report.kept.join(" ").contains("not connected"));
+    }
+
+    /// Or it would be left set to run a file that has gone, from a folder someone may be able
+    /// to put another one in.
+    #[test]
+    fn a_file_that_what_stays_still_uses_stays_too() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let root = work.path().to_path_buf();
+        let used = root.join("service.exe");
+        let unused = root.join("other.dat");
+        for file in [&used, &unused] {
+            fs::write(file, b"x").map_err(|error| WinAppMigratorError::io(file, error))?;
+        }
+        let hash = sha256_file(&used)?;
+        let journal = journal_with(
+            vec![Change::Root {
+                path: root.clone(),
+                real: real_path(&root).map_err(|error| WinAppMigratorError::io(&root, error))?,
+            }],
+            false,
+        );
+        let changes = journal.settled_changes();
+        for (mode, stays) in [
+            (KEEP, true),
+            (UndoMode::Recovery, true),
+            (UndoMode::Rollback, false),
+        ] {
+            let mut undoer = undoer_for(&journal, &changes, mode);
+            undoer
+                .kept_mentions
+                .push(format!("\"{}\" --changed", used.display()));
+            undoer.undo_file(&used, &root, ItemKind::Program, None, Some(&hash), None);
+            undoer.undo_file(&unused, &root, ItemKind::Program, None, Some(&hash), None);
+            assert_eq!(used.exists(), stays, "{mode:?}");
+            assert!(!unused.exists(), "{mode:?}");
+            assert_eq!(undoer.report.kept.len(), usize::from(stays), "{mode:?}");
+            for file in [&used, &unused] {
+                fs::write(file, b"x").map_err(|error| WinAppMigratorError::io(file, error))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Once it has been seen to change, there is no second try in this run.
+    #[test]
+    fn a_folder_changing_as_this_runs_stops_it_there() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let root = work.path().to_path_buf();
+        let file = root.join("a.dat");
+        fs::write(&file, b"x").map_err(|error| WinAppMigratorError::io(&file, error))?;
+        let hash = sha256_file(&file)?;
+        let journal = journal_with(
+            vec![Change::Root {
+                path: root.clone(),
+                real: real_path(&root).map_err(|error| WinAppMigratorError::io(&root, error))?,
+            }],
+            false,
+        );
+        let changes = journal.settled_changes();
+        let mut undoer = undoer_for(&journal, &changes, KEEP);
+        undoer.roots_being_changed.insert(root_key(&root));
+        undoer.undo_file(&file, &root, ItemKind::Program, None, Some(&hash), None);
+        assert!(file.exists());
+        assert!(undoer.report.failed.join(" ").contains("was changing"));
+        Ok(())
     }
 
     /// It cannot get better by trying again, and it must not stop every later install.

@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
 use crate::file_discovery::{
-    expand_env_vars, has_reserved_device_name, known_base_dirs, split_user_data_relative,
-    user_data_base, user_shell_folder,
+    expand_env_vars, first_link_to, has_reserved_device_name, known_base_dirs, link_refusal,
+    split_user_data_relative, user_data_base, user_shell_folder,
 };
 use crate::journal::machine_state_root;
 use crate::models::{
@@ -659,29 +659,40 @@ pub fn system_changes(manifest: &PackageManifest) -> Result<SystemChanges> {
 
 /// Why this install location must not be used on this PC, if so.
 pub fn install_location_problem(target_root: &Path) -> Option<String> {
-    if machine_state_root().is_some_and(|state_root| overlaps_state_root(target_root, &state_root))
+    let state_root = machine_state_root();
+    if state_root
+        .as_deref()
+        .is_some_and(|state_root| overlaps_by_how_written(target_root, state_root))
     {
         return Some(STATE_ROOT_REFUSAL.to_owned());
     }
+    // What can be told from how it is written comes first, so that a path on a share is not sent
+    // to the network, which a window would have to wait for.
     let shared_folders = known_base_dirs(&SystemContext::live());
-    install_location_refusal(target_root, system_root(), &shared_folders).or_else(|| {
-        // And where it really is, past any link or short name.
-        install_placement_refusal(
-            &resolved_location(target_root),
-            system_root(),
-            &shared_folders,
-        )
-    })
+    if let Some(refusal) = install_location_refusal(target_root, system_root(), &shared_folders) {
+        return Some(refusal);
+    }
+    if state_root.is_some_and(|state_root| overlaps_state_root(target_root, &state_root)) {
+        return Some(STATE_ROOT_REFUSAL.to_owned());
+    }
+    // And where it really is, past any link or short name.
+    install_placement_refusal(
+        &resolved_location(target_root),
+        system_root(),
+        &shared_folders,
+    )
+    .or_else(|| first_link_to(target_root).map(|link| link_refusal(&link)))
+}
+
+fn overlaps_by_how_written(target: &Path, state: &Path) -> bool {
+    path_is_within(target, state) || path_is_within(state, target)
 }
 
 /// True when an install location would put an app's files where installs keep their records.
 /// What an uninstall trusts is there, and a package gets to suggest the location.
 pub(crate) fn overlaps_state_root(target_root: &Path, state_root: &Path) -> bool {
-    let overlap = |target: &Path, state: &Path| {
-        path_is_within(target, state) || path_is_within(state, target)
-    };
-    overlap(target_root, state_root)
-        || overlap(
+    overlaps_by_how_written(target_root, state_root)
+        || overlaps_by_how_written(
             &resolved_location(target_root),
             &resolved_location(state_root),
         )

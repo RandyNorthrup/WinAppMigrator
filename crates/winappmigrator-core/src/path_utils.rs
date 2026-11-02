@@ -345,7 +345,7 @@ fn comparable_path(path: &Path) -> String {
                     text.push(char::from(drive));
                     text.push(':');
                 }
-                Prefix::VerbatimUNC(server, share) => {
+                Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
                     text.push_str(r"\\");
                     text.push_str(&server.to_string_lossy());
                     text.push('\\');
@@ -669,6 +669,10 @@ mod tests {
         assert!(path_is_within(
             Path::new(r"C:\ProgramData\.\WinAppMigrator\installs"),
             Path::new(r"C:\ProgramData\WinAppMigrator")
+        ));
+        assert!(path_is_within(
+            Path::new(r"//Server/Share/x"),
+            Path::new(r"\\?\UNC\server\share")
         ));
         assert!(!path_is_within(Path::new(r"C:\Windows2\x"), windows));
         assert!(!path_is_within(Path::new(r"C:\x\Windows"), windows));

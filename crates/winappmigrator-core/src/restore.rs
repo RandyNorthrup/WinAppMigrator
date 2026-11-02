@@ -47,7 +47,7 @@ use crate::registry_target::{
 use crate::restore_policy::{
     COM_SERVER_KEYS, ServiceAccount, com_class_key, com_server_refusal, existing_service_refusal,
     existing_task_refusal, is_autostart_entry, is_com_server_entry, is_uninstall_entry_key,
-    paths_equal, restored_value_bytes, restored_value_text, service_image_path_value,
+    restored_value_bytes, restored_value_text, service_image_path_value,
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
@@ -276,12 +276,18 @@ pub fn restore_package_monitored(
     let mut target_hold = None;
     let journal = if options.apply {
         let mut journal = start_journal(&effective_options, &manifest, &app_name, installer)?;
-        match prepare_target(&mut journal, &options.target_root) {
+        match prepare_target(&mut journal, &options.target_root, &options.state_root) {
             Ok(hold) => target_hold = Some(hold),
             Err(error) => {
                 let report = roll_back(journal, monitor);
                 for line in crate::rollback::report_lines(&report) {
                     info!(rollback = %line);
+                }
+                if !report.failed.is_empty() {
+                    return Err(WinAppMigratorError::InvalidInput(format!(
+                        "{error}. What had been done could not all be put back: {}",
+                        report.failed.join(" ")
+                    )));
                 }
                 return Err(error);
             }
@@ -300,11 +306,6 @@ pub fn restore_package_monitored(
     let mut warnings = recovered_warnings;
     warnings.extend(manifest.warnings.iter().cloned());
     warnings.extend(review.warnings.iter().cloned());
-    if options.apply
-        && let Some(warning) = install_location_link_warning(&options.target_root)
-    {
-        warnings.push(warning);
-    }
     if options.restore_user_data
         && review
             .files
@@ -328,6 +329,7 @@ pub fn restore_package_monitored(
         warnings,
         errors: Vec::new(),
         refused: review.refused.clone(),
+        com_classes_left_alone: Vec::new(),
         cancelled: false,
         app_name: &app_name,
         manifest: &manifest,
@@ -446,10 +448,22 @@ fn start_journal(
     Ok(journal)
 }
 
-/// Record what it takes to make the install location, make it, and hold it.
-fn prepare_target(journal: &mut Journal, target_root: &Path) -> Result<File> {
+/// Record what it takes to make the install location, make it, and hold it. Then it is asked
+/// again whether it can be used: what really is there could not be told until it was, nor can
+/// anything that has changed since it was first asked, and from here on it cannot change.
+fn prepare_target(journal: &mut Journal, target_root: &Path, state_root: &Path) -> Result<File> {
     journal.note_new_folders_to(target_root, ItemKind::Program)?;
-    ensure_target_root(target_root)
+    let hold = ensure_target_root(target_root)?;
+    let problem = install_location_problem(target_root).or_else(|| {
+        overlaps_state_root(target_root, state_root).then(|| STATE_ROOT_REFUSAL.to_owned())
+    });
+    if let Some(problem) = problem {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "that install location cannot be used: {problem}: \"{}\"",
+            target_root.display()
+        )));
+    }
+    Ok(hold)
 }
 
 fn app_display_name(manifest: &PackageManifest) -> String {
@@ -528,24 +542,6 @@ fn refuse_replacing_anything(review: &ReviewedPackage<'_>) -> Result<()> {
     }
 }
 
-/// An install location can sit under a link higher up, such as a volume mounted on a folder.
-/// That can be intended, so it is reported rather than refused.
-fn install_location_link_warning(target_root: &Path) -> Option<Warning> {
-    let actual = fs::canonicalize(target_root).ok()?;
-    let text = actual.to_string_lossy();
-    let actual = text.strip_prefix(r"\\?\").unwrap_or(&text);
-    (!paths_equal(Path::new(actual), target_root)).then(|| {
-        Warning::new(
-            "install_location_is_a_link",
-            WarningSeverity::Warning,
-            format!(
-                "The install location is really {actual}, because a folder above it is a link."
-            ),
-            Some(target_root.display().to_string()),
-        )
-    })
-}
-
 /// How a file should be treated when the app is uninstalled.
 fn file_item_kind(file: &FileEntry) -> ItemKind {
     match file.classification {
@@ -568,6 +564,8 @@ struct Run<'a, 'p> {
     warnings: Vec<Warning>,
     errors: Vec<Warning>,
     refused: Vec<Warning>,
+    /// COM classes that belong to something else on this PC, each with why.
+    com_classes_left_alone: Vec<(String, String)>,
     cancelled: bool,
 }
 
@@ -752,28 +750,42 @@ impl Run<'_, '_> {
         }
     }
 
+    /// Before anything is done with a value or key: a new empty key can take over a class by
+    /// itself, and a value beside a server can change what it does.
+    fn is_left_alone_as_a_com_class(&mut self, entry: &RegistryEntry) -> bool {
+        let Some(class) = com_class_key(&entry.key_path) else {
+            return false;
+        };
+        let refusal = self
+            .com_classes_left_alone
+            .iter()
+            .find(|left_alone| left_alone.0 == class)
+            .map(|left_alone| left_alone.1.clone());
+        let Some(refusal) = refusal else {
+            return false;
+        };
+        self.record_failure(registry_warning(COM_CLASS_EXISTS_CODE, entry, refusal));
+        true
+    }
+
     fn restore_registry(&mut self) {
         let review = self.review;
         let total = review.registry.len();
-        let refused_classes = if self.journal.is_some() {
-            com_classes_to_leave_alone(&review.registry, &review.map)
-        } else {
-            Vec::new()
-        };
+        if self.journal.is_some() {
+            let entries: Vec<&RegistryEntry> = review
+                .registry
+                .iter()
+                .chain(&review.license_registry)
+                .copied()
+                .collect();
+            self.com_classes_left_alone = com_classes_to_leave_alone(&entries, &review.map);
+        }
         for (done, entry) in review.registry.iter().enumerate() {
             if self.stopped() {
                 return;
             }
             self.progress(InstallPhase::Registry, done, total);
-            // All of a class, whatever order it comes in. A server is refused for itself, below.
-            let in_refused_class = com_class_key(&entry.key_path)
-                .is_some_and(|class| refused_classes.contains(&class));
-            if in_refused_class && !is_com_server_entry(entry) {
-                self.record_failure(registry_warning(
-                    COM_CLASS_EXISTS_CODE,
-                    entry,
-                    "this COM class already belongs to something outside the install location",
-                ));
+            if self.is_left_alone_as_a_com_class(entry) {
                 continue;
             }
             let autostart = is_autostart_entry(entry);
@@ -1106,6 +1118,9 @@ impl Run<'_, '_> {
                 return;
             }
             self.progress(InstallPhase::License, review.license.len() + index, total);
+            if self.is_left_alone_as_a_com_class(entry) {
+                continue;
+            }
             let Some(journal) = self.journal.as_mut() else {
                 self.changes.license.push(format!(
                     "would restore license registry {}\\{}",
@@ -1749,10 +1764,6 @@ fn apply_registry_entry(
     map: &RestoreMap,
     item: ItemKind,
 ) -> std::result::Result<String, Warning> {
-    // Before the key is created: a new empty key can take over a class by itself.
-    if is_com_server_entry(entry) {
-        refuse_taking_over_com_class(entry, map)?;
-    }
     let key_source = || format!("{}\\{}", registry_hive_name(&entry.hive), entry.key_path);
     journal
         .note_new_keys(&entry.hive, &entry.key_path, item)
@@ -1814,80 +1825,69 @@ fn apply_registry_entry(
     ))
 }
 
-/// The COM classes in `entries` that belong to something else on this PC. A new value under one
-/// can change it by itself, in a key that a refused server would not have been in, and it
-/// cannot depend on which came first. A class with no server in the package has nothing of its
-/// own to compare, so if one is on this PC, that is someone else's.
-fn com_classes_to_leave_alone(entries: &[&RegistryEntry], map: &RestoreMap) -> Vec<String> {
-    let with_a_server: Vec<String> = entries
-        .iter()
-        .filter(|entry| is_com_server_entry(entry))
-        .filter_map(|entry| com_class_key(&entry.key_path))
-        .collect();
-    let mut refused: Vec<String> = Vec::new();
+/// The COM classes in `entries` that belong to something else on this PC, each with why. All of
+/// a class goes together, whatever order it comes in, since a value beside a server can change
+/// what it does, and a new empty key can take over a class by itself.
+///
+/// Each server on this PC is compared with what the package has for that same server, and one
+/// the package does not have, unless it is in the install location, is someone else's. A
+/// per-user registration wins over the machine's, so a new one in `HKCU` takes over a class that
+/// only exists in `HKLM` just as surely. Any server of the class counts: registering a
+/// `LocalServer32` or `TreatAs` for an in-process class redirects it as well.
+fn com_classes_to_leave_alone(
+    entries: &[&RegistryEntry],
+    map: &RestoreMap,
+) -> Vec<(String, String)> {
+    let mut left_alone: Vec<(String, String)> = Vec::new();
+    let mut looked_at: Vec<(String, &RegistryHive)> = Vec::new();
     for entry in entries {
         let Some(class) = com_class_key(&entry.key_path) else {
             continue;
         };
-        if refused.contains(&class) {
+        if looked_at
+            .iter()
+            .any(|seen| seen.0 == class && seen.1 == &entry.hive)
+        {
             continue;
         }
-        let new_value = if is_com_server_entry(entry) {
-            map.rewrite(entry.value_data.as_deref().unwrap_or_default())
-        } else if with_a_server.contains(&class) {
-            continue;
-        } else {
-            String::new()
+        looked_at.push((class.clone(), &entry.hive));
+        let package_has = |server: &str| {
+            entries
+                .iter()
+                .filter(|entry| is_com_server_entry(entry))
+                .find(|entry| {
+                    let key = entry.key_path.trim_end_matches('\\').to_ascii_lowercase();
+                    com_class_key(&key).as_deref() == Some(class.as_str())
+                        && key.ends_with(&format!("\\{server}"))
+                })
+                .map(|entry| map.rewrite(entry.value_data.as_deref().unwrap_or_default()))
+                .unwrap_or_default()
         };
-        if com_class_refusal(&entry.hive, &class, &new_value, map).is_some() {
-            refused.push(class);
+        let mut hives = vec![&entry.hive];
+        if entry.hive == RegistryHive::CurrentUser {
+            hives.push(&RegistryHive::LocalMachine);
+        }
+        let refusal = hives.into_iter().find_map(|hive| {
+            COM_SERVER_KEYS.iter().find_map(|server| {
+                let existing = registry_root(hive)
+                    .open_subkey(format!(r"{class}\{server}"))
+                    .and_then(|key| key.get_value::<String, _>(""))
+                    .ok()?;
+                com_server_refusal(
+                    &existing,
+                    &package_has(server),
+                    map.target_root(),
+                    system_root(),
+                )
+            })
+        });
+        if let Some(refusal) = refusal
+            && !left_alone.iter().any(|known| known.0 == class)
+        {
+            left_alone.push((class, refusal));
         }
     }
-    refused
-}
-
-/// Look at what the class is registered as on this PC, before writing over it. A per-user
-/// registration wins over the machine's, so a new one in `HKCU` takes over a class that
-/// only exists in `HKLM` just as surely. Any server of the class counts: registering a
-/// `LocalServer32` or `TreatAs` for an in-process class redirects it as well.
-fn refuse_taking_over_com_class(
-    entry: &RegistryEntry,
-    map: &RestoreMap,
-) -> std::result::Result<(), Warning> {
-    let new_value = map.rewrite(entry.value_data.as_deref().unwrap_or_default());
-    let Some((class_key, _)) = entry.key_path.trim_end_matches('\\').rsplit_once('\\') else {
-        return Ok(());
-    };
-    match com_class_refusal(&entry.hive, class_key, &new_value, map) {
-        Some(refusal) => Err(registry_warning(COM_CLASS_EXISTS_CODE, entry, refusal)),
-        None => Ok(()),
-    }
-}
-
-fn com_class_refusal(
-    hive: &RegistryHive,
-    class_key: &str,
-    new_value: &str,
-    map: &RestoreMap,
-) -> Option<String> {
-    let mut hives = vec![hive];
-    if *hive == RegistryHive::CurrentUser {
-        hives.push(&RegistryHive::LocalMachine);
-    }
-    for hive in hives {
-        for server in COM_SERVER_KEYS {
-            let existing = registry_root(hive)
-                .open_subkey(format!(r"{class_key}\{server}"))
-                .and_then(|key| key.get_value::<String, _>(""));
-            if let Ok(existing) = existing
-                && let Some(refusal) =
-                    com_server_refusal(&existing, new_value, map.target_root(), system_root())
-            {
-                return Some(refusal);
-            }
-        }
-    }
-    None
+    left_alone
 }
 
 fn apply_environment_variable(
@@ -2469,6 +2469,11 @@ fn copy_restore_file(
             destination.display()
         ))
     })?;
+    // A known data folder need not be there yet, unlike the install location.
+    if fs::symlink_metadata(&root).is_err() {
+        journal.note_new_folders_to(&root, item)?;
+        fs::create_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
+    }
     ensure_within_root(&root, destination)?;
     let parent = destination.parent().ok_or_else(|| {
         WinAppMigratorError::InvalidInput(format!(
@@ -2476,10 +2481,6 @@ fn copy_restore_file(
             destination.display()
         ))
     })?;
-    if fs::symlink_metadata(&root).is_err() {
-        journal.note_new_folders_to(&root, item)?;
-        fs::create_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
-    }
     journal.note_new_folders(&root, parent, item)?;
     let _pinned = pin_path_below_root(&root, destination)?;
 
@@ -2784,10 +2785,9 @@ mod tests {
         ] {
             let entry = com_entry(hive, format!(r"{SHELL_LINK_CLASS}\{server}"), kind);
             assert!(is_com_server_entry(&entry), "{server}");
-            let refused = refuse_taking_over_com_class(&entry, &map);
             assert_eq!(
-                refused.err().map(|warning| warning.code).as_deref(),
-                Some("registry_com_class_exists"),
+                com_classes_to_leave_alone(&[&entry], &map).len(),
+                1,
                 "{server}"
             );
         }
@@ -2798,7 +2798,7 @@ mod tests {
                 .to_owned(),
             RegistryValueKind::String,
         );
-        assert!(refuse_taking_over_com_class(&own_class, &map).is_ok());
+        assert!(com_classes_to_leave_alone(&[&own_class], &map).is_empty());
         Ok(())
     }
 
@@ -4379,19 +4379,180 @@ mod tests {
             RegistryValueKind::String,
         );
         let class = SHELL_LINK_CLASS.to_ascii_lowercase();
-        assert_eq!(
-            com_classes_to_leave_alone(&[&refused, &own], &map),
-            std::slice::from_ref(&class)
-        );
+        let classes = |entries: &[&RegistryEntry]| -> Vec<String> {
+            com_classes_to_leave_alone(entries, &map)
+                .into_iter()
+                .map(|left_alone| left_alone.0)
+                .collect()
+        };
+        assert_eq!(classes(&[&refused, &own]), std::slice::from_ref(&class));
         // In any order, and even with no server in the package at all.
         let mut sibling = refused.clone();
         sibling.value_name = Some("ThreadingModel".to_owned());
-        assert_eq!(
-            com_classes_to_leave_alone(&[&sibling, &refused], &map),
-            std::slice::from_ref(&class)
+        assert_eq!(classes(&[&sibling, &refused]), std::slice::from_ref(&class));
+        assert_eq!(classes(&[&sibling]), std::slice::from_ref(&class));
+        assert!(classes(&[&own]).is_empty());
+
+        // The 32-bit class of that name is a class of its own, and is looked at where it is.
+        let thirty_two_bit = SHELL_LINK_CLASS.replace(r"SOFTWARE\", r"SOFTWARE\WOW6432Node\");
+        let mut sibling_32 = com_entry(
+            RegistryHive::LocalMachine,
+            format!(r"{thirty_two_bit}\InprocServer32"),
+            RegistryValueKind::String,
         );
-        assert_eq!(com_classes_to_leave_alone(&[&sibling], &map), [class]);
-        assert!(com_classes_to_leave_alone(&[&own], &map).is_empty());
+        sibling_32.value_name = Some("ThreadingModel".to_owned());
+        assert_eq!(
+            classes(&[&sibling_32]),
+            [thirty_two_bit.to_ascii_lowercase()]
+        );
+        Ok(())
+    }
+
+    /// Reads only. What this PC has for a class is what the package has, as it would be when
+    /// installing an app again.
+    #[test]
+    fn a_class_the_package_has_all_of_is_not_taken_for_someone_elses() -> Result<()> {
+        let map = app_map()?;
+        let key = format!(r"{SHELL_LINK_CLASS}\InprocServer32");
+        let existing: String = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+            .open_subkey(&key)
+            .and_then(|key| key.get_value(""))
+            .map_err(|error| WinAppMigratorError::io(Path::new(&key), error))?;
+        let mut server = com_entry(RegistryHive::LocalMachine, key, RegistryValueKind::String);
+        server.value_data = Some(existing);
+        let mut sibling = server.clone();
+        sibling.value_name = Some("ThreadingModel".to_owned());
+        assert!(com_classes_to_leave_alone(&[&sibling, &server], &map).is_empty());
+        Ok(())
+    }
+
+    /// A new location is empty, and a hold does not stop that being turned into a link. Whatever
+    /// comes next must not go through it.
+    #[test]
+    fn an_install_location_turned_into_a_link_after_it_was_checked_is_not_written_through()
+    -> Result<()> {
+        use crate::privilege::tests::try_to_turn_into_a_link;
+
+        let work = temp_folder()?;
+        let options = restore_options(work.path(), work.path().join("no package"), true);
+        let elsewhere = work.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere)
+            .map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
+        let source = work.path().join("source.dat");
+        write_file(&source, b"content")?;
+        let hash = sha256_file(&source)?;
+
+        let mut journal = journal_for_test(&options)?;
+        journal.note_new_folders_to(&options.target_root, ItemKind::Program)?;
+        let hold = ensure_target_root(&options.target_root)?;
+        let first = options.target_root.join("first.dat");
+        copy_restore_file(
+            &mut journal,
+            &source,
+            &first,
+            &options.target_root,
+            ItemKind::Program,
+            Some(&hash),
+        )?;
+        fs::remove_file(&first).map_err(|error| WinAppMigratorError::io(&first, error))?;
+        let made = try_to_turn_into_a_link(&options.target_root, &elsewhere)
+            .map_err(|error| WinAppMigratorError::io(&options.target_root, error))?;
+        assert_eq!(made, "0");
+
+        for relative in ["at_the_top.dat", r"in\a\folder.dat"] {
+            let refused = copy_restore_file(
+                &mut journal,
+                &source,
+                &options.target_root.join(relative),
+                &options.target_root,
+                ItemKind::Program,
+                Some(&hash),
+            );
+            assert!(
+                matches!(&refused, Err(WinAppMigratorError::InvalidInput(message)) if message.contains("link")),
+                "{relative}: {refused:?}"
+            );
+        }
+        assert!(names_in(&elsewhere)?.is_empty(), "nothing went through it");
+        drop(hold);
+        Ok(())
+    }
+
+    #[test]
+    fn a_location_under_a_link_is_refused_and_says_where_to_go() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("acme.exe", b"program")], |_| {})?;
+        let mut options = restore_options(work.path(), package, true);
+        let elsewhere = work.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere)
+            .map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
+        let link = work.path().join("link");
+        junction(&link, &elsewhere)?;
+        options.target_root = link.join("Acme");
+
+        let refused = restore_package(&options);
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::InvalidInput(message)) if message.contains("is a link")),
+            "{refused:?}"
+        );
+        assert!(names_in(&elsewhere)?.is_empty());
+        Ok(())
+    }
+
+    /// An install that never finished, with part of it on a drive that has gone, then another
+    /// that wrote the same thing. When the first is looked at again, it must leave that alone.
+    #[test]
+    fn what_was_undone_while_waiting_for_a_drive_is_not_undone_again() -> Result<()> {
+        let Some(drive) = ('D'..='Z')
+            .map(|letter| format!(r"{letter}:\"))
+            .find(|drive| !Path::new(drive).exists())
+        else {
+            return Ok(());
+        };
+        let gone = Path::new(&drive).join("Apps");
+        let work = temp_folder()?;
+        let options = restore_options(work.path(), work.path().join("no package"), true);
+        let source = work.path().join("source.dat");
+        write_file(&source, b"the same in both")?;
+        let hash = sha256_file(&source)?;
+        let written = options.target_root.join("a.dat");
+
+        let mut journal = journal_for_test(&options)?;
+        journal.note_new_folders_to(&options.target_root, ItemKind::Program)?;
+        copy_restore_file(
+            &mut journal,
+            &source,
+            &written,
+            &options.target_root,
+            ItemKind::Program,
+            Some(&hash),
+        )?;
+        journal.note(Change::Root {
+            path: gone.clone(),
+            real: gone.display().to_string(),
+        })?;
+        journal.note(Change::File {
+            path: gone.join("b.dat"),
+            root: gone.clone(),
+            item: ItemKind::Program,
+            backup: None,
+            sha256: Some(hash.clone()),
+            partial: None,
+        })?;
+        let folder = journal.folder().to_path_buf();
+        drop(journal);
+
+        let first = recover_interrupted_installs(&options.state_root, &InstallMonitor::default())?;
+        assert!(first.recovered[0].report.waits_for_a_drive());
+        assert!(!written.exists(), "what could be reached was undone");
+        assert!(folder.exists(), "and the record stays for the rest");
+
+        // The next install writes the same thing.
+        write_file(&written, b"the same in both")?;
+        let second = recover_interrupted_installs(&options.state_root, &InstallMonitor::default())?;
+        assert!(second.recovered[0].report.waits_for_a_drive());
+        assert!(written.exists(), "it is not that install's to undo");
+        assert!(second.recovered[0].report.undone.is_empty());
         Ok(())
     }
 

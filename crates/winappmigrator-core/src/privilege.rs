@@ -1,10 +1,11 @@
+use std::collections::hash_map::RandomState;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
+use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
 
@@ -36,7 +37,8 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 /// manifest that it has to ask for elevation. No one but administrators can change it.
 const USERS_MAY_START_GRANT: &str = "*S-1-5-32-545:(RX)";
 /// Put briefly in a folder while something is done in it. See [`pin_held_folder`].
-pub(crate) const PIN_FILE_PREFIX: &str = ".wam-pin-";
+const PIN_FILE_PREFIX: &str = ".wam-pin-";
+const PIN_FILE_RANDOM_DIGITS: usize = 16;
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const DELETE: u32 = 0x0001_0000;
@@ -211,14 +213,16 @@ pub fn confirm_protected_folder(folder: &Path) -> io::Result<()> {
 ///
 /// This is by a path too, so the folder may have been turned into a link just before this,
 /// putting the file somewhere else. So it has to be seen where it was meant to be, with the
-/// folder still real on both sides of looking. The file goes when closed, however this process
+/// folder still real on both sides of looking. Its name cannot be guessed, so that what is seen
+/// there is not something put there ahead of time, though whoever has the file land in their own
+/// folder can read the name and race to copy it. None of these steps can be made to wait: a
+/// test of that is described in `SECURITY.md`. The file goes when closed, however this process
 /// ends, unless the power does first, and is hidden so it does not flicker on a Desktop.
 pub(crate) fn pin_held_folder(folder: &Path, hold: &File) -> io::Result<File> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let random = RandomState::new().build_hasher().finish();
     let path = folder.join(format!(
-        "{PIN_FILE_PREFIX}{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
+        "{PIN_FILE_PREFIX}{random:0width$x}",
+        width = PIN_FILE_RANDOM_DIGITS
     ));
     let pin = OpenOptions::new()
         .write(true)
@@ -240,12 +244,27 @@ pub(crate) fn pin_held_folder(folder: &Path, hold: &File) -> io::Result<File> {
     )))
 }
 
+/// Whether a file's name is what [`pin_held_folder`] calls one, and not a name a person gave a
+/// file of their own.
+pub(crate) fn is_pin_file_name(name: &str) -> bool {
+    name.strip_prefix(PIN_FILE_PREFIX).is_some_and(|random| {
+        random.len() == PIN_FILE_RANDOM_DIGITS
+            && random.chars().all(|digit| digit.is_ascii_hexdigit())
+    })
+}
+
 /// Check permissions by a path, knowing they are that folder's. What reads them follows links,
 /// so someone with write access could otherwise turn the folder into a link to one of the right
 /// kind for just that long, and back. The caller holds the folder.
 fn read_with_folder_pinned(folder: &Path, hold: &File) -> io::Result<()> {
     let pin = pin_held_folder(folder, hold)?;
     let result = confirm_administrators_only(folder);
+    if !hold.metadata()?.is_dir() {
+        return Err(io::Error::other(format!(
+            "{} became a link while it was being looked at",
+            folder.display()
+        )));
+    }
     drop(pin);
     result
 }
@@ -441,7 +460,7 @@ fn path_under_any_env(path: &Path, env_vars: &[&str]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -662,7 +681,7 @@ mod tests {
 
     /// Turn a folder that already exists into a link, the way anyone who can write to it can,
     /// by asking the file system directly, and return the Windows error, `0` if it worked.
-    fn try_to_turn_into_a_link(folder: &Path, target: &Path) -> io::Result<String> {
+    pub(crate) fn try_to_turn_into_a_link(folder: &Path, target: &Path) -> io::Result<String> {
         let script = format!(
             r#"Import-Module Microsoft.PowerShell.Utility; Add-Type -TypeDefinition @'
 using System;
@@ -743,6 +762,29 @@ public static class WamLink {{
         drop(hold);
         // A link goes without touching what it points at.
         fs::remove_dir(&folder)
+    }
+
+    #[test]
+    fn a_file_of_ones_own_is_not_taken_for_a_pin() -> io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        let hold = hold_real_folder(folder.path())?;
+        let pin = pin_held_folder(folder.path(), &hold)?;
+        let name = fs::read_dir(folder.path())?
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .next()
+            .ok_or_else(|| io::Error::other("no pin"))?;
+        assert!(is_pin_file_name(&name), "{name}");
+        drop(pin);
+        for name in [
+            ".wam-pin-notes",
+            ".wam-pin-",
+            "pin",
+            ".wam-pin-0123456789abcdefg",
+        ] {
+            assert!(!is_pin_file_name(name), "{name}");
+        }
+        Ok(())
     }
 
     /// The rest of what pinning is for, against what can be tried from a normal shell.

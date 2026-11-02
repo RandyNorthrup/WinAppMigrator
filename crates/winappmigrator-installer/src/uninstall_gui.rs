@@ -639,7 +639,7 @@ mod tests {
 
     fn done_with(report: UndoReport) -> UninstallApp {
         let mut app = sample(ThemeMode::Dark);
-        let finished = report.failed.is_empty() && !report.waiting_for_a_drive;
+        let finished = report.failed.is_empty() && !report.waits_for_a_drive();
         app.log_path = Some(PathBuf::from(
             r"C:\ProgramData\WinAppMigrator\logs\uninstall-1.log",
         ));
@@ -655,7 +655,7 @@ mod tests {
     fn a_drive_that_is_not_connected_is_not_called_a_failure_or_finished() {
         let harness = harness_for(done_with(UndoReport {
             kept: vec![r"What this install put in E:\App is on a drive.".to_owned()],
-            waiting_for_a_drive: true,
+            drives_waited_for: vec![PathBuf::from(r"E:\App")],
             ..UndoReport::default()
         }));
         assert!(
