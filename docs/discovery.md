@@ -341,12 +341,18 @@ app's machine-wide record, as it is written with no link on the way. That is the
 write with no rights at all.
 
 An app installed for one account is held to more, because all of what describes it is that account's to write
-(`SystemContext::is_the_accounts_own`). Its program and install location have to be in that account's profile, or owned by
-that account, which reads the folder's owner. Its roots go no further than its install location and that profile, nothing
-machine-wide goes by its name (`FileDiscoveryContext.installed_for_one_account`), and its install log can only name its own
-registry (`recorded_keys_of_one_account`). A machine-wide app's Inno Setup or NSIS log is only used if an administrator
-wrote it (`privilege::was_written_by_an_administrator`). None of these apply on a drive, whose accounts are all the
-owner's to read, but which is held to the rule above about whose folder something is in.
+(`SystemContext::is_the_accounts_own`). Its program, that program's folder, and its install location have to be in that
+account's profile, or owned by that account, which reads the folder's owner. Its roots go no further than its install
+location and that profile, nothing machine-wide goes by its name, in files (`FileDiscoveryContext.installed_for_one_account`)
+or the registry (`RegistryScanContext.installed_for_one_account`), and its install log can only name its own registry
+(`recorded_keys_of_one_account`). What is found by an app's name in any account's `AppData`, Documents, or Saved Games
+has to pass the same check, since a link there or a value for where Documents are could lead anywhere.
+
+A machine-wide app finds its program by `ExecutableHints::read_machine_wide`, which leaves out an account's own shortcuts
+and App Paths. Its Inno Setup or NSIS log is only used if only administrators can change it
+(`privilege::only_administrators_can_change`), since that names files and registry values to package and sits in the
+app's own folder. None of these ownership checks apply on a drive, whose accounts are all the owner's to read, but which
+is held to the rule above about whose folder something is in.
 
 A folder named for an app in `ProgramData` or Public Documents that is a link is left out, since any account can make one.
 A build asks again before and after copying each file on this PC whether it leads into another account's folder

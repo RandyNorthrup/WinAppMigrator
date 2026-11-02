@@ -83,13 +83,20 @@ its own registry, and its own shortcuts. So what these say does not count for mu
 
 - Only the install location in an app's machine-wide record may be in another account's folder, and only as it is
   written, with no link on the way. Any account may be able to make a folder on `C:\`.
-- An app installed for one account has to be in that account's profile or be owned by that account. That covers a
-  redirected folder outside a profile, which no profile check would see. On this PC that is asked of Windows' owner for
-  the folder, so an app that account's installer put somewhere as an administrator is refused too, and says so.
-- Such an app gets nothing machine-wide by its name, since its name is whatever its entry says and `ProgramData\<name>`
-  may be anyone's. Its install log can only name that account's registry and files in its own folders.
-- A machine-wide app's install log is only believed if an administrator wrote it, going by its owner. It names files and
-  registry values to package, and it sits in the app's own folder.
+- An app installed for one account has to be in that account's profile or be owned by that account, its folder as well as
+  its program. That covers a redirected folder outside a profile, which no profile check would see. On this PC that is
+  asked of Windows' owner for the folder, so an app that account's installer put somewhere as an administrator is
+  refused too, and says so.
+- A machine-wide app does not go by an account's shortcut or App Paths key to find its program, since either could name
+  any folder, which would be taken whole.
+- What is found by an app's name in an account's `AppData`, Documents, or Saved Games has the same rule: it has to be in
+  that account's profile or owned by it. A link there, or a value for where Documents are, could otherwise reach anything
+  an administrator can read.
+- Such an app gets nothing machine-wide by its name, in files or the registry, since its name is whatever its entry says
+  and `ProgramData\<name>` may be anyone's. Its install log can only name that account's registry and files in its own
+  folders.
+- A machine-wide app's install log is only believed if only administrators can change it. It names files and registry
+  values to package, it sits in the app's own folder, and editing a file keeps its owner, so its permissions are read too.
 - A folder in `ProgramData` or Public Documents that is a link is not followed, because anyone can make one there. A
   license store there is treated the same way.
 - A scheduled task that runs as anyone but the account being read or one of Windows' own is left out, with a warning.
@@ -105,7 +112,10 @@ folder. Whoever can write in a scanned folder could make part of it a link and u
 opened, and they would have to know a name that is there. Closing that needs the opened file's own path from Windows,
 which takes `unsafe` code this project does not otherwise have in the core. A symbolic link to a share, which needs
 Developer Mode or that right, is also still followed on this PC when finding where a folder really is. Folder and task
-names of other accounts can appear in a package's warnings.
+names of other accounts can appear in a package's warnings. The folder picker is Windows' own and runs before any of
+this, so what the shell itself does on browsing a hostile drive is not something this controls. An installer is written
+where whoever runs the app says, by default in that account's folders, not those of whoever is signed in, whose data it may
+hold.
 
 An elevated process can be run by another administrator than the person at the PC, whose `%APPDATA%` and
 `HKEY_CURRENT_USER` are not that person's. So who a scan or an install is for comes from the owner of this session's
