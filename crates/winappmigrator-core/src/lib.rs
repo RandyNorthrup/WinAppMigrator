@@ -48,6 +48,7 @@ pub use progress::{BuildMonitor, BuildStep, InstallMonitor, InstallPhase, Instal
 pub use restore::{default_install_location, restore_package, restore_package_monitored};
 pub use restore_review::{
     SystemChange, SystemChangeKind, SystemChanges, install_location_problem, system_changes,
+    system_changes_restoring,
 };
 pub use system_context::{
     ProfileChoice, ScanSource, SystemContext, looks_like_a_windows_drive, sweep_leaked_hive_mounts,

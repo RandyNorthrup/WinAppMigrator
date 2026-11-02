@@ -22,7 +22,7 @@ use crate::hashing::sha256_file;
 use crate::integration_scan::{first_path_in, parse_firewall_rule};
 use crate::journal::{
     Change, ItemKind, Journal, QUIET_FLAG, STAGING_PREFIX, StoredValue, UNINSTALL_FLAG,
-    find_backup, lock_state,
+    find_backup, install_folders, lock_state, read_journal,
 };
 use crate::models::{
     DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry, FileClassification,
@@ -52,7 +52,7 @@ use crate::restore_policy::{
     COM_SERVER_KEYS, EVENT_LOG_PREFIX, Registration, ServiceAccount, com_class_key,
     com_server_refusal, existing_service_refusal, existing_task_refusal, firewall_fingerprint,
     firewall_identity, is_autostart_entry, is_uninstall_entry_key, netsh_add_rule_arguments,
-    registration_of, registration_unit_of, restored_value_bytes, restored_value_name,
+    paths_equal, registration_of, registration_unit_of, restored_value_bytes, restored_value_name,
     restored_value_text, service_image_path_value, stored_firewall_rule_matches,
 };
 use crate::restore_review::{
@@ -101,14 +101,14 @@ const REFUSALS_FOUND_WHEN_INSTALLING: [&str; 6] = [
 ];
 const COM_CLASS_EXISTS_CODE: &str = "registry_com_class_exists";
 const REGISTRATION_EXISTS_CODE: &str = "registration_exists_elsewhere";
+const CLASS_IS_SOMEONES: &str = "this COM class is already on this PC, as something else's";
 /// How far down to look for what says a unit on this PC is the app's: a type library's file is
 /// `{id}\<version>\<language>\<build>`.
 const DEEPEST_LOOK_IN_A_UNIT: usize = 4;
 const APP_ID_KEY_PREFIX: &str = r"software\classes\appid\";
 const CLASS_REFERENCE_KEY: &str = "CLSID";
-const CLIENTS_KEY_PREFIX: &str = r"software\clients\";
-/// `software\clients\<kind>\<program>`.
-const CLIENT_ENTRY_DEPTH: usize = 4;
+/// As a place to compare with, this has nothing in it.
+const NOWHERE: &str = "";
 const FIREWALL_RULE_EXISTS_CODE: &str = "firewall_rule_exists";
 const NETSH_EXE: &str = "netsh.exe";
 const SHELL_KEY_SEGMENT: &str = "shell";
@@ -362,6 +362,9 @@ pub fn restore_package_monitored(
         ));
     }
 
+    let earlier_install_here = journal
+        .as_ref()
+        .is_some_and(|journal| earlier_install_at(&effective_options, journal.folder()));
     let mut run = Run {
         options: &effective_options,
         review: &review,
@@ -373,6 +376,7 @@ pub fn restore_package_monitored(
         refused: review.refused.clone(),
         com_classes_left_alone: Vec::new(),
         registrations_left_alone: Vec::new(),
+        earlier_install_here,
         cancelled: false,
         app_name: &app_name,
         manifest: &manifest,
@@ -663,6 +667,8 @@ struct Run<'a, 'p> {
     com_classes_left_alone: Vec<(String, String)>,
     /// What else this PC has that a package would have taken over.
     registrations_left_alone: Vec<LeftAlone>,
+    /// Whether a record says an install was at this location before this one.
+    earlier_install_here: bool,
     cancelled: bool,
 }
 
@@ -888,9 +894,13 @@ impl Run<'_, '_> {
                 .chain(&review.license_registry)
                 .copied()
                 .collect();
-            self.com_classes_left_alone = com_classes_to_leave_alone(&entries, &review.map);
+            let on_this_pc = OnThisPc {
+                map: &review.map,
+                earlier_install_here: self.earlier_install_here,
+            };
+            self.com_classes_left_alone = com_classes_to_leave_alone(&entries, on_this_pc);
             self.registrations_left_alone =
-                registrations_to_leave_alone(&entries, &review.map, &self.com_classes_left_alone);
+                registrations_to_leave_alone(&entries, on_this_pc, &self.com_classes_left_alone);
         }
         for (done, entry) in review.registry.iter().enumerate() {
             if self.stopped() {
@@ -1074,10 +1084,12 @@ impl Run<'_, '_> {
                 ));
                 continue;
             };
+            let earlier_place =
+                place_of_an_earlier_install(self.options, self.earlier_install_here);
             match apply_service(
                 journal,
                 service,
-                &self.options.target_root,
+                earlier_place,
                 self.options.force,
                 &mut self.warnings,
             ) {
@@ -1411,7 +1423,9 @@ impl Run<'_, '_> {
                 ));
                 continue;
             }
-            match place_and_register_driver(journal, driver, self.options) {
+            let earlier_place =
+                place_of_an_earlier_install(self.options, self.earlier_install_here);
+            match place_and_register_driver(journal, driver, self.options, earlier_place) {
                 Ok(messages) => self.changes.drivers.extend(messages),
                 Err(warning) => self.record_failure(warning),
             }
@@ -1443,7 +1457,9 @@ impl Run<'_, '_> {
                     .push(format!("would restore scheduled task {name}"));
                 continue;
             };
-            match apply_scheduled_task(journal, task, self.options) {
+            let earlier_place =
+                place_of_an_earlier_install(self.options, self.earlier_install_here);
+            match apply_scheduled_task(journal, task, self.options, earlier_place) {
                 Ok(message) => self.changes.tasks.push(message),
                 Err(warning) => self.record_failure(warning),
             }
@@ -1754,6 +1770,7 @@ fn place_and_register_driver(
     journal: &mut Journal,
     reviewed: &ReviewedDriver<'_>,
     options: &RestoreOptions,
+    earlier_place: &Path,
 ) -> std::result::Result<Vec<String>, Warning> {
     let driver = reviewed.entry;
     let destination = reviewed.destination.as_path();
@@ -1784,8 +1801,7 @@ fn place_and_register_driver(
                 Some(name.to_owned()),
             ));
         }
-        if let Some(refusal) =
-            existing_service_refusal(name, current, &options.target_root, system_root())
+        if let Some(refusal) = existing_service_refusal(name, current, earlier_place, system_root())
         {
             return Err(problem("driver_exists_elsewhere", refusal));
         }
@@ -2056,20 +2072,65 @@ fn apply_registry_entry(
     ))
 }
 
+/// What is on this PC goes by what the package would write, and by whether what names the install
+/// location counts for anything. A package suggests that place itself, so naming it says nothing
+/// unless a record says an install was there before: a package that said its home was Chrome's folder
+/// would otherwise have everything of Chrome's be its own.
+#[derive(Clone, Copy)]
+struct OnThisPc<'a> {
+    map: &'a RestoreMap,
+    earlier_install_here: bool,
+}
+
+impl OnThisPc<'_> {
+    fn place_of_an_earlier_install(&self) -> &Path {
+        if self.earlier_install_here {
+            self.map.target_root()
+        } else {
+            Path::new(NOWHERE)
+        }
+    }
+
+    fn runs_from_an_earlier_install(&self, text: &str) -> bool {
+        first_path_in(text)
+            .is_some_and(|path| path_is_strictly_inside(&path, self.place_of_an_earlier_install()))
+    }
+}
+
+/// Where what is on this PC can be taken for an earlier install of this app.
+fn place_of_an_earlier_install(options: &RestoreOptions, earlier_install_here: bool) -> &Path {
+    if earlier_install_here {
+        &options.target_root
+    } else {
+        Path::new(NOWHERE)
+    }
+}
+
+/// Whether this PC has a record of another install at this location. Only an administrator can
+/// write where those are kept, and a package cannot name that place.
+fn earlier_install_at(options: &RestoreOptions, this_one: &Path) -> bool {
+    install_folders(&options.state_root)
+        .unwrap_or_default()
+        .iter()
+        .filter(|folder| folder.file_name() != this_one.file_name())
+        .filter_map(|folder| read_journal(folder).ok())
+        .any(|record| paths_equal(&record.summary().target_root, &options.target_root))
+}
+
 /// The COM classes in `entries` that belong to something else on this PC, each with why. All of
 /// a class goes together, whatever order it comes in, since a value beside a server can change
 /// what it does, and a new empty key can take over a class by itself.
 ///
-/// A class is someone else's if any server of it on this PC is outside the install location. That
-/// goes for both views, since what starts a class in its own process can find it in either, and a
-/// per-user registration wins over the machine's, so a new one in `HKCU` takes over a class that
-/// only exists in `HKLM` just as surely. Any server of the class counts: a `LocalServer32` or
-/// `TreatAs` added to an in-process class redirects it as well. The only thing a package can then
-/// ask is what this PC has already, as when installing an app again, and it has to be all of it:
-/// otherwise a server copied from this PC would let in what comes beside it.
+/// A class is someone else's if its key is on this PC and it is not from an earlier install here.
+/// That goes for both views, since what starts a class in its own process can find it in either, and
+/// a per-user registration wins over the machine's, so a new one in `HKCU` takes over a class that
+/// only exists in `HKLM` just as surely. It takes no server of its own to count: a class a service
+/// hosts has none, and adding one redirects it. The only thing a package can then ask is what this
+/// PC has already, as when installing an app again, and it has to be all of it: otherwise a server
+/// copied from this PC would let in what comes beside it.
 fn com_classes_to_leave_alone(
     entries: &[&RegistryEntry],
-    map: &RestoreMap,
+    on_this_pc: OnThisPc<'_>,
 ) -> Vec<(String, String)> {
     let mut left_alone: Vec<(String, String)> = Vec::new();
     let mut looked_at: Vec<(String, &RegistryHive)> = Vec::new();
@@ -2094,13 +2155,28 @@ fn com_classes_to_leave_alone(
             .into_iter()
             .find_map(|hive| {
                 views.iter().find_map(|view| {
-                    COM_SERVER_KEYS.iter().find_map(|server| {
-                        let existing = registry_root(hive)
-                            .and_then(|root| root.open_subkey(format!(r"{view}\{server}")))
-                            .and_then(|key| key.get_value::<String, _>(""))
-                            .ok()?;
-                        com_server_refusal(server, &existing, "", map.target_root(), system_root())
-                    })
+                    let live = registry_root(hive)
+                        .and_then(|root| root.open_subkey(view))
+                        .ok()?;
+                    COM_SERVER_KEYS
+                        .iter()
+                        .find_map(|server| {
+                            let existing = live
+                                .open_subkey(server)
+                                .and_then(|key| key.get_value::<String, _>(""))
+                                .ok()?;
+                            com_server_refusal(
+                                server,
+                                &existing,
+                                "",
+                                on_this_pc.place_of_an_earlier_install(),
+                                system_root(),
+                            )
+                        })
+                        .or_else(|| {
+                            (!names_an_earlier_install(&live, on_this_pc, DEEPEST_LOOK_IN_A_UNIT))
+                                .then(|| CLASS_IS_SOMEONES.to_owned())
+                        })
                 })
             });
         let Some(refusal) = refusal else {
@@ -2109,7 +2185,7 @@ fn com_classes_to_leave_alone(
         let is_what_this_pc_has = entries
             .iter()
             .filter(|other| com_class_key(&other.key_path).as_deref() == Some(class.as_str()))
-            .all(|other| is_as_it_is_on_this_pc(other, map));
+            .all(|other| is_as_it_is_on_this_pc(other, on_this_pc.map));
         if !is_what_this_pc_has && !left_alone.iter().any(|known| known.0 == class) {
             left_alone.push((class, refusal));
         }
@@ -2152,9 +2228,10 @@ fn plain_key(key_path: &str) -> String {
 }
 
 /// What an entry would change on this PC, if it is set to something else there, in either hive it
-/// would count for. One that is what would be written, or runs from the install location, as an
-/// earlier install of this at the same place would, is no one else's.
-fn differs_on_this_pc(entry: &RegistryEntry, map: &RestoreMap) -> bool {
+/// would count for. One that is what would be written, or runs from an earlier install at the same
+/// place, is no one else's.
+fn differs_on_this_pc(entry: &RegistryEntry, on_this_pc: OnThisPc<'_>) -> bool {
+    let map = on_this_pc.map;
     let Ok(written) = registry_value_from_entry(entry, map) else {
         return true;
     };
@@ -2167,29 +2244,30 @@ fn differs_on_this_pc(entry: &RegistryEntry, map: &RestoreMap) -> bool {
         live.is_ok_and(|live| {
             let live = registry_value_text(&live);
             !live.trim().eq_ignore_ascii_case(written.trim())
-                && !runs_from_the_install_location(&live, map)
+                && !on_this_pc.runs_from_an_earlier_install(&live)
         })
     })
 }
 
 /// Whether what an entry would write is what this PC has for it already, so nothing would change.
+/// That goes for what kind of value it is as well. Only a key on its own has no value to compare.
 fn is_as_it_is_on_this_pc(entry: &RegistryEntry, map: &RestoreMap) -> bool {
     let Ok(key) = registry_root(&entry.hive).and_then(|root| root.open_subkey(&entry.key_path))
     else {
         return false;
     };
-    if entry.value_kind == Some(RegistryValueKind::None) {
+    if entry.value_name.is_none() && entry.value_kind == Some(RegistryValueKind::None) {
         return true;
     }
     let Ok(written) = registry_value_from_entry(entry, map) else {
         return false;
     };
-    let written = registry_value_text(&written);
     key.get_raw_value(restored_value_name(entry, map).as_ref())
         .is_ok_and(|live| {
-            registry_value_text(&live)
-                .trim()
-                .eq_ignore_ascii_case(written.trim())
+            live.vtype == written.vtype
+                && registry_value_text(&live)
+                    .trim()
+                    .eq_ignore_ascii_case(registry_value_text(&written).trim())
         })
 }
 
@@ -2201,10 +2279,6 @@ fn hives_it_counts_for(hive: &RegistryHive) -> Vec<&'static RegistryHive> {
         }
         RegistryHive::LocalMachine => vec![&RegistryHive::LocalMachine],
     }
-}
-
-fn runs_from_the_install_location(text: &str, map: &RestoreMap) -> bool {
-    first_path_in(text).is_some_and(|path| path_is_strictly_inside(&path, map.target_root()))
 }
 
 /// The command something opens with on this PC, in a hive it counts for.
@@ -2231,12 +2305,12 @@ fn live_open_command(hive: &RegistryHive, class_key: &str) -> Option<String> {
 
 /// Whether a type on this PC is someone's: what opens it runs from elsewhere, or it opens by a class
 /// or a handler, which there is no command to go by for.
-fn live_type_is_someones(hive: &RegistryHive, class_key: &str, map: &RestoreMap) -> bool {
+fn live_type_is_someones(hive: &RegistryHive, class_key: &str, on_this_pc: OnThisPc<'_>) -> bool {
     let Ok(class) = registry_root(hive).and_then(|root| root.open_subkey(class_key)) else {
         return false;
     };
     if let Some(command) = live_open_command(hive, class_key) {
-        return !runs_from_the_install_location(&command, map);
+        return !on_this_pc.runs_from_an_earlier_install(&command);
     }
     if class.open_subkey(CLASS_REFERENCE_KEY).is_ok() {
         return true;
@@ -2246,9 +2320,20 @@ fn live_type_is_someones(hive: &RegistryHive, class_key: &str, map: &RestoreMap)
             !shell
                 .open_subkey(format!(r"{verb}\command"))
                 .and_then(|command| command.get_value::<String, _>(""))
-                .is_ok_and(|command| runs_from_the_install_location(&command, map))
+                .is_ok_and(|command| on_this_pc.runs_from_an_earlier_install(&command))
         })
     })
+}
+
+/// What in a type's keys is a verb, which is its own thing to add to the type's menu. A folder has
+/// a menu for its background too.
+fn verb_prefix_of(key: &str, class_key: &str) -> Option<String> {
+    [
+        format!(r"{class_key}\shell\"),
+        format!(r"{class_key}\background\shell\"),
+    ]
+    .into_iter()
+    .find(|prefix| key.starts_with(prefix.as_str()))
 }
 
 /// The keys one of a package's units can be on this PC under, in the views that it has.
@@ -2262,23 +2347,22 @@ fn views_of_unit(unit: &str) -> Vec<String> {
     views
 }
 
-/// Whether anything under a key is in the install location, as an earlier install at the same place
-/// would have.
-fn names_the_install_location(key: &winreg::RegKey, map: &RestoreMap, deeper: usize) -> bool {
+/// Whether anything under a key is in the install location of an earlier install at the same place.
+fn names_an_earlier_install(key: &winreg::RegKey, on_this_pc: OnThisPc<'_>, deeper: usize) -> bool {
     key.enum_values()
         .flatten()
-        .any(|(_, value)| runs_from_the_install_location(&registry_value_text(&value), map))
+        .any(|(_, value)| on_this_pc.runs_from_an_earlier_install(&registry_value_text(&value)))
         || (deeper > 0
             && key.enum_keys().flatten().any(|name| {
                 key.open_subkey(&name)
-                    .is_ok_and(|below| names_the_install_location(&below, map, deeper - 1))
+                    .is_ok_and(|below| names_an_earlier_install(&below, on_this_pc, deeper - 1))
             }))
 }
 
 /// Whether this PC has one of a package's units as something else's: its key is there, and what is
-/// in it is not in the install location. A value a package only adds to it changes what it does
+/// in it is not from an earlier install here. A value a package only adds to it changes what it does
 /// just as surely as one it replaces.
-fn unit_is_someones(unit: &str, of_it: &[&RegistryEntry], map: &RestoreMap) -> bool {
+fn unit_is_someones(unit: &str, of_it: &[&RegistryEntry], on_this_pc: OnThisPc<'_>) -> bool {
     let is_there_as_someones = of_it
         .iter()
         .flat_map(|entry| hives_it_counts_for(&entry.hive))
@@ -2286,10 +2370,15 @@ fn unit_is_someones(unit: &str, of_it: &[&RegistryEntry], map: &RestoreMap) -> b
             views_of_unit(unit).iter().any(|view| {
                 registry_root(hive)
                     .and_then(|root| root.open_subkey(view))
-                    .is_ok_and(|key| !names_the_install_location(&key, map, DEEPEST_LOOK_IN_A_UNIT))
+                    .is_ok_and(|key| {
+                        !names_an_earlier_install(&key, on_this_pc, DEEPEST_LOOK_IN_A_UNIT)
+                    })
             })
         });
-    is_there_as_someones && !of_it.iter().all(|entry| is_as_it_is_on_this_pc(entry, map))
+    is_there_as_someones
+        && !of_it
+            .iter()
+            .all(|entry| is_as_it_is_on_this_pc(entry, on_this_pc.map))
 }
 
 /// `AppID\<program>` applies to a program by its file name alone, so this PC's own go by what they
@@ -2313,9 +2402,10 @@ fn app_id_is_for_a_windows_program(unit: &str) -> bool {
 /// change this. It reads the live registry, and only for what a package asks for.
 fn registrations_to_leave_alone(
     entries: &[&RegistryEntry],
-    map: &RestoreMap,
+    on_this_pc: OnThisPc<'_>,
     com_left_alone: &[(String, String)],
 ) -> Vec<LeftAlone> {
+    let map = on_this_pc.map;
     let mut left_alone: Vec<LeftAlone> = Vec::new();
     let mut leave = |key: String, value: Option<String>| {
         let item = LeftAlone { key, value };
@@ -2339,13 +2429,15 @@ fn registrations_to_leave_alone(
             .is_some_and(|(log, source)| event_source_is_in_another_log(log, source));
         if source_elsewhere
             || app_id_is_for_a_windows_program(unit)
-            || unit_is_someones(unit, of_it, map)
-            || of_it.iter().any(|entry| differs_on_this_pc(entry, map))
+            || unit_is_someones(unit, of_it, on_this_pc)
+            || of_it
+                .iter()
+                .any(|entry| differs_on_this_pc(entry, on_this_pc))
         {
             leave(unit.clone(), None);
         }
     }
-    // A type or protocol, by what opening one runs. What is not the install location's is someone's.
+    // A type or protocol, by what opening one runs. What is not from an earlier install is someone's.
     // A verb is only its own, when that is all the package adds to the type.
     let mut classes: BTreeMap<String, Vec<&RegistryEntry>> = BTreeMap::new();
     for entry in entries {
@@ -2360,8 +2452,10 @@ fn registrations_to_leave_alone(
     for (class, of_it) in &classes {
         let class_key = format!(r"software\classes\{class}");
         let is_extension = class.starts_with('.');
-        let shell_prefix = format!(r"{class_key}\shell\");
-        let shell_key = format!(r"{class_key}\shell");
+        let shell_keys = [
+            format!(r"{class_key}\shell"),
+            format!(r"{class_key}\background\shell"),
+        ];
         let open_key = format!(r"{class_key}\shell\{OPEN_VERB}");
         let says_what_it_is = of_it.iter().any(|entry| {
             let key = plain_key(&entry.key_path);
@@ -2369,11 +2463,11 @@ fn registrations_to_leave_alone(
                 return true;
             }
             // Which verb opening one runs is what it opens with, whichever that is.
-            if key == shell_key {
+            if shell_keys.contains(&key) {
                 return registry_value_name(entry.value_name.as_deref()).is_empty()
                     && entry.value_kind != Some(RegistryValueKind::None);
             }
-            !key.starts_with(&shell_prefix)
+            verb_prefix_of(&key, &class_key).is_none()
                 && !key.contains(r"\shellex")
                 && !key.contains(r"\openwithprogids")
                 && !key.contains(r"\openwithlist")
@@ -2390,7 +2484,7 @@ fn registrations_to_leave_alone(
             } else {
                 &RegistryHive::CurrentUser
             };
-            live_type_is_someones(hive, &class_key, map)
+            live_type_is_someones(hive, &class_key, on_this_pc)
         });
         if says_what_it_is
             && live_is_someones
@@ -2401,16 +2495,16 @@ fn registrations_to_leave_alone(
         }
         for entry in of_it {
             let key = plain_key(&entry.key_path);
-            if !differs_on_this_pc(entry, map) {
+            if !differs_on_this_pc(entry, on_this_pc) {
                 continue;
             }
-            if let Some(rest) = key.strip_prefix(shell_prefix.as_str()) {
-                let verb = rest.split('\\').next().unwrap_or_default();
-                leave(format!("{shell_prefix}{verb}"), None);
+            if let Some(prefix) = verb_prefix_of(&key, &class_key) {
+                let verb = key[prefix.len()..].split('\\').next().unwrap_or_default();
+                leave(format!("{prefix}{verb}"), None);
             } else if key.contains(r"\shellex") {
                 leave(key, None);
             } else if is_extension {
-                // What it says it opens with may be a type of the install location's.
+                // What it says it opens with may be a type of an earlier install here.
                 let current = registry_root(&entry.hive)
                     .and_then(|root| root.open_subkey(&class_key))
                     .and_then(|key| key.get_value::<String, _>(""))
@@ -2419,7 +2513,7 @@ fn registrations_to_leave_alone(
                     &entry.hive,
                     &format!(r"software\classes\{}", current.trim()),
                 )
-                .is_some_and(|command| runs_from_the_install_location(&command, map));
+                .is_some_and(|command| on_this_pc.runs_from_an_earlier_install(&command));
                 if !its_own {
                     leave(
                         key,
@@ -2433,7 +2527,7 @@ fn registrations_to_leave_alone(
     }
     // Lists where one name means one thing. A class left alone takes what names it with it.
     for entry in entries {
-        if is_autostart_entry(entry) && differs_on_this_pc(entry, map) {
+        if is_autostart_entry(entry) && differs_on_this_pc(entry, on_this_pc) {
             leave(
                 plain_key(&entry.key_path),
                 Some(registry_value_name(entry.value_name.as_deref()).to_ascii_lowercase()),
@@ -2441,31 +2535,18 @@ fn registrations_to_leave_alone(
             continue;
         }
         match registration_of(entry) {
-            // The name of a program, or an entry in a list of them, is all of it or none of it.
-            Some(Registration::ProgramName { .. } | Registration::ClientEntry { .. })
-                if differs_on_this_pc(entry, map) =>
-            {
-                let key = plain_key(&entry.key_path);
-                let parts: Vec<&str> = key.split('\\').collect();
-                let depth = if key.starts_with(CLIENTS_KEY_PREFIX) {
-                    CLIENT_ENTRY_DEPTH
-                } else {
-                    parts.len()
-                };
-                leave(parts[..depth.min(parts.len())].join("\\"), None);
-            }
             Some(Registration::ShellExtension { class, .. }) => {
                 let is_left_alone = class.as_deref().is_some_and(|class| {
                     com_left_alone
                         .iter()
                         .any(|(key, _)| key.rsplit('\\').next() == Some(class))
                 });
-                if is_left_alone || differs_on_this_pc(entry, map) {
+                if is_left_alone || differs_on_this_pc(entry, on_this_pc) {
                     leave(plain_key(&entry.key_path), None);
                 }
             }
             Some(Registration::Font { .. } | Registration::DefaultAppsEntry { .. })
-                if differs_on_this_pc(entry, map) =>
+                if differs_on_this_pc(entry, on_this_pc) =>
             {
                 leave(
                     plain_key(&entry.key_path),
@@ -2663,7 +2744,7 @@ fn sc_service_arguments(
 fn apply_service(
     journal: &mut Journal,
     reviewed: &ReviewedService<'_>,
-    target_root: &Path,
+    earlier_place: &Path,
     force: bool,
     warnings: &mut Vec<Warning>,
 ) -> std::result::Result<Vec<String>, Warning> {
@@ -2687,7 +2768,7 @@ fn apply_service(
     }
     if let Some(refusal) = current
         .as_deref()
-        .and_then(|current| existing_service_refusal(name, current, target_root, system_root()))
+        .and_then(|current| existing_service_refusal(name, current, earlier_place, system_root()))
     {
         return Err(Warning::new(
             "service_exists_elsewhere",
@@ -2817,6 +2898,7 @@ fn apply_scheduled_task(
     journal: &mut Journal,
     task: &ReviewedTask<'_>,
     options: &RestoreOptions,
+    earlier_place: &Path,
 ) -> std::result::Result<String, Warning> {
     let name = format!("{}{}", task.entry.task_path, task.entry.task_name);
     let existing =
@@ -2837,7 +2919,7 @@ fn apply_scheduled_task(
                 Some(name),
             ));
         }
-        if let Some(refusal) = existing_task_refusal(existing, &options.target_root) {
+        if let Some(refusal) = existing_task_refusal(existing, earlier_place) {
             return Err(Warning::new(
                 "scheduled_task_exists_elsewhere",
                 WarningSeverity::Error,
@@ -3405,7 +3487,7 @@ mod tests {
                 "{server}"
             );
             assert_eq!(
-                com_classes_to_leave_alone(&[&entry], &map).len(),
+                com_classes_to_leave_alone(&[&entry], earlier_install_here(&map)).len(),
                 1,
                 "{server}"
             );
@@ -3417,7 +3499,7 @@ mod tests {
                 .to_owned(),
             RegistryValueKind::String,
         );
-        assert!(com_classes_to_leave_alone(&[&own_class], &map).is_empty());
+        assert!(com_classes_to_leave_alone(&[&own_class], earlier_install_here(&map)).is_empty());
         Ok(())
     }
 
@@ -3495,7 +3577,8 @@ mod tests {
             let driver = unregistered_driver(hash);
             let reviewed = reviewed_driver(&driver, &options);
             let mut journal = journal_for_test(&options)?;
-            let refused = place_and_register_driver(&mut journal, &reviewed, &options);
+            let refused =
+                place_and_register_driver(&mut journal, &reviewed, &options, &options.target_root);
             assert_eq!(
                 refused.err().map(|warning| warning.code).as_deref(),
                 Some("driver_hash_failed")
@@ -3516,7 +3599,8 @@ mod tests {
         write_file(&reviewed.destination, b"existing")?;
 
         let mut journal = journal_for_test(&options)?;
-        let refused = place_and_register_driver(&mut journal, &reviewed, &options);
+        let refused =
+            place_and_register_driver(&mut journal, &reviewed, &options, &options.target_root);
 
         assert_eq!(
             refused.err().map(|warning| warning.code).as_deref(),
@@ -4988,6 +5072,49 @@ mod tests {
         assert!(long.chars().count() < 300);
     }
 
+    fn earlier_install_here(map: &RestoreMap) -> OnThisPc<'_> {
+        OnThisPc {
+            map,
+            earlier_install_here: true,
+        }
+    }
+
+    #[test]
+    fn being_in_the_install_location_says_nothing_without_a_record_of_an_install_there()
+    -> Result<()> {
+        let map = RestoreMap::for_tests(r"C:\Program Files\Acme");
+        let inside = r#""C:\Program Files\Acme\acme.exe" /x"#;
+        let on_this_pc = |earlier_install_here| OnThisPc {
+            map: &map,
+            earlier_install_here,
+        };
+        assert!(on_this_pc(true).runs_from_an_earlier_install(inside));
+        assert!(!on_this_pc(false).runs_from_an_earlier_install(inside));
+        assert!(!on_this_pc(true).runs_from_an_earlier_install(r"C:\Program Files\Other\o.exe"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_verb_on_a_folders_background_is_a_verb() {
+        let directory = r"software\classes\directory";
+        assert_eq!(
+            verb_prefix_of(
+                r"software\classes\directory\background\shell\acme\command",
+                directory
+            )
+            .as_deref(),
+            Some(r"software\classes\directory\background\shell\")
+        );
+        assert_eq!(
+            verb_prefix_of(r"software\classes\directory\shell\acme", directory).as_deref(),
+            Some(r"software\classes\directory\shell\")
+        );
+        assert_eq!(
+            verb_prefix_of(r"software\classes\directory\defaulticon", directory),
+            None
+        );
+    }
+
     /// Reads only: the class is Windows' own, and every PC has it.
     #[test]
     fn all_of_a_class_that_belongs_to_something_else_is_left_alone() -> Result<()> {
@@ -5006,7 +5133,7 @@ mod tests {
         );
         let class = SHELL_LINK_CLASS.to_ascii_lowercase();
         let classes = |entries: &[&RegistryEntry]| -> Vec<String> {
-            com_classes_to_leave_alone(entries, &map)
+            com_classes_to_leave_alone(entries, earlier_install_here(&map))
                 .into_iter()
                 .map(|left_alone| left_alone.0)
                 .collect()
@@ -5053,14 +5180,16 @@ mod tests {
         let mut sibling = server.clone();
         sibling.value_name = Some("ThreadingModel".to_owned());
         sibling.value_data = Some(threading);
-        assert!(com_classes_to_leave_alone(&[&sibling, &server], &map).is_empty());
+        assert!(
+            com_classes_to_leave_alone(&[&sibling, &server], earlier_install_here(&map)).is_empty()
+        );
 
         // Its server copied from this PC does not let in what is beside it.
         let mut beside_it = server.clone();
         beside_it.key_path = beside_it.key_path.replace("InprocServer32", "TreatAs");
         beside_it.value_data = Some("{5A7E6E0C-0000-4000-8000-000000000000}".to_owned());
         assert_eq!(
-            com_classes_to_leave_alone(&[&server, &beside_it], &map).len(),
+            com_classes_to_leave_alone(&[&server, &beside_it], earlier_install_here(&map)).len(),
             1
         );
         // A key said to have nothing in it does not say what its server is, whatever text it has.
@@ -5069,7 +5198,10 @@ mod tests {
         says_nothing.key_path = says_nothing
             .key_path
             .replace("InprocServer32", "LocalServer32");
-        assert_eq!(com_classes_to_leave_alone(&[&says_nothing], &map).len(), 1);
+        assert_eq!(
+            com_classes_to_leave_alone(&[&says_nothing], earlier_install_here(&map)).len(),
+            1
+        );
         Ok(())
     }
 

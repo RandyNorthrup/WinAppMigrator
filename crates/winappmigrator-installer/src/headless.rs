@@ -16,8 +16,8 @@ use winappmigrator_core::rollback::report_lines;
 use winappmigrator_core::{
     EmbeddedPackage, InstallMonitor, PackageManifest, RestoreOptions, Result, VerificationOptions,
     WinAppMigratorError, default_install_location, has_embedded_self_archive,
-    install_location_problem, read_embedded_manifest, restore_package_monitored, system_changes,
-    verify_package,
+    install_location_problem, read_embedded_manifest, restore_package_monitored,
+    system_changes_restoring, verify_package,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -143,7 +143,7 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     let restore_license = !cli.no_restore_license;
     // The same list the window asks about, before any of it, so that a script can see what it
     // agreed to.
-    if let Ok(changes) = system_changes(&manifest) {
+    if let Ok(changes) = system_changes_restoring(&manifest, restore_license) {
         println!("Sets up: {}", changes.changes.len());
         for change in &changes.changes {
             println!(

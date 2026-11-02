@@ -225,8 +225,8 @@ pub(crate) fn install_placement_refusal(
 
 /// Why a service already on this PC must not be taken over, if so. `--force` does not
 /// change this. A package that names `WinDefend` must not be able to repoint it, however
-/// the rest of the package looks. A service already running from the install location is
-/// an earlier install of this app, which is what `--force` is for.
+/// the rest of the package looks. A service already running from `target_root`, where a record
+/// says an install was, is an earlier install of this app, which is what `--force` is for.
 pub fn existing_service_refusal(
     service_name: &str,
     current_image_path: &str,
@@ -236,8 +236,8 @@ pub fn existing_service_refusal(
     let current = parse_image_path(current_image_path, windows_dir);
     (!path_is_strictly_inside(&current.path, target_root)).then(|| {
         format!(
-            "{service_name} already exists on this PC and runs {}, outside the install location. \
-             If it is an older copy of this app, uninstall that first",
+            "{service_name} already exists on this PC and runs {}, which is not from an earlier \
+             install here. If it is an older copy of this app, uninstall that first",
             current.path.display()
         )
     })
@@ -311,6 +311,8 @@ const REFUSED_SOFTWARE_KEYS: &[&str] = &[
     r"software\microsoft\windows\currentversion\explorer\shell folders",
     r"software\microsoft\windows\windows error reporting",
     r"software\microsoft\windows\currentversion\explorer\shellexecutehooks",
+    // What a menu's `SubCommands` names, which is outside what the rules for a verb read.
+    r"software\microsoft\windows\currentversion\explorer\commandstore",
     r"software\microsoft\windows\currentversion\explorer\browser helper objects",
     r"software\microsoft\windows\currentversion\explorer\sharedtaskscheduler",
     // What stops an extension loading, and what Explorer remembers about those it has.
@@ -419,6 +421,8 @@ const SECURITY_LOG: &str = "security";
 const INTERFACE_PREFIX: &str = r"software\classes\interface\";
 const TYPE_LIBRARY_PREFIX: &str = r"software\classes\typelib\";
 const APP_ID_PREFIX: &str = r"software\classes\appid\";
+const APPLICATIONS_PREFIX: &str = r"software\classes\applications\";
+const APP_PATHS_PREFIX: &str = r"software\microsoft\windows\currentversion\app paths\";
 const ODBC_DRIVERS_KEY: &str = r"software\odbc\odbcinst.ini";
 const ODBC_SOURCES_KEY: &str = r"software\odbc\odbc.ini";
 const FONTS_KEY: &str = r"software\microsoft\windows nt\currentversion\fonts";
@@ -448,6 +452,13 @@ const AUTOMATION_MARSHALERS: &[&str] = &[
 const PROXY_STUB_KEYS: &[&str] = &["proxystubclsid32", "proxystubclsid"];
 const TYPE_LIBRARY_BUILDS: &[&str] = &["win32", "win64", "arm64"];
 const VERB_HANDLER_VALUES: &[&str] = &["explorercommandhandler", "delegateexecute"];
+/// What makes a verb a menu of others, which is on the list of what is set up.
+const VERB_MENU_VALUES: &[&str] = &["subcommands", "extendedsubcommandskey"];
+/// What runs in place of a verb's command when it is run with full rights.
+const ELEVATED_COMMAND_VALUE: &str = "isolatedcommand";
+/// What Windows Installer puts beside a verb's command, for it to find a product by, and which is
+/// run in place of the command. It is no path, and means nothing where that product is not installed.
+const INSTALLER_COMMAND_VALUE: &str = "command";
 /// Values under a registered thing that are read as a path or a class's id, like a default value is.
 const TEXT_ONLY_VALUES: &[&str] = &[
     "appid",
@@ -519,6 +530,18 @@ const COM_WINDOWS_SERVERS: &[&str] = &[
     "oleaut32.dll",
     "shell32.dll",
 ];
+/// Where Windows keeps what can host something of an app's, below its own folder.
+const WINDOWS_PROGRAM_FOLDERS: &[&str] = &["", "System32", "SysWOW64"];
+/// What of Windows' own a file type can run a script or a library of its own through. Not `cmd.exe`
+/// or `ssh.exe`, which run what they are told as well as what they are given.
+const WINDOWS_FILE_HOSTS: &[&str] = &[
+    "cscript.exe",
+    "explorer.exe",
+    "mshta.exe",
+    "notepad.exe",
+    "rundll32.exe",
+    "wscript.exe",
+];
 const COM_LOCAL_SERVER_KEY: &str = "localserver32";
 const COM_INPROC_SERVER_KEY: &str = "inprocserver32";
 /// What is run or loaded for a class besides what its server's default value says.
@@ -533,6 +556,7 @@ const FIREWALL_RULE_NAME_LIMIT: usize = 200;
 /// `netsh` reads this name as every rule on the PC, for a delete.
 const FIREWALL_RESERVED_NAME: &str = "all";
 const FIREWALL_DESCRIPTION_LIMIT: usize = 1024;
+const FIREWALL_ANY: &str = "any";
 /// What a package may write for a service it restores. The rest of a service's key, such
 /// as its `ImagePath` and account, is set through `sc.exe` and these rules.
 const SERVICE_SUBKEYS: &[&str] = &["parameters", "instances"];
@@ -862,8 +886,14 @@ fn shared_class_refusal(
         .map(|_| "it adds a command that runs something this package does not install".to_owned())
 }
 
+/// True for text whose path starts with a variable, which could be hiding the app's own path.
+fn starts_with_a_variable(text: &str) -> bool {
+    text.trim_start_matches(['"', ' ']).starts_with('%')
+}
+
 /// What text means on the target. A path can be written with a variable, as `%ProgramFiles%\A\a.dll`,
 /// which only reads as the app's own place once the variable is read, and is then moved like any.
+/// Anything else is moved once: a new place can be under the old one.
 pub(crate) fn text_on_target(
     text: &str,
     map: &RestoreMap,
@@ -871,10 +901,11 @@ pub(crate) fn text_on_target(
 ) -> String {
     let rewritten = map.rewrite(text);
     let expanded = expand(&rewritten);
-    if expanded == rewritten {
-        return rewritten;
+    if starts_with_a_variable(&rewritten) {
+        map.rewrite(&expanded)
+    } else {
+        expanded
     }
-    map.rewrite(&expanded)
 }
 
 /// True for a value holding a command Windows runs as it is written, where a path needs its quotes.
@@ -894,9 +925,13 @@ fn holds_a_command(entry: &RegistryEntry) -> bool {
 /// that moved with the app is written as where it went.
 pub fn restored_value_text(entry: &RegistryEntry, map: &RestoreMap) -> String {
     let rewritten = map.rewrite(entry.value_data.as_deref().unwrap_or_default());
-    let expanded = crate::file_discovery::expand_env_vars(&rewritten);
-    let moved = map.rewrite(&expanded);
-    let rewritten = if moved == expanded { rewritten } else { moved };
+    let rewritten = if starts_with_a_variable(&rewritten) {
+        let expanded = crate::file_discovery::expand_env_vars(&rewritten);
+        let moved = map.rewrite(&expanded);
+        if moved == expanded { rewritten } else { moved }
+    } else {
+        rewritten
+    };
     if holds_a_command(entry) {
         quote_command_path(&rewritten, map)
     } else {
@@ -959,9 +994,7 @@ fn autostart_refusal(
     }
     let command = expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default()));
     (!command_runs_restored_file(&command, map)).then(|| {
-        format!(
-            "it starts automatically, and runs something this package does not install: {command}"
-        )
+        "it starts automatically, and runs something this package does not install".to_owned()
     })
 }
 
@@ -1245,14 +1278,22 @@ fn is_a_com_host_of_windows(text: &str, windows_dir: &Path) -> bool {
     };
     let as_written = text.trim().trim_matches('"');
     let is_named_alone = path.as_os_str().eq_ignore_ascii_case(as_written);
-    let is_in_windows = if path.is_absolute() {
-        path_is_strictly_inside(&path, windows_dir)
-    } else {
-        path.components().count() == 1
-    };
     is_named_alone
-        && is_in_windows
+        && is_a_program_of_windows(&path, windows_dir)
         && COM_WINDOWS_SERVERS.contains(&file_name_of(&path).to_ascii_lowercase().as_str())
+}
+
+/// Whether a path is what Windows keeps of its own: named alone, or in one of its program folders.
+/// `C:\Windows\Temp` is in the Windows folder, and anyone can write there.
+fn is_a_program_of_windows(path: &Path, windows_dir: &Path) -> bool {
+    if !path.is_absolute() {
+        return path.components().count() == 1;
+    }
+    path.parent().is_some_and(|folder| {
+        WINDOWS_PROGRAM_FOLDERS
+            .iter()
+            .any(|below| paths_equal(folder, &windows_dir.join(below)))
+    })
 }
 
 const FILE_URL_PREFIX: &str = "file:///";
@@ -1316,7 +1357,14 @@ pub fn registration_unit_of(entry: &RegistryEntry) -> Option<String> {
     if key.strip_prefix(CLSID_PREFIX).is_some() {
         return com_class_key(&entry.key_path);
     }
-    for prefix in [INTERFACE_PREFIX, TYPE_LIBRARY_PREFIX, APP_ID_PREFIX] {
+    // A program's name, and what `Open with` goes by for it, is one thing for one program.
+    for prefix in [
+        INTERFACE_PREFIX,
+        TYPE_LIBRARY_PREFIX,
+        APP_ID_PREFIX,
+        APP_PATHS_PREFIX,
+        APPLICATIONS_PREFIX,
+    ] {
         if let Some(rest) = key.strip_prefix(prefix) {
             return Some(format!(
                 "{prefix}{}",
@@ -1328,6 +1376,11 @@ pub fn registration_unit_of(entry: &RegistryEntry) -> Option<String> {
         let mut parts = rest.split('\\');
         let (log, source) = (parts.next()?, parts.next()?);
         return Some(format!("{EVENT_LOG_PREFIX}{log}\\{source}"));
+    }
+    if let Some(rest) = key.strip_prefix(&format!(r"{CLIENTS_KEY}\")) {
+        let mut parts = rest.split('\\');
+        let (kind, program) = (parts.next()?, parts.next()?);
+        return Some(format!(r"{CLIENTS_KEY}\{kind}\{program}"));
     }
     for (keys, list) in [
         (ODBC_DRIVERS_KEY, ODBC_DRIVER_LIST),
@@ -1385,6 +1438,13 @@ pub fn registration_refusal(
     }
     if let Some(name) = of_unit(APP_ID_PREFIX) {
         return app_id_refusal(&name, entries, map, known, restored_services, expand);
+    }
+    if let Some(name) = of_unit(APPLICATIONS_PREFIX)
+        && !known.file_names.contains(&name)
+    {
+        return Some(format!(
+            "it would change how {name} is opened, which this package does not install"
+        ));
     }
     if of_unit(EVENT_LOG_PREFIX).is_some() {
         let message_files: Vec<&&RegistryEntry> = entries
@@ -1469,34 +1529,36 @@ fn interface_refusal(
     entries: &[&RegistryEntry],
     known: &PackageRegistrations,
 ) -> Option<String> {
-    let default_of = |subkeys: &[&str]| -> Option<String> {
-        entries.iter().find_map(|entry| {
-            let key = normalized_key(&entry.key_path);
-            let rest = key.strip_prefix(INTERFACE_PREFIX)?;
-            // Directly under the interface, which is the only place Windows looks.
-            let (_, leaf) = rest.split_once('\\')?;
-            (subkeys.contains(&leaf) && is_default_value(entry.value_name.as_deref()))
-                .then(|| class_named_by(entry.value_data.as_deref().unwrap_or_default()))
-        })
+    let defaults_of = |subkeys: &[&str]| -> Vec<String> {
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let key = normalized_key(&entry.key_path);
+                let rest = key.strip_prefix(INTERFACE_PREFIX)?;
+                // Directly under the interface, which is the only place Windows looks.
+                let (_, leaf) = rest.split_once('\\')?;
+                (subkeys.contains(&leaf) && is_default_value(entry.value_name.as_deref()))
+                    .then(|| class_named_by(entry.value_data.as_deref().unwrap_or_default()))
+            })
+            .collect()
     };
-    let stub = default_of(PROXY_STUB_KEYS);
-    let library = default_of(&["typelib"]);
-    let stub_is_restored = stub
-        .as_ref()
-        .is_some_and(|stub| known.classes.contains(stub));
-    let by_marshaler = stub
-        .as_deref()
-        .is_some_and(|stub| AUTOMATION_MARSHALERS.contains(&stub));
-    let library_is_restored = library
-        .as_ref()
-        .is_some_and(|library| known.type_libraries.contains(library));
-    (!(stub_is_restored || (by_marshaler && library_is_restored)) && !interface.is_empty()).then(
-        || {
-            "it would decide how calls to an interface are made, with something this package \
-             does not install"
-                .to_owned()
-        },
-    )
+    // Each of them, since which one is asked for depends on who asks.
+    let stubs = defaults_of(PROXY_STUB_KEYS);
+    let libraries = defaults_of(&["typelib"]);
+    let by_marshaler = |stub: &str| AUTOMATION_MARSHALERS.contains(&stub);
+    let library_is_restored = !libraries.is_empty()
+        && libraries
+            .iter()
+            .all(|library| known.type_libraries.contains(library));
+    let every_stub_is_fine = !stubs.is_empty()
+        && stubs.iter().all(|stub| {
+            known.classes.contains(stub) || (by_marshaler(stub) && library_is_restored)
+        });
+    (!every_stub_is_fine && !interface.is_empty()).then(|| {
+        "it would decide how calls to an interface are made, with something this package does not \
+         install"
+            .to_owned()
+    })
 }
 
 /// An AppID is how a class is started and who may ask. It can name a surrogate and a service to
@@ -1635,6 +1697,9 @@ pub fn registered_value_refusal(
         || key.starts_with(ODBC_DRIVERS_KEY)
         || key.starts_with(ODBC_SOURCES_KEY)
         || key_is_within(&key, ICON_OVERLAYS_KEY)
+        || key_is_within(&key, APP_PATHS_KEY)
+        || key == FONTS_KEY
+        || key == COMPATIBILITY_LAYERS_KEY
         || known
             .capabilities
             .iter()
@@ -1643,6 +1708,8 @@ pub fn registered_value_refusal(
         // These are read as a path or a class's id. What is written can be something else when the
         // rules read the text of a value of another kind.
         let is_read_as_text = is_default
+            || key == FONTS_KEY
+            || key == COMPATIBILITY_LAYERS_KEY
             || entry
                 .value_name
                 .as_deref()
@@ -1657,7 +1724,7 @@ pub fn registered_value_refusal(
         // Windows opens an icon just by showing it, which hands a server who is looking.
         if is_text
             && default_text()
-                .trim_start_matches(['"', ' '])
+                .trim_start_matches(['"', ' ', '@'])
                 .replace('/', "\\")
                 .starts_with(NETWORK_PATH_START)
         {
@@ -1764,6 +1831,16 @@ fn class_command_refusal(
             "it adds a command handled by something this package does not install".to_owned()
         });
     }
+    if key.contains(SHELL_SEGMENT) && key.ends_with(OPEN_COMMAND_TAIL) {
+        if name == ELEVATED_COMMAND_VALUE {
+            return (!command_runs_restored_file(&text, map)).then(|| {
+                "it adds a command that runs something this package does not install".to_owned()
+            });
+        }
+        if name == INSTALLER_COMMAND_VALUE {
+            return Some("it would run what only Windows Installer can read".to_owned());
+        }
+    }
     let class = key.strip_prefix(CLASSES_PREFIX).unwrap_or_default();
     if class
         .strip_suffix(r"\clsid")
@@ -1804,14 +1881,10 @@ fn command_gives_a_restored_file_to_windows(
     let Some(program) = first_path_in(command) else {
         return false;
     };
-    let is_windows = if program.is_absolute() {
-        path_is_strictly_inside(&program, windows_dir)
-    } else {
-        program.components().count() == 1
-    };
     let mut words = command_words(command);
     let _program = words.next();
-    is_windows
+    is_a_program_of_windows(&program, windows_dir)
+        && WINDOWS_FILE_HOSTS.contains(&file_name_of(&program).to_ascii_lowercase().as_str())
         && words.next().is_some_and(|word| {
             let file = word.split_once(',').map_or(word, |(file, _)| file);
             map.is_restored_file(Path::new(file))
@@ -2051,7 +2124,9 @@ pub fn registration_of(entry: &RegistryEntry) -> Option<Registration> {
             of: original_class[..of.len()].to_owned(),
         });
     }
-    let handled = VERB_HANDLER_VALUES.contains(&value_name.to_ascii_lowercase().as_str());
+    let lower_value_name = value_name.to_ascii_lowercase();
+    let handled = VERB_HANDLER_VALUES.contains(&lower_value_name.as_str())
+        || VERB_MENU_VALUES.contains(&lower_value_name.as_str());
     if let Some(at) = class.find(SHELL_SEGMENT)
         && (class.ends_with(OPEN_COMMAND_TAIL) || handled)
     {
@@ -2151,14 +2226,26 @@ pub fn firewall_identity(
     local_ports: &[String],
     remote_ports: &[String],
 ) -> String {
+    // A port goes by its number however it was written, as Windows keeps it.
     let sorted = |parts: &[String]| {
-        let mut parts: Vec<String> = parts.iter().map(|part| part.to_ascii_lowercase()).collect();
+        let mut parts: Vec<String> = parts
+            .iter()
+            .map(|part| {
+                let part = part.trim().to_ascii_lowercase();
+                let without_zeros = part.trim_start_matches('0');
+                if without_zeros.is_empty() {
+                    part
+                } else {
+                    without_zeros.to_owned()
+                }
+            })
+            .collect();
         parts.sort_unstable();
         parts.join(",")
     };
     format!(
         "{}|{}|{}",
-        netsh_protocol(protocol.unwrap_or_default()),
+        stored_protocol(protocol.unwrap_or_default()),
         sorted(local_ports),
         sorted(remote_ports)
     )
@@ -2186,6 +2273,18 @@ fn netsh_protocol(protocol: &str) -> String {
         "6" => "tcp".to_owned(),
         "17" => "udp".to_owned(),
         other => other.to_ascii_lowercase(),
+    }
+}
+
+/// A protocol as Windows stores one, which is what a rule read back says. Any is not said at all.
+fn stored_protocol(protocol: &str) -> String {
+    match netsh_protocol(protocol).as_str() {
+        "" | FIREWALL_ANY => String::new(),
+        "tcp" => "6".to_owned(),
+        "udp" => "17".to_owned(),
+        "icmpv4" => "1".to_owned(),
+        "icmpv6" => "58".to_owned(),
+        other => other.to_owned(),
     }
 }
 
@@ -2300,7 +2399,8 @@ pub fn com_server_refusal(
     let server = parse_image_path(existing, windows_dir).path;
     (!path_is_strictly_inside(&server, target_root)).then(|| {
         format!(
-            "this COM class already belongs to {existing}, which is outside the install location"
+            "this COM class already belongs to {existing}, which is not from an earlier install \
+             here"
         )
     })
 }
@@ -2469,7 +2569,8 @@ pub fn existing_task_refusal(existing_xml: &str, target_root: &Path) -> Option<S
         let path = command.trim().trim_matches('"');
         (!path_is_strictly_inside(Path::new(path), target_root)).then(|| {
             format!(
-                "a task with this name already exists and runs {path}, outside the install location"
+                "a task with this name already exists and runs {path}, which is not from an \
+                 earlier install here"
             )
         })
     })
@@ -4178,6 +4279,123 @@ mod tests {
     }
 
     #[test]
+    fn a_verb_runs_nothing_else_beside_its_command() {
+        let command = r"Software\Classes\Directory\shell\acme\command";
+        let run_it = r#""C:\Program Files\Acme\acme.exe" "%V""#;
+        assert_eq!(
+            value_refusal(&machine(command, Some("IsolatedCommand"), run_it)),
+            None
+        );
+        assert!(
+            value_refusal(&machine(
+                command,
+                Some("IsolatedCommand"),
+                r"C:\Windows\System32\cmd.exe /c anything"
+            ))
+            .is_some()
+        );
+        assert!(value_refusal(&machine(command, Some("command"), "a]darwin>descriptor")).is_some());
+        let store = machine(
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\CommandStore\shell\acme.x\command",
+            None,
+            r"C:\Windows\System32\cmd.exe /c anything",
+        );
+        assert!(registry_refusal(&store, &app_map(), &HashSet::new(), &no_expanding).is_some());
+        assert_eq!(
+            registration_of(&machine(
+                r"Software\Classes\Directory\shell\acme",
+                Some("SubCommands"),
+                "acme.x"
+            )),
+            Some(Registration::ShellCommand {
+                on: "Directory".to_owned(),
+                verb: "acme".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn what_opens_a_program_is_for_a_program_of_the_package() {
+        let of = |program: &str| {
+            machine(
+                &format!(r"Software\Classes\Applications\{program}\shell\open\command"),
+                None,
+                r#""C:\Program Files\Acme\acme.exe" "%1""#,
+            )
+        };
+        assert_eq!(unit_refusal(&[of("acme.exe")]), None);
+        assert!(
+            unit_refusal(&[of("winword.exe")]).is_some(),
+            "that would change what files Word was chosen for open with"
+        );
+    }
+
+    #[test]
+    fn a_program_of_windows_is_where_windows_keeps_them_and_nowhere_else_in_it() {
+        let windows = Path::new(WINDOWS);
+        for yes in [
+            "wscript.exe",
+            r"C:\Windows\System32\wscript.exe",
+            r"C:\Windows\SysWOW64\wscript.exe",
+            r"C:\Windows\explorer.exe",
+        ] {
+            assert!(is_a_program_of_windows(Path::new(yes), windows), "{yes}");
+        }
+        for no in [
+            r"C:\Windows\Temp\wscript.exe",
+            r"C:\Windows\..\Users\Public\wscript.exe",
+            r"..\wscript.exe",
+            r"\\evil\share\wscript.exe",
+        ] {
+            assert!(!is_a_program_of_windows(Path::new(no), windows), "{no}");
+        }
+        let server = |data: &str| {
+            machine(
+                &format!(r"Software\Classes\CLSID\{OTHER_CLASS}\InprocServer32"),
+                None,
+                data,
+            )
+        };
+        assert!(unit_refusal(&[server(r"C:\Windows\Temp\shell32.dll")]).is_some());
+    }
+
+    #[test]
+    fn every_way_an_interface_is_asked_for_has_to_be_the_packages() {
+        let key = |tail: &str| {
+            format!(r"Software\Classes\Interface\{{5a7e6e0c-e2e0-4000-8000-0000000000cc}}\{tail}")
+        };
+        let good = machine(&key("ProxyStubClsid"), None, CLASS);
+        let bad = machine(&key("ProxyStubClsid32"), None, OTHER_CLASS);
+        assert_eq!(unit_refusal(std::slice::from_ref(&good)), None);
+        assert!(
+            unit_refusal(&[good, bad]).is_some(),
+            "the one a program goes by is the other one"
+        );
+    }
+
+    #[test]
+    fn a_new_place_under_the_old_one_is_moved_once() {
+        let mut map = RestoreMap::for_tests(r"C:\App\New");
+        map.add_test_root(r"C:\App", r"C:\App\New");
+        map.add_test_file(r"C:\App\a.exe", r"C:\App\New\a.exe");
+        let command = machine(r"Software\Acme", None, r"C:\App\a.exe --d %APPDATA%\x");
+        let expand = |text: &str| text.replace("%APPDATA%", r"C:\Users\me\AppData\Roaming");
+        assert_eq!(
+            text_on_target(
+                command.value_data.as_deref().unwrap_or_default(),
+                &map,
+                &expand
+            ),
+            r"C:\App\New\a.exe --d C:\Users\me\AppData\Roaming\x"
+        );
+        assert_eq!(
+            restored_value_text(&command, &map),
+            r"C:\App\New\a.exe --d %APPDATA%\x",
+            "what is not the app's path keeps its variable"
+        );
+    }
+
+    #[test]
     fn a_value_is_not_read_as_text_when_it_would_be_written_as_something_else() {
         let as_bytes = RegistryEntry {
             value_kind: Some(RegistryValueKind::MultiString),
@@ -4207,12 +4425,24 @@ mod tests {
             (r"Software\Classes\CLSID\{a}\DefaultIcon", None),
             (r"Software\Classes\Acme.File\shell\open", Some("Icon")),
             (r"Software\Clients\Media\Acme\DefaultIcon", None),
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\acme.exe",
+                Some("Path"),
+            ),
         ] {
             let entry = machine(key, name, r"\\evil\s\i.ico");
             assert!(value_refusal(&entry).is_some(), "{key}");
             let quoted = machine(key, name, r#""\\evil\s\i.ico",0"#);
             assert!(value_refusal(&quoted).is_some(), "{key}");
         }
+        assert!(
+            value_refusal(&machine(
+                r"Software\Classes\Acme.File",
+                Some("FriendlyTypeName"),
+                r"@\\evil\s\x.dll,-1"
+            ))
+            .is_some()
+        );
     }
 
     #[test]
@@ -4905,7 +5135,16 @@ mod tests {
         );
         assert_eq!(
             firewall_identity(Some("6"), &["80".to_owned(), "443".to_owned()], &[]),
-            firewall_identity(Some("TCP"), &["443".to_owned(), "80".to_owned()], &[]),
+            firewall_identity(Some("TCP"), &["443".to_owned(), "080".to_owned()], &[]),
+        );
+        assert_eq!(
+            firewall_identity(Some("any"), &[], &[]),
+            firewall_identity(None, &[], &[]),
+            "a rule for any says nothing about it when it is read back"
+        );
+        assert_eq!(
+            firewall_identity(Some("icmpv4"), &[], &[]),
+            firewall_identity(Some("1"), &[], &[]),
         );
         assert!(!stored_firewall_rule_matches(
             stored,

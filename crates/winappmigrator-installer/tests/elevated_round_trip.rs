@@ -4588,6 +4588,13 @@ fn int_values(root: &str) -> Vec<IntValue> {
             sz,
             "Open with WAM Int",
         ),
+        // Windows has verbs of its own on `Directory`, which have to stay no reason to leave these.
+        int_value(
+            &format!(r"{classes}\Directory\Background\shell\WamIntHere\command"),
+            None,
+            sz,
+            &format!("\"{exe}\" \"%V\""),
+        ),
         int_value(
             &format!(r"{classes}\Directory\shell\WamIntHere\command"),
             None,
@@ -5028,6 +5035,7 @@ fn int_registered_keys() -> Vec<String> {
         format!(r"{classes}\*\shellex\ContextMenuHandlers\WamInt"),
         format!(r"{explorer}\ShellIconOverlayIdentifiers\WamIntOverlay"),
         format!(r"{classes}\Directory\shell\WamIntHere"),
+        format!(r"{classes}\Directory\Background\shell\WamIntHere"),
         format!(r"HKLM\{INT_VENDOR_KEY}"),
         format!(r"HKCU\{INT_VENDOR_KEY}"),
         format!(r"{EVENT_LOG_APPLICATION}\{INT_EVENT_SOURCE}"),
@@ -5621,6 +5629,29 @@ fn ask_for_hostile_integrations(package: &mut HandBuilt) -> TestResult<Vec<&'sta
             &format!("{CMD} /c calc \"{own}\""),
             sz.clone(),
         ),
+        // Beside a verb's command, what runs with full rights, and what a menu names elsewhere.
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\WamHostile.Iso\shell\go\command",
+            Some("IsolatedCommand"),
+            &format!("{CMD} /c calc"),
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\CommandStore\shell\wamhostile.x\command",
+            None,
+            &format!("{CMD} /c calc"),
+            sz.clone(),
+        ),
+        // What files Word was chosen for open with, by a program the package does not have.
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\Applications\wamhostilewinword.exe\shell\open\command",
+            None,
+            &format!("\"{own}\" \"%1\""),
+            sz.clone(),
+        ),
         // What opening any folder does.
         registry_entry(
             machine.clone(),
@@ -5679,6 +5710,9 @@ fn ask_for_hostile_integrations(package: &mut HandBuilt) -> TestResult<Vec<&'sta
         r"WamHostile.Cmd\shell\open\command",
         r"Directory\shell\open\command",
         r"ContextMenuHandlers\WamHostileSecond",
+        r"WamHostile.Iso\shell\go\command",
+        r"CommandStore\shell\wamhostile.x",
+        r"Applications\wamhostilewinword.exe",
     ])
 }
 
@@ -5770,6 +5804,16 @@ fn hostile_integration_state() -> TestResult<BTreeMap<String, String>> {
             Some("DllSurrogate"),
         ),
         (
+            "what a class only a service hosts is served by",
+            format!(r"{classes}\CLSID\{HOSTILE_SERVICE_CLASS}\InprocServer32"),
+            None,
+        ),
+        (
+            "the server of a class in the folder the package suggests",
+            format!(r"{classes}\CLSID\{HOSTILE_CLASS_THERE}\InprocServer32"),
+            None,
+        ),
+        (
             "the second existing source's other messages",
             format!(r"{EVENT_LOG_APPLICATION}\{HOSTILE_SECOND_SOURCE}"),
             Some("CategoryMessageFile"),
@@ -5781,6 +5825,10 @@ fn hostile_integration_state() -> TestResult<BTreeMap<String, String>> {
         r"HKLM\Software\WamHostileNul".to_owned(),
         format!(r"{classes}\WamHostile.Icon"),
         format!(r"{classes}\WamHostile.Cmd"),
+        format!(r"{classes}\WamHostile.Iso"),
+        format!(r"{classes}\Applications\wamhostilewinword.exe"),
+        r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\CommandStore\shell\wamhostile.x"
+            .to_owned(),
         format!(r"{classes}\CLSID\{{5A7E6E0C-E2E0-4000-8000-0000000B0005}}"),
         format!(r"{classes}\*\shellex\ContextMenuHandlers\WamHostileSecond"),
         format!(r"{classes}\wamhostile"),
@@ -5818,6 +5866,9 @@ const HOSTILE_SECOND_SOURCE: &str = "WamHostileExistingToo";
 const HOSTILE_EXISTING_CLASS: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0002}";
 const HOSTILE_EXISTING_APP_ID: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0003}";
 const HOSTILE_OWN_CLASS: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0004}";
+const HOSTILE_SERVICE_CLASS: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0006}";
+const HOSTILE_CLASS_THERE: &str = "{5A7E6E0C-E2E0-4000-8000-0000000B0007}";
+const HOSTILE_TARGET: &str = r"C:\Program Files\WAM E2E Taking";
 
 /// What can only be refused at the moment it would be done, since it depends on what is here.
 fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResult {
@@ -5868,6 +5919,30 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         None,
         "REG_SZ",
         "Someone's",
+    )?;
+    // A class with no server of its own, as a service's has, which any server would redirect.
+    reg_add(
+        &format!(r"{classes}\CLSID\{HOSTILE_SERVICE_CLASS}"),
+        Some("AppID"),
+        "REG_SZ",
+        HOSTILE_EXISTING_APP_ID,
+    )?;
+    // Something another app has in the folder this package says is its home, with no record of an
+    // install there. Saying so does not make it the package's.
+    reg_add(
+        &format!(r"{classes}\CLSID\{HOSTILE_CLASS_THERE}\InprocServer32"),
+        None,
+        "REG_SZ",
+        &format!(r"{HOSTILE_TARGET}\theirs.dll"),
+    )?;
+    // And what a program is opened as, for a name that happens to be the package's program too.
+    let open_program =
+        format!(r"{classes}\Applications\WAM E2E Taking Source.exe\shell\open\command");
+    reg_add(
+        &open_program,
+        None,
+        "REG_SZ",
+        &format!("\"{other}\" \"%1\""),
     )?;
     let before = hostile_integration_state()?;
     let rule_before = firewall_rules_named(INT_FIREWALL_RULE)?;
@@ -5984,6 +6059,27 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
             HOSTILE_OWN_CLASS,
             sz.clone(),
         ),
+        registry_entry(
+            machine.clone(),
+            &format!(r"Software\Classes\CLSID\{HOSTILE_SERVICE_CLASS}\InprocServer32"),
+            None,
+            &own,
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            &format!(r"Software\Classes\CLSID\{HOSTILE_CLASS_THERE}\InprocServer32"),
+            None,
+            &own,
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\Applications\WAM E2E Taking Source.exe\shell\open\command",
+            None,
+            &command,
+            sz.clone(),
+        ),
         // A value only added to what is someone's changes what it does just as well.
         registry_entry(
             machine.clone(),
@@ -6004,7 +6100,7 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
     ]);
     // A rule of the same name, way, and program as one already there, saying something else.
     let installer = package.build("taking")?;
-    let target = format!(r"{PROGRAM_FILES}\WAM E2E Taking");
+    let target = HOSTILE_TARGET.to_owned();
     let run = run_installer(
         &installer,
         &["--target-root", &target, "--apply", "--force"],
@@ -6027,6 +6123,9 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
         HOSTILE_EXISTING_CLASS,
         HOSTILE_EXISTING_APP_ID,
         HOSTILE_SECOND_SOURCE,
+        HOSTILE_SERVICE_CLASS,
+        HOSTILE_CLASS_THERE,
+        r"Applications\WAM E2E Taking Source.exe",
     ] {
         checks.that(
             &format!("reported as left out: {wanted}"),
@@ -6074,6 +6173,11 @@ fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResu
     reg_delete_key(&existing_source);
     reg_delete_key(&second_source);
     reg_delete_key(&format!(r"{classes}\CLSID\{HOSTILE_EXISTING_CLASS}"));
+    reg_delete_key(&format!(r"{classes}\CLSID\{HOSTILE_SERVICE_CLASS}"));
+    reg_delete_key(&format!(r"{classes}\CLSID\{HOSTILE_CLASS_THERE}"));
+    reg_delete_key(&format!(
+        r"{classes}\Applications\WAM E2E Taking Source.exe"
+    ));
     reg_delete_key(&format!(r"{classes}\AppID\{HOSTILE_EXISTING_APP_ID}"));
     reg_delete_key(&format!(r"{classes}\.wamhostiletype"));
     reg_delete_key(&format!(r"{classes}\WamHostileExisting"));

@@ -25,7 +25,8 @@ use crate::models::{
     MatchConfidence, RegistryEntry, RegistryHive, RegistryValueKind, Warning,
 };
 use crate::path_utils::{
-    comparable_path, normalize_name_for_match, path_is_within, text_mentions_path, trim_icon_suffix,
+    comparable_path, normalize_name_for_match, path_is_strictly_inside, path_is_within,
+    text_mentions_path, trim_icon_suffix,
 };
 use crate::product_match::{MatchScope, ProductNames};
 use crate::registry_scan::{
@@ -197,7 +198,7 @@ impl OwnedFiles {
             || self
                 .install_location
                 .as_deref()
-                .is_some_and(|location| path_is_within(path, location))
+                .is_some_and(|location| path_is_strictly_inside(path, location))
     }
 
     /// Whether text names the app, as a whole path. Only for what is run through something else.
@@ -220,7 +221,7 @@ impl OwnedFiles {
             if self.owns(&first) {
                 return PointsAt::TheApp;
             }
-            if !path_is_within(&first, &self.windows_dir) {
+            if !path_is_strictly_inside(&first, &self.windows_dir) {
                 return PointsAt::Elsewhere;
             }
         }
@@ -520,12 +521,6 @@ impl Scan<'_> {
                     self.owned.app_ids.insert(app_id);
                 }
             }
-            let type_library = default_of(&class, TYPE_LIB);
-            if !type_library.trim().is_empty() {
-                self.owned
-                    .type_libraries
-                    .insert(lower_trimmed(&type_library));
-            }
             for server in COM_SERVERS {
                 let text = default_of(&class, server);
                 if let Some(file) = first_path_in(&self.expanded(&text))
@@ -544,6 +539,7 @@ impl Scan<'_> {
 
     fn class_is_the_apps(&self, class: &RegKey) -> bool {
         let mut someone_elses = false;
+        let mut the_apps = false;
         for server in COM_SERVERS {
             let Ok(key) = class.open_subkey_with_flags(server, KEY_READ) else {
                 continue;
@@ -555,7 +551,7 @@ impl Scan<'_> {
                 named = raw_value_to_display(&value);
             }
             match self.points_at(&named) {
-                PointsAt::TheApp if !named.trim().is_empty() => return true,
+                PointsAt::TheApp if !named.trim().is_empty() => the_apps = true,
                 PointsAt::Elsewhere if !named.trim().is_empty() => someone_elses = true,
                 _ => {}
             }
@@ -564,11 +560,12 @@ impl Scan<'_> {
                 && let Some(path) = path_of_file_url(&raw_value_to_display(&code_base))
                 && self.runs_the_app(&format!("\"{path}\""))
             {
-                return true;
+                the_apps = true;
             }
         }
-        if someone_elses {
-            return false;
+        // One server of someone else's is what would be loaded just as well.
+        if someone_elses || the_apps {
+            return the_apps && !someone_elses;
         }
         if self.runs_the_app(&default_of(class, DEFAULT_ICON)) {
             return true;
@@ -1532,6 +1529,34 @@ pub(crate) fn certificate_named_by(entry: &RegistryEntry) -> Option<CertificateE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reads only. Every PC has this key, with a lot in it.
+    #[test]
+    fn going_through_a_big_key_on_threads_finds_what_going_one_at_a_time_would() {
+        const BIG_KEY: &str = r"Software\Classes";
+        let system = SystemContext::live();
+        let root = RegRoot::Hklm(&system);
+        let parent = root.open(BIG_KEY, KEY_READ);
+        assert!(parent.is_ok(), "{parent:?}");
+        let every: Vec<String> = parent
+            .iter()
+            .flat_map(|parent| parent.enum_keys().flatten())
+            .collect();
+        let wanted = |name: &str| name.starts_with('.');
+        let one_at_a_time: Vec<String> =
+            every.iter().filter(|name| wanted(name)).cloned().collect();
+        assert!(!one_at_a_time.is_empty());
+        assert_eq!(
+            subkeys_where(&root, BIG_KEY, |_, name| wanted(name)),
+            one_at_a_time
+        );
+        // Each thread reads through a handle of its own.
+        let opened = subkeys_where(&root, BIG_KEY, |parent, name| {
+            wanted(name) && parent.open_subkey_with_flags(name, KEY_READ).is_ok()
+        });
+        assert_eq!(opened, one_at_a_time);
+        assert!(subkeys_where(&root, r"Software\WAM No Such Key", |_, _| true).is_empty());
+    }
 
     const WINDOWS: &str = r"C:\Windows";
 

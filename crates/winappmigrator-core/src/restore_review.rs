@@ -957,12 +957,20 @@ pub struct SystemChanges {
 /// item is allowed does not depend on where the app is installed, so this is right for any
 /// install location chosen later. `Err` means the package would be refused whole.
 pub fn system_changes(manifest: &PackageManifest) -> Result<SystemChanges> {
+    system_changes_restoring(manifest, true)
+}
+
+/// The same, for when licenses may be asked not to be restored, as they can from a command line.
+pub fn system_changes_restoring(
+    manifest: &PackageManifest,
+    restore_license: bool,
+) -> Result<SystemChanges> {
     let target = PathBuf::from(NO_TARGET_YET);
     let review = ReviewedPackage::with_folders(
         manifest,
         &target,
         true,
-        manifest.included_license_data,
+        manifest.included_license_data && restore_license,
         &current_known_folders(),
         &expand_env_vars,
         // Whether an existing service may be replaced depends on where it is being installed.
@@ -2598,6 +2606,87 @@ mod tests {
             rule.is_some_and(|change| change.high_rights && change.detail.contains("80")),
             "{rule:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_person_is_also_asked_about_what_opening_a_type_does_and_who_may_start_a_class()
+    -> Result<()> {
+        let mut manifest = with_integrations();
+        let exe = PathBuf::from(SOURCE).join("acme.exe").display().to_string();
+        let command = format!("\"{exe}\" \"%1\"");
+        manifest.registry_keys_exported.extend([
+            value(
+                MACHINE,
+                r"Software\Classes\Acme.File\shell",
+                "(Default)",
+                "edit",
+            ),
+            value(
+                MACHINE,
+                r"Software\Classes\Acme.File\shell\edit\command",
+                "(Default)",
+                &command,
+            ),
+            value(
+                MACHINE,
+                r"Software\Classes\Acme.File\shell\open\command",
+                "(Default)",
+                &command,
+            ),
+            value(
+                MACHINE,
+                r"Software\Classes\Other.File\shell\acme",
+                "ExplorerCommandHandler",
+                ACME_CLASS,
+            ),
+            value(
+                MACHINE,
+                r"Software\Clients\Media\Acme\shell\open\command",
+                "(Default)",
+                &command,
+            ),
+            value(
+                MACHINE,
+                &format!(r"Software\Classes\AppID\{ACME_CLASS}"),
+                "LaunchPermission",
+                "x",
+            ),
+        ]);
+        let reviewed = review(&manifest)?;
+        assert!(reviewed.refused.is_empty(), "{:?}", reviewed.refused);
+        let changes = describe(&reviewed, Path::new(TARGET)).changes;
+        let row = |kind: SystemChangeKind, title: &str| {
+            changes
+                .iter()
+                .find(|change| change.kind == kind && change.title == title)
+        };
+        assert!(
+            row(SystemChangeKind::ShellCommand, "Acme.File")
+                .is_some_and(|change| change.high_rights),
+            "as it is written, and that it changes what opening one does: {changes:?}"
+        );
+        assert!(
+            row(SystemChangeKind::ShellCommand, "acme")
+                .is_some_and(|change| change.detail.contains("Other.File")),
+            "a verb only a class handles is a verb: {changes:?}"
+        );
+        assert!(
+            row(SystemChangeKind::DefaultApps, "Media: Acme").is_some(),
+            "{changes:?}"
+        );
+        assert!(
+            row(SystemChangeKind::ComServer, "COM permissions")
+                .is_some_and(|change| change.high_rights),
+            "{changes:?}"
+        );
+        let open_verbs = changes
+            .iter()
+            .filter(|change| {
+                change.kind == SystemChangeKind::ShellCommand && change.title == "open"
+            })
+            .count();
+        assert_eq!(open_verbs, 2, "one on each type: {changes:?}");
         Ok(())
     }
 
