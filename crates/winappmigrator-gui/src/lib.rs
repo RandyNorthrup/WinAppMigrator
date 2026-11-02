@@ -21,7 +21,7 @@ use winappmigrator_core::{
     AppSelection, BuildMonitor, BuildStep, InstalledApp, InstallerStub, PackageOptions,
     PackageResult, ProfileChoice, ProfilePicker, ProfileSurvey, ScanSource, SystemContext,
     VerificationOptions, VerificationReport, WinAppMigratorError, create_package_monitored,
-    hidden_command, list_installed_apps_from, survey_profiles, sweep_leaked_hive_mounts,
+    hidden_command, list_installed_apps_from, survey_of, survey_profiles, sweep_leaked_hive_mounts,
     verify_package,
 };
 use winappmigrator_ui::theme::{self, Theme, ThemeMode};
@@ -234,14 +234,20 @@ impl WinAppMigratorApp {
         let source = self.scan_source.clone();
         let ctx = self.ctx.clone();
         thread::spawn(move || {
-            let listed =
-                SystemContext::open(&source).and_then(|system| list_installed_apps_from(&system));
+            let listed = SystemContext::open(&source).and_then(|system| {
+                let apps = list_installed_apps_from(&system)?;
+                // A drive's hives are loaded already, and are not to be read twice. Not being able
+                // to read this says nothing about the apps: each just goes by whoever it would be
+                // by default, and the build says what it could not tell.
+                let survey = if source.is_offline() {
+                    Some(survey_of(&system))
+                } else {
+                    survey_profiles(&source).ok()
+                };
+                Ok((apps, survey))
+            });
             let message = match listed {
-                // Not being able to read this says nothing about the apps. Each just goes by
-                // whoever it would be by default, and the app says what it could not tell.
-                Ok(apps) => {
-                    InventoryMessage::Loaded(apps, survey_profiles(&source).ok().map(Arc::new))
-                }
+                Ok((apps, survey)) => InventoryMessage::Loaded(apps, survey.map(Arc::new)),
                 Err(error) => InventoryMessage::Failed(error.to_string()),
             };
             let _send_result = sender.send(message);

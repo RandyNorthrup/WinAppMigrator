@@ -2408,6 +2408,115 @@ mod tests {
     }
 
     #[test]
+    fn a_scan_of_a_drive_takes_its_own_accounts_data_and_nothing_past_a_link() -> Result<()> {
+        let base = temp_base()?;
+        let volume = base.path().join("volume");
+        let alice = volume.join(r"Users\alice");
+        let bob = volume.join(r"Users\bob");
+        let host = base.path().join("this PC");
+        let install = volume.join(r"Program Files\Demo App");
+        for (path, content) in [
+            (install.join("demo.exe"), "MZ"),
+            (install.join(r"bin\tool.dll"), "x"),
+            (alice.join(r"NTUSER.DAT"), "x"),
+            (alice.join(r"AppData\Roaming\Demo App\mine.txt"), "x"),
+            (alice.join(r"Documents\Demo App\mine-doc.txt"), "x"),
+            (alice.join(r"Saved Games\Demo App\mine.sav"), "x"),
+            (bob.join(r"NTUSER.DAT"), "x"),
+            (bob.join(r"AppData\Roaming\Demo App\bobs.txt"), "x"),
+            (bob.join(r"AppData\Roaming\Taxes\return.txt"), "x"),
+            (bob.join(r"Documents\letter.txt"), "x"),
+            (host.join(r"Demo App\secret.txt"), "x"),
+        ] {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| WinAppMigratorError::io(parent, error))?;
+            }
+            fs::write(&path, content).map_err(|error| WinAppMigratorError::io(&path, error))?;
+        }
+        for folder in [alice.join(r"AppData\Local"), volume.join("ProgramData")] {
+            fs::create_dir_all(&folder).map_err(|error| WinAppMigratorError::io(&folder, error))?;
+        }
+        // Inside what is walked, named for the app, on the way to a vendor's folder, and given as
+        // a root by something on the drive.
+        assert!(make_junction(
+            &install.join("linked"),
+            &host.join("Demo App")
+        ));
+        assert!(make_junction(
+            &alice.join(r"AppData\Local\Demo App"),
+            &host.join("Demo App")
+        ));
+        assert!(make_junction(&volume.join(r"ProgramData\Vendor"), &host));
+        assert!(make_junction(
+            &volume.join("Elsewhere"),
+            &host.join("Demo App")
+        ));
+
+        let system = SystemContext::offline_for_tests(&volume, &alice);
+        let (files, _, warnings) = discover_files(
+            &FileDiscoveryContext {
+                executable_path: install.join("demo.exe"),
+                install_location: Some(install.clone()),
+                app_name: Some("Demo App".to_owned()),
+                publisher: Some("Vendor".to_owned()),
+                include_hashes: false,
+                include_user_data: true,
+                include_program_data: true,
+                extra_roots: vec![bob.join(r"AppData\Roaming\Taxes"), volume.join("Elsewhere")],
+                extra_files: vec![bob.join(r"Documents\letter.txt")],
+            },
+            &system,
+        );
+
+        let mut names: Vec<String> = files
+            .iter()
+            .map(|file| file_name_string(&file.path))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "demo.exe",
+                "mine-doc.txt",
+                "mine.sav",
+                "mine.txt",
+                "tool.dll"
+            ],
+            "not bob's, however they were named, and not what is past a link"
+        );
+        let in_documents = files
+            .iter()
+            .find(|file| file_name_string(&file.path) == "mine-doc.txt");
+        assert_eq!(
+            in_documents.and_then(|file| file.user_folder.clone()),
+            Some(UserFolderPath {
+                anchor: UserDataAnchor::Documents,
+                relative: PathBuf::from(r"Demo App\mine-doc.txt"),
+            }),
+            "it says where it goes"
+        );
+        let left_out: Vec<String> = warnings
+            .iter()
+            .filter(|warning| warning.code == "file_discovery_left_out")
+            .filter_map(|warning| warning.source.clone())
+            .collect();
+        for told in [
+            bob.join(r"AppData\Roaming\Taxes"),
+            bob.join(r"Documents\letter.txt"),
+            volume.join("Elsewhere"),
+            alice.join(r"AppData\Local\Demo App"),
+        ] {
+            assert!(
+                left_out.contains(&told.display().to_string()),
+                "{} should be said to be left out: {left_out:?}",
+                told.display()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn nothing_past_a_link_on_a_drive_is_looked_at() -> Result<()> {
         let base = temp_base()?;
         let volume = base.path().join("volume");

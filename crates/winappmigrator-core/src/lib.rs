@@ -40,7 +40,7 @@ pub use errors::{Result, WinAppMigratorError};
 pub use models::*;
 pub use package::{create_package, create_package_monitored, read_embedded_manifest};
 pub use path_utils::hidden_command;
-pub use profile_survey::{ProfilePicker, ProfileRow, ProfileSurvey, survey_profiles};
+pub use profile_survey::{ProfilePicker, ProfileRow, ProfileSurvey, survey_of, survey_profiles};
 pub use progress::{BuildMonitor, BuildStep, InstallMonitor, InstallPhase, InstallStep, Monitor};
 pub use restore::{default_install_location, restore_package, restore_package_monitored};
 pub use restore_review::{

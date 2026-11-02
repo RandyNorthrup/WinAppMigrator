@@ -8,6 +8,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use winreg::RegKey;
+use winreg::enums::{HKEY_USERS, KEY_READ};
+
 use crate::errors::Result;
 use crate::file_discovery::{
     DESKTOP_FALLBACK, DESKTOP_VALUE, START_MENU_FALLBACK, START_MENU_VALUE, UserDataAnchor,
@@ -695,7 +698,12 @@ fn current_known_folders() -> KnownFolders {
         common_desktop: public.map(|public| public.join(DESKTOP_FOLDER)),
         user_start_menu: shell_folder(START_MENU_VALUE, START_MENU_FALLBACK),
         common_start_menu: program_data.map(|base| base.join(START_MENU_SUBFOLDER)),
-        user_account_known: signed_in.account().is_some(),
+        // Under `HKEY_USERS` while they are signed in, which with no desktop they may not be.
+        user_account_known: signed_in.account().is_some_and(|account| {
+            RegKey::predef(HKEY_USERS)
+                .open_subkey_with_flags(&account.sid, KEY_READ)
+                .is_ok()
+        }),
         user_account_note: user_account_note(signed_in, current_user_sid()),
     }
 }

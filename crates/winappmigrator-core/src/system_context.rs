@@ -9,8 +9,8 @@
 //!
 //! * copies the disk's registry hives to an administrators-only folder and loads the copies
 //!   with `reg load`, unloading them again on drop. Loading a hive can replay its transaction
-//!   logs into it, so this is what leaves the drive untouched, and it reads each one only once
-//!   from a disk that may be failing;
+//!   logs into it, so this is what leaves the drive untouched, and asks only for a read of a disk
+//!   that may be failing;
 //! * derives every known-folder base (`Program Files`, `ProgramData`, user
 //!   profiles, `Public`, `Windows`) from the mounted volume root instead of the
 //!   live environment; and
@@ -673,6 +673,33 @@ impl SystemContext {
             }
             ScanSource::OfflineVolume { .. } => Self::open(source),
         }
+    }
+
+    /// A drive with no hive loaded, which takes elevation, for testing what is read from its
+    /// folders: one account is being scanned, and it has no settings to read.
+    #[cfg(test)]
+    pub(crate) fn offline_for_tests(volume_root: &Path, account: &Path) -> Self {
+        let mut context = Self::with_offline(OfflineHives {
+            map: VolumeMap {
+                volume_root: volume_root.to_path_buf(),
+                system_drive: 'C',
+            },
+            software_mount: "WAM_test_SOFTWARE".to_owned(),
+            system_mount: None,
+            control_set: DEFAULT_CONTROL_SET.to_owned(),
+            identity: SourceIdentity::default(),
+        });
+        context.users = Users::Fixed(vec![UserHive {
+            id: file_name_string(account),
+            sid: None,
+            name: file_name_string(account),
+            profile_dir: account.to_path_buf(),
+            kind: UserHiveKind::Mounted {
+                mount: "WAM_test_USER_0".to_owned(),
+                classes: None,
+            },
+        }]);
+        context
     }
 
     fn with_offline(offline: OfflineHives) -> Self {
