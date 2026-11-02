@@ -452,6 +452,7 @@ fn run_build(
     monitor: &BuildMonitor,
     progress: &Sender<MigrateMessage>,
 ) -> MigrateMessage {
+    tracing::info!(app = %job.app_name, folder = %job.installer_dir.display(), "building an installer");
     if let Err(error) = std::fs::create_dir_all(&job.installer_dir) {
         return MigrateMessage::Failed(format!(
             "Could not create the output folder {}: {error}",
@@ -511,6 +512,7 @@ fn run_build(
         }
     };
 
+    tracing::info!(files = package.files_copied, "the package was built");
     let _send_result = progress.send(MigrateMessage::Progress(BuildProgress::Verifying));
     let verify_options = VerificationOptions {
         package_root: package.package_root.clone(),

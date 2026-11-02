@@ -34,6 +34,11 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 /// Lets someone who is not elevated start a file, which is how Windows finds out from its
 /// manifest that it has to ask for elevation. No one but administrators can change it.
 const USERS_MAY_START_GRANT: &str = "*S-1-5-32-545:(RX)";
+/// Put briefly in a folder while its permissions are read. See [`read_with_folder_pinned`].
+const PIN_FILE_PREFIX: &str = ".wam-pin-";
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const DELETE: u32 = 0x0001_0000;
+const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
 
 /// Whether this process runs with full administrator rights.
 pub fn is_elevated() -> bool {
@@ -119,8 +124,13 @@ pub fn hold_folder(folder: &Path) -> io::Result<File> {
 }
 
 /// [`hold_folder`], for a folder that must be the real thing. This opens whatever has that
-/// name and not what a link there points at, so what it checks is what it holds. Once held
-/// it cannot be swapped for a link, and a cloud placeholder, which redirects nothing, passes.
+/// name and not what a link there points at, so what it checks is what it holds. Once held it
+/// cannot be renamed, deleted, or replaced by something else of that name, and a cloud
+/// placeholder, which redirects nothing, passes.
+///
+/// Whoever can write to it can still empty it and turn that same folder into a link, which a
+/// hold does not stop, so a path that matters has to be checked again after the last thing
+/// that can be made to wait.
 pub fn hold_real_folder(folder: &Path) -> io::Result<File> {
     let hold = OpenOptions::new()
         .read(true)
@@ -153,13 +163,15 @@ pub fn ensure_protected_folder(folder: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
     }
-    drop(hold_real_folder(folder)?);
+    let hold = hold_real_folder(folder)?;
     match elevation() {
         Some(true) => {}
         Some(false) => return Ok(()),
         None => return Err(unknown_elevation()),
     }
-    if confirm_administrators_only(folder).is_ok() {
+    let is_protected = read_with_folder_pinned(folder).is_ok();
+    drop(hold);
+    if is_protected {
         return Ok(());
     }
     fs::remove_dir(folder).map_err(|error| {
@@ -178,15 +190,35 @@ fn protect_new_folder(folder: &Path) -> io::Result<()> {
     protect_staging_folder(folder)
 }
 
-/// Check a folder [`ensure_protected_folder`] looks after, without changing anything. A
-/// failure means what is in it cannot be trusted.
+/// Check a folder [`ensure_protected_folder`] looks after. A failure means what is in it cannot
+/// be trusted.
 pub fn confirm_protected_folder(folder: &Path) -> io::Result<()> {
-    drop(hold_real_folder(folder)?);
-    match elevation() {
-        Some(true) => confirm_administrators_only(folder),
+    let hold = hold_real_folder(folder)?;
+    let result = match elevation() {
+        Some(true) => read_with_folder_pinned(folder),
         Some(false) => Ok(()),
         None => Err(unknown_elevation()),
-    }
+    };
+    drop(hold);
+    result
+}
+
+/// Check permissions by a path, knowing they are that folder's. What reads them follows links,
+/// so someone with write access could turn the folder into a link to one of the right kind for
+/// just that long, and back. Turning a folder into a link needs it to be empty, and a file held
+/// open in it cannot be moved out, so with one there it stays what it is. The caller holds the
+/// folder, so it cannot be renamed either. The file goes when closed, however this process ends.
+fn read_with_folder_pinned(folder: &Path) -> io::Result<()> {
+    let pin = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .access_mode(GENERIC_WRITE | DELETE)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+        .open(folder.join(format!("{PIN_FILE_PREFIX}{}", std::process::id())))?;
+    let result = confirm_administrators_only(folder);
+    drop(pin);
+    result
 }
 
 /// Let someone who is not elevated start a file in an administrators-only folder. They could
@@ -583,6 +615,15 @@ mod tests {
         ensure_protected_folder(&folder)?;
         confirm_protected_folder(&folder)?;
         assert!(folder.join("kept.txt").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn pinning_a_folder_leaves_nothing_in_it() -> io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        // Whether or not this process is elevated, in which case a temp folder also fails.
+        let _ = read_with_folder_pinned(folder.path());
+        assert_eq!(fs::read_dir(folder.path())?.count(), 0);
         Ok(())
     }
 

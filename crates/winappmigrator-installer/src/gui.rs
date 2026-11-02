@@ -47,9 +47,10 @@ const UNSIGNED_TEXT: &str = "Not signed: publisher unknown";
 /// What a cancelled install is called in its errors.
 const CANCELLED_CODE: &str = "install_cancelled";
 /// Added to what the person agrees to when they click Install.
-const CAN_BE_UNDONE_TEXT: &str = "If anything goes wrong, all of this is put back. You can also \
-                                  undo the install later from Settings, under Installed apps. \
-                                  Files it replaces come back. Runtimes it installs stay.";
+const BEYOND_FILES_TEXT: &str = "All of this is done with administrator rights. If anything \
+                                 goes wrong, it is all put back. You can also undo the install \
+                                 later from Settings, under Installed apps. Files it replaces \
+                                 come back, and runtimes it installs stay.";
 
 pub fn run() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
@@ -553,6 +554,14 @@ impl eframe::App for InstallerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_load(ctx);
         self.poll(ctx);
+        // Closing the window while an install runs would kill it part-way, to be undone only
+        // by the next install. It is a cancel, and the window stays until that has finished.
+        if self.phase == Phase::Running && ctx.input(|input| input.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if let Some(monitor) = self.monitor.as_ref() {
+                monitor.cancel();
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -725,12 +734,8 @@ impl InstallerApp {
             ui,
             theme,
             "What this sets up beyond files",
-            Some("All of this is done with administrator rights."),
-            |ui| {
-                system_changes_ui(ui, theme, &self.changes);
-                ui.add_space(SPACE_XS);
-                widgets::hint(ui, theme, CAN_BE_UNDONE_TEXT);
-            },
+            Some(BEYOND_FILES_TEXT),
+            |ui| system_changes_ui(ui, theme, &self.changes),
         );
         widgets::section_gap(ui);
 

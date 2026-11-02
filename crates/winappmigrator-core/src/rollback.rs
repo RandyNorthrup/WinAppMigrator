@@ -11,10 +11,15 @@
 //! on comes only from the journal, and before each delete or restore it holds the folders on
 //! the way there and checks that none of them has become a link.
 //!
-//! A rollback takes back everything the install wrote, whatever is in it, since an install
-//! that never finished has no users to lose anything. An uninstall deletes a file only if it
-//! is still what the install wrote. Either way, a registry value or environment variable that
-//! no longer holds what the install wrote belongs to someone else now, and is left alone.
+//! A rollback in the same run takes back everything the install wrote, whatever is in it: it
+//! only just wrote it, and it may be what failed. An uninstall, or undoing an install that never
+//! finished, can come long after, so it deletes a file only if it is still what the install
+//! wrote. Either way, a registry value or environment variable that no longer holds what the
+//! install wrote belongs to someone else now, and is left alone.
+//!
+//! Each of those checks is by path, and whoever can write to a folder can act between a check
+//! and what follows it. So everything that can be made to wait comes before the last check,
+//! which leaves a program running at that moment a very small window, as when installing.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -30,29 +35,29 @@ use winreg::enums::{HKEY_USERS, KEY_READ, KEY_SET_VALUE};
 use winreg::{RegKey, RegValue};
 
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::hold_path_below_root;
+use crate::file_discovery::{ensure_within_root, hold_path_below_root};
 use crate::hashing::sha256_file;
 use crate::journal::{
     Backup, Change, ItemKind, Journal, JournalLock, ReadJournal, STAGING_PREFIX, ServiceConfig,
     StoredValue, checked_install_folder, find_backup, has_no_journal, install_folders, is_in_use,
-    lock_journal, read_journal, real_path,
+    lock_journal, lock_state, read_journal, real_path,
 };
 use crate::models::{EnvironmentScope, RegistryHive, UndoReport};
 use crate::path_utils::{
     POWERSHELL_IMPORT_UTILITY, current_user_sid, escape_powershell_single, hidden_command,
     path_is_within, system_root,
 };
-use crate::privilege::{hold_folder, hold_real_folder};
+use crate::privilege::{confirm_protected_folder, hold_folder, hold_real_folder};
 use crate::progress::{InstallMonitor, InstallPhase, InstallStep};
 use crate::registry_target::{
     environment_location, registry_hive_name, registry_root, remove_path_entries,
     service_image_path,
 };
 use crate::restore::{
-    SC_EXE, encode_utf16_nul, make_replaceable, partial_file_name, register_task_script,
-    run_checked, run_powershell_script, sc_start_type, write_partial_copy, write_task_definition,
+    SC_EXE, encode_utf16_nul, make_replaceable, register_task_script, run_checked,
+    run_powershell_script, sc_start_type, write_partial_copy, write_task_definition,
 };
-use crate::restore_policy::{ServiceAccount, image_path_matches};
+use crate::restore_policy::{ServiceAccount, existing_task_refusal, image_path_matches};
 use crate::task_scan::live_task_xml;
 
 const STOP_SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -71,8 +76,11 @@ const SELF_REMOVAL_TRIES: u32 = 60;
 /// How to treat what an install left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndoMode {
-    /// The install did not finish, so all of it goes.
+    /// The install has just failed, so all of what it wrote goes.
     Rollback,
+    /// An earlier install never finished. All of it goes, but this may be long after, so what
+    /// has changed since is not its to remove.
+    Recovery,
     /// The install finished, and what has changed since, or belongs to the user, stays.
     Uninstall { remove_user_data: bool },
 }
@@ -130,8 +138,8 @@ fn file_action(mode: UndoMode, item: ItemKind, facts: &FileFacts) -> FileAction 
     }
     match mode {
         UndoMode::Rollback => replace_or_delete,
-        UndoMode::Uninstall { .. } if facts.unchanged == Some(true) => replace_or_delete,
-        UndoMode::Uninstall { .. } => FileAction::KeepChanged,
+        _ if facts.unchanged == Some(true) => replace_or_delete,
+        _ => FileAction::KeepChanged,
     }
 }
 
@@ -168,7 +176,13 @@ enum TaskAction {
     Keep,
 }
 
-fn task_action(live: Option<&str>, written: Option<&str>, prior: Option<&str>) -> TaskAction {
+/// `runs_only_the_app` says the task has nothing to run outside the install location.
+fn task_action(
+    live: Option<&str>,
+    written: Option<&str>,
+    prior: Option<&str>,
+    runs_only_the_app: bool,
+) -> TaskAction {
     let Some(live) = live else {
         return TaskAction::Nothing;
     };
@@ -177,8 +191,12 @@ fn task_action(live: Option<&str>, written: Option<&str>, prior: Option<&str>) -
     if !is_written && prior.is_some_and(|prior| same(prior, live)) {
         return TaskAction::Nothing;
     }
-    // What the install registered is only unknown if it was cut off right after doing so.
     if written.is_some() && !is_written {
+        return TaskAction::Keep;
+    }
+    // What the install registered is unknown if it was cut off right after doing so, or never
+    // got that far, in which case this one is someone else's unless it runs what was installed.
+    if written.is_none() && !runs_only_the_app {
         return TaskAction::Keep;
     }
     if prior.is_some() {
@@ -198,6 +216,7 @@ enum Guard {
 
 struct Undoer<'a> {
     folder: &'a Path,
+    target_root: &'a Path,
     mode: UndoMode,
     user_sid: Option<&'a str>,
     roots: HashMap<String, String>,
@@ -223,6 +242,7 @@ pub(crate) fn undo_journal(
     let changes = journal.settled_changes();
     let mut undoer = Undoer {
         folder: &journal.folder,
+        target_root: &journal.header.target_root,
         mode,
         user_sid: journal.header.user_sid.as_deref(),
         roots: changes
@@ -236,7 +256,9 @@ pub(crate) fn undo_journal(
         report: UndoReport::default(),
     };
     if journal.damaged {
-        undoer.failed(format!(
+        // Said, and not held against it. It cannot get better by trying again, and it must
+        // not stop every later install.
+        undoer.kept(format!(
             "Part of the record of {} could not be read, so anything it described is still in \
              place.",
             journal.header.app_name
@@ -386,19 +408,29 @@ impl Undoer<'_> {
                 written_xml.as_deref(),
             ),
             Change::Prerequisite { name } => self.report.left_behind.push(format!(
-                "{name} was installed and stays, because other programs may be using it."
+                "{name} was installed, or may have been, and stays, because other programs may \
+                 be using it."
             )),
         }
     }
 
     /// Hold the way to `path` and check nothing on it is a link. The folder it is under must
     /// still be where it was, which catches a link anywhere above that folder. Holding it
-    /// keeps it and the folders above it from moving, and nothing below it can be swapped
-    /// once [`hold_path_below_root`] has it.
+    /// keeps it and the folders above it from being renamed, and [`hold_path_below_root`] does
+    /// the same for what is below. A folder that is not there means what was in it has gone,
+    /// unless it is a whole drive that is not there, in which case it may come back.
     fn guard(&self, root: &Path, path: &Path) -> std::result::Result<Guard, String> {
         let hold = match hold_folder(root) {
             Ok(hold) => hold,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Guard::RootGone),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if !drive_is_connected(root) {
+                    return Err(format!(
+                        "the drive {} is on is not connected",
+                        root.display()
+                    ));
+                }
+                return Ok(Guard::RootGone);
+            }
             Err(error) => return Err(format!("{} could not be opened: {error}", root.display())),
         };
         let expected = self
@@ -487,7 +519,7 @@ impl Undoer<'_> {
             ));
         }
         let exists = fs::symlink_metadata(path).is_ok();
-        let wants_hash = exists && matches!(self.mode, UndoMode::Uninstall { .. });
+        let wants_hash = exists && !matches!(self.mode, UndoMode::Rollback);
         let unchanged = if wants_hash && !self.keeps(item) {
             match sha256.map(|expected| {
                 sha256_file(path).map(|actual| actual.eq_ignore_ascii_case(expected))
@@ -516,9 +548,13 @@ impl Undoer<'_> {
         match action {
             FileAction::Nothing => {}
             FileAction::Delete => {
-                let deleted = make_replaceable(path).and_then(|()| {
-                    fs::remove_file(path).map_err(|error| WinAppMigratorError::io(path, error))
-                });
+                // Everything that can be made to wait has happened by now, including reading
+                // the file to hash it, so this is the check that counts.
+                let deleted = make_replaceable(path)
+                    .and_then(|()| ensure_within_root(root, path))
+                    .and_then(|()| {
+                        fs::remove_file(path).map_err(|error| WinAppMigratorError::io(path, error))
+                    });
                 match deleted {
                     Ok(()) => self.undone(format!("Removed {}", path.display())),
                     Err(error) => {
@@ -532,7 +568,7 @@ impl Undoer<'_> {
                     .ok_or_else(|| {
                         WinAppMigratorError::InvalidInput("the backup has gone".to_owned())
                     })
-                    .and_then(|found| put_back_backup(found, path));
+                    .and_then(|found| put_back_backup(found, path, root));
                 match put_back {
                     Ok(()) => self.undone(format!("Put back {}", path.display())),
                     Err(error) => self.failed(format!(
@@ -552,24 +588,45 @@ impl Undoer<'_> {
                     path.display()
                 ));
             }
-            FileAction::KeepByRequest => self.kept(format!(
-                "{} stays, since it was not asked to be removed.",
-                path.display()
-            )),
+            FileAction::KeepByRequest => {
+                let replaced = if found_backup.is_some() {
+                    " The file it replaced is not being put back."
+                } else {
+                    ""
+                };
+                self.kept(format!(
+                    "{} stays, since it was not asked to be removed.{replaced}",
+                    path.display()
+                ));
+            }
         }
         drop(holds);
     }
 
     /// Open a hive for a change made during the install. An install writes to the
     /// `HKEY_CURRENT_USER` of whoever ran it, which is not this one if someone else is
-    /// undoing it. Theirs is only there while they are signed in.
-    fn hive_root(&self, hive: &RegistryHive) -> io::Result<RegKey> {
+    /// undoing it. Theirs is only there while they are signed in, and if they are not, what is
+    /// in it stays, and this says so once `None` comes back.
+    fn hive_root(&self, hive: &RegistryHive) -> io::Result<Option<RegKey>> {
         match (hive, self.user_sid) {
             (RegistryHive::CurrentUser, Some(sid)) if current_user_sid() != Some(sid) => {
-                RegKey::predef(HKEY_USERS).open_subkey_with_flags(sid, KEY_READ | KEY_SET_VALUE)
+                match RegKey::predef(HKEY_USERS)
+                    .open_subkey_with_flags(sid, KEY_READ | KEY_SET_VALUE)
+                {
+                    Ok(root) => Ok(Some(root)),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(error),
+                }
             }
-            _ => Ok(registry_root(hive)),
+            _ => Ok(Some(registry_root(hive))),
         }
+    }
+
+    fn kept_for_another_account(&mut self, label: &str) {
+        self.kept(format!(
+            "{label} stays, because it belongs to the account that installed this, which is not \
+             signed in."
+        ));
     }
 
     fn undo_new_key(&mut self, hive: &RegistryHive, key: &str, item: ItemKind) {
@@ -578,7 +635,11 @@ impl Undoer<'_> {
             return;
         }
         let root = match self.hive_root(hive) {
-            Ok(root) => root,
+            Ok(Some(root)) => root,
+            Ok(None) => {
+                self.kept_for_another_account(&format!("The key {label}"));
+                return;
+            }
             Err(error) => {
                 self.failed(format!("The key {label} could not be reached: {error}."));
                 return;
@@ -616,10 +677,18 @@ impl Undoer<'_> {
         written: &StoredValue,
         label: &str,
     ) {
-        let opened = self
-            .hive_root(hive)
-            .and_then(|root| root.open_subkey_with_flags(key, KEY_READ | KEY_SET_VALUE));
-        let handle = match opened {
+        let root = match self.hive_root(hive) {
+            Ok(Some(root)) => root,
+            Ok(None) => {
+                self.kept_for_another_account(label);
+                return;
+            }
+            Err(error) => {
+                self.failed(format!("{label} could not be reached: {error}."));
+                return;
+            }
+        };
+        let handle = match root.open_subkey_with_flags(key, KEY_READ | KEY_SET_VALUE) {
             Ok(handle) => Some(handle),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => {
@@ -627,12 +696,16 @@ impl Undoer<'_> {
                 return;
             }
         };
-        let current = handle.as_ref().and_then(|handle| {
-            handle
-                .get_raw_value(name)
-                .ok()
-                .map(|value| StoredValue::from_reg(&value))
-        });
+        let current = match handle.as_ref().map(|handle| handle.get_raw_value(name)) {
+            Some(Ok(value)) => Some(StoredValue::from_reg(&value)),
+            None => None,
+            Some(Err(error)) if error.kind() == io::ErrorKind::NotFound => None,
+            // Not knowing is not the same as it not being there.
+            Some(Err(error)) => {
+                self.failed(format!("{label} could not be read: {error}."));
+                return;
+            }
+        };
         match value_action(current.as_ref(), written, prior) {
             ValueAction::Nothing => {}
             ValueAction::Keep => self.kept(format!(
@@ -667,10 +740,18 @@ impl Undoer<'_> {
     ) {
         let label = format!("The {} {name}", scope_name(scope));
         let (hive, key) = environment_location(scope);
-        let opened = self
-            .hive_root(&hive)
-            .and_then(|root| root.open_subkey_with_flags(key, KEY_READ | KEY_SET_VALUE));
-        let handle = match opened {
+        let root = match self.hive_root(&hive) {
+            Ok(Some(root)) => root,
+            Ok(None) => {
+                self.kept_for_another_account(&label);
+                return;
+            }
+            Err(error) => {
+                self.failed(format!("{label} could not be reached: {error}."));
+                return;
+            }
+        };
+        let handle = match root.open_subkey_with_flags(key, KEY_READ | KEY_SET_VALUE) {
             Ok(handle) => handle,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return,
             Err(error) => {
@@ -748,8 +829,10 @@ impl Undoer<'_> {
             }
             return;
         }
+        // Removing one still running only marks it, and it could not be put right after that.
         if let Err(reason) = stop_service(name) {
             self.failed(format!("The {kind} {name} could not be stopped: {reason}."));
+            return;
         }
         match prior {
             Some(prior) => self.restore_service(name, kind, driver, prior),
@@ -855,7 +938,10 @@ impl Undoer<'_> {
                 return;
             }
         };
-        match task_action(live.as_deref(), written, prior) {
+        let runs_only_the_app = live
+            .as_deref()
+            .is_some_and(|xml| existing_task_refusal(xml, self.target_root).is_none());
+        match task_action(live.as_deref(), written, prior, runs_only_the_app) {
             TaskAction::Nothing => {}
             TaskAction::Keep => self.kept(format!(
                 "The task {label} stays, because it has changed since it was installed."
@@ -894,6 +980,13 @@ impl Undoer<'_> {
     }
 }
 
+/// Whether the drive a path is on is there at all.
+fn drive_is_connected(path: &Path) -> bool {
+    path.components()
+        .next()
+        .is_some_and(|drive| Path::new(&format!("{}\\", drive.as_os_str().display())).exists())
+}
+
 fn scope_name(scope: &EnvironmentScope) -> &'static str {
     match scope {
         EnvironmentScope::User => "user's",
@@ -913,19 +1006,31 @@ fn value_label(hive: &RegistryHive, key: &str, name: &str) -> String {
 /// at `path` is replaced and never followed. A moved backup is the original file. A copied
 /// one has to be copied beside its destination so it gets that folder's permissions, not
 /// those of the admin-only folder it was in.
-pub(crate) fn put_back_backup(backup: &Backup, path: &Path) -> Result<()> {
+pub(crate) fn put_back_backup(backup: &Backup, path: &Path, root: &Path) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         WinAppMigratorError::InvalidInput(format!("{} has no parent folder", path.display()))
     })?;
+    // A folder made here was not there to hold before, and one could have been put there.
     fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
+    let _holds = hold_path_below_root(root, path)?;
     make_replaceable(path)?;
     match backup {
         Backup::Moved(from) => {
+            ensure_within_root(root, path)?;
             fs::rename(from, path).map_err(|error| WinAppMigratorError::io(path, error))
         }
         Backup::Copied(from) => {
-            let partial = parent.join(partial_file_name());
+            // Under one name for each backup, so a run that was cut off leaves nothing behind
+            // once this runs again.
+            let partial = parent.join(format!(
+                ".wam-putback-{}.partial",
+                from.file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ));
+            remove_regular_file(&partial)?;
             let copied = write_partial_copy(from, &partial, false).and_then(|()| {
+                ensure_within_root(root, path)?;
                 fs::rename(&partial, path).map_err(|error| WinAppMigratorError::io(path, error))
             });
             if copied.is_err() {
@@ -1108,7 +1213,8 @@ pub struct RecoveredInstall {
 }
 
 /// The apps with an install that never finished, which the next install will undo. This only
-/// reads. A journal in use belongs to an installer that is still running.
+/// reads, and what it reads is only ever repeated, so it is not checked as what is undone is.
+/// A journal in use belongs to an installer that is still running.
 pub fn interrupted_installs(state_root: &Path) -> Vec<String> {
     let Ok(folders) = install_folders(state_root) else {
         return Vec::new();
@@ -1129,7 +1235,8 @@ fn journal_is_in_use(folder: &Path) -> bool {
 
 /// Undo every install that never finished, newest first, since one may have been installed
 /// over another. If any cannot be fully undone it stays on record and this fails, because
-/// the next install over the top could not be told from it.
+/// the next install over the top could not be told from it. The state folders have already
+/// been checked, and each record is checked before anything it says is done.
 pub(crate) fn recover_interrupted_installs(
     state_root: &Path,
     monitor: &InstallMonitor,
@@ -1149,7 +1256,15 @@ pub(crate) fn recover_interrupted_installs(
         };
         match read_journal(&folder) {
             Ok(journal) if journal.committed => {}
-            Ok(journal) => interrupted.push((lock, journal)),
+            Ok(journal) => {
+                // What this says would be done elevated. A folder of the right name only counts
+                // if it was made the way an install's is.
+                if let Err(error) = confirm_protected_folder(&folder) {
+                    warn!(folder = %folder.display(), %error, "skipping a record that cannot be trusted");
+                    continue;
+                }
+                interrupted.push((lock, journal));
+            }
             Err(error) => {
                 warn!(folder = %folder.display(), %error, "skipping a record that cannot be read");
             }
@@ -1168,7 +1283,7 @@ pub(crate) fn recover_interrupted_installs(
         info!(id = %journal.header.id, app = %journal.header.app_name, "undoing an install that never finished");
         let report = undo_journal(
             &journal,
-            UndoMode::Rollback,
+            UndoMode::Recovery,
             monitor,
             InstallPhase::RecoveringEarlierInstall,
         );
@@ -1218,6 +1333,7 @@ fn remove_staging_left_behind(journal: &ReadJournal) {
 pub struct OpenInstall {
     journal: ReadJournal,
     lock: JournalLock,
+    state_root: PathBuf,
 }
 
 /// Open an install by id, only from the state root. A failure means nothing should be done.
@@ -1233,7 +1349,11 @@ pub fn open_install(state_root: &Path, id: &str) -> Result<OpenInstall> {
         }
     })?;
     let journal = read_journal(&folder)?;
-    Ok(OpenInstall { journal, lock })
+    Ok(OpenInstall {
+        journal,
+        lock,
+        state_root: state_root.to_path_buf(),
+    })
 }
 
 /// What came of an uninstall.
@@ -1255,11 +1375,27 @@ impl OpenInstall {
 
     /// Undo this install. If all of it went, the record goes too.
     pub fn uninstall(self, remove_user_data: bool, monitor: &InstallMonitor) -> UninstallOutcome {
-        let Self { journal, lock } = self;
+        let Self {
+            journal,
+            lock,
+            state_root,
+        } = self;
+        let _busy = match lock_state(&state_root) {
+            Ok(busy) => busy,
+            Err(error) => {
+                return UninstallOutcome {
+                    report: UndoReport {
+                        failed: vec![format!("Nothing was undone: {error}.")],
+                        ..UndoReport::default()
+                    },
+                    ..UninstallOutcome::default()
+                };
+            }
+        };
         let mode = if journal.committed {
             UndoMode::Uninstall { remove_user_data }
         } else {
-            UndoMode::Rollback
+            UndoMode::Recovery
         };
         info!(id = %journal.header.id, app = %journal.header.app_name, "uninstalling");
         let report = undo_journal(&journal, mode, monitor, InstallPhase::Uninstalling);
@@ -1311,7 +1447,8 @@ fn remove_record_of_install(folder: &Path) -> Option<PathBuf> {
 /// command line, so it runs nothing from any folder but Windows' own, and `/D` keeps `cmd.exe`
 /// from also running the `AutoRun` command in `HKEY_CURRENT_USER`, which is the signed-in
 /// user's to set and would otherwise run elevated. The waiting is done by `ping`, by its full
-/// path, since this runs before any `PATH` could be trusted. `None` if the path holds what
+/// path, since this runs before any `PATH` could be trusted. The brackets matter: without them
+/// `cmd.exe` takes all that follows an `if` to be part of it. `None` if the path holds what
 /// would change the meaning of that line, which only an unusual `ProgramData` could.
 fn self_removal_command_line(folder: &Path, windows_dir: &Path) -> Option<String> {
     let folder = folder.to_string_lossy();
@@ -1325,7 +1462,7 @@ fn self_removal_command_line(folder: &Path, windows_dir: &Path) -> Option<String
     }
     Some(format!(
         "/D /S /C \"for /L %i in (1,1,{SELF_REMOVAL_TRIES}) do @(rd /s /q \"{folder}\" 2>nul & \
-         if not exist \"{folder}\" exit /b 0 & \"{ping}\" -n 2 127.0.0.1 >nul)\""
+         if exist \"{folder}\" (\"{ping}\" -n 2 127.0.0.1 >nul) else (exit /b 0))\""
     ))
 }
 
@@ -1367,6 +1504,8 @@ pub fn report_lines(report: &UndoReport) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::windows::fs::OpenOptionsExt;
+
     use super::*;
 
     const KEEP: UndoMode = UndoMode::Uninstall {
@@ -1403,6 +1542,15 @@ mod tests {
         for (facts, expected) in cases {
             assert_eq!(file_action(UndoMode::Rollback, program, &facts), expected);
         }
+        // Whatever it holds, because the install has only just written it.
+        assert_eq!(
+            file_action(
+                UndoMode::Rollback,
+                program,
+                &facts(false, false, true, Some(false))
+            ),
+            FileAction::Delete
+        );
         // User data goes as well, since that install never finished.
         assert_eq!(
             file_action(
@@ -1443,6 +1591,40 @@ mod tests {
         for (facts, expected) in cases {
             assert_eq!(file_action(KEEP, program, &facts), expected);
         }
+    }
+
+    #[test]
+    fn undoing_an_install_that_never_finished_leaves_what_has_changed_since() {
+        let program = ItemKind::Program;
+        for (facts, expected) in [
+            (facts(false, false, true, Some(true)), FileAction::Delete),
+            // Months later, the user may have put this there themselves.
+            (
+                facts(false, false, true, Some(false)),
+                FileAction::KeepChanged,
+            ),
+            (
+                facts(true, true, true, Some(true)),
+                FileAction::PutBackBackup,
+            ),
+            (
+                facts(true, true, true, Some(false)),
+                FileAction::KeepChanged,
+            ),
+            // It stopped between keeping the old one and placing the new one.
+            (facts(true, true, false, None), FileAction::PutBackBackup),
+        ] {
+            assert_eq!(file_action(UndoMode::Recovery, program, &facts), expected);
+        }
+        // User data was part of what never finished, so nobody has asked for it to stay.
+        assert_eq!(
+            file_action(
+                UndoMode::Recovery,
+                ItemKind::UserData,
+                &facts(false, false, true, Some(true))
+            ),
+            FileAction::Delete
+        );
     }
 
     #[test]
@@ -1514,11 +1696,21 @@ mod tests {
             (Some("other"), Some("new"), Some("old"), TaskAction::Keep),
         ] {
             assert_eq!(
-                task_action(live, written, prior),
+                task_action(live, written, prior, true),
                 expected,
                 "{live:?} {written:?} {prior:?}"
             );
         }
+        // Cut off before it was registered, and this one runs something else, so it is not
+        // what that install was making.
+        assert_eq!(
+            task_action(Some("another program's"), None, None, false),
+            TaskAction::Keep
+        );
+        assert_eq!(
+            task_action(Some("another program's"), None, Some("old"), false),
+            TaskAction::Keep
+        );
     }
 
     #[test]
@@ -1629,6 +1821,45 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// Run for real on a temp folder, which is all it ever touches.
+    #[test]
+    fn a_folder_really_goes_once_the_command_has_run() -> io::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let folder = parent.path().join("wam-abc");
+        fs::create_dir_all(folder.join("backups"))?;
+        fs::write(folder.join("uninstall.exe"), b"x")?;
+        fs::write(folder.join(r"backups\00000001.moved"), b"x")?;
+        // As the running uninstaller is, so the first tries have to fail and it has to wait.
+        let in_use = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(folder.join("uninstall.exe"))?;
+
+        schedule_removal_of_running_uninstaller(&folder)?;
+
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(folder.exists(), "it cannot have gone while that was held");
+        drop(in_use);
+        let started = Instant::now();
+        while folder.exists() && started.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!folder.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_drive_that_is_not_there_is_told_from_a_folder_that_is_not() {
+        assert!(drive_is_connected(system_root()));
+        assert!(drive_is_connected(&system_root().join("no such folder")));
+        let missing = ('D'..='Z')
+            .map(|letter| format!(r"{letter}:\"))
+            .find(|drive| !Path::new(drive).exists());
+        if let Some(drive) = missing {
+            assert!(!drive_is_connected(&Path::new(&drive).join("Apps")));
+        }
     }
 
     #[test]

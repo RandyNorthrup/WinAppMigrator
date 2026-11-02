@@ -43,6 +43,8 @@ use crate::restore_policy::paths_equal;
 const STATE_FOLDER: &str = "WinAppMigrator";
 const INSTALLS_FOLDER: &str = "installs";
 const JOURNAL_FILE: &str = "journal.jsonl";
+/// Held by whatever is installing or uninstalling, so there is only ever one.
+const BUSY_FILE: &str = "busy.lock";
 const BACKUPS_FOLDER: &str = "backups";
 const UNINSTALLER_FILE: &str = "uninstall.exe";
 /// What an install's id starts with. An id is a folder name, and this keeps it from ever
@@ -306,6 +308,8 @@ pub struct Journal {
     _folder_hold: File,
     next_backup: u64,
     since_flush: u32,
+    /// A record could not be written whole, so what comes next would join it and be lost.
+    broken: bool,
     known_roots: HashSet<String>,
     known_folders: HashSet<String>,
     known_keys: HashSet<String>,
@@ -402,6 +406,7 @@ impl Journal {
             _folder_hold: hold,
             next_backup: 0,
             since_flush: 0,
+            broken: false,
             known_roots: HashSet::new(),
             known_folders: HashSet::new(),
             known_keys: HashSet::new(),
@@ -448,17 +453,24 @@ impl Journal {
     }
 
     fn write(&mut self, record: &Record, durability: Durability) -> Result<()> {
+        let path = self.folder.join(JOURNAL_FILE);
+        if self.broken {
+            return Err(WinAppMigratorError::InvalidInput(format!(
+                "the record of this install could not be written: {}",
+                path.display()
+            )));
+        }
         let mut line = serde_json::to_vec(record)?;
         line.push(b'\n');
-        let path = || self.folder.join(JOURNAL_FILE);
-        self.file
-            .write_all(&line)
-            .map_err(|error| WinAppMigratorError::io(path(), error))?;
+        if let Err(error) = self.file.write_all(&line) {
+            self.broken = true;
+            return Err(WinAppMigratorError::io(path, error));
+        }
         self.since_flush += 1;
         if durability == Durability::Now || self.since_flush >= NEW_ITEMS_BETWEEN_FLUSHES {
             self.file
                 .sync_all()
-                .map_err(|error| WinAppMigratorError::io(path(), error))?;
+                .map_err(|error| WinAppMigratorError::io(&path, error))?;
             self.since_flush = 0;
         }
         Ok(())
@@ -585,6 +597,11 @@ impl Journal {
         crate::restore::write_partial_copy(path, &unfinished, true)?;
         fs::rename(&unfinished, &copied)
             .map_err(|error| WinAppMigratorError::io(&copied, error))?;
+        // That rename has to reach the disk before the delete below does, which is on another
+        // drive and could get there first. Flushing any file on this drive takes it there.
+        self.file
+            .sync_all()
+            .map_err(|error| WinAppMigratorError::io(&copied, error))?;
         crate::restore::make_replaceable(path)?;
         fs::remove_file(path).map_err(|error| WinAppMigratorError::io(path, error))
     }
@@ -623,35 +640,14 @@ impl Journal {
         Ok(())
     }
 
-    /// Record a registry value about to be written.
-    pub(crate) fn note_value(
-        &mut self,
-        hive: &RegistryHive,
-        key: &str,
-        name: &str,
-        prior: Option<StoredValue>,
-        written: StoredValue,
-        item: ItemKind,
-    ) -> Result<()> {
-        let keeps_something = prior.is_some();
-        let change = Change::RegistryValue {
-            hive: hive.clone(),
-            key: key.to_owned(),
-            name: name.to_owned(),
-            prior,
-            written,
-            item,
-        };
-        if keeps_something {
-            self.note(change)
-        } else {
-            self.note_new(change)
-        }
-    }
-
     /// True the first time a task folder comes up.
     pub(crate) fn first_look_at_task_folder(&mut self, path: &str) -> bool {
         self.known_task_folders.insert(path.to_ascii_lowercase())
+    }
+
+    /// Where installs are recorded, which nothing a package installs may ever be under.
+    pub(crate) fn state_root(&self) -> Option<&Path> {
+        self.folder.parent()?.parent()
     }
 
     /// Say the install finished. From here on, only an uninstall undoes it.
@@ -669,6 +665,38 @@ impl Journal {
 
     /// Give up the journal, so that its folder can be removed.
     pub(crate) fn close(self) {}
+}
+
+/// Held by whatever is installing or uninstalling, so that two never change the same things at
+/// once: if each kept what the other had just written as what it was replacing, undoing them
+/// in the wrong order would lose the original.
+pub(crate) struct BusyLock {
+    _file: File,
+}
+
+/// Take the one lock there is. This is also what makes the state folders, since nothing can be
+/// done without them. A failure means nothing has changed, and nothing should.
+pub(crate) fn lock_state(state_root: &Path) -> Result<BusyLock> {
+    prepare_state_folders(state_root)?;
+    let path = state_root.join(BUSY_FILE);
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(&path)
+        .map_err(|error| {
+            if is_in_use(&error) {
+                WinAppMigratorError::InvalidInput(
+                    "another install or uninstall is running. Wait for it to finish, then try \
+                     again"
+                        .to_owned(),
+                )
+            } else {
+                WinAppMigratorError::io(&path, error)
+            }
+        })?;
+    Ok(BusyLock { _file: file })
 }
 
 /// Open a journal so that no one else can write to it.
@@ -725,7 +753,9 @@ pub(crate) fn read_journal(folder: &Path) -> Result<ReadJournal> {
 
 /// Each line is one record, and what was written last can be cut off, since a power cut can
 /// come at any moment. Whatever a cut-off record described had not started, because a change
-/// is only made once its record is whole. A bad line with good ones after it is damage.
+/// is only made once its record is whole. A bad line with good ones after it is damage, and
+/// everything else in the record is still read. Above all whether the install finished: to take
+/// a finished install for one that never did would undo it.
 fn parse_journal(text: &str, folder_name: &str, folder: &Path) -> Result<ReadJournal> {
     let unreadable = |detail: &str| {
         WinAppMigratorError::InvalidInput(format!(
@@ -748,21 +778,19 @@ fn parse_journal(text: &str, folder_name: &str, folder: &Path) -> Result<ReadJou
     let mut changes = Vec::new();
     let mut committed = false;
     let mut damaged = false;
-    let rest: Vec<&str> = lines.collect();
-    for (index, line) in rest.iter().enumerate() {
+    let mut bad_line = false;
+    for line in lines {
         match serde_json::from_str::<Record>(line) {
-            Ok(Record::Change(change)) => changes.push(change),
-            Ok(Record::Committed) => committed = true,
-            Ok(Record::Header(_)) => {
-                damaged = true;
-                break;
+            Ok(Record::Change(change)) => {
+                damaged |= bad_line;
+                changes.push(change);
             }
-            Err(_) => {
-                damaged = rest[index + 1..]
-                    .iter()
-                    .any(|later| serde_json::from_str::<Record>(later).is_ok());
-                break;
+            Ok(Record::Committed) => {
+                damaged |= bad_line;
+                committed = true;
             }
+            Ok(Record::Header(_)) => damaged = true,
+            Err(_) => bad_line = true,
         }
     }
     Ok(ReadJournal {
@@ -933,18 +961,13 @@ pub(crate) fn checked_install_folder(state_root: &Path, id: &str) -> Result<Path
     Ok(folder)
 }
 
-/// The folders of all installs on record. `Ok` and empty if there has never been one, and an
-/// error if what is there cannot be trusted.
+/// The folders of all installs on record, without changing anything. Empty if there has
+/// never been one. What this finds is not to be acted on without checking it, and a failure
+/// here means there is nothing to read.
 pub(crate) fn install_folders(state_root: &Path) -> Result<Vec<PathBuf>> {
-    if fs::symlink_metadata(state_root).is_err() {
-        return Ok(Vec::new());
-    }
     let installs = state_root.join(INSTALLS_FOLDER);
     if fs::symlink_metadata(&installs).is_err() {
         return Ok(Vec::new());
-    }
-    for level in [state_root, installs.as_path()] {
-        confirm_protected_folder(level).map_err(|error| WinAppMigratorError::io(level, error))?;
     }
     let entries =
         fs::read_dir(&installs).map_err(|error| WinAppMigratorError::io(&installs, error))?;
@@ -1092,8 +1115,69 @@ mod tests {
 
         let damaged = format!("{header}\nnonsense\n{change}\n");
         let read = parse_journal(&damaged, "wam-abc", &folder)?;
-        assert!(read.changes.is_empty());
+        assert_eq!(read.changes.len(), 1, "what can be read still is");
         assert!(read.damaged);
+        Ok(())
+    }
+
+    #[test]
+    fn a_finished_install_stays_finished_with_a_bad_line_in_its_record() -> Result<()> {
+        let folder = PathBuf::from(r"C:\State\installs\wam-abc");
+        let header = serde_json::to_string(&Record::Header(JournalHeader {
+            schema: SCHEMA_VERSION,
+            id: "wam-abc".to_owned(),
+            app_name: "Acme".to_owned(),
+            target_root: PathBuf::from(r"C:\Acme"),
+            user_sid: None,
+            started_at_utc: String::new(),
+            staging: None,
+            ui_theme: None,
+        }))?;
+        let change = serde_json::to_string(&Record::Change(Change::Prerequisite {
+            name: "Runtime".to_owned(),
+        }))?;
+        let committed = serde_json::to_string(&Record::Committed)?;
+
+        let text = format!("{header}\nnonsense\n{change}\n{committed}\n");
+        let read = parse_journal(&text, "wam-abc", &folder)?;
+
+        assert!(
+            read.committed,
+            "it must not be taken for one that never finished"
+        );
+        assert!(read.damaged);
+        assert_eq!(read.changes.len(), 1, "what can be read still is");
+        Ok(())
+    }
+
+    #[test]
+    fn a_record_that_could_not_be_written_stops_everything_after_it() -> Result<()> {
+        let (_work, state) = temp_state()?;
+        let mut journal = journal_in(&state)?;
+        journal.broken = true;
+        assert!(
+            journal
+                .note(Change::Prerequisite {
+                    name: "Runtime".to_owned(),
+                })
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn only_one_install_or_uninstall_runs_at_a_time() -> Result<()> {
+        let (_work, state) = temp_state()?;
+        let first = lock_state(&state)?;
+        let second = lock_state(&state);
+        assert!(
+            matches!(&second, Err(WinAppMigratorError::InvalidInput(message))
+                if message.contains("another install")),
+            "{:?}",
+            second.err()
+        );
+        drop(first);
+        assert!(lock_state(&state).is_ok());
         Ok(())
     }
 

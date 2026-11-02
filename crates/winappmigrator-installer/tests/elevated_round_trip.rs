@@ -1157,6 +1157,7 @@ fn remove_fake_app(
             &["/delete", "/tn", &task_full_name(task), "/f"],
         )?;
     }
+    delete_task_folder()?;
     for spec in shortcut_specs(folders, root) {
         let _ = fs::remove_file(&spec.path);
     }
@@ -1172,6 +1173,16 @@ fn remove_fake_app(
         }
     }
     Ok(())
+}
+
+/// Windows makes the folder a task goes in and never takes it away.
+fn delete_task_folder() -> TestResult {
+    powershell(&format!(
+        "$s = New-Object -ComObject Schedule.Service; $s.Connect(); \
+         $s.GetFolder('\\').DeleteFolder({}, 0)",
+        quoted(TASK_FOLDER.trim_end_matches('\\'))
+    ))
+    .map(|_| ())
 }
 
 fn check_is_gone(
@@ -1444,12 +1455,21 @@ fn installs_on_record() -> TestResult<Vec<String>> {
     Ok(names)
 }
 
-/// What Windows does with a value like `UninstallString`: hands the whole line to a shell.
+/// What Windows does with a value like `UninstallString`: hands the whole line to
+/// `CreateProcess`, which is told what to run by the quoted path at the start of it.
+fn command_as_windows_would_run_it(command_line: &str) -> TestResult<Command> {
+    let rest = command_line
+        .strip_prefix('"')
+        .ok_or("the command does not start with a quoted path")?;
+    let (program, arguments) = rest.split_once('"').ok_or("the quote is never closed")?;
+    let mut command = Command::new(program);
+    command.raw_arg(arguments.trim_start());
+    Ok(command)
+}
+
 fn run_as_windows_would(command_line: &str) -> TestResult<InstallerRun> {
     println!("\n--- as Windows would: {command_line}");
-    let output = Command::new("cmd.exe")
-        .raw_arg(format!("/D /S /C \"{command_line}\""))
-        .output()?;
+    let output = command_as_windows_would_run_it(command_line)?.output()?;
     let shown = format!("{}{}", text(&output.stdout), text(&output.stderr));
     println!("{shown}--- exit: {}", output.status);
     Ok(InstallerRun {
@@ -2428,8 +2448,7 @@ fn uninstall_puts_the_machine_back(
     // here, and this runner may not be able to show one at all.
     let uninstall = entry_value("UninstallString")?;
     println!("\n--- starting, as Windows would, with a window: {uninstall}");
-    let mut window = Command::new("cmd.exe")
-        .raw_arg(format!("/D /S /C \"{uninstall}\""))
+    let mut window = command_as_windows_would_run_it(&uninstall)?
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2439,10 +2458,7 @@ fn uninstall_puts_the_machine_back(
         Some(status) => println!("it exited by itself, with {status}: no window on this runner"),
         None => println!("still running after 10 seconds, waiting for someone to click"),
     }
-    let _ = tool(
-        "taskkill.exe",
-        &["/F", "/T", "/PID", &window.id().to_string()],
-    );
+    let _ = window.kill();
     let _ = window.wait();
     let after_window = machine_snapshot(TARGET_ROOT, folders, data)?;
     check_same_state(
@@ -2624,11 +2640,7 @@ fn uninstall_puts_the_machine_back(
         "schtasks.exe",
         &["/delete", "/tn", &task_full_name(USER_TASK), "/f"],
     )?;
-    let _ = powershell(&format!(
-        "$s = New-Object -ComObject Schedule.Service; $s.Connect(); \
-         $s.GetFolder('\\').DeleteFolder({}, 0)",
-        quoted(TASK_FOLDER.trim_end_matches('\\'))
-    ));
+    delete_task_folder()?;
     reg_delete_key(HKLM_APP_KEY);
     reg_delete_key(r"HKLM\Software\WAM E2E Vendor");
     reg_delete_value(MACHINE_ENVIRONMENT_KEY, "WAM_E2E_HOME");
@@ -2715,8 +2727,9 @@ fn a_late_failure_puts_everything_back(
     );
 
     section("So does a file an administrator is denied");
-    let conf = app_conf(TARGET_ROOT);
-    must("icacls", &[&conf, "/deny", "*S-1-1-0:(DE)"])?;
+    // Nobody may add a file to this folder, which is how a file gets put in place.
+    let conf_folder = format!(r"{TARGET_ROOT}\conf");
+    must("icacls", &[&conf_folder, "/deny", "*S-1-1-0:(WD)"])?;
     let before = machine_snapshot(TARGET_ROOT, folders, data)?;
     let run = run_installer(installer, &FORCED_INSTALL)?;
     checks.that("the install reports failure", !run.success, &run.output);
@@ -2728,7 +2741,7 @@ fn a_late_failure_puts_everything_back(
     let after = machine_snapshot(TARGET_ROOT, folders, data)?;
     check_same_state(checks, "the machine is as it was", &after, &before, &[]);
     checks.same("no record is left", installs_on_record()?, records);
-    must("icacls", &[&conf, "/remove:d", "*S-1-1-0"])?;
+    must("icacls", &[&conf_folder, "/remove:d", "*S-1-1-0"])?;
     Ok(())
 }
 
@@ -3033,6 +3046,7 @@ fn environment_entry(scope: EnvironmentScope, name: &str, value: &str) -> Enviro
 }
 
 const CMD: &str = r"C:\Windows\System32\cmd.exe";
+const HOSTILE_JOURNAL: &str = r"C:\ProgramData\WinAppMigrator\installs\wam-e2eforged\journal.jsonl";
 const HOSTILE_DRIVER_NAME: &str = "Spooler";
 const IFEO_KEY: &str =
     r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\wame2e-victim.exe";
@@ -3125,6 +3139,7 @@ fn hostile_files() -> TestResult<Vec<PathBuf>> {
         Path::new(&std::env::var("APPDATA")?)
             .join(r"Microsoft\Windows\Start Menu\Programs\Startup\wame2e-hostile.exe"),
         Path::new(&shell_folders()?.desktop).join("WAM E2E Hostile Cmd.lnk"),
+        PathBuf::from(HOSTILE_JOURNAL),
     ])
 }
 
@@ -3240,23 +3255,33 @@ fn ask_for_refused_items(package: &mut HandBuilt) -> TestResult<Vec<&'static str
         environment_entry(EnvironmentScope::Machine, "PATHEXT", ".EXE"),
         environment_entry(EnvironmentScope::Machine, "ComSpec", &own),
     ]);
-    let startup_file = hostile_files()?
-        .into_iter()
-        .nth(1)
-        .ok_or("no startup file")?;
-    let relative = r"files\_external\startup\wame2e-hostile.exe";
-    let (hash, size) = package.add_file(relative, &fake)?;
-    package.manifest.file_inventory.push(FileEntry {
-        path: startup_file.clone(),
-        original_path: startup_file,
-        package_relative_path: Some(PathBuf::from(relative)),
-        suggested_destination_path: None,
-        size_bytes: Some(size),
-        hash_sha256: Some(hash),
-        classification: FileClassification::UserData,
-        should_copy: true,
-        reason: String::new(),
-    });
+    for (file, relative) in [
+        (
+            hostile_files()?
+                .into_iter()
+                .nth(1)
+                .ok_or("no startup file")?,
+            r"files\_external\startup\wame2e-hostile.exe",
+        ),
+        (
+            // A forged record of an install, for the next install to act on.
+            PathBuf::from(HOSTILE_JOURNAL),
+            r"files\_external\state\journal.jsonl",
+        ),
+    ] {
+        let (hash, size) = package.add_file(relative, &fake)?;
+        package.manifest.file_inventory.push(FileEntry {
+            path: file.clone(),
+            original_path: file,
+            package_relative_path: Some(PathBuf::from(relative)),
+            suggested_destination_path: None,
+            size_bytes: Some(size),
+            hash_sha256: Some(hash),
+            classification: FileClassification::UserData,
+            should_copy: true,
+            reason: String::new(),
+        });
+    }
     Ok(vec![
         "wame2e-victim.exe",
         r"Winlogon\Shell",
@@ -3281,6 +3306,7 @@ fn ask_for_refused_items(package: &mut HandBuilt) -> TestResult<Vec<&'static str
         "The environment variable PATHEXT",
         "The environment variable ComSpec",
         r"Startup\wame2e-hostile.exe",
+        "wam-e2eforged",
     ])
 }
 
@@ -3339,6 +3365,8 @@ fn hostile_package_gets_nothing_it_was_refused() -> TestResult {
     let mut checks = Checks::default();
     set_up_marker_folder()?;
     let target = format!(r"{PROGRAM_FILES}\WAM E2E Hostile");
+
+    a_state_folder_someone_else_made_is_not_used(&mut checks)?;
 
     section("A package asking for what no app should do");
     let before = hostile_state()?;
@@ -3528,6 +3556,64 @@ fn hostile_package_gets_nothing_it_was_refused() -> TestResult {
     a_signed_installer_leaves_an_unsigned_uninstaller(&mut checks)?;
 
     checks.finish()
+}
+
+/// Anyone can make a folder in `ProgramData`, and may do so first, to have their own journal
+/// acted on with full rights. This is the first test to run, so none is there yet.
+fn a_state_folder_someone_else_made_is_not_used(checks: &mut Checks) -> TestResult {
+    section("A state folder someone else made first is not used");
+    checks.that(
+        "no state folder is here yet",
+        !Path::new(STATE_ROOT).exists(),
+        STATE_ROOT,
+    );
+    let package = hand_built_package("WAM E2E Squatted Source")?;
+    let installer = package.build("squatted")?;
+    let target = format!(r"{PROGRAM_FILES}\WAM E2E Squatted");
+    let forged = format!(r"{INSTALLS_DIR}\wam-e2eforged");
+    let canary = format!(r"{PROGRAM_FILES}\WAM E2E Squatted Canary.txt");
+    fs::write(&canary, b"keep")?;
+    fs::create_dir_all(&forged)?;
+    must(
+        "icacls",
+        &[STATE_ROOT, "/grant", "*S-1-5-32-545:(OI)(CI)F", "/T", "/Q"],
+    )?;
+    let journal = format!(
+        "{{\"header\":{{\"schema\":1,\"id\":\"wam-e2eforged\",\"app_name\":\"Forged\",\
+         \"target_root\":\"C:\\\\Forged\",\"user_sid\":null,\"started_at_utc\":\"\",\
+         \"staging\":null}}}}\n\
+         {{\"change\":{{\"change\":\"root\",\"path\":\"C:\\\\Program Files\",\"real\":\"C:\\\\Program Files\"}}}}\n\
+         {{\"change\":{{\"change\":\"file\",\"path\":{path:?},\"root\":\"C:\\\\Program Files\",\
+         \"item\":\"program\",\"backup\":null,\"sha256\":null,\"partial\":null}}}}\n",
+        path = canary,
+    );
+    fs::write(format!(r"{forged}\journal.jsonl"), journal)?;
+
+    let run = run_installer(&installer, &["--target-root", &target, "--apply"])?;
+    checks.that(
+        "an install will not go ahead with a state folder others can change",
+        !run.success && !Path::new(&target).exists(),
+        &run.output,
+    );
+    checks.that(
+        "and does not act on what is in it",
+        Path::new(&canary).is_file(),
+        "the file the forged record named is gone",
+    );
+
+    fs::remove_dir_all(&forged)?;
+    fs::remove_dir_all(INSTALLS_DIR)?;
+    let run = run_installer(&installer, &["--target-root", &target, "--apply"])?;
+    checks.that(
+        "one left empty is replaced with a proper one",
+        run.success,
+        &run.output,
+    );
+    check_is_protected(checks, STATE_ROOT)?;
+    let id = install_id_in(&run.output)?;
+    let run = uninstall_quietly(checks, &id, "")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+    Ok(())
 }
 
 /// A package of a program and a file in a folder, installed at `target`.
@@ -3985,12 +4071,15 @@ fn what_only_administrators_may_change_they_alone_can(
         result.starts_with("refused"),
         &result,
     );
+    // With UAC on, that is as far as it gets. This runner has it off, so it just runs, with no
+    // arguments and no rights, and does nothing. What matters is that Windows could read it.
     let started = probe_with("protected-run", "--try-run", &uninstaller)?;
-    checks.same(
-        "starting the uninstaller gets as far as Windows asking for elevation, so it can be \
-         started from Settings by someone who is not elevated yet",
-        marker_field(&started, "started"),
-        format!("refused: {ERROR_ELEVATION_REQUIRED}"),
+    let started = marker_field(&started, "started");
+    checks.that(
+        "LocalService can start the uninstaller, so it can be started from Settings by someone \
+         who is not elevated yet",
+        started == "ran" || started == format!("refused: {ERROR_ELEVATION_REQUIRED}"),
+        &started,
     );
     let run = uninstall_quietly(checks, &id, "")?;
     checks.that("the uninstall succeeded", run.success, &run.output);

@@ -612,6 +612,12 @@ impl WinAppMigratorApp {
         let (role, message) = outcome_summary(outcome);
         widgets::notice(ui, theme, role, &message);
         ui.add_space(SPACE_SM);
+        if role == Role::Danger
+            && let Some(log) = self.log_file.as_deref()
+        {
+            widgets::mono_path(ui, theme, "Log", &log.display().to_string());
+            ui.add_space(SPACE_SM);
+        }
         widgets::metric_tiles(
             ui,
             theme,

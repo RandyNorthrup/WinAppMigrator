@@ -72,17 +72,7 @@ pub(crate) fn verify_prepared_package(
             &mut warnings,
             &mut errors,
         )?;
-        Some(
-            !items
-                .iter()
-                .filter(|item| {
-                    !matches!(
-                        item.category,
-                        VerificationCategory::Manifest | VerificationCategory::PackageFile
-                    )
-                })
-                .any(|item| item.status == VerificationStatus::Failed),
-        )
+        Some(restored_items_are_valid(&items))
     } else {
         None
     };
@@ -119,6 +109,40 @@ pub(crate) fn verify_prepared_package(
     }
 
     Ok(report)
+}
+
+fn restored_items_are_valid(items: &[VerificationItem]) -> bool {
+    !items
+        .iter()
+        .filter(|item| {
+            !matches!(
+                item.category,
+                VerificationCategory::Manifest | VerificationCategory::PackageFile
+            )
+        })
+        .any(|item| item.status == VerificationStatus::Failed)
+}
+
+/// A check of what was installed, leaving out what the rules refused at the moment it would
+/// have been done. The review the check works from could not see those coming, so it expects
+/// them to be there, and them not being there is what was meant to happen.
+pub(crate) fn without_what_was_refused(
+    mut report: VerificationReport,
+    refused: &[&str],
+) -> VerificationReport {
+    let is_refused = |name: &str| refused.contains(&name);
+    for item in &mut report.items {
+        if is_refused(&item.name) {
+            item.status = VerificationStatus::Skipped;
+        }
+    }
+    report
+        .errors
+        .retain(|error| !error.source.as_deref().is_some_and(is_refused));
+    if report.restore_valid.is_some() {
+        report.restore_valid = Some(restored_items_are_valid(&report.items));
+    }
+    report
 }
 
 fn verify_manifest(
@@ -1331,6 +1355,57 @@ fn render_verification_markdown(report: &VerificationReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_was_refused_while_installing_is_not_held_against_the_install() {
+        let refused = r"HKLM\SOFTWARE\Classes\CLSID\{A}\InprocServer32\(Default)";
+        let error = |source: &str| {
+            Warning::new(
+                "verification_registry_failed",
+                WarningSeverity::Error,
+                "Registry key is missing.",
+                Some(source.to_owned()),
+            )
+        };
+        let report = |items, errors| VerificationReport {
+            schema_version: String::new(),
+            verified_at_utc: String::new(),
+            package_root: PathBuf::new(),
+            target_root: None,
+            package_valid: true,
+            restore_valid: Some(false),
+            items,
+            warnings: Vec::new(),
+            errors,
+            report_json: None,
+            report_markdown: None,
+        };
+        let failed = |name: &str| {
+            failed_item(
+                VerificationCategory::Registry,
+                name,
+                "Registry key is missing.",
+                Some(name.to_owned()),
+            )
+        };
+
+        let only_refused = without_what_was_refused(
+            report(vec![failed(refused)], vec![error(refused)]),
+            &[refused],
+        );
+        assert_eq!(only_refused.restore_valid, Some(true));
+        assert!(only_refused.errors.is_empty());
+
+        let also_real = without_what_was_refused(
+            report(
+                vec![failed(refused), failed(r"HKLM\SOFTWARE\Acme\Other")],
+                vec![error(refused), error(r"HKLM\SOFTWARE\Acme\Other")],
+            ),
+            &[refused],
+        );
+        assert_eq!(also_real.restore_valid, Some(false));
+        assert_eq!(also_real.errors.len(), 1);
+    }
 
     fn task_xml(commands: &[&str]) -> String {
         let actions: String = commands

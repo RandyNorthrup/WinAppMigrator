@@ -13,12 +13,13 @@ use crate::file_discovery::{
     expand_env_vars, has_reserved_device_name, known_base_dirs, split_user_data_relative,
     user_data_base, user_shell_folder,
 };
+use crate::journal::machine_state_root;
 use crate::models::{
     DriverEntry, EnvironmentVariableEntry, FileEntry, LicenseArtifact, PackageManifest,
     RegistryEntry, RegistryHive, ScheduledTaskEntry, ServiceEntry, Warning, WarningSeverity,
 };
 use crate::path_rewrite::RestoreMap;
-use crate::path_utils::{strip_prefix_ignore_case, system_root};
+use crate::path_utils::{path_is_within, strip_prefix_ignore_case, system_root};
 use crate::registry_target::{app_path_entries, is_path_variable, service_image_path};
 use crate::restore_policy::{
     KnownFolders, SERVICES_PREFIX, ServiceAccount, ShortcutPlacement, driver_destination,
@@ -34,6 +35,7 @@ const START_MENU_SUBFOLDER: &str = r"Microsoft\Windows\Start Menu";
 const PARAMETERS_SUBKEY: &str = "parameters";
 const REFUSED_CODE: &str = "restore_refused";
 const DISPLAY_NAME_VALUE: &str = "DisplayName";
+pub(crate) const STATE_ROOT_REFUSAL: &str = "it is where installs keep their records";
 const UNC_PREFIX: &str = r"\\";
 /// A stand-in target, for describing a package before an install location is chosen.
 const NO_TARGET_YET: &str = r"C:\WinAppMigrator install location";
@@ -437,6 +439,7 @@ impl<'a> ReviewedPackage<'a> {
                 continue;
             }
             match registry_refusal(entry, &self.map, restored_services, expand) {
+                None if is_source_uninstall_value(entry) => {}
                 None => self.license_registry.push(entry),
                 Some(reason) => self.refuse(registry_item(entry), reason),
             }
@@ -655,11 +658,21 @@ pub fn system_changes(manifest: &PackageManifest) -> Result<SystemChanges> {
 
 /// Why this install location must not be used on this PC, if so.
 pub fn install_location_problem(target_root: &Path) -> Option<String> {
+    if machine_state_root().is_some_and(|state_root| overlaps_state_root(target_root, &state_root))
+    {
+        return Some(STATE_ROOT_REFUSAL.to_owned());
+    }
     install_location_refusal(
         target_root,
         system_root(),
         &known_base_dirs(&SystemContext::live()),
     )
+}
+
+/// True when an install location would put an app's files where installs keep their records.
+/// What an uninstall trusts is there, and a package gets to suggest the location.
+pub(crate) fn overlaps_state_root(target_root: &Path, state_root: &Path) -> bool {
+    path_is_within(target_root, state_root) || path_is_within(state_root, target_root)
 }
 
 fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {

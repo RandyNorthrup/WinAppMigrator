@@ -429,6 +429,9 @@ const REFUSED_DATA_FOLDERS: &[&str] = &[
     // In the Public profile, where a file would appear on everyone's desktop.
     r"desktop\",
     r"start menu\",
+    // Where installs keep their records and what an uninstall trusts. A file a package put
+    // there could be taken for a record of an install, and acted on with full rights.
+    r"winappmigrator\",
 ];
 /// Where Settings finds what it lists under installed apps.
 const UNINSTALL_KEY: &str = r"software\microsoft\windows\currentversion\uninstall";
@@ -444,7 +447,11 @@ const SOURCE_UNINSTALL_VALUES: &[&str] = &[
     "noremove",
     "nomodify",
     "norepair",
+    // Hides it from the list, where the only way to uninstall it is.
+    "systemcomponent",
 ];
+const DISPLAY_ICON_VALUE: &str = "displayicon";
+const UNC_PREFIX: &str = r"\\";
 /// Windows' own scheduled tasks, which run with high rights and are expected to be there.
 const WINDOWS_TASK_FOLDER: &str = r"\microsoft\windows\";
 const SYSTEM_ACCOUNTS: &[&str] = &["s-1-5-18", "system", "localsystem"];
@@ -502,7 +509,15 @@ pub fn is_uninstall_entry_key(key_path: &str) -> bool {
 pub fn is_source_uninstall_value(entry: &RegistryEntry) -> bool {
     is_uninstall_entry_key(&entry.key_path)
         && entry.value_name.as_deref().is_some_and(|name| {
-            SOURCE_UNINSTALL_VALUES.contains(&name.to_ascii_lowercase().as_str())
+            let name = name.to_ascii_lowercase();
+            SOURCE_UNINSTALL_VALUES.contains(&name.as_str())
+                // Settings opens an icon just by showing it, so one on a network share would
+                // hand that server the name and password hash of whoever looks at the list.
+                || (name == DISPLAY_ICON_VALUE
+                    && entry
+                        .value_data
+                        .as_deref()
+                        .is_some_and(|data| data.trim_start_matches('"').starts_with(UNC_PREFIX)))
         })
 }
 
@@ -1101,10 +1116,16 @@ mod tests {
             "UninstallPath",
             "WindowsInstaller",
             "NoRemove",
+            "SystemComponent",
         ] {
             assert!(is_source_uninstall_value(&value(entry, name)), "{name}");
             assert!(is_source_uninstall_value(&value(wow, name)), "{name}");
         }
+        let mut icon = value(entry, "DisplayIcon");
+        icon.value_data = Some(r"\\server\share\app.ico".to_owned());
+        assert!(is_source_uninstall_value(&icon));
+        icon.value_data = Some(r"C:\Program Files\Acme\app.exe,0".to_owned());
+        assert!(!is_source_uninstall_value(&icon));
         for (key, name) in [
             (entry, "DisplayName"),
             (entry, "InstallLocation"),
@@ -1128,6 +1149,18 @@ mod tests {
                 "{key} {name}"
             );
         }
+    }
+
+    #[test]
+    fn nothing_a_package_installs_goes_where_installs_are_recorded() {
+        for tail in [
+            r"WinAppMigrator\installs\wam-evil\journal.jsonl",
+            r"winappmigrator\installs\wam-evil\backups\00000001.moved",
+            r"WinAppMigrator\busy.lock",
+        ] {
+            assert!(data_location_refusal(Path::new(tail)).is_some(), "{tail}");
+        }
+        assert!(data_location_refusal(Path::new(r"WinAppMigrator Extras\settings.json")).is_none());
     }
 
     #[test]

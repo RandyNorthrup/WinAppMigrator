@@ -19,7 +19,8 @@ use crate::file_discovery::{
 };
 use crate::hashing::sha256_file;
 use crate::journal::{
-    Change, ItemKind, Journal, QUIET_FLAG, STAGING_PREFIX, StoredValue, UNINSTALL_FLAG, find_backup,
+    Change, ItemKind, Journal, QUIET_FLAG, STAGING_PREFIX, StoredValue, UNINSTALL_FLAG,
+    find_backup, lock_state,
 };
 use crate::models::{
     DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry, FileClassification,
@@ -31,7 +32,8 @@ use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_TASKS, POWERSHELL_IMPORT_UTILITY,
-    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, system_root,
+    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, path_is_within,
+    sanitize_filename, system_root,
 };
 use crate::prerequisites::{
     PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
@@ -50,14 +52,14 @@ use crate::restore_policy::{
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
-    install_location_problem,
+    STATE_ROOT_REFUSAL, install_location_problem, overlaps_state_root,
 };
 use crate::rollback::{
     interrupted_installs, put_back_backup, recover_interrupted_installs, roll_back,
 };
 use crate::service_scan::DELAYED_AUTOMATIC_START_LABEL;
 use crate::task_scan::live_task_xml;
-use crate::verify::verify_prepared_package;
+use crate::verify::{verify_prepared_package, without_what_was_refused};
 
 pub(crate) const POWERSHELL_EXE: &str = "powershell.exe";
 pub(crate) const SC_EXE: &str = "sc.exe";
@@ -79,9 +81,6 @@ const DISPLAY_NAME_VALUE: &str = "DisplayName";
 const DISPLAY_VERSION_VALUE: &str = "DisplayVersion";
 const PUBLISHER_VALUE: &str = "Publisher";
 const INSTALL_LOCATION_VALUE: &str = "InstallLocation";
-/// What PowerShell's error text starts going on about where in the script it happened, after
-/// which it quotes the script, which can hold what a shortcut's arguments were.
-const POWERSHELL_ERROR_POSITION: &str = "At line:";
 /// Failures found at the moment of installing that are the rules refusing something, and so
 /// are left out like any other refusal rather than failing the install. They depend on what
 /// is on this PC at that moment, so the review before the install could not see them.
@@ -92,6 +91,10 @@ const REFUSALS_FOUND_WHEN_INSTALLING: [&str; 4] = [
     "driver_exists_elsewhere",
 ];
 const CANCELLED_CODE: &str = "install_cancelled";
+const JOURNAL_WRITE_FAILED_CODE: &str = "journal_write_failed";
+/// What PowerShell says can quote its script, on any language of Windows, and a script can hold
+/// what must not be logged, such as a shortcut's arguments.
+const POWERSHELL_FAILED_CODE: &str = "powershell_command_failed";
 
 /// What a restore did or would do, kept apart so what reaches beyond files can be listed
 /// first. A preview of a large app is otherwise thousands of files before anything else.
@@ -161,6 +164,12 @@ pub fn restore_package_monitored(
             options.target_root.display()
         )));
     }
+    if overlaps_state_root(&options.target_root, &options.state_root) {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "that install location cannot be used: {STATE_ROOT_REFUSAL}: \"{}\"",
+            options.target_root.display()
+        )));
+    }
 
     let prepared = PreparedPackage::new(&options.package_root)?;
     let mut effective_options = options.clone();
@@ -169,9 +178,13 @@ pub fn restore_package_monitored(
     // the hash check and the install, even if the file on disk does.
     let manifest = read_manifest(&effective_options.package_root)?;
     let mut recovered_warnings = Vec::new();
+    let mut busy_lock = None;
     if options.apply {
         monitor.report(InstallStep::new(InstallPhase::CheckingPackage, 0, 0));
         refuse_damaged_package(&effective_options, &manifest)?;
+        // There is nowhere safe to keep a record without this, so nothing goes ahead, and held
+        // until the end, so that no other install can change what this one is changing.
+        busy_lock = Some(lock_state(&options.state_root).map_err(nowhere_to_keep_a_record)?);
         // Before anything looks at what is on this PC, since what an install that never
         // finished left there is not to be taken for anything.
         for earlier in recover_interrupted_installs(&options.state_root, monitor)? {
@@ -186,14 +199,21 @@ pub fn restore_package_monitored(
                 ),
                 None,
             ));
-            recovered_warnings.extend(earlier.report.kept.iter().map(|kept| {
-                Warning::new(
-                    "earlier_install_left",
-                    WarningSeverity::Warning,
-                    kept.clone(),
-                    None,
-                )
-            }));
+            recovered_warnings.extend(
+                earlier
+                    .report
+                    .kept
+                    .iter()
+                    .chain(&earlier.report.left_behind)
+                    .map(|left| {
+                        Warning::new(
+                            "earlier_install_left",
+                            WarningSeverity::Warning,
+                            left.clone(),
+                            None,
+                        )
+                    }),
+            );
         }
     } else {
         for app_name in interrupted_installs(&options.state_root) {
@@ -247,7 +267,10 @@ pub fn restore_package_monitored(
         match prepare_target(&mut journal, &options.target_root) {
             Ok(hold) => target_hold = Some(hold),
             Err(error) => {
-                let _ = roll_back(journal, monitor);
+                let report = roll_back(journal, monitor);
+                for line in crate::rollback::report_lines(&report) {
+                    info!(rollback = %line);
+                }
                 return Err(error);
             }
         }
@@ -361,7 +384,21 @@ pub fn restore_package_monitored(
         rollback,
     };
     log_result(&result);
+    drop(busy_lock);
     Ok(result)
+}
+
+fn nowhere_to_keep_a_record(error: WinAppMigratorError) -> WinAppMigratorError {
+    match error {
+        // Someone else's install, not a problem with where records are kept.
+        WinAppMigratorError::InvalidInput(message) if message.contains("another install") => {
+            WinAppMigratorError::InvalidInput(message)
+        }
+        error => WinAppMigratorError::InvalidInput(format!(
+            "there is nowhere safe to keep the record that would let this install be undone, so \
+             nothing was installed: {error}"
+        )),
+    }
 }
 
 /// Start the record of this install, with what it needs to be undone later. A failure here
@@ -378,12 +415,6 @@ fn start_journal(
         .file_name()
         .is_some_and(|name| name.to_string_lossy().starts_with(STAGING_PREFIX))
         .then_some(options.package_root.as_path());
-    let unprotected = |error: WinAppMigratorError| {
-        WinAppMigratorError::InvalidInput(format!(
-            "there is nowhere safe to keep the record that would let this install be undone, so \
-             nothing was installed: {error}"
-        ))
-    };
     let mut journal = Journal::begin(
         &options.state_root,
         app_name,
@@ -391,14 +422,14 @@ fn start_journal(
         staging,
         manifest.ui_theme.as_deref(),
     )
-    .map_err(unprotected)?;
+    .map_err(nowhere_to_keep_a_record)?;
     if let Some(installer) = installer
         && let Err(error) = journal.write_uninstaller(installer)
     {
         let folder = journal.folder().to_path_buf();
         journal.close();
         let _ = fs::remove_dir_all(folder);
-        return Err(unprotected(error));
+        return Err(nowhere_to_keep_a_record(error));
     }
     Ok(journal)
 }
@@ -454,7 +485,11 @@ fn log_result(result: &RestoreResult) {
         warn!(code = %refused.code, source = refused.source.as_deref().unwrap_or_default(), "refused");
     }
     for error in &result.errors {
-        warn!(code = %error.code, source = error.source.as_deref().unwrap_or_default(), message = %error.message);
+        if error.code == POWERSHELL_FAILED_CODE {
+            warn!(code = %error.code, source = error.source.as_deref().unwrap_or_default());
+        } else {
+            warn!(code = %error.code, source = error.source.as_deref().unwrap_or_default(), message = %error.message);
+        }
     }
     if let Some(report) = result.rollback.as_ref() {
         for line in crate::rollback::report_lines(report) {
@@ -604,6 +639,13 @@ impl Run<'_, '_> {
             },
         ) {
             Ok(report) => {
+                let refused: Vec<&str> = self
+                    .refused
+                    .iter()
+                    .filter(|item| REFUSALS_FOUND_WHEN_INSTALLING.contains(&item.code.as_str()))
+                    .filter_map(|item| item.source.as_deref())
+                    .collect();
+                let report = without_what_was_refused(report, &refused);
                 if !report.package_valid || report.restore_valid == Some(false) {
                     self.errors.extend(report.errors.clone());
                 }
@@ -850,9 +892,14 @@ impl Run<'_, '_> {
                 ));
                 return;
             }
+            // Before it runs, as with anything else. It cannot be taken back out, and it is
+            // only reported, so a failure to install that says so is harmless.
+            self.note_prerequisite(prerequisite);
+            if self.stopped() {
+                return;
+            }
             match install_bundle(&prerequisite.kind, bundle, &self.options.package_root) {
                 PrerequisiteInstallOutcome::Installed => {
-                    self.note_prerequisite(prerequisite);
                     self.changes
                         .prerequisites
                         .push(format!("installed prerequisite {}", prerequisite.name));
@@ -865,7 +912,6 @@ impl Run<'_, '_> {
                     );
                 }
                 PrerequisiteInstallOutcome::InstalledNeedsReboot => {
-                    self.note_prerequisite(prerequisite);
                     self.changes.prerequisites.push(format!(
                         "installed prerequisite {} (reboot required)",
                         prerequisite.name
@@ -1163,7 +1209,9 @@ impl Run<'_, '_> {
                 // A Desktop or Start Menu shortcut is only a way in to an app that works
                 // without it, so losing one is not worth undoing the install. One in a
                 // Startup folder makes something run, so that is a part of what it does.
-                Err(warning) if !autostart => self.warnings.push(warning),
+                Err(warning) if !autostart && warning.code != JOURNAL_WRITE_FAILED_CODE => {
+                    self.warnings.push(warning);
+                }
                 Err(warning) => self.errors.push(warning),
             }
         }
@@ -1238,7 +1286,12 @@ impl Run<'_, '_> {
         if keys.is_empty() {
             keys.push(crate::restore_review::UninstallKey {
                 hive: RegistryHive::LocalMachine,
-                key_path: format!("{UNINSTALL_KEY_FOR_NEW_ENTRIES}\\WinAppMigrator {id}"),
+                // Named for the app and not the install, so a second install over the first
+                // takes over its line in Settings, and the first's comes back with it.
+                key_path: format!(
+                    "{UNINSTALL_KEY_FOR_NEW_ENTRIES}\\WinAppMigrator {}",
+                    sanitize_filename(self.app_name)
+                ),
                 has_display_name: false,
             });
         }
@@ -1612,14 +1665,14 @@ fn set_journaled_value(
         )
     })?;
     journal
-        .note_value(
-            hive,
-            key_path,
-            name,
+        .note(Change::RegistryValue {
+            hive: hive.clone(),
+            key: key_path.to_owned(),
+            name: name.to_owned(),
             prior,
-            StoredValue::from_reg(value),
+            written: StoredValue::from_reg(value),
             item,
-        )
+        })
         .map_err(|error| failed("journal_write_failed", error.to_string()))?;
     key.set_raw_value(name, value).map_err(|error| {
         failed(
@@ -2240,7 +2293,7 @@ fn apply_shortcut(
     }
     if let Err(warning) = run_powershell_script(&shortcut_script(shortcut)) {
         if let Some(found) = backup.and_then(|number| find_backup(journal.folder(), number))
-            && let Err(error) = put_back_backup(&found, destination)
+            && let Err(error) = put_back_backup(&found, destination, &placement.root)
         {
             return Err(Warning::new(
                 "shortcut_put_back_failed",
@@ -2311,6 +2364,15 @@ fn copy_restore_file(
     item: ItemKind,
     sha256: Option<&str>,
 ) -> Result<()> {
+    if journal
+        .state_root()
+        .is_some_and(|state_root| path_is_within(destination, state_root))
+    {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "refusing to write where installs keep their records: {}",
+            destination.display()
+        )));
+    }
     let root = write_root_for(destination, target_root).ok_or_else(|| {
         WinAppMigratorError::InvalidInput(format!(
             "refusing to write outside the install location and the known data folders: {}",
@@ -2340,7 +2402,9 @@ fn copy_restore_file(
     };
     let partial = parent.join(partial_file_name());
     let backup = journal.note_file(destination, &root, item, replaces, sha256, Some(&partial))?;
-    let copied = write_partial_copy(source, &partial, false).and_then(|()| {
+    // With a file to put back, what is written has to be on disk before it takes that file's
+    // place. After a power cut, what stands there may be taken for something the user changed.
+    let copied = write_partial_copy(source, &partial, replaces).and_then(|()| {
         if let Some(number) = backup {
             journal.back_up(destination, number)?;
         }
@@ -2517,13 +2581,13 @@ pub(crate) fn run_checked(
     ))
 }
 
-/// What PowerShell said went wrong, without the part after it where it quotes the script. A
-/// script can hold what is not to be logged, such as a shortcut's arguments.
+/// What PowerShell said went wrong, which is its first line. The lines after that say where in
+/// the script it happened, in the language of this Windows, and quote the script.
 fn powershell_error_summary(text: &str) -> String {
-    text.split(POWERSHELL_ERROR_POSITION)
-        .next()
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
         .unwrap_or_default()
-        .trim()
         .to_owned()
 }
 
@@ -3601,13 +3665,14 @@ mod tests {
         let mut journal = journal_for_test(&options)?;
         journal.note_new_folders_to(&options.target_root, ItemKind::Program)?;
         for relative in ["a.dat", r"sub\b.dat"] {
+            let source = package.join("files").join(relative);
             copy_restore_file(
                 &mut journal,
-                &package.join("files").join(relative),
+                &source,
                 &options.target_root.join(relative),
                 &options.target_root,
                 ItemKind::Program,
-                None,
+                Some(&sha256_file(&source)?),
             )?;
         }
         // A journal is only ever closed like this when a process dies.
@@ -4011,6 +4076,145 @@ mod tests {
         for id in [r"..\..\elsewhere", "wam-notthere", "", "CON"] {
             assert!(open_install(&state, id).is_err(), "{id}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn an_install_location_where_installs_are_recorded_is_refused() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("a.dat", b"a")], |_| {})?;
+        let mut options = restore_options(work.path(), package, true);
+        options.target_root = options.state_root.join(r"installs\wam-evil");
+        let refused = restore_package(&options);
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::InvalidInput(message))
+                if message.contains("keep their records")),
+            "{:?}",
+            refused.err()
+        );
+        assert!(!options.state_root.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn nothing_is_written_where_installs_are_recorded_whatever_the_rules_said() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("a.dat", b"a")], |_| {})?;
+        let options = restore_options(work.path(), package.clone(), true);
+        let mut journal = journal_for_test(&options)?;
+        let inside = options.state_root.join(r"installs\wam-evil\journal.jsonl");
+        let refused = copy_restore_file(
+            &mut journal,
+            &package.join(r"files\a.dat"),
+            &inside,
+            &options.state_root,
+            ItemKind::UserData,
+            None,
+        );
+        assert!(refused.is_err());
+        assert!(!inside.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn another_install_running_stops_this_one_before_anything_changes() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("a.dat", b"a")], |_| {})?;
+        let options = restore_options(work.path(), package, true);
+        let busy = lock_state(&options.state_root)?;
+
+        let refused = restore_package(&options);
+
+        assert!(
+            matches!(&refused, Err(WinAppMigratorError::InvalidInput(message))
+                if message.contains("another install")),
+            "{:?}",
+            refused.err()
+        );
+        assert!(!options.target_root.exists());
+        drop(busy);
+        assert!(restore_package(&options)?.errors.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn an_uninstall_waits_its_turn_too() -> Result<()> {
+        let work = temp_folder()?;
+        let (options, id) = installed(work.path(), &[("a.dat", b"a")], |_| {})?;
+        let busy = lock_state(&options.state_root)?;
+
+        let outcome = uninstall(&options, &id, false)?;
+
+        assert!(!outcome.finished);
+        assert!(outcome.report.failed.join(" ").contains("another install"));
+        assert!(options.target_root.join("a.dat").is_file());
+        drop(busy);
+        assert!(uninstall(&options, &id, false)?.finished);
+        Ok(())
+    }
+
+    /// What it replaced comes back when nobody has changed it, and otherwise stays where it was.
+    #[test]
+    fn undoing_an_install_long_after_it_stopped_leaves_what_someone_put_there_since() -> Result<()>
+    {
+        let work = temp_folder()?;
+        let interrupted = interrupted_install(work.path())?;
+        write_file(
+            &interrupted.target_root.join(r"sub\b.dat"),
+            b"the user's own",
+        )?;
+        write_file(&interrupted.target_root.join("a.dat"), b"the user's own")?;
+        let other = work.path().join("other");
+        let other_package = package_of(&other, &[("other.dat", b"other")], |_| {})?;
+        let mut next = restore_options(&other, other_package, true);
+        next.state_root = interrupted.state_root.clone();
+
+        let result = restore_package(&next)?;
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            read_text(&interrupted.target_root.join(r"sub\b.dat"))?,
+            "the user's own"
+        );
+        assert_eq!(
+            read_text(&interrupted.target_root.join("a.dat"))?,
+            "the user's own"
+        );
+        let said = result
+            .warnings
+            .iter()
+            .map(|warning| warning.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(said.contains("b.dat stays"), "{said}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_finished_install_is_not_undone_because_of_a_bad_line_in_its_record() -> Result<()> {
+        let work = temp_folder()?;
+        let (options, _id) = installed(work.path(), &[("a.dat", b"a")], |_| {})?;
+        let folder = install_folders(&options.state_root)?
+            .pop()
+            .ok_or_else(|| WinAppMigratorError::InvalidInput("no journal".to_owned()))?;
+        let journal = folder.join("journal.jsonl");
+        let text = read_text(&journal)?;
+        let (first, rest) = text
+            .split_once('\n')
+            .ok_or_else(|| WinAppMigratorError::InvalidInput("no lines".to_owned()))?;
+        write_file(
+            &journal,
+            format!("{first}\nnot a record\n{rest}").as_bytes(),
+        )?;
+
+        let other = work.path().join("other");
+        let other_package = package_of(&other, &[("other.dat", b"other")], |_| {})?;
+        let mut next = restore_options(&other, other_package, true);
+        next.state_root = options.state_root.clone();
+        let result = restore_package(&next)?;
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(options.target_root.join("a.dat").is_file());
         Ok(())
     }
 

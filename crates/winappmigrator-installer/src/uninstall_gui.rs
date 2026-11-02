@@ -297,7 +297,7 @@ impl UninstallApp {
                 ("Services", summary.services),
                 ("Drivers", summary.drivers),
                 ("Scheduled tasks", summary.tasks),
-                ("Environment changes", summary.environment),
+                ("Environment", summary.environment),
             ] {
                 if count > 0 {
                     widgets::kv_row(ui, theme, label, &count.to_string());
@@ -367,6 +367,13 @@ impl eframe::App for UninstallApp {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        // It can be run again if it is killed, but it has nearly finished by the time anyone
+        // would want to, and undoing has no good place to stop.
+        if matches!(self.stage, Stage::Running)
+            && ctx.input(|input| input.viewport().close_requested())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
