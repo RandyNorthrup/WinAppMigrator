@@ -24,8 +24,6 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use winappmigrator_core::path_utils::{POWERSHELL_UTF8_OUTPUT, signed_in_user};
@@ -329,72 +327,16 @@ fn tree_state(root: &str) -> TestResult<BTreeMap<String, String>> {
         .collect())
 }
 
-/// How to see what connects to this machine's SMB port.
-enum SmbWatch {
-    /// Listening on it, counting what connects. Nothing else has a say in this count, and no
-    /// credentials go anywhere.
-    Listening(Arc<AtomicUsize>),
-    /// Windows' own connections to it, which the client keeps open for minutes after it is done.
-    Netstat,
-}
-
-/// A link to `\\\\127.0.0.1\\...` is followed to this port by Windows' own client, whatever made it
-/// do that. Windows' Server service has it, so that goes first, on this throwaway runner.
-fn start_watching_smb() -> SmbWatch {
-    let bind = || std::net::TcpListener::bind("127.0.0.1:445");
-    let mut listener = bind();
-    if listener.is_err() {
-        for (program, args) in [
-            ("net.exe", ["stop", "LanmanServer", "/y"]),
-            ("sc.exe", ["stop", "srv2", ""]),
-            ("sc.exe", ["stop", "srvnet", ""]),
-        ] {
-            let args: Vec<&str> = args.into_iter().filter(|arg| !arg.is_empty()).collect();
-            if let Ok(output) = tool(program, &args) {
-                println!(
-                    "{program} {args:?}: {}: {}",
-                    output.status,
-                    text(&output.stdout).trim()
-                );
-            }
-        }
-        let started = Instant::now();
-        while listener.is_err() && started.elapsed() < Duration::from_secs(15) {
-            std::thread::sleep(Duration::from_millis(500));
-            listener = bind();
-        }
-    }
-    match listener {
-        Ok(listener) => {
-            println!("listening on this machine's SMB port");
-            let count = Arc::new(AtomicUsize::new(0));
-            let counter = Arc::clone(&count);
-            std::thread::spawn(move || {
-                for connection in listener.incoming() {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    drop(connection);
-                }
-            });
-            SmbWatch::Listening(count)
-        }
-        Err(error) => {
-            println!("could not listen on the SMB port ({error}), so going by netstat");
-            let _ = tool("net.exe", &["start", "LanmanServer"]);
-            SmbWatch::Netstat
-        }
-    }
-}
-
-/// See [`SmbWatch`]. One watcher for the process, since the port is one.
+/// Connections open to this machine's SMB port, by Windows' own count. A link to
+/// `\\\\127.0.0.1\\...` is followed to this port by Windows' own client, whatever made it do that, and
+/// the client keeps a connection for minutes after it is done with one. Nothing here can listen on
+/// that port itself: Windows does not give it up even with its Server service stopped, and stopping
+/// that makes other things slow.
 fn smb_connections() -> TestResult<usize> {
-    static WATCH: OnceLock<SmbWatch> = OnceLock::new();
-    match WATCH.get_or_init(start_watching_smb) {
-        SmbWatch::Listening(count) => Ok(count.load(Ordering::SeqCst)),
-        SmbWatch::Netstat => Ok(must("netstat.exe", &["-an", "-p", "TCP"])?
-            .lines()
-            .filter(|line| line.split_whitespace().nth(2) == Some("127.0.0.1:445"))
-            .count()),
-    }
+    Ok(must("netstat.exe", &["-an", "-p", "TCP"])?
+        .lines()
+        .filter(|line| line.split_whitespace().nth(2) == Some("127.0.0.1:445"))
+        .count())
 }
 
 /// What is different between two looks at a folder.
@@ -2015,13 +1957,18 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
     let before = tree_state(DRIVE_FOLDER)?;
     println!("{} entries on the drive", before.len());
     let connections_before = smb_connections()?;
-    println!("connections to this machine's SMB port so far: {connections_before}");
+    println!("connections open to this machine's SMB port: {connections_before}");
 
     section("List what is on the drive, through the real code");
     let system = SystemContext::open(&source)?;
     println!("hives while listing: {:?}", wam_mounts()?);
     let apps = list_installed_apps_from(&system)?;
     drop(system);
+    checks.same(
+        "listing connected to nothing, as netstat sees it",
+        smb_connections()?,
+        connections_before,
+    );
     checks.same(
         "no hive stays loaded after a listing",
         wam_mounts()?,
@@ -2078,6 +2025,11 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
         .ok_or("no installer was built")?;
     let manifest = manifest_of(&installer)?;
     check_the_scan(&mut checks, &manifest, &paths);
+    checks.same(
+        "building connected to nothing, as netstat sees it",
+        smb_connections()?,
+        connections_before,
+    );
 
     section("Nothing of this machine's is in it, by Windows' own search of what was packaged");
     let holding = files_holding(&package.package_root, HOST_SECRET)?;
@@ -2255,7 +2207,7 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
 
     section("No SMB connection was made to where a value or a link pointed");
     let connections_after = smb_connections()?;
-    println!("connections to this machine's SMB port by now: {connections_after}");
+    println!("connections open to this machine's SMB port by now: {connections_after}");
     checks.same(
         "none, in all that was read from the drive",
         connections_after,
@@ -2279,8 +2231,8 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
     let connections_control = smb_connections()?;
     println!("then, {connections_control}");
     checks.that(
-        "going through a link on purpose does show, so the count above means something",
-        connections_control > connections_after,
+        "going through a link on purpose does show, so the counts above mean something",
+        looked.status.success() && connections_control > connections_after,
         format!("{connections_control} after {connections_after}"),
     );
 
@@ -2935,10 +2887,11 @@ fn what_can_name_another_accounts_folder(
     let survey = survey_profiles(&ScanSource::Live)?;
     let apps = list_installed_apps_from(&SystemContext::live())?;
     println!("{:?}", survey.picker_for(&find_app(&apps, PROFILES_APP)?));
-    checks.same(
-        "reading that connected to nothing, as this machine's SMB port saw it",
-        smb_connections()?,
-        connections_before,
+    let connections_now = smb_connections()?;
+    checks.that(
+        "reading that connected to nothing, as netstat sees it",
+        connections_now <= connections_before,
+        format!("{connections_now} after {connections_before}"),
     );
     edit_hive(&hive, |key| {
         reg_add(
@@ -2984,10 +2937,11 @@ fn what_can_name_another_accounts_folder(
     ))?;
     let holding = files_holding(&package.package_root, "private to theirs")?;
     checks.same("none of that account's data is in it", holding.trim(), "");
-    checks.same(
-        "and nothing connected, as this machine's SMB port saw it",
-        smb_connections()?,
-        connections_before,
+    let connections_now = smb_connections()?;
+    checks.that(
+        "and nothing connected, as netstat sees it",
+        connections_now <= connections_before,
+        format!("{connections_now} after {connections_before}"),
     );
     reg_delete_key(entry);
 
@@ -3082,6 +3036,109 @@ fn what_can_name_another_accounts_folder(
     checks.same("what is there is not in it", holding.trim(), "");
     fs::remove_dir(&named_for_it)?;
     reg_delete_key(entry);
+
+    section("A task file that says it runs as SYSTEM, in a folder any account can write to");
+    let dropped_name = "WAM Dropped Task";
+    let dropped = format!(r"C:\Windows\System32\Tasks\{dropped_name}");
+    utf16_file(
+        Path::new(&dropped),
+        &format!(
+            r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId></Principal></Principals>
+  <Settings><Enabled>false</Enabled></Settings>
+  <Actions Context="Author"><Exec><Command>{PROFILES_ROOT}\bin\{PROFILES_APP}.exe</Command></Exec></Actions>
+</Task>"#
+        ),
+    )?;
+    // As it would be if another account had made it, by what that lets that account do.
+    must("icacls", &[&dropped, "/grant", "*S-1-5-11:(M)", "/C", "/Q"])?;
+    let apps = list_installed_apps_from(&SystemContext::live())?;
+    let with_a_task = create_package(&package_options(
+        &find_app(&apps, PROFILES_APP)?,
+        &work.join("dropped task"),
+        ScanSource::Live,
+        ProfileChoice::Default,
+    ))?;
+    let manifest = manifest_of(
+        with_a_task
+            .self_extracting_archive_path
+            .as_deref()
+            .ok_or("no installer")?,
+    )?;
+    let names: Vec<&str> = manifest
+        .scheduled_tasks_detected
+        .iter()
+        .map(|task| task.task_name.as_str())
+        .collect();
+    println!("tasks in it: {names:?}");
+    checks.that(
+        "it is not in the package",
+        !names.contains(&dropped_name),
+        format!("{names:?}"),
+    );
+    checks.that(
+        "and that is said",
+        with_a_task
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "scheduled_task_left_out"),
+        "no warning",
+    );
+    fs::remove_file(&dropped)?;
+
+    section("A link in this account's AppData to a shadow copy, which has no name to give");
+    match tool("vssadmin.exe", &["create", "shadow", "/for=C:"]) {
+        Ok(output) if output.status.success() => {
+            let shown = text(&output.stdout);
+            let volume = shown.lines().find_map(|line| {
+                line.split_once("Shadow Copy Volume Name:")
+                    .map(|(_, name)| name.trim().to_owned())
+            });
+            if let Some(volume) = volume {
+                println!("shadow copy: {volume}");
+                let inside = format!(r"{volume}\Users\{other_name}\{other_data}");
+                let named_for_it = my_profile.join(r"AppData\Roaming\WAM By A Share");
+                let link = named_for_it.display().to_string();
+                let made = tool("cmd", &["/C", "mklink", "/J", &link, &inside])?;
+                println!(
+                    "the link: {}: {}{}",
+                    made.status,
+                    text(&made.stdout),
+                    text(&made.stderr)
+                );
+                reg_add(entry, Some("DisplayName"), "REG_SZ", "WAM By A Share")?;
+                reg_add(
+                    entry,
+                    Some("DisplayIcon"),
+                    "REG_SZ",
+                    &exe.display().to_string(),
+                )?;
+                let listed = tool("cmd", &["/C", "dir", "/b", &link])?;
+                println!("what is through it: {}", text(&listed.stdout));
+                checks.that(
+                    "the link does lead to that account's data, so this tries something",
+                    made.status.success() && text(&listed.stdout).contains("theirs"),
+                    text(&listed.stderr),
+                );
+                let apps = list_installed_apps_from(&SystemContext::live())?;
+                let package = create_package(&package_options(
+                    &find_app(&apps, "WAM By A Share")?,
+                    &work.join("shadow"),
+                    ScanSource::Live,
+                    ProfileChoice::Default,
+                ))?;
+                let holding = files_holding(&package.package_root, "private to theirs")?;
+                checks.same("none of it is in the package", holding.trim(), "");
+                let _ = fs::remove_dir(&named_for_it);
+                reg_delete_key(entry);
+            }
+        }
+        other => println!(
+            "NOT PROVEN: this runner would not make a shadow copy: {:?}",
+            other.map(|output| text(&output.stderr))
+        ),
+    }
 
     section("A shortcut of this account's that names the program of a machine-wide app");
     let theirs = other_profile.join(&other_data);
