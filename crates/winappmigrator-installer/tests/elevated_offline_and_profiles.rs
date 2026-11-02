@@ -55,6 +55,9 @@ const OTHER_SID_ON_DRIVE: &str = "S-1-5-21-1111-2222-3333-1001";
 const HOST_FOLDER: &str = r"C:\WAM Host Secret";
 const HOST_SECRET: &str = "wam-host-secret-must-not-be-captured";
 const OTHER_SECRET: &str = "wam-other-account-private";
+/// In this machine's registry, where a link in the drive's registry leads.
+const HOST_REGISTRY_KEY: &str = r"HKLM\SOFTWARE\WAM Host Registry Secret";
+const HOST_REGISTRY_TARGET: &str = r"\REGISTRY\MACHINE\SOFTWARE\WAM Host Registry Secret";
 
 const UNINSTALL_KEY: &str =
     r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\WAM Offline App";
@@ -961,6 +964,40 @@ fn lay_out_the_drive(paths: &Paths) -> TestResult {
     Ok(())
 }
 
+/// Make a key in a hive that is a link to somewhere else in the registry. Only the Windows API can,
+/// and this is a test, so it can use it. A registry link in a hive would be followed by opening
+/// it, as a link on a disk is.
+fn registry_link(parent_key: &str, name: &str, target: &str) -> TestResult {
+    let parent = parent_key
+        .strip_prefix(r"HKLM\")
+        .ok_or("the key has to be under HKLM")?;
+    powershell(&format!(
+        r#"Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class WamRegistry {{
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    public static extern int RegCreateKeyExW(IntPtr key, string subKey, int reserved, string className, int options, int access, IntPtr security, out IntPtr result, out int disposition);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    public static extern int RegSetValueExW(IntPtr key, string name, int reserved, int type, byte[] data, int size);
+    [DllImport("advapi32.dll")]
+    public static extern int RegCloseKey(IntPtr key);
+}}
+'@;
+           $machine = [IntPtr]::new([long]0x80000002 - 0x100000000);
+           $created = [IntPtr]::Zero; $disposition = 0;
+           $code = [WamRegistry]::RegCreateKeyExW($machine, {key}, 0, $null, 2, 0xF003F, [IntPtr]::Zero, [ref]$created, [ref]$disposition);
+           if ($code -ne 0) {{ throw "RegCreateKeyEx: $code" }};
+           $bytes = [Text.Encoding]::Unicode.GetBytes({target});
+           $code = [WamRegistry]::RegSetValueExW($created, 'SymbolicLinkValue', 0, 6, $bytes, $bytes.Length);
+           if ($code -ne 0) {{ throw "RegSetValueEx: $code" }};
+           [void][WamRegistry]::RegCloseKey($created)"#,
+        key = quoted(&format!(r"{parent}\{name}")),
+        target = quoted(target),
+    ))
+    .map(|_| ())
+}
+
 /// What makes the drive's registry the other PC's and not a copy of this one's, and what makes it
 /// hostile.
 fn edit_the_drives_registry(paths: &Paths) -> TestResult {
@@ -1044,6 +1081,12 @@ fn edit_the_drives_registry(paths: &Paths) -> TestResult {
             Some("Path"),
             "REG_SZ",
             &on_the_host,
+        )?;
+        // A key under the app's own, which is all captured, that is this machine's registry.
+        registry_link(
+            &format!(r"{key}\{VENDOR}\{APP}"),
+            "HostLink",
+            HOST_REGISTRY_TARGET,
         )?;
         // A whole app that is on this machine, by its uninstall entry.
         let hostile = format!(r"{key}\Microsoft\Windows\CurrentVersion\Uninstall\WAM Hostile App");
@@ -1756,6 +1799,23 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
     section("Take the app off this machine, so that nothing can come from here by accident");
     remove_live_app(&paths, &mut checks)?;
 
+    section("What Windows itself does with a registry link in a hive it has just loaded");
+    reg_add(HOST_REGISTRY_KEY, Some("Token"), "REG_SZ", HOST_SECRET)?;
+    edit_hive(
+        &format!(r"{DRIVE_FOLDER}\Windows\System32\config\SOFTWARE"),
+        |key| {
+            let link = format!(r"{key}\{VENDOR}\{APP}\HostLink");
+            let output = tool("reg.exe", &["query", &link, "/s"])?;
+            println!(
+                "reg query of the link: {}\n{}{}",
+                output.status,
+                text(&output.stdout),
+                text(&output.stderr)
+            );
+            Ok(())
+        },
+    )?;
+
     let source = ScanSource::offline(DRIVE);
     let before = tree_state(DRIVE_FOLDER)?;
     println!("{} entries on the drive", before.len());
@@ -1831,6 +1891,14 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
     );
     let holding = files_holding(&package.package_root, OTHER_SECRET)?;
     checks.same("another account's data is in no file", holding.trim(), "");
+    checks.that(
+        "a registry link to this machine was not followed into the package",
+        !manifest.registry_keys_exported.iter().any(|entry| {
+            entry.value_name.as_deref() == Some("Token")
+                || entry.value_data.as_deref() == Some(HOST_SECRET)
+        }),
+        "the value from this machine's registry is there",
+    );
     let raw = fs::read_to_string(&package.manifest_path)?;
     let without_warnings: PackageManifest = serde_json::from_str(&raw)?;
     let files_text = serde_json::to_string(&without_warnings.file_inventory)?;
