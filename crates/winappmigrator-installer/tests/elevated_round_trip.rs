@@ -2843,15 +2843,6 @@ fn logs_are_kept_and_hold_no_secrets(checks: &mut Checks, work: &Path) -> TestRe
     check_is_protected(checks, LOGS_DIR)?;
     check_is_protected(checks, INSTALLS_DIR)?;
     check_is_protected(checks, STATE_ROOT)?;
-    let logs: Vec<PathBuf> = fs::read_dir(LOGS_DIR)?
-        .flatten()
-        .map(|entry| entry.path())
-        .collect();
-    checks.that(
-        "there are logs, and no more than the limit",
-        !logs.is_empty() && logs.len() <= 20,
-        format!("{logs:?}"),
-    );
     // Asked for by name as well, and held to the same.
     let asked_for = work.join("asked-for.log");
     let package = hand_built_package("WAM E2E Log Source")?;
@@ -2876,6 +2867,16 @@ fn logs_are_kept_and_hold_no_secrets(checks: &mut Checks, work: &Path) -> TestRe
         "one that is already there is refused, and nothing is done",
         !refused.success,
         &refused.output,
+    );
+    // Only now, since each new log can take the place of the oldest.
+    let logs: Vec<PathBuf> = fs::read_dir(LOGS_DIR)?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    checks.that(
+        "there are logs, and no more than the limit, after far more runs than that",
+        !logs.is_empty() && logs.len() <= 20,
+        format!("{logs:?}"),
     );
     let mut text_of_logs = String::new();
     for log in logs.iter().chain([&asked_for]) {
@@ -3552,7 +3553,9 @@ fn hostile_package_gets_nothing_it_was_refused() -> TestResult {
         1,
     );
 
+    a_location_is_where_it_is_however_it_is_written(&mut checks)?;
     an_uninstall_cannot_be_led_outside_the_install(&mut checks)?;
+    a_drive_that_has_gone_is_waited_for(&mut checks)?;
     a_signed_installer_leaves_an_unsigned_uninstaller(&mut checks)?;
 
     checks.finish()
@@ -3704,6 +3707,128 @@ fn an_uninstall_cannot_be_led_outside_the_install(checks: &mut Checks) -> TestRe
         fs::read(&victim_nested)?,
         b"the same in both places".to_vec(),
     );
+    Ok(())
+}
+
+/// Windows reads all of these as the state folder or the Windows folder, and an install cannot
+/// be let in by writing one of them differently.
+fn a_location_is_where_it_is_however_it_is_written(checks: &mut Checks) -> TestResult {
+    section("The state folder and the Windows folder, written some other way");
+    const LEAF: &str = "WAM E2E Spelled";
+    const WINDOWS: &str = r"C:\Windows";
+    let package = hand_built_package("WAM E2E Spelled Source")?;
+    let installer = package.build("spelled")?;
+    let link = format!(r"{PROGRAM_FILES}\WAM E2E Link To Windows");
+    junction(&link, WINDOWS)?;
+    let short_program_data = powershell(
+        "(New-Object -ComObject Scripting.FileSystemObject).GetFolder('C:\\ProgramData').ShortPath",
+    )?;
+    let short_program_data = short_program_data.trim();
+    println!("ProgramData's short name here: {short_program_data}");
+    let mut locations = vec![
+        format!(r"C:\.\ProgramData\WinAppMigrator\{LEAF}"),
+        format!(r"C:\\ProgramData\WinAppMigrator\{LEAF}"),
+        format!(r"C:/ProgramData/WinAppMigrator/{LEAF}"),
+        format!(r"\\?\{STATE_ROOT}\{LEAF}"),
+        format!(r"C:\ProgramData\WinAppMigrator.\{LEAF}"),
+        format!(r"C:\.\Windows\{LEAF}"),
+        format!(r"C:\\Windows\{LEAF}"),
+        format!(r"\\?\{WINDOWS}\{LEAF}"),
+        format!(r"\\localhost\C$\Windows\{LEAF}"),
+        format!(r"C:\Windows.\{LEAF}"),
+        format!(r"{link}\{LEAF}"),
+    ];
+    if !short_program_data.eq_ignore_ascii_case(r"C:\ProgramData") {
+        locations.push(format!(r"{short_program_data}\WinAppMigrator\{LEAF}"));
+    }
+    let on_record = installs_on_record()?;
+    for location in &locations {
+        let run = run_installer(&installer, &["--target-root", location, "--apply"])?;
+        checks.that(&format!("{location} is refused"), !run.success, &run.output);
+        checks.that(
+            "with nothing put in the Windows folder",
+            !Path::new(WINDOWS).join(LEAF).exists(),
+            location,
+        );
+        checks.that(
+            "or where installs are recorded",
+            !Path::new(STATE_ROOT).join(LEAF).exists(),
+            location,
+        );
+    }
+    checks.same(
+        "and no install was recorded",
+        installs_on_record()?,
+        on_record,
+    );
+    fs::remove_dir(&link)?;
+    Ok(())
+}
+
+/// A drive can be unplugged between installing and uninstalling, and that is not what has gone
+/// wrong with anything. It comes back, so everything has to still be there to finish with.
+fn a_drive_that_has_gone_is_waited_for(checks: &mut Checks) -> TestResult {
+    section("An install on a drive that is not connected");
+    const DRIVE: &str = "W:";
+    const ENTRIES: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall";
+    let backing = format!(r"{PROGRAM_FILES}\WAM E2E Drive");
+    fs::create_dir_all(&backing)?;
+    must("subst", &[DRIVE, &backing])?;
+    let id = installed_with_a_subfolder("WAM E2E Drive Source", &format!(r"{DRIVE}\Acme"))?;
+    let installed = format!(r"{backing}\Acme\sub\plugin.dat");
+    checks.that(
+        "it was installed",
+        Path::new(&installed).is_file(),
+        &installed,
+    );
+    checks.that(
+        "and has an entry in Settings",
+        whole_key(ENTRIES)?.contains(&id),
+        &id,
+    );
+
+    must("subst", &[DRIVE, "/D"])?;
+    let run = uninstall_quietly(checks, &id, "")?;
+    checks.that(
+        "the uninstall does not say it finished",
+        !run.success,
+        &run.output,
+    );
+    checks.that(
+        "and says why, without calling it a failure",
+        run.output.contains("not connected") && run.output.contains("Could not be undone: 0"),
+        &run.output,
+    );
+    checks.that(
+        "its entry in Settings stays, to finish from",
+        whole_key(ENTRIES)?.contains(&id),
+        &id,
+    );
+    checks.that(
+        "so does its record",
+        installs_on_record()?.contains(&id),
+        &id,
+    );
+    checks.that(
+        "and so does the file",
+        Path::new(&installed).is_file(),
+        &installed,
+    );
+
+    must("subst", &[DRIVE, &backing])?;
+    let run = uninstall_quietly(checks, &id, "")?;
+    checks.that(
+        "with the drive back, running it again finishes the job",
+        run.success && !Path::new(&format!(r"{backing}\Acme")).exists(),
+        &run.output,
+    );
+    checks.that(
+        "and its entry in Settings goes",
+        !whole_key(ENTRIES)?.contains(&id),
+        &id,
+    );
+    must("subst", &[DRIVE, "/D"])?;
+    fs::remove_dir_all(&backing)?;
     Ok(())
 }
 
