@@ -57,8 +57,10 @@ may be able to write to.
   whoever could read it before still can, by a path they would have to know.
 - **Links.** An install location that is a link or under one is refused, and so is a data folder it would
   write to, because whoever can write beside a link can change where it leads at any moment, with no need
-  to empty anything. Use the place it leads to instead. A volume mounted on a folder is allowed if it has no
-  drive letter of its own, though if others can write beside that folder, they can change that too. For each
+  to empty anything. Use the place it leads to instead. A volume mounted on a folder is allowed if Windows
+  gives that folder as where it is, though if others can write beside that folder, they can change that too.
+  If Windows gives a drive letter instead, it is refused, so use that. Neither has been run on a real
+  mounted volume. For each
   delete and restore, and each file an install writes, it holds every folder on the way and keeps a hidden
   file open in the last one until it is done. A held folder cannot be moved, and a folder with something held
   in it cannot be emptied, which it would have to be to become a link. The folder it is all under is held

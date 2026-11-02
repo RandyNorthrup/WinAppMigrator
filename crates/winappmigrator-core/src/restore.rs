@@ -587,9 +587,9 @@ fn refuse_roots_under_links(roots: &[PathBuf], target_root: &Path) -> Result<()>
         if let Some(link) = first_link_to(root) {
             return Err(WinAppMigratorError::InvalidInput(format!(
                 "this app has things to restore to {}, and {} is a link to somewhere else, which \
-                 others may be able to change, so nothing was installed. Install it without its \
-                 user data and license data if that is what goes there, or put that folder back \
-                 where it was",
+                 others may be able to change, so nothing was installed. If what goes there is \
+                 user data or license data, install it without its user data and license data. \
+                 If it is a shortcut in a Startup folder, put that folder back where it was",
                 root.display(),
                 link.display()
             )));
