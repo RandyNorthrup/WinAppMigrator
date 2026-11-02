@@ -69,6 +69,24 @@ const APP_PATHS_KEY: &str =
     r"HKLM\Software\Microsoft\Windows\CurrentVersion\App Paths\WAM Offline App.exe";
 const CLSID: &str = "{5A7E6E0C-E2E0-4000-8000-00000000AB01}";
 const USER_CLSID: &str = "{5A7E6E0C-E2E0-4000-8000-00000000AB02}";
+const CLSID_32: &str = "{5A7E6E0C-E2E0-4000-8000-00000000AB03}";
+const USER_CLSID_32: &str = "{5A7E6E0C-E2E0-4000-8000-00000000AB04}";
+/// A class on the drive whose server is where this machine's marker is. Nothing is to come of it.
+const HOST_CLSID: &str = "{5A7E6E0C-E2E0-4000-8000-00000000AB05}";
+const DRIVE_FIREWALL_RULE: &str = "WAM Offline In";
+const DRIVE_HOST_RULE: &str = "WAM Offline Host";
+const DRIVE_EVENT_SOURCE: &str = "WamOfflineSource";
+const DRIVE_FONT: &str = "WAM Offline Sans (TrueType)";
+const DRIVE_DRIVER: &str = "WAM Offline Driver";
+const DRIVE_DSN: &str = "WAM Offline DB";
+/// Under the app's key on the drive, and never to reach a package.
+const DRIVE_CANARY: &str = "wam-offline-canary";
+const MACHINE_FONTS: &str = r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\Fonts";
+const EVENT_LOG_APPLICATION: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application";
+const MACHINE_RUN_32: &str = r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run";
+const APP_PATHS_32: &str =
+    r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\WAM Offline App.exe";
+const LAYERS: &str = r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
 const MACHINE_KEY: &str = r"HKLM\Software\WAM Offline Vendor\WAM Offline App";
 const USER_KEY: &str = r"HKCU\Software\WAM Offline Vendor\WAM Offline App";
 const MACHINE_RUN: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Run";
@@ -658,6 +676,8 @@ fn exe_of(root: &str) -> String {
 fn app_files() -> Vec<(&'static str, &'static [u8])> {
     vec![
         (r"conf\app.conf", b"setting=1\r\n"),
+        // What says it uses FlexLM, which is what ties the store of that name to it.
+        (r"bin\lmgr11.dll", b"not really FlexNet\r\n"),
         (r"plugins\Größe.txt", "größe\r\n".as_bytes()),
     ]
 }
@@ -677,6 +697,89 @@ fn app_data(paths: &Paths) -> Vec<(String, &'static [u8])> {
 }
 
 /// The app, on this machine, by Windows' own tools.
+/// What goes into how Windows finds and starts things, which a drive has in its own hives. Some
+/// are in `UsrClass.dat`, the hive of its own that an account's classes are in.
+fn drive_integrations(root: &str) -> Vec<(String, Option<String>, String)> {
+    let exe = exe_of(root);
+    let server = format!(r"{root}\bin\Shell.dll");
+    let command = format!("\"{exe}\" \"%1\"");
+    let of = |key: String, name: Option<&str>, data: &str| {
+        (key, name.map(ToOwned::to_owned), data.to_owned())
+    };
+    vec![
+        of(
+            format!(r"HKLM\Software\Classes\WOW6432Node\CLSID\{CLSID_32}\InprocServer32"),
+            None,
+            &server,
+        ),
+        of(
+            format!(r"HKCU\Software\Classes\WOW6432Node\CLSID\{USER_CLSID_32}\InprocServer32"),
+            None,
+            &server,
+        ),
+        of(
+            r"HKLM\Software\Classes\wamoffline".to_owned(),
+            Some("URL Protocol"),
+            "",
+        ),
+        of(
+            r"HKLM\Software\Classes\wamoffline\shell\open\command".to_owned(),
+            None,
+            &command,
+        ),
+        of(
+            r"HKCU\Software\Classes\wamofflineuser".to_owned(),
+            Some("URL Protocol"),
+            "",
+        ),
+        of(
+            r"HKCU\Software\Classes\wamofflineuser\shell\open\command".to_owned(),
+            None,
+            &command,
+        ),
+        of(
+            r"HKLM\Software\Classes\*\shellex\ContextMenuHandlers\WamOffline".to_owned(),
+            None,
+            CLSID,
+        ),
+        of(
+            format!(r"{EVENT_LOG_APPLICATION}\{DRIVE_EVENT_SOURCE}"),
+            Some("EventMessageFile"),
+            &server,
+        ),
+        of(MACHINE_FONTS.to_owned(), Some(DRIVE_FONT), &server),
+        of(
+            format!(r"HKLM\Software\ODBC\ODBCINST.INI\{DRIVE_DRIVER}"),
+            Some("Driver"),
+            &server,
+        ),
+        of(
+            format!(r"HKLM\Software\ODBC\ODBC.INI\{DRIVE_DSN}"),
+            Some("Driver"),
+            &server,
+        ),
+        of(
+            MACHINE_RUN_32.to_owned(),
+            Some(APP),
+            &format!("\"{exe}\" --tray"),
+        ),
+        of(APP_PATHS_32.to_owned(), None, &exe),
+        of(LAYERS.to_owned(), Some(&exe), "~ WINXPSP3"),
+    ]
+}
+
+fn firewall_rule_says(name: &str) -> TestResult<String> {
+    let shown = powershell(&format!(
+        "Get-NetFirewallRule -DisplayName {} -ErrorAction SilentlyContinue | ForEach-Object {{ \
+           $app = $_ | Get-NetFirewallApplicationFilter; \
+           $port = $_ | Get-NetFirewallPortFilter; \
+           '{{0}}|{{1}}|{{2}}|{{3}}' -f $_.Direction, $_.Action, $app.Program, ($port.LocalPort -join ',') \
+         }}",
+        quoted(name)
+    ))?;
+    Ok(shown.trim().to_owned())
+}
+
 fn create_live_app(paths: &Paths, program: &Path) -> TestResult {
     let root = LIVE_ROOT;
     let exe = exe_of(root);
@@ -779,6 +882,43 @@ fn create_live_app(paths: &Paths, program: &Path) -> TestResult {
         "REG_SZ",
         &format!("\"{exe}\" \"%1\""),
     )?;
+    for (key, name, data) in drive_integrations(root) {
+        reg_add(&key, name.as_deref(), "REG_SZ", &data)?;
+    }
+    reg_add(MACHINE_KEY, Some("ApiKey"), "REG_SZ", DRIVE_CANARY)?;
+    reg_add(
+        &format!(r"HKLM\Software\ODBC\ODBC.INI\{DRIVE_DSN}"),
+        Some("PWD"),
+        "REG_SZ",
+        DRIVE_CANARY,
+    )?;
+    // Saying things of this machine's files, in the way only a hostile drive would.
+    reg_add(
+        &format!(r"HKLM\Software\Classes\CLSID\{HOST_CLSID}\InprocServer32"),
+        None,
+        "REG_SZ",
+        &format!(r"{HOST_FOLDER}\{APP}\host.exe"),
+    )?;
+    for (name, program, port) in [
+        (DRIVE_FIREWALL_RULE, exe.as_str(), "8766"),
+        (DRIVE_HOST_RULE, r"C:\WAM Host Secret\host.exe", "8767"),
+    ] {
+        must(
+            "netsh.exe",
+            &[
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                &format!("name={name}"),
+                "dir=in",
+                "action=allow",
+                &format!("program={program}"),
+                "protocol=tcp",
+                &format!("localport={port}"),
+            ],
+        )?;
+    }
     must(
         "sc.exe",
         &[
@@ -1347,6 +1487,40 @@ fn remove_live_app(paths: &Paths, checks: &mut Checks) -> TestResult {
     }
     reg_delete_key(&format!(r"HKLM\Software\Classes\CLSID\{CLSID}"));
     reg_delete_key(&format!(r"HKCU\Software\Classes\CLSID\{USER_CLSID}"));
+    reg_delete_key(&format!(r"HKLM\Software\Classes\CLSID\{HOST_CLSID}"));
+    for (key, name, _) in drive_integrations(LIVE_ROOT) {
+        match name {
+            Some(name)
+                if key.starts_with(MACHINE_FONTS)
+                    || key.starts_with(MACHINE_RUN_32)
+                    || key.starts_with(LAYERS) =>
+            {
+                reg_delete_value(&key, &name);
+            }
+            _ => reg_delete_key(&key),
+        }
+    }
+    reg_delete_key(r"HKLM\Software\Classes\wamoffline");
+    reg_delete_key(r"HKCU\Software\Classes\wamofflineuser");
+    reg_delete_key(&format!(
+        r"HKLM\Software\Classes\WOW6432Node\CLSID\{CLSID_32}"
+    ));
+    reg_delete_key(&format!(
+        r"HKCU\Software\Classes\WOW6432Node\CLSID\{USER_CLSID_32}"
+    ));
+    reg_delete_key(&format!(r"HKLM\Software\ODBC\ODBC.INI\{DRIVE_DSN}"));
+    for name in [DRIVE_FIREWALL_RULE, DRIVE_HOST_RULE] {
+        let _ = tool(
+            "netsh.exe",
+            &[
+                "advfirewall",
+                "firewall",
+                "delete",
+                "rule",
+                &format!("name={name}"),
+            ],
+        )?;
+    }
     reg_delete_value(MACHINE_RUN, APP);
     reg_delete_value(USER_RUN, APP);
     reg_delete_value(MACHINE_ENVIRONMENT, "WAM_OFFLINE_HOME");
@@ -1633,6 +1807,58 @@ fn check_the_scan(checks: &mut Checks, manifest: &PackageManifest, paths: &Paths
             .any(|file| file.path.starts_with(DRIVE) || file.original_path.starts_with(DRIVE)),
         "it does",
     );
+    for (key, name, _) in drive_integrations(LIVE_ROOT) {
+        let below = key
+            .split_once('\\')
+            .map_or(key.as_str(), |(_, below)| below);
+        checks.that(
+            &format!(
+                "scan of the drive: {key}\\{}",
+                name.as_deref().unwrap_or("(Default)")
+            ),
+            manifest.registry_keys_exported.iter().any(|entry| {
+                entry.key_path.eq_ignore_ascii_case(below)
+                    && name.as_deref().is_none_or(|name| {
+                        entry
+                            .value_name
+                            .as_deref()
+                            .is_some_and(|value| value.eq_ignore_ascii_case(name))
+                    })
+            }),
+            "it was not captured",
+        );
+    }
+    let exe = exe_of(LIVE_ROOT);
+    let rules: Vec<(&str, &Path)> = manifest
+        .firewall_rules_detected
+        .iter()
+        .map(|rule| (rule.name.as_str(), rule.program.as_path()))
+        .collect();
+    checks.same(
+        "scan of the drive: its firewall rule, as its PC calls the program, and not the other",
+        rules,
+        vec![(DRIVE_FIREWALL_RULE, Path::new(&exe))],
+    );
+    checks.that(
+        "scan of the drive: a class whose server is this machine's file is not the app's",
+        !manifest.registry_keys_exported.iter().any(|entry| {
+            entry
+                .key_path
+                .to_ascii_lowercase()
+                .contains(&HOST_CLSID.to_ascii_lowercase())
+        }),
+        "it was captured",
+    );
+    for name in ["ApiKey", "PWD"] {
+        checks.that(
+            &format!("scan of the drive: {name} is left out, and said to be"),
+            manifest
+                .secrets_left_out
+                .iter()
+                .any(|item| item.name.ends_with(name)),
+            format!("{:?}", manifest.secrets_left_out),
+        );
+    }
     let warned = manifest
         .warnings
         .iter()
@@ -1730,6 +1956,26 @@ fn check_installed(checks: &mut Checks, paths: &Paths, root: &str) -> TestResult
         "reg.exe: the user's variable",
         reg_data(USER_ENVIRONMENT, Some("WAM_OFFLINE_USER_HOME"))?,
         Some(format!(r"{root}\conf")),
+    );
+    for (key, name, data) in drive_integrations(root) {
+        checks.same(
+            &format!(
+                "reg.exe: from the drive: {key}\\{}",
+                name.as_deref().unwrap_or("(Default)")
+            ),
+            reg_data(&key, name.as_deref())?,
+            Some(data),
+        );
+    }
+    checks.same(
+        "Get-NetFirewallRule: the rule from the drive, for the file on this machine",
+        firewall_rule_says(DRIVE_FIREWALL_RULE)?,
+        format!("Inbound|Allow|{exe}|8766"),
+    );
+    checks.same(
+        "Get-NetFirewallRule: and not the one for this machine's file",
+        firewall_rule_says(DRIVE_HOST_RULE)?,
+        String::new(),
     );
     let service = must("sc.exe", &["qc", SERVICE, "8192"])?;
     checks.that(
@@ -1830,6 +2076,22 @@ fn new_locations_come_back_out(
 
     section("An uninstall that takes the user data with it");
     let run = uninstall_quietly(checks, &id, " --remove-user-data")?;
+    section("What came from the drive's registry comes back out");
+    for (key, name, _) in drive_integrations(root) {
+        checks.same(
+            &format!(
+                "reg.exe: after the uninstall: {key}\\{}",
+                name.as_deref().unwrap_or("(Default)")
+            ),
+            reg_data(&key, name.as_deref())?,
+            None,
+        );
+    }
+    checks.same(
+        "Get-NetFirewallRule: after the uninstall, no rule from the drive",
+        firewall_rule_says(DRIVE_FIREWALL_RULE)?,
+        String::new(),
+    );
     checks.that("the uninstall succeeded", run.success, &run.output);
     checks.same(
         "uninstall: what Documents had comes back",
@@ -2064,6 +2326,10 @@ fn a_real_drive_from_another_pc_round_trips() -> TestResult {
         smb_connections()?,
         connections_before,
     );
+
+    section("What looks like a credential on the drive is not in it, by Windows' own search");
+    let holding = files_holding(&package.package_root, DRIVE_CANARY)?;
+    checks.same("the canary is in no file", holding.trim(), "");
 
     section("Nothing of this machine's is in it, by Windows' own search of what was packaged");
     let holding = files_holding(&package.package_root, HOST_SECRET)?;

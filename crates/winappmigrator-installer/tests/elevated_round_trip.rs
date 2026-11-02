@@ -32,15 +32,16 @@ use std::time::{Duration, Instant};
 use winappmigrator_core::archive::{create_zip_archive, has_certificate_table};
 use winappmigrator_core::hashing::sha256_file;
 use winappmigrator_core::path_utils::POWERSHELL_UTF8_OUTPUT;
-use winappmigrator_core::prerequisites::download;
+use winappmigrator_core::prerequisites::{compiled_specs, download};
 use winappmigrator_core::privilege::{ProtectedFolder, is_elevated};
 use winappmigrator_core::{
     AppArchitecture, AppSelection, BuildMonitor, DriverEntry, DriverKind, EmbeddedPackage,
-    EnvironmentScope, EnvironmentVariableEntry, FileClassification, FileEntry, InstallerStub,
-    MatchConfidence, PackageManifest, PackageOptions, PrerequisiteBundle, ProfileChoice,
-    RegistryEntry, RegistryHive, RegistryValueKind, RuntimePrerequisite, RuntimePrerequisiteKind,
-    ScanSource, ScheduledTaskEntry, ServiceEntry, ShortcutEntry, SystemContext, create_package,
-    create_self_extracting_archive, list_installed_apps_from, read_embedded_manifest,
+    EnvironmentScope, EnvironmentVariableEntry, FileClassification, FileEntry, FirewallRuleEntry,
+    InstallerStub, MatchConfidence, PackageManifest, PackageOptions, PrerequisiteBundle,
+    ProfileChoice, RegistryEntry, RegistryHive, RegistryValueKind, RuntimePrerequisite,
+    RuntimePrerequisiteKind, ScanSource, ScheduledTaskEntry, ServiceEntry, ShortcutEntry,
+    SystemContext, create_package, create_self_extracting_archive, list_installed_apps_from,
+    read_embedded_manifest,
 };
 use winappmigrator_installer::cleanup::create_staging_dir;
 
@@ -544,12 +545,6 @@ fn expected_registry(root: &str) -> Vec<ExpectedValue> {
             "REG_EXPAND_SZ",
             r"%ProgramData%\WAM E2E App\logs".to_owned(),
         ),
-        value(
-            HKLM_APP_KEY,
-            Some("ApiToken"),
-            "REG_SZ",
-            SECRET_IN_REGISTRY.to_owned(),
-        ),
         value(HKLM_APP_KEY, Some("Count"), "REG_DWORD", "0x2a".to_owned()),
         value(
             HKLM_APP_KEY,
@@ -664,12 +659,6 @@ fn expected_registry(root: &str) -> Vec<ExpectedValue> {
             Some("WAM_E2E_HOME"),
             "REG_SZ",
             root.to_owned(),
-        ),
-        value(
-            MACHINE_ENVIRONMENT_KEY,
-            Some("WAM_E2E_TOKEN"),
-            "REG_SZ",
-            format!(r"{root}\{SECRET_IN_ENVIRONMENT}"),
         ),
         value(
             USER_ENVIRONMENT_KEY,
@@ -1081,6 +1070,14 @@ fn create_fake_app(
     for expected in expected_registry(root) {
         reg_add(&expected.key, expected.name, expected.kind, &expected.data)?;
     }
+    // What looks like a credential, which a scan leaves out, and no log can hold.
+    reg_add(HKLM_APP_KEY, Some("ApiToken"), "REG_SZ", SECRET_IN_REGISTRY)?;
+    reg_add(
+        MACHINE_ENVIRONMENT_KEY,
+        Some("WAM_E2E_TOKEN"),
+        "REG_SZ",
+        &format!(r"{root}\{SECRET_IN_ENVIRONMENT}"),
+    )?;
     // What the source says about removing it from the source, which must not survive.
     for (name, data) in [
         (
@@ -2049,6 +2046,24 @@ fn check_scan(checks: &mut Checks, manifest: &PackageManifest) {
                 file.should_copy && file.original_path == Path::new(SOURCE_ROOT).join(wanted)
             }),
             "it was not found",
+        );
+    }
+    for name in ["ApiToken", "WAM_E2E_TOKEN"] {
+        checks.that(
+            &format!("scan: {name} is left out, and said to be, by name"),
+            manifest
+                .secrets_left_out
+                .iter()
+                .any(|item| item.name.contains(name))
+                && !manifest
+                    .registry_keys_exported
+                    .iter()
+                    .any(|entry| entry.value_name.as_deref() == Some(name))
+                && !manifest
+                    .environment_variables_detected
+                    .iter()
+                    .any(|variable| variable.name == name),
+            format!("{:?}", manifest.secrets_left_out),
         );
     }
     let prerequisite = manifest.runtime_prerequisites.iter().find(|prerequisite| {
@@ -4305,5 +4320,2055 @@ fn downloads_stay_on_https() -> TestResult {
             "NOT PROVEN: no public server gave a redirect to plain HTTP in this run"
         }
     );
+    checks.finish()
+}
+
+// ---------------------------------------------------------------------------------------
+// What goes into how Windows finds and starts things, and what is left out of a package
+// ---------------------------------------------------------------------------------------
+
+const INT_APP: &str = "WAM Int App";
+const INT_VENDOR: &str = "WAM Int Vendor";
+const INT_SOURCE: &str = r"C:\Program Files\WAM Int App";
+const INT_TARGET: &str = r"C:\Program Files\WAM Int Restored";
+const INT_OTHER_ROOT: &str = r"C:\Program Files\WAM Int Other";
+const INT_APP_KEY: &str = r"Software\WAM Int Vendor\WAM Int App";
+const INT_VENDOR_KEY: &str = r"Software\WAM Int Vendor";
+const INT_UNINSTALL: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\WAM Int App";
+const INT_CLASS: &str = "{5A7E6E0C-E2E0-4000-8000-0000000A0001}";
+const INT_SERVER_CLASS: &str = "{5A7E6E0C-E2E0-4000-8000-0000000A0002}";
+const INT_CLASS_32: &str = "{5A7E6E0C-E2E0-4000-8000-0000000A0003}";
+const INT_USER_CLASS: &str = "{5A7E6E0C-E2E0-4000-8000-0000000A0004}";
+const INT_USER_CLASS_32: &str = "{5A7E6E0C-E2E0-4000-8000-0000000A0005}";
+const INT_TYPE_LIBRARY: &str = "{5A7E6E0C-E2E0-4000-8000-0000000A0006}";
+const INT_INTERFACE: &str = "{5A7E6E0C-E2E0-4000-8000-0000000A0007}";
+const INT_APP_ID: &str = "{5A7E6E0C-E2E0-4000-8000-0000000A0008}";
+const OTHER_APP_CLASS: &str = "{5A7E6E0C-E2E0-4000-8000-0000000A0099}";
+const INT_FIREWALL_RULE: &str = "WAM Int In";
+const INT_FONT: &str = "WAM Int Sans (TrueType)";
+const INT_RECORDED_FONT: &str = "WAM Int Recorded (TrueType)";
+const INT_RECORDED_FONT_FILE: &str = r"C:\Windows\Fonts\WamIntRecorded.ttf";
+const INT_UNCLAIMED_FONT: &str = "WAM Int App Extras (TrueType)";
+const INT_UNCLAIMED_FONT_FILE: &str = r"C:\Windows\Fonts\WamIntUnclaimed.ttf";
+const INT_EVENT_SOURCE: &str = "WamIntSource";
+const OTHER_EVENT_SOURCE: &str = "WamOtherSource";
+const EVENT_LOG_APPLICATION: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application";
+const INT_DRIVER: &str = "WAM Int Driver";
+const INT_SOURCE_NAME: &str = "WAM Int DB";
+const INT_SERVICE: &str = "WamIntSvc";
+const INT_CERTIFICATE_SUBJECT: &str = "WAM Int Vendor";
+const LAYERS: &str = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
+const FONTS_KEY: &str = r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\Fonts";
+const INT_RUN_32: &str = r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run";
+const INT_APP_PATHS_32: &str =
+    r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\WAM Int App.exe";
+const CANARY_API_KEY: &str = "wam-canary-api-key";
+const CANARY_PASSWORD: &str = "wam-canary-password";
+const CANARY_CONNECTION: &str = "wam-canary-connection";
+const CANARY_DSN: &str = "wam-canary-dsn-password";
+const CANARY_ENV_FILE: &str = "wam-canary-dotenv";
+const CANARY_KEY_FILE: &str = "wam-canary-private-key";
+const CANARY_SERVICE: &str = "wam-canary-service-argument";
+const CANARY_SHORTCUT: &str = "wam-canary-shortcut-argument";
+const CANARY_LICENSE_FILE: &str = "wam-canary-license-file";
+const CANARY_LICENSE_VALUE: &str = "wam-canary-license-value";
+const CREDENTIALS: [&str; 8] = [
+    CANARY_API_KEY,
+    CANARY_PASSWORD,
+    CANARY_CONNECTION,
+    CANARY_DSN,
+    CANARY_ENV_FILE,
+    CANARY_KEY_FILE,
+    CANARY_SERVICE,
+    CANARY_SHORTCUT,
+];
+const LICENSES: [&str; 2] = [CANARY_LICENSE_FILE, CANARY_LICENSE_VALUE];
+
+/// A value the fake app has, wherever it has it. Its name can be a path, so it is not `ExpectedValue`.
+struct IntValue {
+    key: String,
+    name: Option<String>,
+    kind: &'static str,
+    data: String,
+}
+
+fn int_value(key: &str, name: Option<&str>, kind: &'static str, data: &str) -> IntValue {
+    IntValue {
+        key: key.to_owned(),
+        name: name.map(ToOwned::to_owned),
+        kind,
+        data: data.to_owned(),
+    }
+}
+
+fn int_exe(root: &str) -> String {
+    format!(r"{root}\bin\{INT_APP}.exe")
+}
+
+fn int_shell(root: &str) -> String {
+    format!(r"{root}\bin\WamIntShell.dll")
+}
+
+/// All that the fake app registers. Only the root changes between the source and the target.
+fn int_values(root: &str) -> Vec<IntValue> {
+    let exe = int_exe(root);
+    let shell = int_shell(root);
+    let command = format!("\"{exe}\" \"%1\"");
+    let classes = r"HKLM\Software\Classes";
+    let user_classes = r"HKCU\Software\Classes";
+    let explorer = r"HKLM\Software\Microsoft\Windows\CurrentVersion";
+    let sz = "REG_SZ";
+    let mut values = vec![
+        int_value(INT_UNINSTALL, Some("DisplayName"), sz, INT_APP),
+        int_value(INT_UNINSTALL, Some("Publisher"), sz, INT_VENDOR),
+        int_value(INT_UNINSTALL, Some("InstallLocation"), sz, root),
+        // COM: a class in a DLL, one in a program with an AppID, a 32-bit one, and an account's.
+        int_value(
+            &format!(r"{classes}\CLSID\{INT_CLASS}\InprocServer32"),
+            None,
+            sz,
+            &shell,
+        ),
+        int_value(
+            &format!(r"{classes}\CLSID\{INT_CLASS}\InprocServer32"),
+            Some("ThreadingModel"),
+            sz,
+            "Apartment",
+        ),
+        int_value(
+            &format!(r"{classes}\CLSID\{INT_CLASS}\ProgID"),
+            None,
+            sz,
+            "WamInt.Thing.1",
+        ),
+        int_value(
+            &format!(r"{classes}\CLSID\{INT_CLASS}\VersionIndependentProgID"),
+            None,
+            sz,
+            "WamInt.Thing",
+        ),
+        int_value(
+            &format!(r"{classes}\CLSID\{INT_CLASS}\TypeLib"),
+            None,
+            sz,
+            INT_TYPE_LIBRARY,
+        ),
+        int_value(
+            &format!(r"{classes}\CLSID\{INT_SERVER_CLASS}\LocalServer32"),
+            None,
+            sz,
+            &format!("\"{exe}\" /automation"),
+        ),
+        int_value(
+            &format!(r"{classes}\CLSID\{INT_SERVER_CLASS}"),
+            Some("AppID"),
+            sz,
+            INT_APP_ID,
+        ),
+        int_value(
+            &format!(r"{classes}\WOW6432Node\CLSID\{INT_CLASS_32}\InprocServer32"),
+            None,
+            sz,
+            &shell,
+        ),
+        int_value(
+            &format!(r"{user_classes}\CLSID\{INT_USER_CLASS}\InprocServer32"),
+            None,
+            sz,
+            &shell,
+        ),
+        int_value(
+            &format!(r"{user_classes}\WOW6432Node\CLSID\{INT_USER_CLASS_32}\InprocServer32"),
+            None,
+            sz,
+            &shell,
+        ),
+        int_value(
+            &format!(r"{classes}\WamInt.Thing.1\CLSID"),
+            None,
+            sz,
+            INT_CLASS,
+        ),
+        int_value(
+            &format!(r"{classes}\WamInt.Thing\CLSID"),
+            None,
+            sz,
+            INT_CLASS,
+        ),
+        int_value(
+            &format!(r"{classes}\WamInt.Thing\CurVer"),
+            None,
+            sz,
+            "WamInt.Thing.1",
+        ),
+        int_value(
+            &format!(r"{classes}\TypeLib\{INT_TYPE_LIBRARY}\1.0\0\win64"),
+            None,
+            sz,
+            &format!(r"{root}\bin\wamint.tlb"),
+        ),
+        int_value(
+            &format!(r"{classes}\Interface\{INT_INTERFACE}\ProxyStubClsid32"),
+            None,
+            sz,
+            INT_CLASS,
+        ),
+        int_value(
+            &format!(r"{classes}\Interface\{INT_INTERFACE}\TypeLib"),
+            None,
+            sz,
+            INT_TYPE_LIBRARY,
+        ),
+        int_value(
+            &format!(r"{classes}\AppID\{INT_APP_ID}"),
+            Some("RunAs"),
+            sz,
+            "Interactive User",
+        ),
+        int_value(
+            &format!(r"{classes}\AppID\{INT_APP}.exe"),
+            Some("AppID"),
+            sz,
+            INT_APP_ID,
+        ),
+        // A protocol, a file type of its own, and being on the list for one that is not.
+        int_value(&format!(r"{classes}\wamint"), None, sz, "URL:WAM Int"),
+        int_value(&format!(r"{classes}\wamint"), Some("URL Protocol"), sz, ""),
+        int_value(
+            &format!(r"{classes}\wamint\shell\open\command"),
+            None,
+            sz,
+            &command,
+        ),
+        int_value(&format!(r"{classes}\.wamint"), None, sz, "WamInt.File"),
+        int_value(
+            &format!(r"{classes}\WamInt.File\shell\open\command"),
+            None,
+            sz,
+            &command,
+        ),
+        int_value(
+            &format!(r"{classes}\WamInt.File\DefaultIcon"),
+            None,
+            sz,
+            &format!("{exe},0"),
+        ),
+        int_value(
+            &format!(r"{classes}\.wamshared\OpenWithProgids"),
+            Some("WamInt.File"),
+            sz,
+            "",
+        ),
+        // Shell extensions, and a command on the menu of every folder.
+        int_value(
+            &format!(r"{classes}\*\shellex\ContextMenuHandlers\WamInt"),
+            None,
+            sz,
+            INT_CLASS,
+        ),
+        int_value(
+            &format!(r"{explorer}\Explorer\ShellIconOverlayIdentifiers\WamIntOverlay"),
+            None,
+            sz,
+            INT_CLASS,
+        ),
+        int_value(
+            &format!(r"{explorer}\Shell Extensions\Approved"),
+            Some(INT_CLASS),
+            sz,
+            "WAM Int menu",
+        ),
+        int_value(
+            &format!(r"{classes}\Directory\shell\WamIntHere"),
+            None,
+            sz,
+            "Open with WAM Int",
+        ),
+        int_value(
+            &format!(r"{classes}\Directory\shell\WamIntHere\command"),
+            None,
+            sz,
+            &command,
+        ),
+        // What Default Apps offers.
+        int_value(
+            r"HKLM\Software\RegisteredApplications",
+            Some(INT_APP),
+            sz,
+            r"Software\WAM Int Vendor\Capabilities",
+        ),
+        int_value(
+            r"HKLM\Software\WAM Int Vendor\Capabilities",
+            Some("ApplicationIcon"),
+            sz,
+            &format!("{exe},0"),
+        ),
+        // The rest.
+        int_value(
+            &format!(r"{EVENT_LOG_APPLICATION}\{INT_EVENT_SOURCE}"),
+            Some("EventMessageFile"),
+            sz,
+            &format!(r"{root}\bin\WamIntMsg.dll"),
+        ),
+        int_value(
+            &format!(r"{EVENT_LOG_APPLICATION}\{INT_EVENT_SOURCE}"),
+            Some("TypesSupported"),
+            "REG_DWORD",
+            "0x7",
+        ),
+        int_value(
+            FONTS_KEY,
+            Some(INT_FONT),
+            sz,
+            &format!(r"{root}\fonts\WamIntSans.ttf"),
+        ),
+        int_value(
+            &format!(r"HKLM\Software\ODBC\ODBCINST.INI\{INT_DRIVER}"),
+            Some("Driver"),
+            sz,
+            &shell,
+        ),
+        int_value(
+            &format!(r"HKLM\Software\ODBC\ODBCINST.INI\{INT_DRIVER}"),
+            Some("Setup"),
+            sz,
+            &shell,
+        ),
+        int_value(
+            r"HKLM\Software\ODBC\ODBCINST.INI\ODBC Drivers",
+            Some(INT_DRIVER),
+            sz,
+            "Installed",
+        ),
+        int_value(
+            &format!(r"HKLM\Software\ODBC\ODBC.INI\{INT_SOURCE_NAME}"),
+            Some("Driver"),
+            sz,
+            &shell,
+        ),
+        int_value(
+            &format!(r"HKLM\Software\ODBC\ODBC.INI\{INT_SOURCE_NAME}"),
+            Some("Server"),
+            sz,
+            "db.example",
+        ),
+        int_value(
+            r"HKLM\Software\ODBC\ODBC.INI\ODBC Data Sources",
+            Some(INT_SOURCE_NAME),
+            sz,
+            INT_DRIVER,
+        ),
+        int_value(INT_RUN_32, Some(INT_APP), sz, &format!("\"{exe}\" --tray")),
+        int_value(INT_APP_PATHS_32, None, sz, &exe),
+        int_value(
+            &format!(r"HKLM\{LAYERS}"),
+            Some(exe.as_str()),
+            sz,
+            "~ WINXPSP3",
+        ),
+        int_value(
+            &format!(r"HKCU\{LAYERS}"),
+            Some(exe.as_str()),
+            sz,
+            "~ HIGHDPIAWARE",
+        ),
+        int_value(&format!(r"HKLM\{INT_APP_KEY}"), Some("Theme"), sz, "dark"),
+    ];
+    // What is not a credential whatever it starts like, which must survive.
+    values.extend([
+        int_value(
+            &format!(r"HKLM\{INT_APP_KEY}"),
+            Some("PasswordPolicyVersion"),
+            sz,
+            "3",
+        ),
+        int_value(
+            &format!(r"HKLM\{INT_APP_KEY}"),
+            Some("TokenizerPath"),
+            sz,
+            &format!(r"{root}\conf\app.conf"),
+        ),
+    ]);
+    values
+}
+
+/// What the fake app holds that must never reach a package, as `reg add` wants it.
+fn int_credentials() -> Vec<IntValue> {
+    let sz = "REG_SZ";
+    vec![
+        int_value(
+            &format!(r"HKLM\{INT_APP_KEY}"),
+            Some("ApiKey"),
+            sz,
+            CANARY_API_KEY,
+        ),
+        int_value(
+            &format!(r"HKCU\{INT_APP_KEY}"),
+            Some("Password"),
+            sz,
+            CANARY_PASSWORD,
+        ),
+        int_value(
+            &format!(r"HKLM\{INT_APP_KEY}"),
+            Some("Database"),
+            sz,
+            &format!("Server=db;User Id=sa;Password={CANARY_CONNECTION};"),
+        ),
+        int_value(
+            &format!(r"HKLM\Software\ODBC\ODBC.INI\{INT_SOURCE_NAME}"),
+            Some("PWD"),
+            sz,
+            CANARY_DSN,
+        ),
+    ]
+}
+
+/// What it holds as license data.
+fn int_licenses(root: &str) -> Vec<IntValue> {
+    vec![
+        int_value(
+            &format!(r"HKCU\{INT_APP_KEY}"),
+            Some("LicenseKey"),
+            "REG_SZ",
+            CANARY_LICENSE_VALUE,
+        ),
+        int_value(
+            MACHINE_ENVIRONMENT_KEY,
+            Some("WAM_INT_LICENSE_FILE"),
+            "REG_SZ",
+            &format!(r"{root}\license.lic"),
+        ),
+    ]
+}
+
+/// What belongs to another app, which is there from before and stays there through everything.
+fn other_app_values() -> Vec<IntValue> {
+    let sz = "REG_SZ";
+    let classes = r"HKLM\Software\Classes";
+    let other = format!(r"{INT_OTHER_ROOT}\other.exe");
+    vec![
+        int_value(
+            &format!(r"{classes}\CLSID\{OTHER_APP_CLASS}\InprocServer32"),
+            None,
+            sz,
+            &format!(r"{INT_OTHER_ROOT}\other.dll"),
+        ),
+        // Mentioning a file of the app does not make another app's class its.
+        int_value(
+            &format!(r"{classes}\CLSID\{OTHER_APP_CLASS}\DefaultIcon"),
+            None,
+            sz,
+            &format!("{},0", int_exe(INT_SOURCE)),
+        ),
+        int_value(&format!(r"{classes}\.wamshared"), None, sz, "WamOther.File"),
+        int_value(
+            &format!(r"{classes}\.wamshared\OpenWithProgids"),
+            Some("WamOther.File"),
+            sz,
+            "",
+        ),
+        int_value(
+            &format!(r"{classes}\WamOther.File\shell\open\command"),
+            None,
+            sz,
+            &format!("\"{other}\" \"%1\""),
+        ),
+        int_value(
+            &format!(r"{classes}\wamother"),
+            Some("URL Protocol"),
+            sz,
+            "",
+        ),
+        int_value(
+            &format!(r"{classes}\wamother\shell\open\command"),
+            None,
+            sz,
+            &format!("\"{other}\" \"%1\""),
+        ),
+        int_value(
+            &format!(r"{EVENT_LOG_APPLICATION}\{OTHER_EVENT_SOURCE}"),
+            Some("EventMessageFile"),
+            sz,
+            &format!(r"{INT_OTHER_ROOT}\messages.dll"),
+        ),
+        int_value(
+            r"HKLM\Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved",
+            Some(OTHER_APP_CLASS),
+            sz,
+            "Another app's menu",
+        ),
+    ]
+}
+
+fn add_value(value: &IntValue) -> TestResult {
+    reg_add(&value.key, value.name.as_deref(), value.kind, &value.data)
+}
+
+/// What is in the Windows Firewall of this PC by that name, by Windows' own commands, one line for
+/// each, sorted. Each says what it does and for what.
+fn firewall_rules_named(name: &str) -> TestResult<Vec<String>> {
+    let shown = powershell(&format!(
+        "Get-NetFirewallRule -DisplayName {} -ErrorAction SilentlyContinue | ForEach-Object {{ \
+           $app = $_ | Get-NetFirewallApplicationFilter; \
+           $port = $_ | Get-NetFirewallPortFilter; \
+           '{{0}}|{{1}}|{{2}}|{{3}}|{{4}}|{{5}}' -f $_.Direction, $_.Action, $_.Enabled, \
+             $app.Program, $port.Protocol, ($port.LocalPort -join ',') \
+         }}",
+        quoted(name)
+    ))?;
+    let mut lines: Vec<String> = shown
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    lines.sort();
+    Ok(lines)
+}
+
+fn netsh_add_rule(name: &str, program: &str, port: &str) -> TestResult {
+    must(
+        "netsh.exe",
+        &[
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &format!("name={name}"),
+            "dir=in",
+            "action=allow",
+            &format!("program={program}"),
+            "protocol=tcp",
+            &format!("localport={port}"),
+        ],
+    )
+    .map(|_| ())
+}
+
+fn netsh_show_rule(name: &str) -> TestResult<String> {
+    shown(
+        "netsh.exe",
+        &[
+            "advfirewall",
+            "firewall",
+            "show",
+            "rule",
+            &format!("name={name}"),
+            "verbose",
+        ],
+    )
+}
+
+/// The thumbprint of a certificate this adds to a store of the PC, for the app to be seen relying
+/// on. It is never to be restored.
+fn trust_a_certificate() -> TestResult<String> {
+    let thumbprint = powershell(&format!(
+        "$c = New-SelfSignedCertificate -Subject {} -CertStoreLocation Cert:\\LocalMachine\\My; \
+         $file = Join-Path $env:TEMP 'wam-int-certificate.cer'; \
+         Export-Certificate -Cert $c -FilePath $file | Out-Null; \
+         Import-Certificate -FilePath $file -CertStoreLocation Cert:\\LocalMachine\\TrustedPublisher | Out-Null; \
+         Remove-Item -LiteralPath $file; \
+         Remove-Item -LiteralPath (Join-Path 'Cert:\\LocalMachine\\My' $c.Thumbprint); \
+         $c.Thumbprint",
+        quoted(&format!(
+            "CN={INT_CERTIFICATE_SUBJECT},O={INT_CERTIFICATE_SUBJECT}"
+        ))
+    ))?;
+    Ok(thumbprint.trim().to_owned())
+}
+
+fn trusted_publisher_has(thumbprint: &str) -> TestResult<bool> {
+    let shown = powershell(&format!(
+        "Test-Path -LiteralPath (Join-Path 'Cert:\\LocalMachine\\TrustedPublisher' {})",
+        quoted(thumbprint)
+    ))?;
+    Ok(shown.trim().eq_ignore_ascii_case("true"))
+}
+
+fn untrust_certificate(thumbprint: &str) -> TestResult {
+    powershell(&format!(
+        "Remove-Item -LiteralPath (Join-Path 'Cert:\\LocalMachine\\TrustedPublisher' {})",
+        quoted(thumbprint)
+    ))
+    .map(|_| ())
+}
+
+/// Lay out the fake app, with its integrations, using only Windows' own tools.
+fn create_integrated_app(program: &Path, folders: &ShellFolders) -> TestResult {
+    let root = INT_SOURCE;
+    fs::create_dir_all(format!(r"{root}\bin"))?;
+    fs::create_dir_all(format!(r"{root}\fonts"))?;
+    fs::create_dir_all(format!(r"{root}\conf"))?;
+    fs::copy(program, int_exe(root))?;
+    fs::copy(program, int_shell(root))?;
+    fs::copy(program, format!(r"{root}\bin\WamIntMsg.dll"))?;
+    fs::write(
+        format!(r"{root}\bin\wamint.tlb"),
+        b"WAM Int: not a type library\r\n",
+    )?;
+    fs::write(
+        format!(r"{root}\fonts\WamIntSans.ttf"),
+        b"WAM Int: not a font\r\n",
+    )?;
+    fs::write(format!(r"{root}\conf\app.conf"), b"setting=1\r\n")?;
+    fs::write(
+        format!(r"{root}\conf\cacert.pem"),
+        b"-----BEGIN CERTIFICATE-----\r\nMIIB\r\n-----END CERTIFICATE-----\r\n",
+    )?;
+    fs::write(
+        format!(r"{root}\conf\server.pem"),
+        format!(
+            "-----BEGIN RSA PRIVATE KEY-----\r\n{CANARY_KEY_FILE}\r\n-----END RSA PRIVATE KEY-----\r\n"
+        ),
+    )?;
+    fs::write(
+        format!(r"{root}\.env"),
+        format!("API_KEY={CANARY_ENV_FILE}\r\n"),
+    )?;
+    fs::write(
+        format!(r"{root}\license.lic"),
+        format!("LICENSE {CANARY_LICENSE_FILE}\r\n"),
+    )?;
+    // An NSIS uninstaller and the log of what it installed, which is what makes a font in the
+    // Windows folder this app's own. Another font is there that nothing says is.
+    fs::write(
+        format!(r"{root}\uninstall.exe"),
+        b"MZ Nullsoft.NSIS stand-in\r\n",
+    )?;
+    fs::write(
+        format!(r"{root}\uninstall.log"),
+        format!("{INT_RECORDED_FONT_FILE}\r\n{}\r\n", int_exe(root)),
+    )?;
+    fs::write(INT_RECORDED_FONT_FILE, b"WAM Int: not a font\r\n")?;
+    fs::write(INT_UNCLAIMED_FONT_FILE, b"WAM Int: not a font\r\n")?;
+    reg_add(
+        FONTS_KEY,
+        Some(INT_RECORDED_FONT),
+        "REG_SZ",
+        "WamIntRecorded.ttf",
+    )?;
+    reg_add(
+        FONTS_KEY,
+        Some(INT_UNCLAIMED_FONT),
+        "REG_SZ",
+        "WamIntUnclaimed.ttf",
+    )?;
+    reg_add(
+        INT_UNINSTALL,
+        Some("UninstallString"),
+        "REG_SZ",
+        &format!("\"{root}\\uninstall.exe\""),
+    )?;
+    reg_add(
+        INT_UNINSTALL,
+        Some("DisplayIcon"),
+        "REG_SZ",
+        &format!("{},0", int_exe(root)),
+    )?;
+    for value in int_values(root)
+        .iter()
+        .chain(&int_credentials())
+        .chain(&int_licenses(root))
+    {
+        add_value(value)?;
+    }
+    netsh_add_rule(INT_FIREWALL_RULE, &int_exe(root), "8765")?;
+    must(
+        "sc.exe",
+        &[
+            "create",
+            INT_SERVICE,
+            "binPath=",
+            &format!("\"{}\" --password={CANARY_SERVICE} --port 1", int_exe(root)),
+            "start=",
+            "demand",
+        ],
+    )?;
+    create_shortcut(
+        &ShortcutSpec {
+            path: format!(r"{}\{INT_APP}.lnk", folders.startup),
+            arguments: format!("--tray --token={CANARY_SHORTCUT}"),
+            working_directory: String::new(),
+            icon: ",0".to_owned(),
+        },
+        &int_exe(root),
+    )?;
+    Ok(())
+}
+
+fn int_registered_keys() -> Vec<String> {
+    let classes = r"HKLM\Software\Classes";
+    let user_classes = r"HKCU\Software\Classes";
+    let explorer = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Explorer";
+    vec![
+        format!(r"{classes}\CLSID\{INT_CLASS}"),
+        format!(r"{classes}\CLSID\{INT_SERVER_CLASS}"),
+        format!(r"{classes}\WOW6432Node\CLSID\{INT_CLASS_32}"),
+        format!(r"{user_classes}\CLSID\{INT_USER_CLASS}"),
+        format!(r"{user_classes}\WOW6432Node\CLSID\{INT_USER_CLASS_32}"),
+        format!(r"{classes}\WamInt.Thing.1"),
+        format!(r"{classes}\WamInt.Thing"),
+        format!(r"{classes}\TypeLib\{INT_TYPE_LIBRARY}"),
+        format!(r"{classes}\Interface\{INT_INTERFACE}"),
+        format!(r"{classes}\AppID\{INT_APP_ID}"),
+        format!(r"{classes}\AppID\{INT_APP}.exe"),
+        format!(r"{classes}\wamint"),
+        format!(r"{classes}\.wamint"),
+        format!(r"{classes}\WamInt.File"),
+        format!(r"{classes}\*\shellex\ContextMenuHandlers\WamInt"),
+        format!(r"{explorer}\ShellIconOverlayIdentifiers\WamIntOverlay"),
+        format!(r"{classes}\Directory\shell\WamIntHere"),
+        format!(r"HKLM\{INT_VENDOR_KEY}"),
+        format!(r"HKCU\{INT_VENDOR_KEY}"),
+        format!(r"{EVENT_LOG_APPLICATION}\{INT_EVENT_SOURCE}"),
+        format!(r"HKLM\Software\ODBC\ODBCINST.INI\{INT_DRIVER}"),
+        format!(r"HKLM\Software\ODBC\ODBC.INI\{INT_SOURCE_NAME}"),
+        INT_APP_PATHS_32.to_owned(),
+        INT_UNINSTALL.to_owned(),
+    ]
+}
+
+/// Take it all off this PC, as something other than the code under test would.
+fn remove_integrated_app(root: &str, folders: &ShellFolders) -> TestResult {
+    let _ = tool("sc.exe", &["delete", INT_SERVICE]);
+    let _ = tool(
+        "netsh.exe",
+        &[
+            "advfirewall",
+            "firewall",
+            "delete",
+            "rule",
+            &format!("name={INT_FIREWALL_RULE}"),
+            &format!("program={}", int_exe(root)),
+        ],
+    );
+    for key in int_registered_keys() {
+        reg_delete_key(&key);
+    }
+    for (key, name) in [
+        (
+            r"HKLM\Software\Classes\.wamshared\OpenWithProgids".to_owned(),
+            "WamInt.File".to_owned(),
+        ),
+        (
+            r"HKLM\Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved".to_owned(),
+            INT_CLASS.to_owned(),
+        ),
+        (
+            r"HKLM\Software\RegisteredApplications".to_owned(),
+            INT_APP.to_owned(),
+        ),
+        (FONTS_KEY.to_owned(), INT_FONT.to_owned()),
+        (FONTS_KEY.to_owned(), INT_RECORDED_FONT.to_owned()),
+        (
+            r"HKLM\Software\ODBC\ODBCINST.INI\ODBC Drivers".to_owned(),
+            INT_DRIVER.to_owned(),
+        ),
+        (
+            r"HKLM\Software\ODBC\ODBC.INI\ODBC Data Sources".to_owned(),
+            INT_SOURCE_NAME.to_owned(),
+        ),
+        (INT_RUN_32.to_owned(), INT_APP.to_owned()),
+        (format!(r"HKLM\{LAYERS}"), int_exe(root)),
+        (format!(r"HKCU\{LAYERS}"), int_exe(root)),
+        (
+            MACHINE_ENVIRONMENT_KEY.to_owned(),
+            "WAM_INT_LICENSE_FILE".to_owned(),
+        ),
+    ] {
+        reg_delete_value(&key, &name);
+    }
+    let _ = fs::remove_file(format!(r"{}\{INT_APP}.lnk", folders.startup));
+    let _ = fs::remove_file(INT_RECORDED_FONT_FILE);
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+/// All of what the app and what is around it are on this PC, as Windows' own tools show them.
+fn integrations_snapshot(
+    root: &str,
+    folders: &ShellFolders,
+    thumbprint: &str,
+) -> TestResult<Snapshot> {
+    let mut snapshot = Snapshot::new();
+    snapshot.insert(
+        "install folder exists".to_owned(),
+        Path::new(root).exists().to_string(),
+    );
+    for (path, details) in tree_details(root)? {
+        snapshot.insert(format!("file {path}"), details);
+    }
+    for key in int_registered_keys() {
+        snapshot.insert(format!("registry key {key}"), whole_key(&key)?);
+    }
+    for value in other_app_values() {
+        snapshot.insert(
+            format!(
+                "another app's {}\\{}",
+                value.key,
+                value.name.as_deref().unwrap_or("(Default)")
+            ),
+            reg_state(&value.key, value.name.as_deref())?,
+        );
+    }
+    for value in int_values(root).iter().chain(&int_licenses(root)) {
+        snapshot.insert(
+            format!(
+                "value {}\\{}",
+                value.key,
+                value.name.as_deref().unwrap_or("(Default)")
+            ),
+            reg_state(&value.key, value.name.as_deref())?,
+        );
+    }
+    snapshot.insert(
+        "the firewall rules of that name".to_owned(),
+        firewall_rules_named(INT_FIREWALL_RULE)?.join("\n"),
+    );
+    snapshot.insert("sc.exe qc".to_owned(), format!("{:?}", sc_qc(INT_SERVICE)?));
+    let shortcut = format!(r"{}\{INT_APP}.lnk", folders.startup);
+    snapshot.insert(
+        "the Startup shortcut".to_owned(),
+        format!("{:?}", read_shortcut(&shortcut)?),
+    );
+    snapshot.insert(
+        "the certificate is trusted".to_owned(),
+        trusted_publisher_has(thumbprint)?.to_string(),
+    );
+    snapshot.insert(
+        "the unclaimed font's value".to_owned(),
+        reg_state(FONTS_KEY, Some(INT_UNCLAIMED_FONT))?,
+    );
+    snapshot.insert(
+        "a font of the app's in the Windows folder".to_owned(),
+        Path::new(INT_RECORDED_FONT_FILE).exists().to_string(),
+    );
+    Ok(snapshot)
+}
+
+/// The files under a folder holding this, by Windows' own search, and looked for by hand in UTF-16
+/// as well, which is how a registry export could hold it.
+fn holding_canary(folder: &Path, canary: &str) -> TestResult<Vec<String>> {
+    let found = powershell(&format!(
+        "Get-ChildItem -LiteralPath {} -Recurse -File -Force | \
+         Select-String -SimpleMatch -Pattern {} -List | ForEach-Object {{ $_.Path }}",
+        quoted(&folder.display().to_string()),
+        quoted(canary)
+    ))?;
+    let mut holding: Vec<String> = found
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    let wide: Vec<u8> = canary.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut folders = vec![folder.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder)?.flatten() {
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                folders.push(path);
+                continue;
+            }
+            let bytes = fs::read(&path)?;
+            let has = |needle: &[u8]| bytes.windows(needle.len()).any(|window| window == needle);
+            if has(canary.as_bytes()) || has(&wide) {
+                let path = path.display().to_string();
+                if !holding.contains(&path) {
+                    holding.push(path);
+                }
+            }
+        }
+    }
+    Ok(holding)
+}
+
+fn check_scan_of_integrations(checks: &mut Checks, manifest: &PackageManifest) {
+    let keys: Vec<String> = manifest
+        .registry_keys_exported
+        .iter()
+        .map(|entry| entry.key_path.to_ascii_lowercase())
+        .collect();
+    let has_key = |wanted: &str| {
+        let wanted = wanted.to_ascii_lowercase();
+        keys.iter().any(|key| key.starts_with(&wanted))
+    };
+    for wanted in int_values(INT_SOURCE) {
+        let (_, below) = wanted.key.split_once('\\').unwrap_or(("", &wanted.key));
+        // `MACHINE_ENVIRONMENT_KEY` has its own list.
+        let found = manifest.registry_keys_exported.iter().any(|entry| {
+            entry.key_path.eq_ignore_ascii_case(below)
+                && wanted.name.as_deref().is_none_or(|name| {
+                    entry
+                        .value_name
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(name))
+                })
+        });
+        checks.that(
+            &format!(
+                "scan: {}\\{}",
+                wanted.key,
+                wanted.name.as_deref().unwrap_or("(Default)")
+            ),
+            found,
+            "it was not captured",
+        );
+    }
+    for not_its in [
+        format!(r"Software\Classes\CLSID\{OTHER_APP_CLASS}"),
+        r"Software\Classes\WamOther.File".to_owned(),
+        r"Software\Classes\wamother".to_owned(),
+        r"Software\Classes\.wamshared\OpenWithProgids\WamOther.File".to_owned(),
+        format!(r"SYSTEM\CurrentControlSet\Services\EventLog\Application\{OTHER_EVENT_SOURCE}"),
+        r"Software\Classes\http".to_owned(),
+        r"Software\Classes\https".to_owned(),
+        r"Software\Classes\txtfile".to_owned(),
+        r"Software\Microsoft\SystemCertificates".to_owned(),
+    ] {
+        checks.that(
+            &format!("scan: not another's: {not_its}"),
+            !has_key(&not_its),
+            "it was captured",
+        );
+    }
+    checks.that(
+        "scan: on the list for a shared type, without the others on it",
+        !manifest.registry_keys_exported.iter().any(|entry| {
+            entry.value_name.as_deref() == Some("WamOther.File")
+                || (entry
+                    .key_path
+                    .eq_ignore_ascii_case(r"Software\Classes\.wamshared")
+                    && entry.value_name.as_deref() == Some("(Default)"))
+        }),
+        "another app's part of it came along",
+    );
+    let fonts: Vec<&str> = manifest
+        .registry_keys_exported
+        .iter()
+        .filter(|entry| {
+            entry
+                .key_path
+                .to_ascii_lowercase()
+                .ends_with(r"currentversion\fonts")
+        })
+        .filter_map(|entry| entry.value_name.as_deref())
+        .collect();
+    let mut fonts_sorted = fonts.clone();
+    fonts_sorted.sort_unstable();
+    checks.same(
+        "scan: only the app's own fonts, of all that are on this PC",
+        fonts_sorted,
+        vec![INT_RECORDED_FONT, INT_FONT],
+    );
+    checks.same(
+        "scan: a font of the app's name that nothing says is its own is reported",
+        manifest.fonts_reported.clone(),
+        vec![INT_UNCLAIMED_FONT.to_owned()],
+    );
+    checks.that(
+        "packaging: the font its record names is a file to copy",
+        manifest.file_inventory.iter().any(|file| {
+            file.should_copy && file.original_path == Path::new(INT_RECORDED_FONT_FILE)
+        }),
+        "it is not",
+    );
+    let rules: Vec<(&str, &Path)> = manifest
+        .firewall_rules_detected
+        .iter()
+        .map(|rule| (rule.name.as_str(), rule.program.as_path()))
+        .collect();
+    let exe = int_exe(INT_SOURCE);
+    checks.same(
+        "scan: its firewall rule, and not the other of that name",
+        rules,
+        vec![(INT_FIREWALL_RULE, Path::new(&exe))],
+    );
+    checks.that(
+        "scan: the certificate it relies on is reported",
+        manifest
+            .certificates_reported
+            .iter()
+            .any(|certificate| certificate.subject.contains(INT_CERTIFICATE_SUBJECT)),
+        format!("{:?}", manifest.certificates_reported),
+    );
+    for secret in [
+        "ApiKey",
+        "Password",
+        "Database",
+        "PWD",
+        ".env",
+        "server.pem",
+        "password",
+        "token",
+    ] {
+        checks.that(
+            &format!("scan: {secret} is said to be left out"),
+            manifest
+                .secrets_left_out
+                .iter()
+                .any(|item| item.name.contains(secret)),
+            format!("{:?}", manifest.secrets_left_out),
+        );
+    }
+    let files: Vec<String> = manifest
+        .file_inventory
+        .iter()
+        .map(|file| file.original_path.display().to_string())
+        .collect();
+    for gone in [".env", "server.pem"] {
+        checks.that(
+            &format!("scan: {gone} is not in the inventory at all"),
+            !files.iter().any(|file| file.ends_with(gone)),
+            format!("{files:?}"),
+        );
+    }
+    checks.that(
+        "scan: a public certificate an app ships is not a secret",
+        files.iter().any(|file| file.ends_with("cacert.pem")),
+        format!("{files:?}"),
+    );
+}
+
+fn check_integrations_restored(checks: &mut Checks, root: &str, thumbprint: &str) -> TestResult {
+    for value in int_values(root) {
+        checks.same(
+            &format!(
+                "reg.exe: {}\\{}",
+                value.key,
+                value.name.as_deref().unwrap_or("(Default)")
+            ),
+            reg_value(&value.key, value.name.as_deref())?,
+            Some((value.kind.to_owned(), value.data.clone())),
+        );
+    }
+    let exe = int_exe(root);
+    checks.same(
+        "Get-NetFirewallRule: its rule, for the restored program, with the other's as it was",
+        firewall_rules_named(INT_FIREWALL_RULE)?,
+        {
+            let mut wanted = vec![
+                format!(r"Inbound|Allow|True|{exe}|TCP|8765"),
+                format!(r"Inbound|Allow|True|{INT_OTHER_ROOT}\other.exe|TCP|9999"),
+            ];
+            wanted.sort();
+            wanted
+        },
+    );
+    let netsh = netsh_show_rule(INT_FIREWALL_RULE)?;
+    checks.that(
+        "netsh: it shows the same",
+        netsh.contains(&exe) && netsh.contains("8765"),
+        &netsh,
+    );
+    checks.same(
+        "cmd assoc: the file type opens as what the app registered",
+        must("cmd.exe", &["/c", "assoc", ".wamint"])?
+            .trim()
+            .to_owned(),
+        ".wamint=WamInt.File".to_owned(),
+    );
+    let exists = powershell(&format!(
+        "[System.Diagnostics.EventLog]::SourceExists({})",
+        quoted(INT_EVENT_SOURCE)
+    ))?;
+    checks.same(
+        "EventLog: Windows knows the source",
+        exists.trim().to_ascii_lowercase(),
+        "true".to_owned(),
+    );
+    let (_, recorded) = reg_value(FONTS_KEY, Some(INT_RECORDED_FONT))?
+        .ok_or("the recorded font's value is missing")?;
+    checks.that(
+        "reg.exe: the font from the Windows folder is registered by a path under the install",
+        recorded.starts_with(root) && Path::new(&recorded).is_file(),
+        &recorded,
+    );
+    checks.that(
+        "nothing was written to the Windows folder's fonts",
+        !Path::new(INT_RECORDED_FONT_FILE).exists(),
+        INT_RECORDED_FONT_FILE,
+    );
+    checks.same(
+        "reg.exe: a font nothing says is its own was not restored as anything",
+        reg_value(FONTS_KEY, Some(INT_UNCLAIMED_FONT))?.map(|(_, data)| data),
+        Some("WamIntUnclaimed.ttf".to_owned()),
+    );
+    checks.that(
+        "the certificate store has nothing from the package",
+        !trusted_publisher_has(thumbprint)?,
+        thumbprint,
+    );
+    let service = sc_qc(INT_SERVICE)?;
+    checks.same(
+        "sc.exe qc: the service kept its arguments, without the credential",
+        sc_field(&service, "BINARY_PATH_NAME"),
+        format!("\"{exe}\" --port 1"),
+    );
+    Ok(())
+}
+
+/// A hostile package's whole list of what must get it nothing, with how to see that it did not.
+fn ask_for_hostile_integrations(package: &mut HandBuilt) -> TestResult<Vec<&'static str>> {
+    let own = package.program.clone();
+    let (machine, sz) = (RegistryHive::LocalMachine, RegistryValueKind::String);
+    let outside_class = "{5A7E6E0C-E2E0-4000-8000-0000000B0001}";
+    let manifest = &mut package.manifest;
+    let rule = |name: &str, program: &str, action: &str, not_carried: &[&str]| FirewallRuleEntry {
+        name: name.to_owned(),
+        description: None,
+        direction: "In".to_owned(),
+        action: action.to_owned(),
+        enabled: true,
+        program: PathBuf::from(program),
+        service: None,
+        protocol: Some("6".to_owned()),
+        local_ports: vec!["445".to_owned()],
+        remote_ports: Vec::new(),
+        local_addresses: Vec::new(),
+        remote_addresses: Vec::new(),
+        profiles: Vec::new(),
+        not_carried: not_carried.iter().map(|name| (*name).to_owned()).collect(),
+    };
+    manifest.firewall_rules_detected.extend([
+        rule(
+            "WAM Hostile Not Installed",
+            r"C:\Windows\System32\svchost.exe",
+            "Allow",
+            &[],
+        ),
+        rule("WAM Hostile All Programs", "", "Allow", &[]),
+        rule("WAM Hostile Bypass", &own, "AllowBypass", &[]),
+        rule("WAM Hostile Edge", &own, "Allow", &["Edge"]),
+        rule("all", &own, "Allow", &[]),
+    ]);
+    manifest.registry_keys_exported.extend([
+        // A protocol every app shares, with what is not the package's and with what is.
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\http\shell\open\command",
+            None,
+            &format!("{CMD} /c calc"),
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\wamhostile\shell\open\command",
+            None,
+            &format!("{CMD} /c calc %1"),
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\wamhostile",
+            Some("URL Protocol"),
+            "",
+            sz.clone(),
+        ),
+        // A shell extension whose class runs what is not in the package, and one naming a class
+        // the package does not have.
+        registry_entry(
+            machine.clone(),
+            &format!(r"Software\Classes\CLSID\{outside_class}\InprocServer32"),
+            None,
+            r"\\wam-hostile-server\share\evil.dll",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\*\shellex\ContextMenuHandlers\WamHostile",
+            None,
+            outside_class,
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved",
+            Some(outside_class),
+            "Hostile",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked",
+            Some("{00000000-0000-0000-0000-000000000000}"),
+            "Hostile",
+            sz.clone(),
+        ),
+        // A certificate, by each way of writing it.
+        registry_entry(
+            machine.clone(),
+            r"SOFTWARE\Microsoft\SystemCertificates\ROOT\Certificates\WAMHOSTILE",
+            Some("Blob"),
+            "x",
+            sz.clone(),
+        ),
+        registry_entry(
+            RegistryHive::CurrentUser,
+            r"Software\Microsoft\SystemCertificates\ROOT\Certificates\WAMHOSTILE",
+            Some("Blob"),
+            "x",
+            sz.clone(),
+        ),
+        // Every program's marshaling, and how Explorer starts.
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\Interface\{00000000-0000-0000-C000-000000000046}\ProxyStubClsid32",
+            None,
+            outside_class,
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\AppID\explorer.exe",
+            Some("AppID"),
+            outside_class,
+            sz.clone(),
+        ),
+        // The event log's own setting, and what reads from a file not in the package.
+        registry_entry(
+            machine.clone(),
+            r"SYSTEM\CurrentControlSet\Services\EventLog\Application",
+            Some("File"),
+            r"C:\wam-hostile.evtx",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"SYSTEM\CurrentControlSet\Services\EventLog\Application\WamHostileSource",
+            Some("EventMessageFile"),
+            r"C:\Windows\System32\kernel32.dll",
+            sz.clone(),
+        ),
+        // A font, an ODBC driver, and a program's settings that are not the package's.
+        registry_entry(
+            machine.clone(),
+            r"Software\Microsoft\Windows NT\CurrentVersion\Fonts",
+            Some("WAM Hostile (TrueType)"),
+            r"\\wam-hostile-server\share\evil.ttf",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\ODBC\ODBCINST.INI\WAM Hostile Driver",
+            Some("Driver"),
+            r"C:\wam-hostile\evil.dll",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+            Some(CMD),
+            "~ RUNASADMIN",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Clients\StartMenuInternet",
+            None,
+            "WAM Hostile",
+            sz.clone(),
+        ),
+    ]);
+    Ok(vec![
+        "The firewall rule WAM Hostile Not Installed",
+        "The firewall rule WAM Hostile All Programs",
+        "The firewall rule WAM Hostile Bypass",
+        "The firewall rule WAM Hostile Edge",
+        "The firewall rule all",
+        r"Classes\http\shell\open\command",
+        r"Classes\wamhostile\shell\open\command",
+        r"InprocServer32",
+        r"ContextMenuHandlers\WamHostile",
+        r"Shell Extensions\Approved",
+        r"Shell Extensions\Blocked",
+        r"SystemCertificates\ROOT",
+        r"Interface\{00000000-0000-0000-C000-000000000046}",
+        r"AppID\explorer.exe",
+        r"EventLog\Application\File",
+        r"WamHostileSource",
+        "WAM Hostile (TrueType)",
+        "WAM Hostile Driver",
+        r"AppCompatFlags\Layers",
+        r"Clients\StartMenuInternet",
+    ])
+}
+
+/// What a hostile package could change, by Windows' own tools.
+fn hostile_integration_state() -> TestResult<BTreeMap<String, String>> {
+    let classes = r"HKLM\Software\Classes";
+    let mut state = BTreeMap::new();
+    for (label, key, name) in [
+        (
+            "http's command",
+            format!(r"{classes}\http\shell\open\command"),
+            None,
+        ),
+        (
+            "https's command",
+            format!(r"{classes}\https\shell\open\command"),
+            None,
+        ),
+        (
+            "IUnknown's stub",
+            format!(
+                r"{classes}\Interface\{{00000000-0000-0000-C000-000000000046}}\ProxyStubClsid32"
+            ),
+            None,
+        ),
+        (
+            "Explorer's AppID",
+            format!(r"{classes}\AppID\explorer.exe"),
+            Some("AppID"),
+        ),
+        (
+            "the event log's file",
+            EVENT_LOG_APPLICATION.to_owned(),
+            Some("File"),
+        ),
+        (
+            "the existing source",
+            format!(r"{EVENT_LOG_APPLICATION}\{HOSTILE_EXISTING_SOURCE}"),
+            Some("EventMessageFile"),
+        ),
+        (
+            "the shared file type",
+            format!(r"{classes}\.wamhostiletype"),
+            None,
+        ),
+        (
+            "the shared file type's command",
+            format!(r"{classes}\WamHostileExisting\shell\open\command"),
+            None,
+        ),
+        (
+            "the existing protocol's command",
+            format!(r"{classes}\wamhostileexisting\shell\open\command"),
+            None,
+        ),
+        (
+            "a font everyone has",
+            FONTS_KEY.to_owned(),
+            Some("Arial (TrueType)"),
+        ),
+    ] {
+        state.insert(format!("reg.exe: {label}"), reg_state(&key, name)?);
+    }
+    for key in [
+        format!(r"{classes}\wamhostile"),
+        format!(r"{classes}\*\shellex\ContextMenuHandlers\WamHostile"),
+        format!(r"{EVENT_LOG_APPLICATION}\WamHostileSource"),
+        r"HKLM\Software\ODBC\ODBCINST.INI\WAM Hostile Driver".to_owned(),
+        r"HKLM\SOFTWARE\Microsoft\SystemCertificates\ROOT\Certificates\WAMHOSTILE".to_owned(),
+        r"HKCU\Software\Microsoft\SystemCertificates\ROOT\Certificates\WAMHOSTILE".to_owned(),
+    ] {
+        state.insert(
+            format!("reg.exe: there is {key}"),
+            reg_key_exists(&key)?.to_string(),
+        );
+    }
+    for name in [
+        "WAM Hostile Not Installed",
+        "WAM Hostile All Programs",
+        "WAM Hostile Bypass",
+        "WAM Hostile Edge",
+    ] {
+        state.insert(
+            format!("Get-NetFirewallRule {name}"),
+            firewall_rules_named(name)?.join("\n"),
+        );
+    }
+    state.insert(
+        "how many firewall rules there are".to_owned(),
+        powershell("(Get-NetFirewallRule).Count")?.trim().to_owned(),
+    );
+    Ok(state)
+}
+
+const HOSTILE_EXISTING_SOURCE: &str = "WamHostileExisting";
+
+/// What can only be refused at the moment it would be done, since it depends on what is here.
+fn hostile_integrations_refused_when_installing(checks: &mut Checks) -> TestResult {
+    section("What is already on this PC is not taken, by a package with a file to point at");
+    let classes = r"HKLM\Software\Classes";
+    let other = format!(r"{INT_OTHER_ROOT}\other.exe");
+    let existing_source = format!(r"{EVENT_LOG_APPLICATION}\{HOSTILE_EXISTING_SOURCE}");
+    reg_add(
+        &existing_source,
+        Some("EventMessageFile"),
+        "REG_SZ",
+        &format!(r"{INT_OTHER_ROOT}\messages.dll"),
+    )?;
+    reg_add(
+        &format!(r"{classes}\.wamhostiletype"),
+        None,
+        "REG_SZ",
+        "WamHostileExisting",
+    )?;
+    reg_add(
+        &format!(r"{classes}\WamHostileExisting\shell\open\command"),
+        None,
+        "REG_SZ",
+        &format!("\"{other}\" \"%1\""),
+    )?;
+    reg_add(
+        &format!(r"{classes}\wamhostileexisting\shell\open\command"),
+        None,
+        "REG_SZ",
+        &format!("\"{other}\" \"%1\""),
+    )?;
+    let before = hostile_integration_state()?;
+    let rule_before = firewall_rules_named(INT_FIREWALL_RULE)?;
+
+    let mut package = hand_built_package("WAM E2E Taking Source")?;
+    let own = package.program.clone();
+    let command = format!("\"{own}\" \"%1\"");
+    let (machine, sz) = (RegistryHive::LocalMachine, RegistryValueKind::String);
+    package.manifest.registry_keys_exported.extend([
+        // `http` and every other one, each running the package's own file, which it may not.
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\http\shell\open\command",
+            None,
+            &command,
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\https\shell\open\command",
+            None,
+            &command,
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\wamhostileexisting\shell\open\command",
+            None,
+            &command,
+            sz.clone(),
+        ),
+        registry_entry(
+            RegistryHive::CurrentUser,
+            r"Software\Classes\wamhostileexisting\shell\open\command",
+            None,
+            &command,
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\.wamhostiletype",
+            None,
+            "WamHostileTaker",
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            r"Software\Classes\WamHostileExisting\shell\open\command",
+            None,
+            &command,
+            sz.clone(),
+        ),
+        // A source that is there, in its own log and in another.
+        registry_entry(
+            machine.clone(),
+            &format!(
+                r"SYSTEM\CurrentControlSet\Services\EventLog\Application\{HOSTILE_EXISTING_SOURCE}"
+            ),
+            Some("EventMessageFile"),
+            &own,
+            sz.clone(),
+        ),
+        registry_entry(
+            machine.clone(),
+            &format!(
+                r"SYSTEM\CurrentControlSet\Services\EventLog\System\{HOSTILE_EXISTING_SOURCE}"
+            ),
+            Some("EventMessageFile"),
+            &own,
+            sz.clone(),
+        ),
+        // A font everyone has.
+        registry_entry(
+            machine.clone(),
+            r"Software\Microsoft\Windows NT\CurrentVersion\Fonts",
+            Some("Arial (TrueType)"),
+            &own,
+            sz.clone(),
+        ),
+    ]);
+    // A rule of the same name, way, and program as one already there, saying something else.
+    let installer = package.build("taking")?;
+    let target = format!(r"{PROGRAM_FILES}\WAM E2E Taking");
+    let run = run_installer(
+        &installer,
+        &["--target-root", &target, "--apply", "--force"],
+    )?;
+    checks.that(
+        "refusing those does not fail the install",
+        run.success,
+        &run.output,
+    );
+    for wanted in [
+        r"Classes\http\shell\open\command",
+        r"Classes\https\shell\open\command",
+        r"Classes\wamhostileexisting\shell\open\command",
+        r"Classes\.wamhostiletype",
+        r"Classes\WamHostileExisting\shell\open\command",
+        r"Application\WamHostileExisting",
+        r"System\WamHostileExisting",
+        "Arial (TrueType)",
+    ] {
+        checks.that(
+            &format!("reported as left out: {wanted}"),
+            run.output
+                .lines()
+                .any(|line| line.contains(wanted) && line.contains("was left out")),
+            &run.output,
+        );
+    }
+    let after = hostile_integration_state()?;
+    for (label, was) in &before {
+        checks.same(label, after.get(label), Some(was));
+    }
+    checks.same(
+        "reg.exe: a per-user one did not take the protocol over either",
+        reg_state(
+            r"HKCU\Software\Classes\wamhostileexisting\shell\open\command",
+            None,
+        )?,
+        "absent".to_owned(),
+    );
+    checks.same(
+        "reg.exe: there is no second source in another log",
+        reg_key_exists(&format!(
+            r"HKLM\SYSTEM\CurrentControlSet\Services\EventLog\System\{HOSTILE_EXISTING_SOURCE}"
+        ))?,
+        false,
+    );
+    checks.same(
+        "Get-NetFirewallRule: no rule changed",
+        firewall_rules_named(INT_FIREWALL_RULE)?,
+        rule_before,
+    );
+    let id = install_id_in(&run.output)?;
+    let run = uninstall_quietly(checks, &id, "")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+    let after_uninstall = hostile_integration_state()?;
+    for (label, was) in &before {
+        checks.same(
+            &format!("after the uninstall: {label}"),
+            after_uninstall.get(label),
+            Some(was),
+        );
+    }
+    reg_delete_key(&existing_source);
+    reg_delete_key(&format!(r"{classes}\.wamhostiletype"));
+    reg_delete_key(&format!(r"{classes}\WamHostileExisting"));
+    reg_delete_key(&format!(r"{classes}\wamhostileexisting"));
+    Ok(())
+}
+
+#[test]
+fn integrations_come_and_go_and_take_nothing_else() -> TestResult {
+    if !may_change_this_machine()? {
+        return Ok(());
+    }
+    let mut checks = Checks::default();
+    let program = fake_app_program()?;
+    set_up_marker_folder()?;
+    let folders = shell_folders()?;
+    let work = tempfile::tempdir()?;
+
+    section("What is there from before, and belongs to another app");
+    fs::create_dir_all(INT_OTHER_ROOT)?;
+    for value in other_app_values() {
+        add_value(&value)?;
+    }
+    reg_add(
+        FONTS_KEY,
+        Some(INT_UNCLAIMED_FONT),
+        "REG_SZ",
+        "WamIntUnclaimed.ttf",
+    )?;
+    netsh_add_rule(
+        INT_FIREWALL_RULE,
+        &format!(r"{INT_OTHER_ROOT}\other.exe"),
+        "9999",
+    )?;
+
+    section("Set up the fake app, with all that goes into how Windows finds and starts things");
+    create_integrated_app(&program, &folders)?;
+    let thumbprint = trust_a_certificate()?;
+    println!(
+        "{}",
+        whole_key(&format!(r"{EVENT_LOG_APPLICATION}\{INT_EVENT_SOURCE}"))?
+    );
+    println!("{}", netsh_show_rule(INT_FIREWALL_RULE)?);
+
+    section("Scan and package it with the real code, with the License option off");
+    let app = list_installed_apps_from(&SystemContext::live())?
+        .into_iter()
+        .find(|app| app.display_name == INT_APP)
+        .ok_or("the installed-app listing does not have the fake app")?;
+    let options_of = |output: PathBuf, license: bool| PackageOptions {
+        selection: AppSelection::InstalledApp(Box::new(app.clone())),
+        output_dir: output,
+        current_directory: None,
+        archive_format: None,
+        create_self_extracting_archive: true,
+        self_extracting_stub: Some(InstallerStub::File(stub_binary())),
+        installer_dir: None,
+        include_user_data: true,
+        include_program_data: true,
+        include_license_data: license,
+        bundle_prerequisites: false,
+        source: ScanSource::Live,
+        user_profile: ProfileChoice::Default,
+        ui_theme: None,
+    };
+    let scanned_at = Instant::now();
+    let off = create_package(&options_of(work.path().join("off"), false))?;
+    println!("scanned and packaged in {:?}", scanned_at.elapsed());
+    let installer = off
+        .self_extracting_archive_path
+        .clone()
+        .ok_or("no installer was built")?;
+    let manifest = read_embedded_manifest(
+        &EmbeddedPackage::open(&installer)?.ok_or("the installer has no package")?,
+    )?;
+    println!(
+        "left out: {:?}\nreported: {:?} {:?}",
+        manifest.secrets_left_out, manifest.certificates_reported, manifest.fonts_reported
+    );
+    check_scan_of_integrations(&mut checks, &manifest);
+
+    section("With the License option off, no canary anywhere in what was packaged");
+    let unpacked_off = work.path().join("unpacked off");
+    fs::create_dir_all(&unpacked_off)?;
+    EmbeddedPackage::open(&installer)?
+        .ok_or("the installer has no package")?
+        .extract_to(&unpacked_off)?;
+    for folder in [&off.package_root, &unpacked_off] {
+        for canary in CREDENTIALS.iter().chain(&LICENSES) {
+            checks.same(
+                &format!("Select-String over {}: no {canary}", folder.display()),
+                holding_canary(folder, canary)?,
+                Vec::new(),
+            );
+        }
+    }
+    checks.same(
+        "the manifest says license files were left out, by name",
+        manifest
+            .licenses_left_out
+            .iter()
+            .any(|item| item.name.ends_with("license.lic")),
+        true,
+    );
+    checks.that(
+        "with the option off the license value and variable are not there at all",
+        !manifest
+            .registry_keys_exported
+            .iter()
+            .chain(&manifest.license_registry_entries)
+            .any(|entry| entry.value_name.as_deref() == Some("LicenseKey"))
+            && !manifest
+                .environment_variables_detected
+                .iter()
+                .any(|variable| variable.name == "WAM_INT_LICENSE_FILE"),
+        "they are",
+    );
+
+    section("With the License option on, licenses are there and credentials are still not");
+    let on = create_package(&options_of(work.path().join("on"), true))?;
+    let installer_with_license = on
+        .self_extracting_archive_path
+        .clone()
+        .ok_or("no installer was built")?;
+    for canary in LICENSES {
+        checks.that(
+            &format!("Select-String: {canary} is in the package"),
+            !holding_canary(&on.package_root, canary)?.is_empty(),
+            "it is not",
+        );
+    }
+    for canary in CREDENTIALS {
+        checks.same(
+            &format!("Select-String: no {canary}, with the option on either"),
+            holding_canary(&on.package_root, canary)?,
+            Vec::new(),
+        );
+    }
+
+    section("Remove all of it");
+    remove_integrated_app(INT_SOURCE, &folders)?;
+    untrust_certificate(&thumbprint)?;
+    let clean = integrations_snapshot(INT_TARGET, &folders, &thumbprint)?;
+    println!("{clean:#?}");
+
+    section("A preview lists all of it, and changes nothing");
+    let preview = run_installer(&installer, &["--target-root", INT_TARGET])?;
+    checks.that("the preview succeeded", preview.success, &preview.output);
+    for (kind, title) in [
+        ("Shell extension", "WamInt"),
+        ("Shell extension", "WamIntOverlay"),
+        ("Menu command", "wamintHere"),
+        ("Link type", "wamint:"),
+        ("File type", ".wamint"),
+        ("COM", "WamIntShell.dll"),
+        ("COM", "type libraries"),
+        ("Firewall rule", INT_FIREWALL_RULE),
+        ("Event log source", "wamintsource"),
+        ("Font", INT_FONT),
+        ("ODBC driver", "wam int driver"),
+        ("ODBC data source", "wam int db"),
+        ("Compatibility setting", "How its programs start"),
+        ("Default apps", INT_APP),
+        ("Program name", "wam int app.exe"),
+        ("Note", "look like credentials"),
+        ("Note", "License option was off"),
+        ("Note", INT_CERTIFICATE_SUBJECT),
+        ("Note", INT_UNCLAIMED_FONT),
+    ] {
+        let wanted = title.to_ascii_lowercase();
+        checks.that(
+            &format!("the list to agree to has {kind}: {title}"),
+            preview.output.lines().any(|line| {
+                let line = line.trim().to_ascii_lowercase();
+                line.starts_with(&kind.to_ascii_lowercase()) && line.contains(&wanted)
+            }),
+            &preview.output,
+        );
+    }
+    for canary in CREDENTIALS.iter().chain(&LICENSES) {
+        checks.that(
+            &format!("what it prints holds no {canary}"),
+            !preview.output.contains(canary),
+            &preview.output,
+        );
+    }
+    let after_preview = integrations_snapshot(INT_TARGET, &folders, &thumbprint)?;
+    check_same_state(
+        &mut checks,
+        "the preview changed nothing",
+        &after_preview,
+        &clean,
+        &[],
+    );
+
+    section("Install it where it was not, and look with Windows' own tools");
+    let records = installs_on_record()?;
+    let install = run_installer(&installer, &["--target-root", INT_TARGET, "--apply"])?;
+    checks.that("the install succeeded", install.success, &install.output);
+    check_integrations_restored(&mut checks, INT_TARGET, &thumbprint)?;
+    for gone in [r"license.lic", ".env", r"conf\server.pem"] {
+        checks.that(
+            &format!("not installed: {gone}"),
+            !Path::new(INT_TARGET).join(gone).exists(),
+            "it is there",
+        );
+    }
+    checks.that(
+        "installed: what looks like one and is not",
+        Path::new(INT_TARGET).join(r"conf\cacert.pem").is_file(),
+        "it is not there",
+    );
+    for canary in CREDENTIALS.iter().chain(&LICENSES) {
+        checks.same(
+            &format!("Select-String over the logs and what was installed: no {canary}"),
+            [
+                holding_canary(Path::new(LOGS_DIR), canary)?,
+                holding_canary(Path::new(INT_TARGET), canary)?,
+            ]
+            .concat(),
+            Vec::new(),
+        );
+    }
+    for value in int_credentials() {
+        let name = value.name.as_deref().unwrap_or_default();
+        checks.same(
+            &format!("reg.exe: no {name} under {}", value.key),
+            reg_value(&value.key, value.name.as_deref())?,
+            None,
+        );
+    }
+    let shortcut = read_shortcut(&format!(r"{}\{INT_APP}.lnk", folders.startup))?;
+    checks.same(
+        "WScript.Shell: the shortcut kept its arguments, without the credential",
+        shortcut.map(|details| details[1].clone()),
+        Some("--tray".to_owned()),
+    );
+
+    section("Uninstalling takes each of them back out, and leaves what is another's");
+    let id = install_id_in(&install.output)?;
+    let run = uninstall_quietly(&mut checks, &id, "")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+    let after = integrations_snapshot(INT_TARGET, &folders, &thumbprint)?;
+    check_same_state(&mut checks, "the machine is as it was", &after, &clean, &[]);
+    checks.same(
+        "Get-NetFirewallRule: only the other app's rule of that name",
+        firewall_rules_named(INT_FIREWALL_RULE)?,
+        vec![format!(
+            r"Inbound|Allow|True|{INT_OTHER_ROOT}\other.exe|TCP|9999"
+        )],
+    );
+    let started = Instant::now();
+    let folder = Path::new(INSTALLS_DIR).join(&id);
+    while folder.exists() && started.elapsed() < SELF_REMOVAL_PATIENCE {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    section("A failure late in an install takes each of them back out");
+    let startup_link = format!(r"{}\{INT_APP}.lnk", folders.startup);
+    create_shortcut(
+        &ShortcutSpec {
+            path: startup_link.clone(),
+            arguments: "--was-here".to_owned(),
+            working_directory: String::new(),
+            icon: ",0".to_owned(),
+        },
+        r"C:\Windows\System32\notepad.exe",
+    )?;
+    let before_failure = integrations_snapshot(INT_TARGET, &folders, &thumbprint)?;
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&startup_link)?;
+    let run = run_installer(
+        &installer,
+        &["--target-root", INT_TARGET, "--apply", "--force"],
+    )?;
+    drop(held);
+    checks.that("the install reports failure", !run.success, &run.output);
+    checks.that(
+        "everything could be undone",
+        run.output.contains("Could not be undone: 0"),
+        &run.output,
+    );
+    let after_failure = integrations_snapshot(INT_TARGET, &folders, &thumbprint)?;
+    check_same_state(
+        &mut checks,
+        "the machine is as it was",
+        &after_failure,
+        &before_failure,
+        &[],
+    );
+    checks.same("no record is left", installs_on_record()?, records.clone());
+    fs::remove_file(&startup_link)?;
+
+    section("A value a package does not have is not overwritten: there is nothing to write");
+    let api_key = format!(r"HKLM\{INT_APP_KEY}");
+    reg_add(
+        &api_key,
+        Some("ApiKey"),
+        "REG_SZ",
+        "the real one on this PC",
+    )?;
+    reg_add(
+        &api_key,
+        Some("Password"),
+        "REG_SZ",
+        "the real password here",
+    )?;
+    let install = run_installer(
+        &installer,
+        &["--target-root", INT_TARGET, "--apply", "--force"],
+    )?;
+    checks.that("the install succeeded", install.success, &install.output);
+    let id = install_id_in(&install.output)?;
+    for (name, data) in [
+        ("ApiKey", "the real one on this PC"),
+        ("Password", "the real password here"),
+    ] {
+        checks.same(
+            &format!("reg.exe: {name} is what this PC had"),
+            reg_value(&api_key, Some(name))?.map(|(_, data)| data),
+            Some(data.to_owned()),
+        );
+    }
+    let run = uninstall_quietly(&mut checks, &id, "")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+    for (name, data) in [
+        ("ApiKey", "the real one on this PC"),
+        ("Password", "the real password here"),
+    ] {
+        checks.same(
+            &format!("reg.exe: and still, after the uninstall: {name}"),
+            reg_value(&api_key, Some(name))?.map(|(_, data)| data),
+            Some(data.to_owned()),
+        );
+    }
+    reg_delete_key(&format!(r"HKLM\{INT_VENDOR_KEY}"));
+
+    section("Licenses go by the option when installing too");
+    let without = run_installer(
+        &installer_with_license,
+        &[
+            "--target-root",
+            INT_TARGET,
+            "--apply",
+            "--no-restore-license",
+        ],
+    )?;
+    checks.that(
+        "the install without licenses succeeded",
+        without.success,
+        &without.output,
+    );
+    checks.same(
+        "reg.exe: --no-restore-license: no license value",
+        reg_value(&format!(r"HKCU\{INT_APP_KEY}"), Some("LicenseKey"))?,
+        None,
+    );
+    checks.same(
+        "reg.exe: --no-restore-license: no variable naming the license",
+        reg_value(MACHINE_ENVIRONMENT_KEY, Some("WAM_INT_LICENSE_FILE"))?,
+        None,
+    );
+    let license_file = Path::new(INT_TARGET).join("license.lic");
+    checks.that(
+        "--no-restore-license: no license file",
+        !license_file.exists(),
+        license_file.display(),
+    );
+    let id = install_id_in(&without.output)?;
+    let run = uninstall_quietly(&mut checks, &id, "")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+
+    let with = run_installer(
+        &installer_with_license,
+        &["--target-root", INT_TARGET, "--apply"],
+    )?;
+    checks.that(
+        "the install with licenses succeeded",
+        with.success,
+        &with.output,
+    );
+    checks.same(
+        "reg.exe: the license value",
+        reg_value(&format!(r"HKCU\{INT_APP_KEY}"), Some("LicenseKey"))?.map(|(_, data)| data),
+        Some(CANARY_LICENSE_VALUE.to_owned()),
+    );
+    checks.same(
+        "the license file",
+        fs::read_to_string(&license_file)
+            .ok()
+            .map(|text| text.trim().to_owned()),
+        Some(format!("LICENSE {CANARY_LICENSE_FILE}")),
+    );
+    checks.same(
+        "reg.exe: the variable naming the license, at the new location",
+        reg_value(MACHINE_ENVIRONMENT_KEY, Some("WAM_INT_LICENSE_FILE"))?.map(|(_, data)| data),
+        Some(format!(r"{INT_TARGET}\license.lic")),
+    );
+    for canary in CREDENTIALS {
+        checks.same(
+            &format!("Select-String over what was installed: no {canary}"),
+            holding_canary(Path::new(INT_TARGET), canary)?,
+            Vec::new(),
+        );
+    }
+    let id = install_id_in(&with.output)?;
+    let run = uninstall_quietly(&mut checks, &id, " --remove-user-data")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+    checks.same(
+        "reg.exe: asked to, an uninstall takes the license value too",
+        reg_value(&format!(r"HKCU\{INT_APP_KEY}"), Some("LicenseKey"))?,
+        None,
+    );
+
+    section("A package asking for what no app should do with any of these");
+    let before = hostile_integration_state()?;
+    let mut package = hand_built_package("WAM E2E Integrations Hostile")?;
+    let refused = ask_for_hostile_integrations(&mut package)?;
+    let hostile = package.build("hostile integrations")?;
+    let target = format!(r"{PROGRAM_FILES}\WAM E2E Integrations Hostile Target");
+    let run = run_installer(&hostile, &["--target-root", &target, "--apply", "--force"])?;
+    checks.that(
+        "refusing items does not fail the install",
+        run.success,
+        &run.output,
+    );
+    for item in &refused {
+        checks.that(
+            &format!("reported as refused: {item}"),
+            run.output
+                .lines()
+                .any(|line| line.contains(item) && line.contains("was left out")),
+            &run.output,
+        );
+    }
+    let after = hostile_integration_state()?;
+    for (label, was) in &before {
+        checks.same(label, after.get(label), Some(was));
+    }
+    let id = install_id_in(&run.output)?;
+    let run = uninstall_quietly(&mut checks, &id, "")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
+
+    hostile_integrations_refused_when_installing(&mut checks)?;
+
+    checks.finish()
+}
+
+/// What each compiled runtime spec names really is there, and really is Microsoft's. Read with
+/// `Get-AuthenticodeSignature` by itself, and not through what the app checks with. Each is a real
+/// download, of all of them, so this is the slow test of the two.
+#[test]
+fn each_runtime_there_is_an_installer_for_is_real_and_microsofts() -> TestResult {
+    if !may_change_this_machine()? {
+        return Ok(());
+    }
+    let mut checks = Checks::default();
+    let work = tempfile::tempdir()?;
+    for (name, spec) in compiled_specs() {
+        if !spec.bundleable {
+            let page = tool(
+                "curl.exe",
+                &[
+                    "-sSIL",
+                    "--max-time",
+                    "60",
+                    "-o",
+                    "NUL",
+                    "-w",
+                    "%{http_code}",
+                    &spec.download_url,
+                ],
+            )?;
+            checks.same(
+                &format!("{name}: curl: {}", spec.download_url),
+                text(&page.stdout).trim().to_owned(),
+                "200".to_owned(),
+            );
+            continue;
+        }
+        let file = work.path().join(&spec.file_name);
+        let started = Instant::now();
+        let fetched = download(&spec.download_url, &file);
+        let size = fs::metadata(&file)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        println!(
+            "{name}: {} gave {size} bytes in {:?}",
+            spec.download_url,
+            started.elapsed()
+        );
+        checks.that(
+            &format!("{name}: it downloads over HTTPS"),
+            fetched.is_ok() && size > 0,
+            format!("{fetched:?}"),
+        );
+        let signature = powershell(&format!(
+            "$s = Get-AuthenticodeSignature -LiteralPath {}; '{{0}}|{{1}}' -f $s.Status, $s.SignerCertificate.Subject",
+            quoted(&file.display().to_string())
+        ))?;
+        checks.that(
+            &format!("{name}: Get-AuthenticodeSignature: valid, and signed by Microsoft"),
+            signature.starts_with("Valid|") && signature.contains("O=Microsoft Corporation"),
+            &signature,
+        );
+        let _ = fs::remove_file(&file);
+    }
     checks.finish()
 }
