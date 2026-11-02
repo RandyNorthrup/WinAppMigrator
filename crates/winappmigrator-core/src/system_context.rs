@@ -1459,12 +1459,18 @@ impl SystemContext {
         on_volume
     }
 
-    /// Whether a path found while scanning can be read. On this PC, if it is on a disk of this PC.
-    /// On a drive, see [`VolumeMap::may_read`], which every path is asked again just before reading
-    /// it. That has to come first, since nearly any other look at a path follows a link.
+    /// Whether a path found while scanning can be read. On this PC, if it is on a disk of this PC and
+    /// written in ordinary names, since any account can make a real folder `x.` beside a link `x`,
+    /// which is how a link gets past anything that looks at the name it was listed by. On a drive,
+    /// see [`VolumeMap::may_read`], which every path is asked again just before reading it. That has
+    /// to come first, since nearly any other look at a path follows a link.
     pub fn may_read(&self, path: &Path) -> bool {
         let Some(hives) = &self.offline else {
-            return is_on_a_local_disk(path);
+            return is_on_a_local_disk(path)
+                && path.components().all(|component| match component {
+                    Component::Normal(name) => is_ordinary_name(name),
+                    _ => true,
+                });
         };
         match self.checked.lock() {
             Ok(mut checked) => hives.map.may_read_noting(path, &mut checked),
@@ -1540,8 +1546,9 @@ impl SystemContext {
 }
 
 fn live_windows_version() -> Option<String> {
+    // `/D`, or an account's `AutoRun` runs here as whoever is running this.
     hidden_command("cmd")
-        .args(["/C", "ver"])
+        .args(["/D", "/C", "ver"])
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -2171,6 +2178,8 @@ mod tests {
         }
     }
 
+    const DEEPEST_FOR_THIS_TEST: usize = 8;
+
     #[test]
     fn a_name_windows_would_read_as_another_is_not_ordinary() {
         use std::os::windows::ffi::OsStringExt;
@@ -2287,6 +2296,42 @@ mod tests {
             .output()?;
         assert!(remade.status.success());
         assert!(scanned_after.hold(&moved_file), "it leads somewhere else");
+        Ok(())
+    }
+
+    #[test]
+    fn on_this_pc_a_name_windows_would_read_as_another_is_not_looked_at() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let elsewhere = work.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere)?;
+        fs::write(elsewhere.join("secret.txt"), b"x")?;
+        let app = work.path().join("app");
+        fs::create_dir_all(&app)?;
+        fs::write(app.join("own.txt"), b"x")?;
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(app.join("x"))
+            .arg(&elsewhere)
+            .output()?;
+        assert!(made.status.success());
+        fs::create_dir(format!(r"\\?\{}.", app.join("x").display()))?;
+
+        let system = SystemContext::live();
+        assert!(!system.may_read(&app.join("x.")));
+        assert!(!system.may_read(&app.join("x ")));
+        assert!(!system.may_read(&app.join(r"x.\secret.txt")));
+        assert!(system.may_read(&app.join("own.txt")));
+        let found: Vec<String> =
+            crate::path_utils::walk_asking(&app, DEEPEST_FOR_THIS_TEST, |path, _| {
+                system.may_read(path)
+            })
+            .flatten()
+            .filter(|entry| entry.file_type.is_file())
+            .map(|entry| file_name_string(&entry.path))
+            .collect();
+        assert_eq!(found, ["own.txt"], "not what is past the link");
         Ok(())
     }
 

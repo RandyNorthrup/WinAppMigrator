@@ -3133,6 +3133,32 @@ fn what_can_name_another_accounts_folder(
     );
     fs::remove_file(&dropped)?;
 
+    section("A real folder with a dot beside a link, on this PC, where any account can make one");
+    let twin_home = my_profile.join(r"AppData\Local\WAM By A Share");
+    fs::create_dir_all(&twin_home)?;
+    let twin_exe = twin_home.join("wam-by-a-share.exe");
+    fs::copy(program, &twin_exe)?;
+    let twin = twin_home.join("twin");
+    junction(&twin.display().to_string(), not_mine)?;
+    fs::create_dir(format!(r"\\?\{}.", twin.display()))?;
+    reg_add(entry, Some("DisplayName"), "REG_SZ", "WAM By A Share")?;
+    reg_add(
+        entry,
+        Some("DisplayIcon"),
+        "REG_SZ",
+        &twin_exe.display().to_string(),
+    )?;
+    let apps = list_installed_apps_from(&SystemContext::live())?;
+    let package = create_package(&package_options(
+        &find_app(&apps, "WAM By A Share")?,
+        &work.join("twin"),
+        ScanSource::Live,
+        ProfileChoice::Default,
+    ))?;
+    let holding = files_holding(&package.package_root, "private to theirs")?;
+    checks.same("what is past the link is not in it", holding.trim(), "");
+    reg_delete_key(entry);
+
     section("A link in this account's AppData to a shadow copy, which has no name to give");
     match tool("vssadmin.exe", &["create", "shadow", "/for=C:"]) {
         Ok(output) if output.status.success() => {

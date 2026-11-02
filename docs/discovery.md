@@ -508,7 +508,9 @@ drive maps to one, in ordinary names:
 **Nothing that is not on a disk of this PC is looked at, on a scan of this PC.** A value in any account's registry can
 name a share, and looking at it connects as the administrator running this. `SystemContext::may_read` refuses `\\server`,
 `\\?\UNC`, `\\.\`, `\\?\GLOBALROOT`, `\\?\Volume{}`, and rooted forms such as `\??\UNC`, by how the path is written.
-A known folder there gets `user_folder_out_of_reach`, and anything else is listed in `network_paths_not_followed`.
+A known folder there gets `user_folder_out_of_reach`, and anything else is listed in `network_paths_not_followed`. Names
+Windows would read as another are refused on this PC as they are on a drive, since any account can make a real folder `x.`
+beside a link `x`.
 
 **No link on a drive is followed,** since a junction or symbolic link on another PC's disk resolves against
 this PC. `VolumeMap::may_read` walks from the drive's root to a path, and everything that opens a file or

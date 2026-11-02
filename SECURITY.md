@@ -105,9 +105,11 @@ its own registry, and its own shortcuts. So what these say does not count for mu
   can make a file in that folder, which the Task Scheduler would never run but a package would register.
 
 **On this PC, a share is not looked at** either, since a value in any account's registry could name one, and looking
-would connect as the administrator running this, including when the app starts. Anything not on a disk of this PC, in any
-spelling, such as `\\localhost\C$`, `\\?\GLOBALROOT`, or `\??\UNC`, is left out, and the build lists it. So a Documents
-folder redirected to a share is not included, and an app on a share cannot be built from.
+would connect as the administrator running this, including when the app starts. Anything that is written as not on a disk
+of this PC, such as `\\localhost\C$`, `\\?\GLOBALROOT`, or `\??\UNC`, is left out, and the build lists it. So a Documents
+folder redirected to a share is not included, and an app on a share cannot be built from. A drive letter mapped to a share
+counts as a disk, if the elevated session has one. Names Windows would read as another, as on a drive, are refused here too,
+since any account can make a real folder `x.` beside a link `x`.
 
 **What is left is a race.** A build asks again before and after copying each file whether it leads into another account's
 folder, or goes through a link that was not there when it was scanned. Whoever can write in a scanned folder could make
