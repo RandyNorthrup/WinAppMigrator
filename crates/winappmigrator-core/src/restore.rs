@@ -714,14 +714,19 @@ impl Run<'_, '_> {
             .iter()
             .filter_map(|file| review.map.destination_of(&file.original_path))
             .map(Path::to_path_buf);
+        // A store goes by its files, and what it is called says nothing of what is around it.
         let licenses = review.license.iter().flat_map(|license| {
-            std::iter::once(license.destination.clone()).chain(
-                license
-                    .artifact
-                    .store_files
-                    .iter()
-                    .map(|file| license.destination.join(&file.relative_path)),
-            )
+            let of_a_store = license
+                .artifact
+                .store_files
+                .iter()
+                .map(|file| license.destination.join(&file.relative_path));
+            let of_a_file = license
+                .artifact
+                .store_files
+                .is_empty()
+                .then(|| license.destination.clone());
+            of_a_store.chain(of_a_file).collect::<Vec<_>>()
         });
         let mut folders: Vec<PathBuf> = files
             .chain(licenses)
@@ -1921,16 +1926,20 @@ fn data_folder_of(destination: &Path, target_root: &Path) -> Option<PathBuf> {
     })
 }
 
-/// [`program_placement_refusal`], for a folder of those that were there before.
+/// [`program_placement_refusal`], for a folder of those that were there before. It is the file's
+/// own folder of that kind that counts: a data folder is on the list for what goes straight in it,
+/// and that says nothing of a new folder beside what is there.
 fn program_left_alone(
     destination: &Path,
     target_root: &Path,
     earlier_install_here: bool,
     folders_already_here: &[PathBuf],
 ) -> Option<String> {
-    let was_there = folders_already_here
-        .iter()
-        .any(|folder| path_is_within(destination, folder));
+    let was_there = data_folder_of(destination, target_root).is_some_and(|its_folder| {
+        folders_already_here.iter().any(|folder| {
+            path_is_within(&its_folder, folder) && path_is_within(folder, &its_folder)
+        })
+    });
     program_placement_refusal(destination, target_root, earlier_install_here, was_there)
 }
 
@@ -5286,6 +5295,42 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// Reads only: this asks where the data folder is, and compares names.
+    #[test]
+    fn a_data_folder_on_the_list_says_nothing_of_a_new_folder_in_it() -> Result<()> {
+        let data = PathBuf::from(
+            std::env::var_os("ProgramData")
+                .ok_or_else(|| WinAppMigratorError::InvalidInput("no ProgramData".to_owned()))?,
+        );
+        let target = Path::new(r"C:\Program Files\Acme");
+        let left_alone = |destination: PathBuf, folders: &[PathBuf]| {
+            program_left_alone(&destination, target, false, folders).is_some()
+        };
+        let other = data.join("WAM Other");
+        assert_eq!(
+            data_folder_of(&other.join(r"deep\down\a.dll"), target).as_ref(),
+            Some(&other)
+        );
+        assert_eq!(
+            data_folder_of(&data.join("a.dll"), target).as_ref(),
+            Some(&data)
+        );
+        assert_eq!(data_folder_of(&target.join("a.dll"), target), None);
+
+        let there = std::slice::from_ref(&other);
+        assert!(left_alone(other.join("version.dll"), there));
+        assert!(left_alone(other.join(r"deep\version.dll"), there));
+        assert!(!left_alone(data.join(r"WAM Acme\helper.exe"), there));
+
+        let the_data_folder = std::slice::from_ref(&data);
+        assert!(left_alone(data.join("straight-in.exe"), the_data_folder));
+        assert!(
+            !left_alone(data.join(r"WAM Acme\helper.exe"), the_data_folder),
+            "a new folder there has no program in it to load this"
+        );
         Ok(())
     }
 

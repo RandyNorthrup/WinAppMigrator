@@ -551,7 +551,13 @@ const RUNNABLE_EXTENSIONS: &[&str] = &[
 ];
 /// What says how the program of that name starts, which can name what it loads. A `user.config` is
 /// only someone's settings.
-const RUNNABLE_NAME_ENDS: &[&str] = &[".exe.config", ".dll.config"];
+const RUNNABLE_NAME_ENDS: &[&str] = &[
+    ".exe.config",
+    ".dll.config",
+    ".runtimeconfig.json",
+    ".deps.json",
+    "._pth",
+];
 const COM_INPROC_SERVER_KEY: &str = "inprocserver32";
 /// What is run or loaded for a class besides what its server's default value says.
 const COM_SERVER_PROGRAM_VALUE: &str = "ServerExecutable";
@@ -4384,6 +4390,9 @@ mod tests {
             r"C:\ProgramData\Other\svc.exe",
             r"C:\ProgramData\Other\VERSION.DLL",
             r"C:\ProgramData\Other\svc.exe.config",
+            r"C:\ProgramData\Other\svc.runtimeconfig.json",
+            r"C:\ProgramData\Other\svc.deps.json",
+            r"C:\ProgramData\Other\python39._pth",
             r"C:\Users\me\AppData\Local\Programs\Other\resources\app.asar",
             r"C:\ProgramData\Other\native.node",
             r"C:\ProgramData\Other\mod.pyd",
