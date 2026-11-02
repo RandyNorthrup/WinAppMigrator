@@ -5,7 +5,11 @@ use filetime::{FileTime, set_file_times};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::archive::{create_self_extracting_archive, create_zip_archive, read_embedded_file};
+use tempfile::TempDir;
+
+use crate::archive::{
+    create_self_extracting_archive, create_zip_archive, extract_zip_archive, read_embedded_file,
+};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{package_destination_path, safe_relative_path};
 use crate::hashing::sha256_file;
@@ -16,6 +20,7 @@ use crate::models::{
     WarningSeverity,
 };
 use crate::path_utils::{hidden_command, sanitize_filename};
+use crate::privilege::protect_staging_folder;
 use crate::progress::{BuildMonitor, BuildStep};
 use crate::scan::scan_and_write_reports;
 
@@ -31,6 +36,7 @@ const PREREQUISITES_DIR: &str = "prerequisites";
 const MANIFESTS_DIR: &str = "manifests";
 const REPORTS_DIR: &str = "reports";
 const MANIFEST_FILE: &str = "manifest.json";
+const ZIP_EXTENSION: &str = "zip";
 const RESTORE_PLAN_FILE: &str = "restore_plan.md";
 const REGISTRY_ENTRIES_FILE: &str = "registry_entries.json";
 const REGISTRY_EXPORT_FILE: &str = "registry_export.reg";
@@ -804,6 +810,41 @@ fn write_restore_plan(path: &Path, manifest: &PackageManifest) -> Result<()> {
         ));
     }
     fs::write(path, markdown).map_err(|source| WinAppMigratorError::io(path, source))
+}
+
+/// A package ready to read: the folder it is already in, or a zip unpacked to a temporary
+/// folder, which is removed when this is dropped.
+pub(crate) struct PreparedPackage {
+    package_root: PathBuf,
+    _temp_dir: Option<TempDir>,
+}
+
+impl PreparedPackage {
+    pub(crate) fn new(package_root: &Path) -> Result<Self> {
+        if package_root.is_file()
+            && package_root
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case(ZIP_EXTENSION))
+        {
+            let temp_dir = tempfile::tempdir()
+                .map_err(|source| WinAppMigratorError::io("temporary package folder", source))?;
+            protect_staging_folder(temp_dir.path())
+                .map_err(|source| WinAppMigratorError::io(temp_dir.path(), source))?;
+            extract_zip_archive(package_root, temp_dir.path())?;
+            return Ok(Self {
+                package_root: temp_dir.path().to_path_buf(),
+                _temp_dir: Some(temp_dir),
+            });
+        }
+        Ok(Self {
+            package_root: package_root.to_path_buf(),
+            _temp_dir: None,
+        })
+    }
+
+    pub(crate) fn package_root(&self) -> &Path {
+        &self.package_root
+    }
 }
 
 pub fn read_manifest(package_root: &Path) -> Result<PackageManifest> {

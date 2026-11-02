@@ -9,6 +9,7 @@ pub mod install_source;
 pub mod license_scan;
 pub mod models;
 pub mod package;
+pub mod path_rewrite;
 pub mod path_utils;
 pub mod pe_scan;
 pub mod prerequisites;

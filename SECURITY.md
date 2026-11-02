@@ -39,10 +39,10 @@ the installer stub must never be signed.
 [docs/PLAN.md](docs/PLAN.md#open-issues-most-important-first) lists open issues, including
 restore-time allowlists and prerequisite signature checks.
 
-An install location outside a protected folder, such as `D:\\Apps`, stays writable by other
+An install location outside a protected folder, such as `D:\Apps`, stays writable by other
 programs on the PC. Links are checked just before each file is written, but a program running
 at that moment could still race the check, and it can change the installed files afterward.
-Choose a location under `C:\\Program Files` for anything that installs a service or a driver.
+Choose a location under `C:\Program Files` for anything that installs a service or a driver.
 
 ## Licensing data
 

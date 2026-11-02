@@ -4,6 +4,14 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **Paths are rewritten exactly.** `C:\App\a.exe` no longer becomes `C:\App22\a.exe` for a
+  target of `C:\App2`, `C:\Application Data` is left alone, and a rule for
+  `C:\Program Files\Git` no longer touches `C:\Program Files\GitHub CLI`. Verification used
+  the same flawed function, so it had been passing these. Text is walked once and a path counts
+  only as a whole. Restore and verification now share one implementation, and a scheduled task
+  whose path or target holds `&` stays valid XML. Rewriting costs a few hash lookups per path
+  instead of a loop over every file: about 1.5 microseconds per value at 100,000 files, measured
+  by a test in a development build. It was about 110 milliseconds.
 - **Staging folders are locked down while elevated.** The installer's extraction folder and
   the app's build folder are restricted to Administrators and SYSTEM before anything is
   written to them, and the work stops if that fails. A process that is not elevated could

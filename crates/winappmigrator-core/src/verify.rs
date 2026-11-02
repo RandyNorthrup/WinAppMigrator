@@ -1,17 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tempfile::TempDir;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use winreg::enums::HKEY_LOCAL_MACHINE;
 use winreg::{RegKey, RegValue};
 
-use crate::archive::extract_zip_archive;
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{
-    package_destination_path, restore_destination_for_entry, user_data_real_destination,
-};
+use crate::file_discovery::{package_destination_path, user_data_real_destination};
 use crate::hashing::sha256_file;
 use crate::models::{
     EnvironmentVariableEntry, FileEntry, PackageManifest, RegistryEntry, RegistryValueKind,
@@ -19,15 +15,15 @@ use crate::models::{
     VerificationCategory, VerificationItem, VerificationOptions, VerificationReport,
     VerificationStatus, Warning, WarningSeverity,
 };
-use crate::package::read_manifest;
-use crate::path_utils::{escape_powershell_single, hidden_command, is_drive_root};
+use crate::package::{PreparedPackage, read_manifest};
+use crate::path_rewrite::RestoreMap;
+use crate::path_utils::{escape_powershell_single, hidden_command};
 use crate::prerequisites::is_present;
 use crate::registry_target::{
     app_path_entries, environment_registry_target, is_path_variable, path_contains_entry,
     registry_hive_name, registry_raw_type, registry_root, registry_value_name,
 };
 
-const ZIP_EXTENSION: &str = "zip";
 const VERIFICATION_REPORT_JSON: &str = "verification_report.json";
 const VERIFICATION_REPORT_MARKDOWN: &str = "verification_report.md";
 const POWERSHELL_EXE: &str = "powershell.exe";
@@ -219,65 +215,39 @@ fn verify_restored_target(
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) -> Result<()> {
-    let path_rewrites = path_rewrites(manifest, target_root, restore_user_data)?;
-    verify_restored_files(target_root, manifest, restore_user_data, items, errors)?;
+    let map = RestoreMap::new(manifest, target_root, restore_user_data)?;
+    verify_restored_files(&map, manifest, items, errors)?;
     verify_prerequisites(manifest, items);
     // License artifacts and their transferable registry values are only expected
     // on the target when the restore was told to write them.
     if restore_license {
-        verify_license_restored(manifest, &path_rewrites, restore_user_data, items, errors)?;
-        verify_registry_entries(
-            &manifest.license_registry_entries,
-            &path_rewrites,
-            items,
-            errors,
-        );
+        verify_license_restored(manifest, &map, restore_user_data, items, errors)?;
+        verify_registry_entries(&manifest.license_registry_entries, &map, items, errors);
     }
-    verify_registry_entries(
-        &manifest.registry_keys_exported,
-        &path_rewrites,
-        items,
-        errors,
-    );
+    verify_registry_entries(&manifest.registry_keys_exported, &map, items, errors);
     verify_environment_variables(
         &manifest.environment_variables_detected,
         target_root,
-        &path_rewrites,
+        &map,
         items,
         errors,
     );
-    verify_services(
-        target_root,
-        manifest,
-        restore_user_data,
-        &manifest.services_detected,
-        items,
-        warnings,
-        errors,
-    );
+    verify_services(&map, &manifest.services_detected, items, warnings, errors);
     verify_drivers(manifest, items, warnings, errors);
     verify_scheduled_tasks(
         &manifest.scheduled_tasks_detected,
-        &path_rewrites,
+        &map,
         items,
         warnings,
         errors,
     );
-    verify_shortcuts(
-        target_root,
-        manifest,
-        restore_user_data,
-        &manifest.shortcuts_detected,
-        items,
-        errors,
-    );
+    verify_shortcuts(&map, &manifest.shortcuts_detected, items, errors);
     Ok(())
 }
 
 fn verify_restored_files(
-    target_root: &Path,
+    map: &RestoreMap,
     manifest: &PackageManifest,
-    restore_user_data: bool,
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) -> Result<()> {
@@ -289,12 +259,14 @@ fn verify_restored_files(
         let Some(relative) = file.package_relative_path.as_ref() else {
             continue;
         };
-        let destination = restore_destination_for_entry(file, target_root, restore_user_data)?;
+        let Some(destination) = map.destination_of(&file.original_path) else {
+            continue;
+        };
         let item = if destination.is_file() {
             verify_file_size_and_hash(
                 VerificationCategory::RestoredFile,
                 relative.display().to_string(),
-                &destination,
+                destination,
                 file,
             )?
         } else {
@@ -544,7 +516,7 @@ fn verify_prerequisites(manifest: &PackageManifest, items: &mut Vec<Verification
 /// locations.
 fn verify_license_restored(
     manifest: &PackageManifest,
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
     restore_user_data: bool,
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
@@ -556,7 +528,7 @@ fn verify_license_restored(
         let Some(original) = artifact.path.as_ref() else {
             continue;
         };
-        let destination = license_destination(original, path_rewrites, restore_user_data)?;
+        let destination = license_destination(original, map, restore_user_data)?;
         let name = original.display().to_string();
         let item = if artifact.hash_sha256.is_some() {
             if destination.is_file() {
@@ -605,26 +577,23 @@ fn verify_license_restored(
 
 fn license_destination(
     original: &Path,
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
     restore_user_data: bool,
 ) -> Result<PathBuf> {
     if restore_user_data && let Some(destination) = user_data_real_destination(original)? {
         return Ok(destination);
     }
-    Ok(PathBuf::from(rewrite_known_paths(
-        &original.to_string_lossy(),
-        path_rewrites,
-    )))
+    Ok(PathBuf::from(map.rewrite(&original.to_string_lossy())))
 }
 
 fn verify_registry_entries(
     entries: &[RegistryEntry],
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) {
     for entry in entries {
-        let item = match verify_registry_entry(entry, path_rewrites) {
+        let item = match verify_registry_entry(entry, map) {
             Ok(item) => item,
             Err(warning) => {
                 errors.push(warning.clone());
@@ -650,7 +619,7 @@ fn verify_registry_entries(
 
 fn verify_registry_entry(
     entry: &RegistryEntry,
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
 ) -> std::result::Result<VerificationItem, Warning> {
     let root = registry_root(&entry.hive);
     let key = root.open_subkey(&entry.key_path).map_err(|error| {
@@ -677,7 +646,7 @@ fn verify_registry_entry(
             format!("Registry value is missing or unreadable: {error}"),
         )
     })?;
-    if registry_value_matches(entry, &actual, path_rewrites)? {
+    if registry_value_matches(entry, &actual, map)? {
         Ok(passed_item(
             VerificationCategory::Registry,
             registry_entry_name(entry),
@@ -697,7 +666,7 @@ fn verify_registry_entry(
 fn verify_environment_variables(
     variables: &[EnvironmentVariableEntry],
     target_root: &Path,
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) {
@@ -709,7 +678,7 @@ fn verify_environment_variables(
             .and_then(|key| key.get_raw_value(&variable.name))
         {
             Ok(actual) => {
-                let expected = rewrite_known_paths(&variable.value, path_rewrites);
+                let expected = map.rewrite(&variable.value);
                 let matches = if is_path_variable(&variable.name) {
                     let actual = actual.to_string();
                     app_path_entries(&expected, target_root)
@@ -754,25 +723,19 @@ fn verify_environment_variables(
 }
 
 fn verify_services(
-    target_root: &Path,
-    manifest: &PackageManifest,
-    restore_user_data: bool,
+    map: &RestoreMap,
     services: &[ServiceEntry],
     items: &mut Vec<VerificationItem>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
     for service in services {
-        let expected_binary = mapped_original_path(
-            manifest,
-            target_root,
-            &service.binary_path,
-            restore_user_data,
-        )
-        .unwrap_or_else(|| service.binary_path.clone());
+        let expected_binary = map
+            .destination_of(&service.binary_path)
+            .unwrap_or(&service.binary_path);
         let item = match read_service_image_path(&service.service_name) {
             Ok(actual) => {
-                if command_path_matches(&actual, &expected_binary) {
+                if command_path_matches(&actual, expected_binary) {
                     passed_item(
                         VerificationCategory::Service,
                         service.service_name.clone(),
@@ -878,7 +841,7 @@ fn driver_service_registered(service_name: &str) -> bool {
 
 fn verify_scheduled_tasks(
     tasks: &[ScheduledTaskEntry],
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
     items: &mut Vec<VerificationItem>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
@@ -887,10 +850,7 @@ fn verify_scheduled_tasks(
         let name = format!("{}{}", task.task_path, task.task_name);
         let item = match scheduled_task_xml(task) {
             Ok(Some(xml)) => {
-                let expected_command = rewrite_known_paths(
-                    task.action_command.display().to_string().as_str(),
-                    path_rewrites,
-                );
+                let expected_command = map.rewrite(&task.action_command.to_string_lossy());
                 if xml
                     .to_ascii_lowercase()
                     .contains(&expected_command.to_ascii_lowercase())
@@ -944,24 +904,18 @@ fn verify_scheduled_tasks(
 }
 
 fn verify_shortcuts(
-    target_root: &Path,
-    manifest: &PackageManifest,
-    restore_user_data: bool,
+    map: &RestoreMap,
     shortcuts: &[ShortcutEntry],
     items: &mut Vec<VerificationItem>,
     errors: &mut Vec<Warning>,
 ) {
     for shortcut in shortcuts {
-        let expected_target = mapped_original_path(
-            manifest,
-            target_root,
-            &shortcut.target_path,
-            restore_user_data,
-        )
-        .unwrap_or_else(|| shortcut.target_path.clone());
+        let expected_target = map
+            .destination_of(&shortcut.target_path)
+            .unwrap_or(&shortcut.target_path);
         let item = match shortcut_target(&shortcut.original_lnk_path) {
             Ok(Some(actual)) => {
-                if command_path_matches(&actual, &expected_target) {
+                if command_path_matches(&actual, expected_target) {
                     passed_item(
                         VerificationCategory::Shortcut,
                         shortcut.original_lnk_path.display().to_string(),
@@ -1005,7 +959,7 @@ fn verify_shortcuts(
 fn registry_value_matches(
     entry: &RegistryEntry,
     actual: &RegValue<'_>,
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
 ) -> std::result::Result<bool, Warning> {
     let kind = entry.value_kind.as_ref().ok_or_else(|| {
         registry_warning(
@@ -1019,10 +973,7 @@ fn registry_value_matches(
     }
     match kind {
         RegistryValueKind::String | RegistryValueKind::ExpandString => {
-            let expected = rewrite_known_paths(
-                entry.value_data.as_deref().unwrap_or_default(),
-                path_rewrites,
-            );
+            let expected = map.rewrite(entry.value_data.as_deref().unwrap_or_default());
             Ok(actual.to_string() == expected)
         }
         RegistryValueKind::None => Ok(actual.bytes.is_empty()),
@@ -1034,90 +985,6 @@ fn registry_value_matches(
             Ok(actual.bytes.as_ref() == expected.as_slice())
         }
     }
-}
-
-fn path_rewrites(
-    manifest: &PackageManifest,
-    target_root: &Path,
-    restore_user_data: bool,
-) -> Result<Vec<(String, String)>> {
-    let mut rewrites = Vec::new();
-    for file in &manifest.file_inventory {
-        if !file.should_copy {
-            continue;
-        }
-        if file.package_relative_path.is_none() {
-            continue;
-        }
-        let destination = restore_destination_for_entry(file, target_root, restore_user_data)?;
-        rewrites.push((
-            file.original_path.to_string_lossy().to_string(),
-            destination.to_string_lossy().to_string(),
-        ));
-    }
-    // Files are stored relative to the install location, which can be above the
-    // executable's own folder (`Chrome` for `Chrome\Application\chrome.exe`).
-    let source_root = manifest
-        .application_metadata
-        .as_ref()
-        .and_then(|app| app.install_location.as_deref())
-        .or_else(|| manifest.main_executable_path.parent());
-    if let Some(source_root) = source_root.filter(|root| !is_drive_root(root)) {
-        rewrites.push((
-            source_root
-                .to_string_lossy()
-                .trim_end_matches('\\')
-                .to_owned(),
-            target_root.to_string_lossy().to_string(),
-        ));
-    }
-    rewrites.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
-    Ok(rewrites)
-}
-
-fn mapped_original_path(
-    manifest: &PackageManifest,
-    target_root: &Path,
-    original: &Path,
-    restore_user_data: bool,
-) -> Option<PathBuf> {
-    manifest
-        .file_inventory
-        .iter()
-        .find(|file| {
-            file.should_copy
-                && file
-                    .original_path
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&original.to_string_lossy())
-        })
-        .and_then(|file| restore_destination_for_entry(file, target_root, restore_user_data).ok())
-}
-
-fn rewrite_known_paths(value: &str, rewrites: &[(String, String)]) -> String {
-    let mut rewritten = value.to_owned();
-    for (source, destination) in rewrites {
-        rewritten = replace_ignore_ascii_case(&rewritten, source, destination);
-    }
-    rewritten
-}
-
-fn replace_ignore_ascii_case(haystack: &str, needle: &str, replacement: &str) -> String {
-    if needle.is_empty() {
-        return haystack.to_owned();
-    }
-    let lower_haystack = haystack.to_ascii_lowercase();
-    let lower_needle = needle.to_ascii_lowercase();
-    let mut result = String::new();
-    let mut cursor = 0_usize;
-    while let Some(found) = lower_haystack[cursor..].find(&lower_needle) {
-        let absolute = cursor + found;
-        result.push_str(&haystack[cursor..absolute]);
-        result.push_str(replacement);
-        cursor = absolute + needle.len();
-    }
-    result.push_str(&haystack[cursor..]);
-    result
 }
 
 fn read_service_image_path(service_name: &str) -> std::io::Result<String> {
@@ -1327,51 +1194,9 @@ fn render_verification_markdown(report: &VerificationReport) -> String {
     output
 }
 
-struct PreparedPackage {
-    package_root: PathBuf,
-    _temp_dir: Option<TempDir>,
-}
-
-impl PreparedPackage {
-    fn new(package_root: &Path) -> Result<Self> {
-        if package_root.is_file()
-            && package_root
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case(ZIP_EXTENSION))
-        {
-            let temp_dir = tempfile::tempdir().map_err(|source| {
-                WinAppMigratorError::io("temporary verification extraction directory", source)
-            })?;
-            extract_zip_archive(package_root, temp_dir.path())?;
-            return Ok(Self {
-                package_root: temp_dir.path().to_path_buf(),
-                _temp_dir: Some(temp_dir),
-            });
-        }
-        Ok(Self {
-            package_root: package_root.to_path_buf(),
-            _temp_dir: None,
-        })
-    }
-
-    fn package_root(&self) -> &Path {
-        &self.package_root
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rewrites_paths_case_insensitively() {
-        let rewrites = vec![(r"C:\App".to_owned(), r"D:\Restored".to_owned())];
-
-        assert_eq!(
-            rewrite_known_paths(r"run C:\APP\bin.exe", &rewrites),
-            r"run D:\Restored\bin.exe"
-        );
-    }
 
     #[test]
     fn restore_destination_strips_files_root() -> Result<()> {

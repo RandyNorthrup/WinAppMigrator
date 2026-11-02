@@ -6,12 +6,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use filetime::{FileTime, set_file_times};
-use tempfile::TempDir;
 use walkdir::WalkDir;
 use winreg::RegValue;
 use winreg::enums::REG_NONE;
 
-use crate::archive::extract_zip_archive;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
     ensure_target_root, ensure_within_root, package_destination_path, reject_unsafe_components,
@@ -23,10 +21,10 @@ use crate::models::{
     RegistryValueKind, RestoreOptions, RestorePlan, RestoreResult, RuntimePrerequisite,
     ScheduledTaskEntry, ServiceEntry, ShortcutEntry, VerificationOptions, Warning, WarningSeverity,
 };
-use crate::package::read_manifest;
+use crate::package::{PreparedPackage, read_manifest};
+use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
-    escape_powershell_single, hidden_command, is_drive_root, sanitize_filename,
-    strip_prefix_ignore_case,
+    escape_powershell_single, hidden_command, sanitize_filename, strip_prefix_ignore_case,
 };
 use crate::prerequisites::{PrerequisiteInstallOutcome, install_bundle, is_present};
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
@@ -38,7 +36,6 @@ use crate::verify::verify_prepared_package;
 
 const RESTORE_LOG_JSON: &str = "restore_log.json";
 const RESTORE_LOG_MARKDOWN: &str = "restore_log.md";
-const ZIP_EXTENSION: &str = "zip";
 const POWERSHELL_EXE: &str = "powershell.exe";
 const SC_EXE: &str = "sc.exe";
 /// Buffer for copying a file out of the package. Large files are the slow ones.
@@ -99,7 +96,7 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         )));
     }
 
-    let prepared = PreparedPackage::new(options)?;
+    let prepared = PreparedPackage::new(&options.package_root)?;
     let mut effective_options = options.clone();
     effective_options.package_root = prepared.package_root().to_path_buf();
     // Read once. Everything below works from this copy, so nothing can change between
@@ -133,7 +130,7 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
         ));
     }
 
-    let path_rewrites = path_rewrites(&manifest, &options.target_root, options.restore_user_data)?;
+    let map = RestoreMap::new(&manifest, &options.target_root, options.restore_user_data)?;
     if options.apply {
         ensure_target_root(&options.target_root)?;
     }
@@ -174,7 +171,7 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     restore_registry(
         &effective_options,
         &plan.planned_registry_writes,
-        &path_rewrites,
+        &map,
         &mut changes_logged,
         &mut warnings,
         &mut errors,
@@ -182,14 +179,14 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     restore_license(
         &effective_options,
         &manifest,
-        &path_rewrites,
+        &map,
         &mut changes_logged,
         &mut warnings,
         &mut errors,
     );
     restore_services(
         &effective_options,
-        &manifest,
+        &map,
         &plan.planned_service_changes,
         &mut changes_logged,
         &mut warnings,
@@ -198,7 +195,7 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     restore_drivers(
         &effective_options,
         &plan.planned_driver_actions,
-        &path_rewrites,
+        &map,
         &mut changes_logged,
         &mut warnings,
         &mut errors,
@@ -206,14 +203,14 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     restore_scheduled_tasks(
         &effective_options,
         &plan.planned_task_changes,
-        &path_rewrites,
+        &map,
         &mut changes_logged,
         &mut warnings,
         &mut errors,
     );
     restore_shortcuts(
         &effective_options,
-        &manifest,
+        &map,
         &plan.planned_shortcut_changes,
         &mut changes_logged,
         &mut warnings,
@@ -222,7 +219,7 @@ pub fn restore_package(options: &RestoreOptions) -> Result<RestoreResult> {
     restore_environment(
         &effective_options,
         &plan.planned_environment_changes,
-        &path_rewrites,
+        &map,
         &mut changes_logged,
         &mut warnings,
         &mut errors,
@@ -335,7 +332,7 @@ fn restore_files(
 fn restore_registry(
     options: &RestoreOptions,
     entries: &[RegistryEntry],
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
     changes_logged: &mut Vec<String>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
@@ -351,7 +348,7 @@ fn restore_registry(
             continue;
         }
 
-        match apply_registry_entry(entry, options.force, path_rewrites) {
+        match apply_registry_entry(entry, options.force, map) {
             Ok(message) => changes_logged.push(message),
             Err(warning) => errors.push(warning),
         }
@@ -368,20 +365,16 @@ fn restore_registry(
 
 fn restore_services(
     options: &RestoreOptions,
-    manifest: &PackageManifest,
+    map: &RestoreMap,
     services: &[ServiceEntry],
     changes_logged: &mut Vec<String>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
     for service in services {
-        let binary_path = mapped_original_path(
-            manifest,
-            &options.target_root,
-            &service.binary_path,
-            options.restore_user_data,
-        )
-        .unwrap_or_else(|| service.binary_path.clone());
+        let binary_path = map
+            .destination_of(&service.binary_path)
+            .map_or_else(|| service.binary_path.clone(), Path::to_path_buf);
         if !options.apply {
             changes_logged.push(format!(
                 "would restore service {} -> {}",
@@ -546,7 +539,7 @@ fn confirm_prerequisite(
 fn restore_license(
     options: &RestoreOptions,
     manifest: &PackageManifest,
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
     changes_logged: &mut Vec<String>,
     _warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
@@ -578,19 +571,18 @@ fn restore_license(
                 continue;
             }
         };
-        let destination =
-            match license_destination(original, path_rewrites, options.restore_user_data) {
-                Ok(path) => path,
-                Err(error) => {
-                    errors.push(Warning::new(
-                        "license_destination_invalid",
-                        WarningSeverity::Error,
-                        format!("Could not resolve license destination: {error}"),
-                        Some(original.display().to_string()),
-                    ));
-                    continue;
-                }
-            };
+        let destination = match license_destination(original, map, options.restore_user_data) {
+            Ok(path) => path,
+            Err(error) => {
+                errors.push(Warning::new(
+                    "license_destination_invalid",
+                    WarningSeverity::Error,
+                    format!("Could not resolve license destination: {error}"),
+                    Some(original.display().to_string()),
+                ));
+                continue;
+            }
+        };
 
         let is_dir = source.is_dir();
         if !options.apply {
@@ -650,7 +642,7 @@ fn restore_license(
             ));
             continue;
         }
-        match apply_registry_entry(entry, options.force, path_rewrites) {
+        match apply_registry_entry(entry, options.force, map) {
             Ok(message) => changes_logged.push(message),
             Err(warning) => errors.push(warning),
         }
@@ -662,14 +654,13 @@ fn restore_license(
 /// app-install paths rewritten to the target root.
 fn license_destination(
     original: &Path,
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
     restore_user_data: bool,
 ) -> Result<PathBuf> {
     if restore_user_data && let Some(destination) = user_data_real_destination(original)? {
         return Ok(destination);
     }
-    let rewritten = rewrite_known_paths(&original.to_string_lossy(), path_rewrites);
-    Ok(PathBuf::from(rewritten))
+    Ok(PathBuf::from(map.rewrite(&original.to_string_lossy())))
 }
 
 fn copy_license_dir(source: &Path, destination: &Path, target_root: &Path) -> Result<()> {
@@ -693,7 +684,7 @@ fn copy_license_dir(source: &Path, destination: &Path, target_root: &Path) -> Re
 fn restore_drivers(
     options: &RestoreOptions,
     drivers: &[DriverEntry],
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
     changes_logged: &mut Vec<String>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
@@ -715,19 +706,18 @@ fn restore_drivers(
         // a copyable file-inventory entry, so we re-anchor its original path and
         // constrain the result to the target root (path-traversal safe), falling
         // back to <target_root>\drivers\<leaf> for atypical layouts.
-        let destination =
-            match driver_restore_destination(driver, &options.target_root, path_rewrites) {
-                Ok(path) => path,
-                Err(error) => {
-                    errors.push(Warning::new(
-                        "driver_destination_invalid",
-                        WarningSeverity::Error,
-                        format!("Could not resolve a safe driver destination: {error}"),
-                        Some(driver.service_name.clone()),
-                    ));
-                    continue;
-                }
-            };
+        let destination = match driver_restore_destination(driver, map) {
+            Ok(path) => path,
+            Err(error) => {
+                errors.push(Warning::new(
+                    "driver_destination_invalid",
+                    WarningSeverity::Error,
+                    format!("Could not resolve a safe driver destination: {error}"),
+                    Some(driver.service_name.clone()),
+                ));
+                continue;
+            }
+        };
 
         if !options.apply {
             changes_logged.push(format!(
@@ -840,15 +830,9 @@ fn driver_sc_type(kind: &DriverKind) -> &'static str {
 
 /// Resolve a path-traversal-safe destination for a bundled driver image, always
 /// inside `target_root`.
-fn driver_restore_destination(
-    driver: &DriverEntry,
-    target_root: &Path,
-    path_rewrites: &[(String, String)],
-) -> Result<PathBuf> {
-    let rewritten = PathBuf::from(rewrite_known_paths(
-        &driver.image_path.to_string_lossy(),
-        path_rewrites,
-    ));
+fn driver_restore_destination(driver: &DriverEntry, map: &RestoreMap) -> Result<PathBuf> {
+    let target_root = map.target_root();
+    let rewritten = PathBuf::from(map.rewrite(&driver.image_path.to_string_lossy()));
     if strip_prefix_ignore_case(&rewritten, target_root).is_some_and(|relative| {
         !relative.as_os_str().is_empty() && reject_unsafe_components(&relative).is_ok()
     }) {
@@ -868,7 +852,7 @@ fn driver_restore_destination(
 fn restore_scheduled_tasks(
     options: &RestoreOptions,
     tasks: &[ScheduledTaskEntry],
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
     changes_logged: &mut Vec<String>,
     _warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
@@ -881,7 +865,7 @@ fn restore_scheduled_tasks(
             ));
             continue;
         }
-        match apply_scheduled_task(task, options.force, path_rewrites) {
+        match apply_scheduled_task(task, options.force, map) {
             Ok(message) => changes_logged.push(message),
             Err(warning) => errors.push(warning),
         }
@@ -890,38 +874,24 @@ fn restore_scheduled_tasks(
 
 fn restore_shortcuts(
     options: &RestoreOptions,
-    manifest: &PackageManifest,
+    map: &RestoreMap,
     shortcuts: &[ShortcutEntry],
     changes_logged: &mut Vec<String>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
 ) {
     for shortcut in shortcuts {
-        let target_path = mapped_original_path(
-            manifest,
-            &options.target_root,
-            &shortcut.target_path,
-            options.restore_user_data,
-        )
-        .unwrap_or_else(|| shortcut.target_path.clone());
-        let working_directory = shortcut.working_directory.as_ref().map(|working| {
-            mapped_original_path(
-                manifest,
-                &options.target_root,
-                working,
-                options.restore_user_data,
-            )
-            .unwrap_or_else(|| working.clone())
-        });
-        let icon_path = shortcut.icon_path.as_ref().map(|icon| {
-            mapped_original_path(
-                manifest,
-                &options.target_root,
-                icon,
-                options.restore_user_data,
-            )
-            .unwrap_or_else(|| icon.clone())
-        });
+        let target_path = map
+            .destination_of(&shortcut.target_path)
+            .map_or_else(|| shortcut.target_path.clone(), Path::to_path_buf);
+        let working_directory = shortcut
+            .working_directory
+            .as_ref()
+            .map(|working| PathBuf::from(map.rewrite(&working.to_string_lossy())));
+        let icon_path = shortcut
+            .icon_path
+            .as_ref()
+            .map(|icon| PathBuf::from(map.rewrite(&icon.to_string_lossy())));
 
         if !options.apply {
             changes_logged.push(format!(
@@ -989,7 +959,7 @@ fn refuse_damaged_package(options: &RestoreOptions, manifest: &PackageManifest) 
 fn restore_environment(
     options: &RestoreOptions,
     environment_variables: &[EnvironmentVariableEntry],
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
     changes_logged: &mut Vec<String>,
     warnings: &mut Vec<Warning>,
     errors: &mut Vec<Warning>,
@@ -1002,12 +972,7 @@ fn restore_environment(
             ));
             continue;
         }
-        match apply_environment_variable(
-            variable,
-            options.force,
-            &options.target_root,
-            path_rewrites,
-        ) {
+        match apply_environment_variable(variable, options.force, &options.target_root, map) {
             Ok(message) => changes_logged.push(message),
             Err(warning) => errors.push(warning),
         }
@@ -1025,7 +990,7 @@ fn restore_environment(
 fn apply_registry_entry(
     entry: &RegistryEntry,
     force: bool,
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
 ) -> std::result::Result<String, Warning> {
     let root = registry_root(&entry.hive);
     let (key, _) = root.create_subkey(&entry.key_path).map_err(|error| {
@@ -1064,7 +1029,7 @@ fn apply_registry_entry(
         ));
     }
 
-    let value = registry_value_from_entry(entry, path_rewrites)?;
+    let value = registry_value_from_entry(entry, map)?;
     key.set_raw_value(value_name, &value).map_err(|error| {
         Warning::new(
             "registry_value_write_failed",
@@ -1090,7 +1055,7 @@ fn apply_environment_variable(
     variable: &EnvironmentVariableEntry,
     force: bool,
     target_root: &Path,
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
 ) -> std::result::Result<String, Warning> {
     let (root, key_path) = environment_registry_target(&variable.scope);
     let (key, _) = root.create_subkey(key_path).map_err(|error| {
@@ -1112,7 +1077,7 @@ fn apply_environment_variable(
         ));
     }
 
-    let rewritten = rewrite_known_paths(&variable.value, path_rewrites);
+    let rewritten = map.rewrite(&variable.value);
     let (data, vtype) = if is_path {
         let current = key
             .get_value::<String, _>(&variable.name)
@@ -1146,7 +1111,7 @@ fn apply_environment_variable(
 
 fn registry_value_from_entry(
     entry: &RegistryEntry,
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
 ) -> std::result::Result<RegValue<'static>, Warning> {
     let kind = entry.value_kind.as_ref().ok_or_else(|| {
         registry_warning(
@@ -1157,10 +1122,7 @@ fn registry_value_from_entry(
     })?;
     match kind {
         RegistryValueKind::String | RegistryValueKind::ExpandString => {
-            let rewritten = rewrite_known_paths(
-                entry.value_data.as_deref().unwrap_or_default(),
-                path_rewrites,
-            );
+            let rewritten = map.rewrite(entry.value_data.as_deref().unwrap_or_default());
             Ok(RegValue {
                 bytes: Cow::Owned(encode_utf16_nul(&rewritten)),
                 vtype: registry_raw_type(kind),
@@ -1258,7 +1220,7 @@ fn apply_service(
 fn apply_scheduled_task(
     task: &ScheduledTaskEntry,
     force: bool,
-    path_rewrites: &[(String, String)],
+    map: &RestoreMap,
 ) -> std::result::Result<String, Warning> {
     let Some(xml) = task.definition_xml.as_deref() else {
         return Err(Warning::new(
@@ -1277,7 +1239,14 @@ fn apply_scheduled_task(
         ));
     }
 
-    let rewritten_xml = rewrite_known_paths(xml, path_rewrites);
+    let rewritten_xml = map.rewrite_xml(xml).map_err(|error| {
+        Warning::new(
+            "scheduled_task_xml_invalid",
+            WarningSeverity::Error,
+            format!("The scheduled task's definition could not be read: {error}"),
+            Some(format!("{}{}", task.task_path, task.task_name)),
+        )
+    })?;
     let xml_path = std::env::temp_dir().join(format!(
         "winappmigrator-task-{}-{}.xml",
         std::process::id(),
@@ -1499,64 +1468,6 @@ fn shortcut_requires_admin(shortcut: &ShortcutEntry) -> bool {
         || path.contains(r"\users\public\desktop")
 }
 
-fn path_rewrites(
-    manifest: &PackageManifest,
-    target_root: &Path,
-    restore_user_data: bool,
-) -> Result<Vec<(String, String)>> {
-    let mut rewrites = Vec::new();
-    for file in &manifest.file_inventory {
-        if !file.should_copy {
-            continue;
-        }
-        if file.package_relative_path.is_none() {
-            continue;
-        }
-        let destination = restore_destination_for_entry(file, target_root, restore_user_data)?;
-        rewrites.push((
-            file.original_path.to_string_lossy().to_string(),
-            destination.to_string_lossy().to_string(),
-        ));
-    }
-    // Files are stored relative to the install location, which can be above the
-    // executable's own folder (`Chrome` for `Chrome\Application\chrome.exe`).
-    let source_root = manifest
-        .application_metadata
-        .as_ref()
-        .and_then(|app| app.install_location.as_deref())
-        .or_else(|| manifest.main_executable_path.parent());
-    if let Some(source_root) = source_root.filter(|root| !is_drive_root(root)) {
-        rewrites.push((
-            source_root
-                .to_string_lossy()
-                .trim_end_matches('\\')
-                .to_owned(),
-            target_root.to_string_lossy().to_string(),
-        ));
-    }
-    rewrites.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
-    Ok(rewrites)
-}
-
-fn mapped_original_path(
-    manifest: &PackageManifest,
-    target_root: &Path,
-    original: &Path,
-    restore_user_data: bool,
-) -> Option<PathBuf> {
-    manifest
-        .file_inventory
-        .iter()
-        .find(|file| {
-            file.should_copy
-                && file
-                    .original_path
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&original.to_string_lossy())
-        })
-        .and_then(|file| restore_destination_for_entry(file, target_root, restore_user_data).ok())
-}
-
 /// True when any planned user-data file will be restored to a machine-wide
 /// protected location (for example ProgramData) and therefore needs elevation.
 fn user_data_restore_requires_admin(options: &RestoreOptions, plan: &RestorePlan) -> bool {
@@ -1565,32 +1476,6 @@ fn user_data_restore_requires_admin(options: &RestoreOptions, plan: &RestorePlan
             .map(|destination| destination_requires_admin(&destination))
             .unwrap_or(false)
     })
-}
-
-fn rewrite_known_paths(value: &str, rewrites: &[(String, String)]) -> String {
-    let mut rewritten = value.to_owned();
-    for (source, destination) in rewrites {
-        rewritten = replace_ignore_ascii_case(&rewritten, source, destination);
-    }
-    rewritten
-}
-
-fn replace_ignore_ascii_case(haystack: &str, needle: &str, replacement: &str) -> String {
-    if needle.is_empty() {
-        return haystack.to_owned();
-    }
-    let lower_haystack = haystack.to_ascii_lowercase();
-    let lower_needle = needle.to_ascii_lowercase();
-    let mut result = String::new();
-    let mut cursor = 0_usize;
-    while let Some(found) = lower_haystack[cursor..].find(&lower_needle) {
-        let absolute = cursor + found;
-        result.push_str(&haystack[cursor..absolute]);
-        result.push_str(replacement);
-        cursor = absolute + needle.len();
-    }
-    result.push_str(&haystack[cursor..]);
-    result
 }
 
 fn encode_utf16_nul(value: &str) -> Vec<u8> {
@@ -1729,39 +1614,6 @@ fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
     ))
 }
 
-struct PreparedPackage {
-    package_root: PathBuf,
-    _temp_dir: Option<TempDir>,
-}
-
-impl PreparedPackage {
-    fn new(options: &RestoreOptions) -> Result<Self> {
-        if options.package_root.is_file()
-            && options
-                .package_root
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case(ZIP_EXTENSION))
-        {
-            let temp_dir = tempfile::tempdir().map_err(|source| {
-                WinAppMigratorError::io("temporary package extraction directory", source)
-            })?;
-            extract_zip_archive(&options.package_root, temp_dir.path())?;
-            return Ok(Self {
-                package_root: temp_dir.path().to_path_buf(),
-                _temp_dir: Some(temp_dir),
-            });
-        }
-        Ok(Self {
-            package_root: options.package_root.clone(),
-            _temp_dir: None,
-        })
-    }
-
-    fn package_root(&self) -> &Path {
-        &self.package_root
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1788,7 +1640,7 @@ mod tests {
         fs::write(path, bytes).map_err(|error| WinAppMigratorError::io(path, error))
     }
 
-    fn temp_folder() -> Result<TempDir> {
+    fn temp_folder() -> Result<tempfile::TempDir> {
         tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp folder", error))
     }
 
@@ -1886,20 +1738,33 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn rewrites_paths_case_insensitively() {
-        let rewrites = vec![(r"C:\App".to_owned(), r"D:\Restored".to_owned())];
-
-        assert_eq!(
-            rewrite_known_paths(r"run C:\APP\bin.exe", &rewrites),
-            r"run D:\Restored\bin.exe"
-        );
+    fn app_map() -> Result<RestoreMap> {
+        let manifest: PackageManifest = serde_json::from_str(
+            r#"{
+                "schema_version": "",
+                "source_computer_name": null,
+                "source_windows_version": null,
+                "scan_timestamp_utc": "",
+                "main_executable_path": "C:\\App\\app.exe",
+                "application_metadata": null,
+                "file_inventory": [],
+                "registry_keys_exported": [],
+                "services_detected": [],
+                "scheduled_tasks_detected": [],
+                "shortcuts_detected": [],
+                "environment_variables_detected": [],
+                "runtime_prerequisites": [],
+                "warnings": [],
+                "items_intentionally_excluded": []
+            }"#,
+        )?;
+        RestoreMap::new(&manifest, Path::new(r"D:\Restored"), false)
     }
 
     #[test]
     fn license_destination_rewrites_app_paths() -> Result<()> {
-        let rewrites = vec![(r"C:\App".to_owned(), r"D:\Restored".to_owned())];
-        let destination = license_destination(Path::new(r"C:\App\license.lic"), &rewrites, false)?;
+        let destination =
+            license_destination(Path::new(r"C:\App\license.lic"), &app_map()?, false)?;
         assert_eq!(destination, PathBuf::from(r"D:\Restored\license.lic"));
         Ok(())
     }
@@ -1933,9 +1798,8 @@ mod tests {
     #[test]
     fn driver_destination_reanchors_under_target_root() -> Result<()> {
         let target = PathBuf::from(r"D:\Restored");
-        let rewrites = vec![(r"C:\App".to_owned(), r"D:\Restored".to_owned())];
         let driver = test_driver(r"C:\App\drivers\flt.sys");
-        let destination = driver_restore_destination(&driver, &target, &rewrites)?;
+        let destination = driver_restore_destination(&driver, &app_map()?)?;
         assert_eq!(destination, PathBuf::from(r"D:\Restored\drivers\flt.sys"));
         assert!(destination.starts_with(&target));
         Ok(())
@@ -1945,9 +1809,8 @@ mod tests {
     fn driver_destination_never_escapes_target_root() -> Result<()> {
         let target = PathBuf::from(r"D:\Restored");
         // No rewrite matches a machine path, so it must fall back under target.
-        let rewrites = vec![(r"C:\App".to_owned(), r"D:\Restored".to_owned())];
         let driver = test_driver(r"C:\Windows\System32\drivers\flt.sys");
-        let destination = driver_restore_destination(&driver, &target, &rewrites)?;
+        let destination = driver_restore_destination(&driver, &app_map()?)?;
         assert!(
             destination.starts_with(&target),
             "driver destination {destination:?} escaped target root"

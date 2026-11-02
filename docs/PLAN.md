@@ -97,24 +97,22 @@ From the audit of 2026-11-01. Items are removed from this list as they are fixed
 
 **Performance**
 
-9. Path rewriting checks every value against every file's rule, repeatedly: minutes at
-    100,000 files. Rewrite by root instead.
-10. Every byte is read about five times to build and four times to install. Hash while
+9. Every byte is read about five times to build and four times to install. Hash while
     copying, in parallel.
-11. Compression is single-threaded, and recompresses formats that are already compressed.
-12. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
+10. Compression is single-threaded, and recompresses formats that are already compressed.
+11. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
     lost if one contains a character that breaks the JSON. The offline XML reader could
     serve live scans too.
 
 **Features**
 
-13. Footprint preview with include and exclude before building, offering folders that nearly
+12. Footprint preview with include and exclude before building, offering folders that nearly
     match the product's name, which are now left out.
-14. Size and free-space check before building.
-15. A way past the 4 GiB limit: a small loader plus a data file beside it.
-16. Installer progress, persistent logs, and a change journal enabling rollback and a
+13. Size and free-space check before building.
+14. A way past the 4 GiB limit: a small loader plus a data file beside it.
+15. Installer progress, persistent logs, and a change journal enabling rollback and a
     generated uninstaller.
-17. Target OS and architecture check.
+16. Target OS and architecture check.
 
 ## Not in scope for this release line
 
