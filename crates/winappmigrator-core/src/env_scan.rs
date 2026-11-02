@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use winreg::enums::{KEY_READ, REG_EXPAND_SZ, REG_MULTI_SZ};
 use winreg::{RegKey, RegValue};
@@ -7,6 +7,8 @@ use crate::models::{
     EnvironmentScope, EnvironmentVariableEntry, MatchConfidence, RegistryValueKind, Warning,
     WarningSeverity,
 };
+use crate::path_utils::text_mentions_path;
+use crate::registry_scan::registry_value_text;
 use crate::system_context::SystemContext;
 
 const HKCU_ENVIRONMENT: &str = r"Environment";
@@ -62,7 +64,7 @@ fn collect_env_values(
     for value in key.enum_values().flatten() {
         let name = value.0;
         let raw = value.1;
-        let value_text = raw.to_string();
+        let value_text = registry_value_text(&raw);
         if value_matches_context(context, &value_text) {
             entries.push(EnvironmentVariableEntry {
                 scope: scope.clone(),
@@ -77,16 +79,11 @@ fn collect_env_values(
 }
 
 fn value_matches_context(context: &EnvironmentScanContext, value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    path_text_matches(&context.executable_path, &lower)
+    text_mentions_path(value, &context.executable_path, true)
         || context
             .install_location
             .as_ref()
-            .is_some_and(|path| path_text_matches(path, &lower))
-}
-
-fn path_text_matches(path: &Path, lower_text: &str) -> bool {
-    lower_text.contains(&path.to_string_lossy().to_ascii_lowercase())
+            .is_some_and(|path| text_mentions_path(value, path, false))
 }
 
 fn environment_value_kind(value: &RegValue<'_>) -> RegistryValueKind {

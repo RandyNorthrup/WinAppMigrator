@@ -13,7 +13,11 @@ use crate::models::{
     FileClassification, FileEntry, FootprintKind, FootprintLocation, InstallScope, Warning,
     WarningSeverity,
 };
-use crate::path_utils::{file_name_string, normalize_name_for_match, path_has_extension};
+use crate::path_utils::{
+    file_name_string, is_auxiliary_executable, is_drive_root, path_has_extension, path_is_within,
+    strip_prefix_ignore_case,
+};
+use crate::product_match::{MatchScope, ProductNames};
 use crate::system_context::SystemContext;
 
 const MAX_WALK_DEPTH: usize = 24;
@@ -33,45 +37,9 @@ const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
 const PACKAGE_FILES_ROOT: &str = "files";
 const EXTERNAL_FILES_DIR: &str = "_external";
 const DRIVER_EXTENSION: &str = "sys";
-const MIN_TOKEN_LEN: usize = 3;
-/// Tokens too generic to identify an application; ignored when matching
-/// directory names so a publisher like "data" never matches every `data` dir.
-const GENERIC_TOKENS: &[&str] = &[
-    "bin",
-    "lib",
-    "app",
-    "apps",
-    "data",
-    "core",
-    "src",
-    "etc",
-    "share",
-    "usr",
-    "var",
-    "common",
-    "resources",
-    "plugins",
-    "program",
-    "programfiles",
-    "programfilesx86",
-    "programfilesx64",
-    "programdata",
-    "files",
-    "x86",
-    "x64",
-    "win32",
-    "win64",
-    "windows",
-    "microsoft",
-    "inc",
-    "llc",
-    "ltd",
-    "corp",
-    "corporation",
-    "software",
-    "company",
-    "limited",
-];
+const APPDATA_SEGMENT: &str = "AppData";
+const LOCAL_PROGRAMS_SEGMENT: &str = r"AppData\Local\Programs";
+const COMMON_FILES_SEGMENT: &str = "Common Files";
 const APPDATA_ROAMING_SEGMENT: &str = r"AppData\Roaming";
 const APPDATA_LOCAL_SEGMENT: &str = r"AppData\Local";
 const APPDATA_LOCAL_LOW_SEGMENT: &str = r"AppData\LocalLow";
@@ -105,6 +73,9 @@ pub struct FileDiscoveryContext {
     /// Additional roots discovered elsewhere (service binaries, shortcut
     /// targets, scheduled task actions, App Paths) to fold into the footprint.
     pub extra_roots: Vec<PathBuf>,
+    /// Files an install record names that have no folder of the app's own to walk, such
+    /// as one directly under `Common Files`. Captured one by one.
+    pub extra_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,10 +83,6 @@ struct DiscoveryRoot {
     path: PathBuf,
     kind: FootprintKind,
     scope: InstallScope,
-}
-
-struct Tokens {
-    values: Vec<String>,
 }
 
 pub fn discover_files(
@@ -144,8 +111,23 @@ pub fn discover_files(
         &mut warnings,
     );
 
-    let tokens = Tokens::from_context(context);
-    for root in collect_roots(context, &tokens, system, &mut warnings) {
+    for extra in &context.extra_files {
+        add_file(
+            &mut files,
+            &mut seen,
+            extra,
+            install_root,
+            kind_for_path(extra),
+            context.include_hashes,
+            context.include_user_data,
+            context.include_program_data,
+            "File named by the install record",
+            &mut warnings,
+        );
+    }
+
+    let names = product_names(context);
+    for root in collect_roots(context, &names, system, &mut warnings) {
         let start = files.len();
         discover_tree(
             &root,
@@ -191,9 +173,8 @@ pub fn discover_files(
 
 pub fn package_relative_path(original_path: &Path, install_root: Option<&Path>) -> PathBuf {
     let relative = install_root
-        .and_then(|root| original_path.strip_prefix(root).ok())
+        .and_then(|root| strip_prefix_ignore_case(original_path, root))
         .filter(|path| !path.as_os_str().is_empty())
-        .map(Path::to_path_buf)
         .unwrap_or_else(|| external_relative_path(original_path));
 
     PathBuf::from(PACKAGE_FILES_ROOT).join(safe_relative_path(&relative))
@@ -380,9 +361,40 @@ fn user_data_base(anchor: UserDataAnchor) -> Option<PathBuf> {
     }
 }
 
+/// The names this app's own folders can go by. The install folder's parent only ever
+/// qualifies a nested match as a vendor folder: selecting on it is how an app in
+/// `AppData\Local\Programs` used to take everything else installed there.
+fn product_names(context: &FileDiscoveryContext) -> ProductNames {
+    let mut aliases = Vec::new();
+    if !is_auxiliary_executable(&context.executable_path)
+        && let Some(stem) = context.executable_path.file_stem().and_then(|s| s.to_str())
+    {
+        aliases.push(stem);
+    }
+    let mut vendor_folders = Vec::new();
+    if let Some(install) = context.install_location.as_ref() {
+        if let Some(leaf) = install.file_name().and_then(|s| s.to_str()) {
+            aliases.push(leaf);
+        }
+        if let Some(parent) = install
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|s| s.to_str())
+        {
+            vendor_folders.push(parent);
+        }
+    }
+    ProductNames::new(
+        context.app_name.as_deref(),
+        context.publisher.as_deref(),
+        &aliases,
+        &vendor_folders,
+    )
+}
+
 fn collect_roots(
     context: &FileDiscoveryContext,
-    tokens: &Tokens,
+    names: &ProductNames,
     system: &SystemContext,
     warnings: &mut Vec<Warning>,
 ) -> Vec<DiscoveryRoot> {
@@ -407,19 +419,20 @@ fn collect_roots(
         push_root(&mut raw, extra.clone(), kind);
     }
 
-    collect_program_files_roots(tokens, &mut raw, system, warnings);
-    collect_program_data_roots(tokens, &mut raw, system, warnings);
-    collect_appdata_roots(tokens, &mut raw, system, warnings);
-    collect_known_user_folder_roots(tokens, &mut raw, system, warnings);
+    collect_program_files_roots(names, &mut raw, system, warnings);
+    collect_program_data_roots(names, &mut raw, system, warnings);
+    collect_appdata_roots(names, &mut raw, system, warnings);
+    collect_known_user_folder_roots(names, &mut raw, system, warnings);
 
     let known_base_dirs = known_base_dirs(system);
+    let windows_dir = system.windows_dir();
     // Deduplicate while preserving order so the most authoritative root (the
     // install location) owns each shared file, and drop any root nested inside a
     // root already kept so subtrees are not walked twice.
     let mut seen_paths = BTreeSet::new();
     let mut roots: Vec<DiscoveryRoot> = Vec::new();
     for root in raw {
-        if !is_walkable_app_dir(&root.path, &known_base_dirs) {
+        if !is_walkable_app_dir(&root.path, &known_base_dirs, &windows_dir) {
             continue;
         }
         let key = root.path.to_string_lossy().to_ascii_lowercase();
@@ -428,7 +441,7 @@ fn collect_roots(
         }
         if roots
             .iter()
-            .any(|existing| root.path.starts_with(&existing.path))
+            .any(|existing| path_is_within(&root.path, &existing.path))
         {
             continue;
         }
@@ -443,7 +456,7 @@ fn push_root(roots: &mut Vec<DiscoveryRoot>, path: PathBuf, kind: FootprintKind)
 }
 
 fn collect_program_files_roots(
-    tokens: &Tokens,
+    names: &ProductNames,
     roots: &mut Vec<DiscoveryRoot>,
     system: &SystemContext,
     warnings: &mut Vec<Warning>,
@@ -452,7 +465,8 @@ fn collect_program_files_roots(
         collect_matching_dirs(
             &base,
             FootprintKind::InstallDirectory,
-            tokens,
+            names,
+            MatchScope::ProgramFolders,
             roots,
             warnings,
         );
@@ -460,24 +474,38 @@ fn collect_program_files_roots(
 }
 
 fn collect_program_data_roots(
-    tokens: &Tokens,
+    names: &ProductNames,
     roots: &mut Vec<DiscoveryRoot>,
     system: &SystemContext,
     warnings: &mut Vec<Warning>,
 ) {
     if let Some(base) = system.program_data() {
-        collect_matching_dirs(&base, FootprintKind::ProgramData, tokens, roots, warnings);
+        collect_matching_dirs(
+            &base,
+            FootprintKind::ProgramData,
+            names,
+            MatchScope::ProgramFolders,
+            roots,
+            warnings,
+        );
     }
 }
 
 fn collect_appdata_roots(
-    tokens: &Tokens,
+    names: &ProductNames,
     roots: &mut Vec<DiscoveryRoot>,
     system: &SystemContext,
     warnings: &mut Vec<Warning>,
 ) {
     for (base, kind) in appdata_bases(system) {
-        collect_matching_dirs(&base, kind, tokens, roots, warnings);
+        collect_matching_dirs(
+            &base,
+            kind,
+            names,
+            MatchScope::ProgramFolders,
+            roots,
+            warnings,
+        );
     }
 }
 
@@ -486,7 +514,7 @@ fn collect_appdata_roots(
 /// any folder redirection (OneDrive, roaming profiles) recorded in the
 /// `User Shell Folders` registry key before falling back to the profile path.
 fn collect_known_user_folder_roots(
-    tokens: &Tokens,
+    names: &ProductNames,
     roots: &mut Vec<DiscoveryRoot>,
     system: &SystemContext,
     warnings: &mut Vec<Warning>,
@@ -498,14 +526,16 @@ fn collect_known_user_folder_roots(
             collect_matching_dirs(
                 &profile.join(DOCUMENTS_FALLBACK),
                 FootprintKind::Documents,
-                tokens,
+                names,
+                MatchScope::UserFolders,
                 roots,
                 warnings,
             );
             collect_matching_dirs(
                 &profile.join(SAVED_GAMES_FALLBACK),
                 FootprintKind::SavedGames,
-                tokens,
+                names,
+                MatchScope::UserFolders,
                 roots,
                 warnings,
             );
@@ -515,7 +545,8 @@ fn collect_known_user_folder_roots(
             collect_matching_dirs(
                 &documents,
                 FootprintKind::Documents,
-                tokens,
+                names,
+                MatchScope::UserFolders,
                 roots,
                 warnings,
             );
@@ -524,7 +555,8 @@ fn collect_known_user_folder_roots(
             collect_matching_dirs(
                 &saved_games,
                 FootprintKind::SavedGames,
-                tokens,
+                names,
+                MatchScope::UserFolders,
                 roots,
                 warnings,
             );
@@ -537,7 +569,8 @@ fn collect_known_user_folder_roots(
         collect_matching_dirs(
             &public_documents,
             FootprintKind::PublicDocuments,
-            tokens,
+            names,
+            MatchScope::UserFolders,
             roots,
             warnings,
         );
@@ -606,14 +639,15 @@ fn expand_env_vars(value: &str) -> String {
     output
 }
 
-/// Find directories under `base` whose name matches the application tokens, at
-/// either the top level (`base\App`) or one level deep (`base\Vendor\App`).
-/// Many installers nest per-vendor, so checking the second level is essential
-/// to capture data folders like `ProgramData\Apple Computer\iTunes`.
+/// Find directories under `base` named for the application, at either the top level
+/// (`base\App`) or one level deep (`base\Vendor\App`). Many installers nest per-vendor,
+/// so checking the second level is essential to capture data folders like
+/// `ProgramData\Apple Computer\iTunes`. A vendor's folder itself is never selected.
 fn collect_matching_dirs(
     base: &Path,
     kind: FootprintKind,
-    tokens: &Tokens,
+    names: &ProductNames,
+    scope: MatchScope,
     roots: &mut Vec<DiscoveryRoot>,
     warnings: &mut Vec<Warning>,
 ) {
@@ -644,7 +678,8 @@ fn collect_matching_dirs(
         if !path.is_dir() || is_volatile_dir(&path, true) {
             continue;
         }
-        if tokens.matches(&file_name_string(&path)) {
+        let folder_name = file_name_string(&path);
+        if names.matches_top_level(&folder_name, scope) {
             // Matched at the top level; the whole directory is walked later, so
             // there is no need to descend into it here.
             push_root(roots, path, kind.clone());
@@ -671,7 +706,7 @@ fn collect_matching_dirs(
             let child_path = child.path();
             if child_path.is_dir()
                 && !is_volatile_dir(&child_path, true)
-                && tokens.matches(&file_name_string(&child_path))
+                && names.matches_nested(&folder_name, &file_name_string(&child_path), scope)
             {
                 push_root(roots, child_path, kind.clone());
             }
@@ -698,78 +733,6 @@ fn appdata_bases(system: &SystemContext) -> Vec<(PathBuf, FootprintKind)> {
     bases
 }
 
-impl Tokens {
-    fn from_context(context: &FileDiscoveryContext) -> Self {
-        let mut values = Vec::new();
-        let mut candidates: Vec<String> = Vec::new();
-        if let Some(name) = context.app_name.as_deref() {
-            candidates.push(primary_name(name));
-        }
-        if let Some(publisher) = context.publisher.as_deref() {
-            candidates.push(publisher.to_owned());
-        }
-        if let Some(stem) = context.executable_path.file_stem().and_then(|s| s.to_str()) {
-            candidates.push(stem.to_owned());
-        }
-        if let Some(install) = context.install_location.as_ref() {
-            if let Some(leaf) = install.file_name().and_then(|s| s.to_str()) {
-                candidates.push(leaf.to_owned());
-            }
-            if let Some(vendor) = install
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|s| s.to_str())
-            {
-                candidates.push(vendor.to_owned());
-            }
-        }
-
-        for candidate in candidates {
-            let token = normalize_name_for_match(&candidate);
-            if token.len() >= MIN_TOKEN_LEN
-                && !GENERIC_TOKENS.contains(&token.as_str())
-                && !values.contains(&token)
-            {
-                values.push(token);
-            }
-        }
-        Self { values }
-    }
-
-    fn matches(&self, dir_name: &str) -> bool {
-        let normalized = normalize_name_for_match(dir_name);
-        if normalized.len() < MIN_TOKEN_LEN || GENERIC_TOKENS.contains(&normalized.as_str()) {
-            return false;
-        }
-        self.values.iter().any(|token| {
-            // Exact match, or the directory name embeds a sufficiently specific
-            // token (e.g. "Mozilla Firefox" contains "firefox"), or the token
-            // embeds a longer directory name (a vendor folder shorter than the
-            // product token). The length floors avoid generic fragments such as
-            // "x64" or "bin" producing spurious matches.
-            *token == normalized
-                || (token.len() >= 4 && normalized.contains(token.as_str()))
-                || (normalized.len() >= 5
-                    && token.len() > normalized.len()
-                    && token.contains(normalized.as_str()))
-        })
-    }
-}
-
-/// Reduce a Display Name to its core product name by dropping trailing version
-/// numbers and parenthetical qualifiers (architecture, edition, etc.).
-fn primary_name(display_name: &str) -> String {
-    let base = display_name.split('(').next().unwrap_or(display_name);
-    base.split_whitespace()
-        .filter(|word| {
-            !word
-                .chars()
-                .all(|character| character.is_ascii_digit() || matches!(character, '.' | ',' | '-'))
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[allow(clippy::too_many_arguments)]
 fn discover_tree(
     root: &DiscoveryRoot,
@@ -781,11 +744,14 @@ fn discover_tree(
     seen: &mut BTreeSet<String>,
     warnings: &mut Vec<Warning>,
 ) {
+    let prune_volatile = holds_disposable_data(&root.kind);
     let walker = WalkDir::new(&root.path)
         .max_depth(MAX_WALK_DEPTH)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| !is_volatile_dir(entry.path(), entry.file_type().is_dir()));
+        .filter_entry(|entry| {
+            !prune_volatile || !is_volatile_dir(entry.path(), entry.file_type().is_dir())
+        });
 
     for entry in walker {
         let entry = match entry {
@@ -815,6 +781,17 @@ fn discover_tree(
             );
         }
     }
+}
+
+/// True for data folders, where a `Cache` or `Logs` folder is the app's own scratch
+/// space and can be left behind. Inside an install folder the same names can be files
+/// the app shipped with, so nothing there is skipped: an installer missing them is
+/// silently broken.
+fn holds_disposable_data(kind: &FootprintKind) -> bool {
+    !matches!(
+        kind,
+        FootprintKind::InstallDirectory | FootprintKind::RegistryReference | FootprintKind::Other
+    )
 }
 
 fn discovery_reason(kind: &FootprintKind) -> &'static str {
@@ -959,18 +936,20 @@ fn classify_file(
     if is_windows_system_path(path) {
         return FileClassification::WindowsSystem;
     }
-    if install_root.is_some_and(|root| path.starts_with(root)) {
+    if install_root.is_some_and(|root| path_is_within(path, root)) {
         return FileClassification::AppOwned;
     }
     match root_kind {
         FootprintKind::InstallDirectory => FileClassification::AppOwned,
         FootprintKind::RegistryReference | FootprintKind::Other => {
-            if is_program_files_path(path) {
-                FileClassification::AppOwned
-            } else if is_program_data_path(path) {
+            if is_program_data_path(path) {
                 FileClassification::MachineAppData
-            } else {
+            } else if is_user_profile_path(path) && !is_program_files_path(path) {
                 FileClassification::UserData
+            } else {
+                // Program Files, or a folder of its own such as C:\CocosDashboard: an
+                // install record pointed here, so the app needs it.
+                FileClassification::AppOwned
             }
         }
         // ProgramData and shared Public Documents are machine-wide application
@@ -1044,6 +1023,12 @@ fn is_program_data_path(path: &Path) -> bool {
         .contains(r"\programdata")
 }
 
+fn is_user_profile_path(path: &Path) -> bool {
+    path.to_string_lossy()
+        .to_ascii_lowercase()
+        .contains(r"\users\")
+}
+
 /// True for a cloud (e.g. OneDrive Files On-Demand) placeholder whose data is
 /// not present locally, so it cannot be copied without hydrating it.
 fn is_online_only(attributes: u32) -> bool {
@@ -1057,28 +1042,18 @@ fn is_windows_system_path(path: &Path) -> bool {
         || lower.ends_with(r"\windows")
 }
 
-/// True when `path` is a directory we can safely walk: it exists, is not a
-/// Windows system tree, and is a subdirectory of (not equal to) a known base
-/// such as `Program Files` or a user profile.
-fn is_walkable_app_dir(path: &Path, known_base_dirs: &[PathBuf]) -> bool {
-    if !path.is_dir() {
-        return false;
-    }
-    let lower = path.to_string_lossy().to_ascii_lowercase();
-    if lower.contains(r"\windows\") || lower.ends_with(r"\windows") {
-        return false;
-    }
-    let component_count = path
-        .components()
-        .filter(|component| matches!(component, Component::Normal(_)))
-        .count();
-    if component_count < 2 {
-        return false;
-    }
-    !is_known_base_dir(path, known_base_dirs)
+/// True when `path` is a directory we can safely walk: it exists, is not the drive
+/// itself, is not in the Windows directory, and is not a known base such as
+/// `Program Files` or a user profile. A folder directly on a drive, like
+/// `C:\CocosDashboard`, is a normal install location.
+fn is_walkable_app_dir(path: &Path, known_base_dirs: &[PathBuf], windows_dir: &Path) -> bool {
+    path.is_dir()
+        && !is_drive_root(path)
+        && !path_is_within(path, windows_dir)
+        && !is_known_base_dir(path, known_base_dirs)
 }
 
-fn is_known_base_dir(path: &Path, known_base_dirs: &[PathBuf]) -> bool {
+pub(crate) fn is_known_base_dir(path: &Path, known_base_dirs: &[PathBuf]) -> bool {
     let normalized = path.to_string_lossy().to_ascii_lowercase();
     let normalized = normalized.trim_end_matches('\\');
     known_base_dirs.iter().any(|base| {
@@ -1089,10 +1064,19 @@ fn is_known_base_dir(path: &Path, known_base_dirs: &[PathBuf]) -> bool {
     })
 }
 
-fn known_base_dirs(system: &SystemContext) -> Vec<PathBuf> {
+/// Folders that hold other things side by side. None of them can be an app's own install
+/// location or a root to walk.
+pub(crate) fn known_base_dirs(system: &SystemContext) -> Vec<PathBuf> {
     let mut bases = system.program_files_dirs();
+    for program_files in system.program_files_dirs() {
+        bases.push(program_files.join(COMMON_FILES_SEGMENT));
+    }
     if let Some(program_data) = system.program_data() {
         bases.push(program_data);
+    }
+    if let Some(public) = system.public_dir() {
+        bases.push(public.join(DOCUMENTS_FALLBACK));
+        bases.push(public);
     }
     for (base, _) in appdata_bases(system) {
         bases.push(base);
@@ -1102,8 +1086,13 @@ fn known_base_dirs(system: &SystemContext) -> Vec<PathBuf> {
         bases.push(users_root.to_path_buf());
     }
     for profile in profiles {
+        bases.push(profile.join(APPDATA_SEGMENT));
+        bases.push(profile.join(LOCAL_PROGRAMS_SEGMENT));
+        bases.push(profile.join(DOCUMENTS_FALLBACK));
+        bases.push(profile.join(SAVED_GAMES_FALLBACK));
         bases.push(profile);
     }
+    bases.push(system.windows_dir());
     bases
 }
 
@@ -1295,90 +1284,304 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn matches_nested_vendor_app_directories() {
-        let base = std::env::temp_dir().join(format!(
-            "wam-discovery-test-{}-{}",
+    fn unique_temp(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "wam-discovery-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_nanos())
                 .unwrap_or(0)
-        ));
-        let nested = base.join("Apple Computer").join("iTunes");
-        let top_level = base.join("AnyDesk");
-        let _ = fs::create_dir_all(&nested);
-        let _ = fs::create_dir_all(&top_level);
+        ))
+    }
 
-        let context = FileDiscoveryContext {
-            executable_path: PathBuf::from(r"C:\Program Files\iTunes\iTunes.exe"),
-            install_location: Some(PathBuf::from(r"C:\Program Files\iTunes")),
-            app_name: Some("iTunes".to_owned()),
-            publisher: Some("Apple Inc.".to_owned()),
-            include_hashes: false,
-            include_user_data: true,
-            include_program_data: true,
-            extra_roots: Vec::new(),
-        };
-        let tokens = Tokens::from_context(&context);
+    fn matching_dirs(base: &Path, names: &ProductNames, scope: MatchScope) -> Vec<PathBuf> {
         let mut roots = Vec::new();
         let mut warnings = Vec::new();
         collect_matching_dirs(
-            &base,
+            base,
             FootprintKind::ProgramData,
-            &tokens,
+            names,
+            scope,
             &mut roots,
             &mut warnings,
         );
+        let mut paths: Vec<PathBuf> = roots.into_iter().map(|root| root.path).collect();
+        paths.sort();
+        paths
+    }
 
+    #[test]
+    fn matches_nested_vendor_app_directories() {
+        let base = unique_temp("nested");
+        let nested = base.join("Apple Computer").join("iTunes");
+        let unrelated = base.join("AnyDesk");
+        let _ = fs::create_dir_all(&nested);
+        let _ = fs::create_dir_all(&unrelated);
+
+        let names = ProductNames::new(Some("iTunes"), Some("Apple Inc."), &["iTunes"], &[]);
+        let found = matching_dirs(&base, &names, MatchScope::ProgramFolders);
         let _ = fs::remove_dir_all(&base);
-        assert!(
-            roots.iter().any(|root| root.path == nested),
-            "nested vendor/app directory should be matched at depth two"
+
+        assert_eq!(
+            found,
+            vec![nested],
+            "the nested product folder matches at depth two, and nothing else does"
         );
     }
 
     #[test]
-    fn rejects_generic_and_cross_app_matches() {
-        let context = FileDiscoveryContext {
-            executable_path: PathBuf::from(r"C:\Program Files\7-Zip\7zFM.exe"),
-            install_location: Some(PathBuf::from(r"C:\Program Files\7-Zip")),
-            app_name: Some("7-Zip 25.01 (x64)".to_owned()),
-            publisher: Some("Igor Pavlov".to_owned()),
-            include_hashes: false,
-            include_user_data: true,
-            include_program_data: true,
-            extra_roots: Vec::new(),
-        };
-        let tokens = Tokens::from_context(&context);
-        assert!(
-            tokens.matches("7-Zip"),
-            "the product directory should match"
-        );
-        assert!(
-            !tokens.matches("x64"),
-            "architecture fragment must not match"
-        );
-        assert!(
-            !tokens.matches("TeamViewer"),
-            "unrelated vendor must not match"
-        );
-        assert!(!tokens.matches("files"), "generic directory must not match");
+    fn selects_the_product_and_never_the_vendor_or_its_other_products() {
+        let base = unique_temp("vendor");
+        for folder in [
+            r"Mozilla\Firefox",
+            r"Mozilla\Thunderbird",
+            r"Mozilla\Extensions",
+            "Mozilla Thunderbird",
+            r"ms-playwright\firefox-1543",
+            r"grok\git",
+        ] {
+            let _ = fs::create_dir_all(base.join(folder));
+        }
 
-        let anydesk = FileDiscoveryContext {
-            executable_path: PathBuf::from(r"C:\Program Files (x86)\AnyDesk\AnyDesk.exe"),
-            install_location: Some(PathBuf::from(r"C:\Program Files (x86)\AnyDesk")),
-            app_name: Some("AnyDesk".to_owned()),
-            publisher: None,
+        let names = ProductNames::new(
+            Some("Mozilla Firefox (x64 en-US)"),
+            Some("Mozilla"),
+            &["firefox", "Mozilla Firefox"],
+            &[],
+        );
+        let found = matching_dirs(&base, &names, MatchScope::ProgramFolders);
+        let _ = fs::remove_dir_all(&base);
+
+        assert_eq!(found, vec![base.join(r"Mozilla\Firefox")]);
+    }
+
+    #[test]
+    fn product_names_never_select_on_the_install_parent() {
+        let context = FileDiscoveryContext {
+            executable_path: PathBuf::from(
+                r"C:\Users\me\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+            ),
+            install_location: Some(PathBuf::from(
+                r"C:\Users\me\AppData\Local\Programs\Microsoft VS Code",
+            )),
+            app_name: Some("Microsoft Visual Studio Code (User)".to_owned()),
+            publisher: Some("Microsoft Corporation".to_owned()),
             include_hashes: false,
             include_user_data: true,
             include_program_data: true,
             extra_roots: Vec::new(),
+            extra_files: Vec::new(),
         };
-        let anydesk_tokens = Tokens::from_context(&anydesk);
-        assert!(anydesk_tokens.matches("AnyDesk"));
-        assert!(!anydesk_tokens.matches("files"));
-        assert!(!anydesk_tokens.matches("3uTools9"));
+        let names = product_names(&context);
+
+        assert!(!names.matches_top_level("Programs", MatchScope::ProgramFolders));
+        assert!(names.matches_top_level("Code", MatchScope::ProgramFolders));
+        assert!(names.matches_top_level("Microsoft VS Code", MatchScope::ProgramFolders));
+        assert!(!names.matches_top_level("Microsoft Visual Studio", MatchScope::ProgramFolders));
+    }
+
+    #[test]
+    fn user_folders_are_not_taken_by_an_executable_name() {
+        let base = unique_temp("documents");
+        for folder in ["Code", "Git", "PowerShell", "WindowsPowerShell"] {
+            let _ = fs::create_dir_all(base.join(folder));
+        }
+        let names = ProductNames::new(
+            Some("PowerShell 7.6.9.0-x64"),
+            Some("Microsoft Corporation"),
+            &["Code", "Git"],
+            &[],
+        );
+        let found = matching_dirs(&base, &names, MatchScope::UserFolders);
+        let _ = fs::remove_dir_all(&base);
+
+        assert_eq!(found, vec![base.join("PowerShell")]);
+    }
+
+    fn walk_tree(root: &Path, kind: FootprintKind) -> Vec<String> {
+        let mut files = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut warnings = Vec::new();
+        discover_tree(
+            &DiscoveryRoot {
+                path: root.to_path_buf(),
+                kind,
+                scope: InstallScope::PerUser,
+            },
+            None,
+            false,
+            true,
+            true,
+            &mut files,
+            &mut seen,
+            &mut warnings,
+        );
+        let mut names: Vec<String> = files
+            .iter()
+            .filter_map(|file| {
+                file.original_path
+                    .strip_prefix(root)
+                    .ok()
+                    .map(|relative| relative.display().to_string())
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn install_folders_keep_files_under_volatile_names_and_data_folders_do_not() {
+        let root = unique_temp("volatile");
+        let _ = fs::create_dir_all(root.join(r"node-compile-cache\v24"));
+        let _ = fs::create_dir_all(root.join("Logs"));
+        let _ = fs::write(root.join(r"node-compile-cache\v24\00b791e3"), b"x");
+        let _ = fs::write(root.join(r"Logs\shipped.txt"), b"x");
+        let _ = fs::write(root.join("app.dll"), b"x");
+
+        let install = walk_tree(&root, FootprintKind::InstallDirectory);
+        let data = walk_tree(&root, FootprintKind::LocalAppData);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(
+            install,
+            vec![
+                r"Logs\shipped.txt".to_owned(),
+                "app.dll".to_owned(),
+                r"node-compile-cache\v24\00b791e3".to_owned(),
+            ]
+        );
+        assert_eq!(data, vec!["app.dll".to_owned()]);
+    }
+
+    #[test]
+    fn walks_a_folder_on_a_drive_but_not_the_drive_or_a_known_base() {
+        let windows = Path::new(r"C:\Windows");
+        let temp = std::env::temp_dir();
+        let top_level = temp
+            .ancestors()
+            .find(|ancestor| ancestor.parent().is_some_and(is_drive_root));
+        if let Some(top_level) = top_level {
+            assert!(
+                is_walkable_app_dir(top_level, &[], windows),
+                "a folder directly on a drive is a normal install location"
+            );
+            assert!(!is_walkable_app_dir(
+                top_level,
+                &[top_level.to_path_buf()],
+                windows
+            ));
+        }
+        assert!(!is_walkable_app_dir(Path::new(r"C:\"), &[], windows));
+        assert!(!is_walkable_app_dir(windows, &[], windows));
+        assert!(!is_walkable_app_dir(
+            Path::new(r"C:\Windows\System32"),
+            &[],
+            windows
+        ));
+    }
+
+    #[test]
+    fn a_windows_folder_inside_an_app_is_not_the_windows_directory() {
+        let parent = unique_temp("windows-segment");
+        let root = parent.join("windows");
+        let _ = fs::create_dir_all(&root);
+        let walkable = is_walkable_app_dir(&root, &[], Path::new(r"C:\Windows"));
+        let _ = fs::remove_dir_all(&parent);
+
+        assert!(walkable);
+    }
+
+    #[test]
+    fn known_bases_include_the_shared_per_user_programs_folder() {
+        let system = SystemContext::live();
+        let bases = known_base_dirs(&system);
+        for profile in system.user_profiles() {
+            assert!(is_known_base_dir(
+                &profile.join(r"AppData\Local\Programs\"),
+                &bases
+            ));
+        }
+        for program_files in system.program_files_dirs() {
+            assert!(is_known_base_dir(&program_files, &bases));
+            assert!(is_known_base_dir(
+                &program_files.join("Common Files"),
+                &bases
+            ));
+        }
+    }
+
+    #[test]
+    fn a_folder_of_its_own_outside_program_files_is_app_owned() {
+        assert_eq!(
+            classify_file(
+                Path::new(r"C:\CocosDashboard\ffmpeg.dll"),
+                None,
+                &FootprintKind::RegistryReference
+            ),
+            FileClassification::AppOwned
+        );
+        assert_eq!(
+            classify_file(
+                Path::new(r"C:\Users\me\Documents\Demo\a.txt"),
+                None,
+                &FootprintKind::RegistryReference
+            ),
+            FileClassification::UserData
+        );
+    }
+
+    #[test]
+    fn captures_recorded_roots_and_loose_files_outside_the_install_folder() {
+        let base = unique_temp("recorded");
+        let install = base.join("WAM Recorded Demo App");
+        let recorded = base.join("Elsewhere Recorded");
+        let loose = base.join("Shared").join("loose.dll");
+        let unrelated = base.join("Shared").join("unrelated.dll");
+        let _ = fs::create_dir_all(&install);
+        let _ = fs::create_dir_all(&recorded);
+        let _ = fs::create_dir_all(base.join("Shared"));
+        let exe = install.join("wam-recorded-demo.exe");
+        let _ = fs::write(&exe, b"MZ");
+        let _ = fs::write(recorded.join("data.bin"), b"x");
+        let _ = fs::write(&loose, b"x");
+        let _ = fs::write(&unrelated, b"x");
+
+        let (files, _, _) = discover_files(
+            &FileDiscoveryContext {
+                executable_path: exe.clone(),
+                install_location: Some(install),
+                app_name: Some("WAM Recorded Demo App".to_owned()),
+                publisher: None,
+                include_hashes: false,
+                include_user_data: true,
+                include_program_data: true,
+                extra_roots: vec![recorded.clone()],
+                extra_files: vec![loose.clone()],
+            },
+            &SystemContext::live(),
+        );
+        let _ = fs::remove_dir_all(&base);
+
+        let captured: Vec<&Path> = files.iter().map(|file| file.path.as_path()).collect();
+        assert!(captured.contains(&exe.as_path()));
+        assert!(captured.contains(&recorded.join("data.bin").as_path()));
+        assert!(captured.contains(&loose.as_path()));
+        assert!(
+            !captured.contains(&unrelated.as_path()),
+            "a loose file does not bring its neighbors"
+        );
+    }
+
+    #[test]
+    fn package_paths_ignore_case_differences_in_the_install_root() {
+        assert_eq!(
+            package_relative_path(
+                Path::new(r"C:\Program Files\NVIDIA Corporation\NVIDIA app\7z.dll"),
+                Some(Path::new(r"C:\Program Files\NVIDIA Corporation\NVIDIA App")),
+            ),
+            PathBuf::from(r"files\7z.dll")
+        );
     }
 
     fn external_entry(original: &str) -> FileEntry {
@@ -1482,24 +1685,5 @@ mod tests {
 
         assert_eq!(destination, target.join(r"bin\app.exe"));
         Ok(())
-    }
-
-    #[test]
-    fn tokens_match_vendor_directories() {
-        let context = FileDiscoveryContext {
-            executable_path: PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe"),
-            install_location: Some(PathBuf::from(r"C:\Program Files\Mozilla Firefox")),
-            app_name: Some("Mozilla Firefox".to_owned()),
-            publisher: Some("Mozilla".to_owned()),
-            include_hashes: false,
-            include_user_data: true,
-            include_program_data: true,
-            extra_roots: Vec::new(),
-        };
-        let tokens = Tokens::from_context(&context);
-
-        assert!(tokens.matches("Mozilla"));
-        assert!(tokens.matches("Mozilla Firefox"));
-        assert!(!tokens.matches("Google"));
     }
 }

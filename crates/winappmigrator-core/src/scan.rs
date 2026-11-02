@@ -11,14 +11,17 @@ use crate::dll_resolver::{
 use crate::env_scan::{EnvironmentScanContext, scan_environment};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{FileDiscoveryContext, discover_files};
-use crate::install_source::detect_install_source;
+use crate::install_source::{
+    InstallSource, add_app_paths_roots, detect_install_source, is_usable_main_executable,
+    primary_executable, resolve_install_location, squirrel_current_executable,
+};
 use crate::license_scan::{LicenseScanContext, scan_license_artifacts};
 use crate::models::{
     AppSelection, DependencyEntry, DriverEntry, FileEntry, InstalledApp, RuntimePrerequisite,
     RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport, ScheduledTaskEntry,
     ServiceEntry, ShortcutEntry, Warning, WarningSeverity,
 };
-use crate::path_utils::looks_like_executable;
+use crate::path_utils::{is_drive_root, looks_like_executable};
 use crate::pe_scan::scan_pe;
 use crate::registry_scan::{RegistryScanContext, scan_registry_artifacts};
 use crate::reporting::{artifact_paths, write_scan_reports};
@@ -62,8 +65,27 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     // offline volume from another PC. Held for the whole scan so offline hive
     // mounts stay live until every scanner has run.
     let system = SystemContext::open(&options.source)?;
-    let executable_path = selected_executable_path(options, &system)?;
+    let mut source_app = match &options.selection {
+        AppSelection::InstalledApp(app) => Some((**app).clone()),
+        AppSelection::ExecutablePath(_) => None,
+    };
+    // Reverse-engineer how the app was installed; for MSI products this reads the
+    // authoritative Windows Installer component database. That is slow, so it runs
+    // once, here, and everything that needs the result is passed it.
+    let mut install_source = source_app
+        .as_ref()
+        .map(|app| detect_install_source(app, &system));
+    let executable_path = selected_executable_path(options, install_source.as_ref(), &system)?;
+    let executable_path = install_source
+        .as_ref()
+        .and_then(|source| squirrel_current_executable(&executable_path, source))
+        .unwrap_or(executable_path);
     validate_scan_input(&executable_path)?;
+    if let (Some(app), Some(source)) = (source_app.as_ref(), install_source.as_mut())
+        && app.main_executable.is_none()
+    {
+        add_app_paths_roots(source, &executable_path, &system);
+    }
 
     let mut pe_scan = scan_pe(&executable_path)?;
     if pe_scan.metadata.external_manifest.is_some() {
@@ -86,6 +108,14 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             Some(executable_path.display().to_string()),
         ));
     }
+    if source_app.is_some() && !is_usable_main_executable(&executable_path, &system) {
+        pe_scan.warnings.push(Warning::new(
+            "main_executable_not_the_app",
+            WarningSeverity::Warning,
+            "No ordinary application executable was found, so this file stands in for it. Architecture and dependency results describe this file, and may not describe the application.",
+            Some(executable_path.display().to_string()),
+        ));
+    }
 
     let context = DllResolutionContext {
         executable_path: executable_path.clone(),
@@ -97,25 +127,27 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     let (dependencies, resolver_warnings) =
         resolve_imports(&pe_scan.direct_imports, &context, &system);
     let app_local_dlls = find_app_local_dlls(&executable_path)?;
-    let source_app = match &options.selection {
-        AppSelection::InstalledApp(app) => Some((**app).clone()),
-        AppSelection::ExecutablePath(_) => None,
+    let install_location = match (source_app.as_ref(), install_source.as_ref()) {
+        (Some(app), Some(source)) => resolve_install_location(app, &executable_path, source),
+        _ => executable_path
+            .parent()
+            .filter(|parent| !is_drive_root(parent))
+            .map(Path::to_path_buf),
     };
-    let install_location = source_app
+    let recorded_location = source_app
         .as_ref()
-        .and_then(|app| app.install_location.clone())
-        .or_else(|| executable_path.parent().map(Path::to_path_buf));
+        .and_then(|app| app.install_location.clone());
+    // What the report and the installer work from: files are stored relative to this
+    // location, so the installer has to offer the same one.
+    if let Some(app) = source_app.as_mut() {
+        app.install_location.clone_from(&install_location);
+        app.main_executable = Some(executable_path.clone());
+    }
     let app_name = source_app.as_ref().map(|app| app.display_name.clone());
     let publisher = source_app.as_ref().and_then(|app| app.publisher.clone());
     let source_registry_path = source_app
         .as_ref()
         .map(|app| app.registry_source_path.clone());
-
-    // Reverse-engineer how the app was installed; for MSI products this reads
-    // the authoritative Windows Installer component database.
-    let install_source = source_app
-        .as_ref()
-        .map(|app| detect_install_source(app, &system));
 
     let registry_artifacts = scan_registry_artifacts(
         &RegistryScanContext {
@@ -124,6 +156,10 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             display_name: app_name.clone(),
             publisher: publisher.clone(),
             source_registry_path,
+            recorded_keys: install_source
+                .as_ref()
+                .map(|source| source.registry_keys.clone())
+                .unwrap_or_default(),
         },
         &system,
     );
@@ -166,8 +202,13 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     // Fold concrete locations referenced by Windows integrations into the
     // footprint discovery so split installs (Program Files plus a service
     // binary or a ProgramData data tree) are captured automatically.
-    let mut extra_roots =
-        collect_extra_roots(source_app.as_ref(), &services, &scheduled_tasks, &shortcuts);
+    let mut extra_roots = collect_extra_roots(
+        source_app.as_ref(),
+        recorded_location.as_deref(),
+        &services,
+        &scheduled_tasks,
+        &shortcuts,
+    );
     if let Some(source) = install_source.as_ref() {
         extra_roots.extend(source.roots.iter().cloned());
     }
@@ -181,6 +222,10 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             include_user_data: options.include_user_data,
             include_program_data: options.include_program_data,
             extra_roots,
+            extra_files: install_source
+                .as_ref()
+                .map(|source| source.loose_files.clone())
+                .unwrap_or_default(),
         },
         &system,
     );
@@ -274,7 +319,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         items_excluded: vec![
             "Windows directory, System32, and SysWOW64 files are reported but not copied."
                 .to_owned(),
-            "Shared runtimes are reported as prerequisites, not copied. Folder matching can still capture other products, so check the file count and size."
+            "Shared runtimes are reported as prerequisites, not copied. Folders outside the install records are matched by the product's exact name, so a folder the app uses under another name is missed."
                 .to_owned(),
             "Registry, services, scheduled tasks, and shortcuts are archived for restore; apply mode remains explicit and privilege-gated."
                 .to_owned(),
@@ -289,16 +334,20 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     Ok(report)
 }
 
-fn selected_executable_path(options: &ScanOptions, system: &SystemContext) -> Result<PathBuf> {
+fn selected_executable_path(
+    options: &ScanOptions,
+    install_source: Option<&InstallSource>,
+    system: &SystemContext,
+) -> Result<PathBuf> {
     match &options.selection {
         AppSelection::ExecutablePath(path) => Ok(path.clone()),
         AppSelection::InstalledApp(app) => app
             .main_executable
             .clone()
-            .or_else(|| crate::install_source::primary_executable(app, system))
+            .or_else(|| install_source.and_then(|source| primary_executable(app, source, system)))
             .ok_or_else(|| {
                 WinAppMigratorError::InvalidInput(format!(
-                    "installed app has no main executable guess: {}",
+                    "could not find an executable for {}. A driver, runtime, or add-in may have no program of its own to package.",
                     app.display_name
                 ))
             }),
@@ -317,8 +366,11 @@ fn validate_scan_input(executable_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `recorded_location` is what the uninstall entry says, which stays part of the app even
+/// when the executable turned out to live elsewhere and `source_app` now names that.
 fn collect_extra_roots(
     source_app: Option<&InstalledApp>,
+    recorded_location: Option<&Path>,
     services: &[ServiceEntry],
     tasks: &[ScheduledTaskEntry],
     shortcuts: &[ShortcutEntry],
@@ -335,6 +387,7 @@ fn collect_extra_roots(
             push_parent_dir(&mut roots, &shortcut.target_path);
         }
     }
+    roots.extend(recorded_location.map(Path::to_path_buf));
     if let Some(app) = source_app {
         if let Some(location) = app.install_location.as_ref() {
             roots.push(location.clone());
@@ -641,6 +694,32 @@ mod tests {
     use crate::models::{AppArchitecture, DependencySourceCategory};
 
     use super::*;
+
+    #[test]
+    fn the_recorded_install_location_stays_a_root_when_the_executable_is_elsewhere() {
+        let app = InstalledApp {
+            display_name: "NVIDIA App".to_owned(),
+            publisher: None,
+            version: None,
+            install_location: Some(PathBuf::from(r"C:\Vendor\NVIDIA app")),
+            uninstall_string: None,
+            main_executable: Some(PathBuf::from(r"C:\Vendor\NVIDIA app\CEF\NVIDIA App.exe")),
+            registry_source_path: r"HKLM\Example".to_owned(),
+            architecture: AppArchitecture::X64,
+            install_scope: crate::models::InstallScope::PerMachine,
+        };
+        let roots = collect_extra_roots(
+            Some(&app),
+            Some(Path::new(r"C:\Vendor\Installer2\Display.NvApp")),
+            &[],
+            &[],
+            &[],
+        );
+
+        assert!(roots.contains(&PathBuf::from(r"C:\Vendor\Installer2\Display.NvApp")));
+        assert!(roots.contains(&PathBuf::from(r"C:\Vendor\NVIDIA app")));
+        assert!(roots.contains(&PathBuf::from(r"C:\Vendor\NVIDIA app\CEF")));
+    }
 
     #[test]
     fn serializes_scan_options() -> Result<()> {

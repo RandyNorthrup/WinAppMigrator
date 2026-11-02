@@ -3,8 +3,22 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::models::{ShortcutEntry, Warning, WarningSeverity};
-use crate::path_utils::hidden_command;
+use crate::path_utils::{hidden_command, path_is_within};
 use crate::system_context::SystemContext;
+
+const LNK_HEADER_SIZE: u32 = 0x4C;
+const LNK_FLAGS_OFFSET: usize = 0x14;
+const LNK_HAS_TARGET_ID_LIST: u32 = 0x1;
+const LNK_HAS_LINK_INFO: u32 = 0x2;
+const LNK_ID_LIST_SIZE_FIELD: usize = 2;
+const LNK_INFO_HEADER_SIZE_OFFSET: usize = 0x04;
+const LNK_INFO_FLAGS_OFFSET: usize = 0x08;
+const LNK_INFO_BASE_OFFSET: usize = 0x10;
+const LNK_INFO_SUFFIX_OFFSET: usize = 0x18;
+const LNK_INFO_UNICODE_BASE_OFFSET: usize = 0x1C;
+const LNK_INFO_UNICODE_SUFFIX_OFFSET: usize = 0x20;
+const LNK_INFO_UNICODE_HEADER_SIZE: u32 = 0x24;
+const LNK_INFO_HAS_LOCAL_PATH: u32 = 0x1;
 
 #[derive(Debug, Clone)]
 pub struct ShortcutScanContext {
@@ -156,5 +170,175 @@ fn path_matches(context: &ShortcutScanContext, candidate: &Path) -> bool {
         || context
             .install_location
             .as_ref()
-            .is_some_and(|root| candidate.starts_with(root))
+            .is_some_and(|root| path_is_within(candidate, root))
+}
+
+/// Read the target of a `.lnk` file from its `LinkInfo` section, without the COM object
+/// `scan_live_shortcuts` uses, so it also works on a shortcut from another PC. A shortcut
+/// that only stores a shell item list has no such path, and neither does an MSI
+/// "advertised" one: both give `None`. The format is documented in MS-SHLLINK.
+pub(crate) fn lnk_target_path(data: &[u8]) -> Option<PathBuf> {
+    if read_u32(data, 0)? != LNK_HEADER_SIZE {
+        return None;
+    }
+    let flags = read_u32(data, LNK_FLAGS_OFFSET)?;
+    let mut offset = LNK_HEADER_SIZE as usize;
+    if flags & LNK_HAS_TARGET_ID_LIST != 0 {
+        let list_size = usize::from(read_u16(data, offset)?);
+        offset += LNK_ID_LIST_SIZE_FIELD + list_size;
+    }
+    if flags & LNK_HAS_LINK_INFO == 0 {
+        return None;
+    }
+    let info = data.get(offset..)?;
+    if read_u32(info, LNK_INFO_FLAGS_OFFSET)? & LNK_INFO_HAS_LOCAL_PATH == 0 {
+        return None;
+    }
+    let header_size = read_u32(info, LNK_INFO_HEADER_SIZE_OFFSET)?;
+    if header_size >= LNK_INFO_UNICODE_HEADER_SIZE
+        && let Some(base) =
+            read_u32(info, LNK_INFO_UNICODE_BASE_OFFSET).and_then(|at| utf16_string(info, at))
+    {
+        let suffix = read_u32(info, LNK_INFO_UNICODE_SUFFIX_OFFSET)
+            .and_then(|at| utf16_string(info, at))
+            .unwrap_or_default();
+        return Some(PathBuf::from(format!("{base}{suffix}")));
+    }
+    let base = ansi_string(info, read_u32(info, LNK_INFO_BASE_OFFSET)?)?;
+    let suffix = read_u32(info, LNK_INFO_SUFFIX_OFFSET)
+        .and_then(|at| ansi_string(info, at))
+        .unwrap_or_default();
+    Some(PathBuf::from(format!("{base}{suffix}"))).filter(|path| !path.as_os_str().is_empty())
+}
+
+fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
+    let bytes = data.get(offset..offset.checked_add(2)?)?;
+    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
+    let bytes = data.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// A NUL-terminated string in the local code page, read as Latin-1: a path outside that
+/// fails the existence check callers apply, and the shortcut is simply not used.
+fn ansi_string(data: &[u8], offset: u32) -> Option<String> {
+    let start = data.get(offset as usize..)?;
+    let end = start.iter().position(|&byte| byte == 0)?;
+    Some(start[..end].iter().map(|&byte| char::from(byte)).collect())
+}
+
+fn utf16_string(data: &[u8], offset: u32) -> Option<String> {
+    let (pairs, _) = data.get(offset as usize..)?.as_chunks::<2>();
+    let units: Vec<u16> = pairs
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .take_while(|&unit| unit != 0)
+        .collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shortcut holding the given local path, in the ANSI form or also the Unicode one.
+    fn lnk_bytes(base: &str, suffix: &str, unicode: bool, id_list: &[u8]) -> Vec<u8> {
+        let mut data = vec![0_u8; LNK_HEADER_SIZE as usize];
+        data[0..4].copy_from_slice(&LNK_HEADER_SIZE.to_le_bytes());
+        let mut flags = LNK_HAS_LINK_INFO;
+        if !id_list.is_empty() {
+            flags |= LNK_HAS_TARGET_ID_LIST;
+            data.extend_from_slice(&(id_list.len() as u16).to_le_bytes());
+            data.extend_from_slice(id_list);
+        }
+        data[LNK_FLAGS_OFFSET..LNK_FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
+
+        let header_size: u32 = if unicode {
+            LNK_INFO_UNICODE_HEADER_SIZE
+        } else {
+            0x1C
+        };
+        let base_at = header_size;
+        let suffix_at = base_at + base.len() as u32 + 1;
+        let unicode_base_at = suffix_at + suffix.len() as u32 + 1;
+        let unicode_suffix_at = unicode_base_at + (base.encode_utf16().count() as u32 + 1) * 2;
+        let mut info = vec![0_u8; header_size as usize];
+        let mut put = |at: usize, value: u32| {
+            info[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        put(LNK_INFO_HEADER_SIZE_OFFSET, header_size);
+        put(LNK_INFO_FLAGS_OFFSET, LNK_INFO_HAS_LOCAL_PATH);
+        put(LNK_INFO_BASE_OFFSET, base_at);
+        put(LNK_INFO_SUFFIX_OFFSET, suffix_at);
+        if unicode {
+            put(LNK_INFO_UNICODE_BASE_OFFSET, unicode_base_at);
+            put(LNK_INFO_UNICODE_SUFFIX_OFFSET, unicode_suffix_at);
+        }
+        info.extend_from_slice(base.as_bytes());
+        info.push(0);
+        info.extend_from_slice(suffix.as_bytes());
+        info.push(0);
+        if unicode {
+            for text in [base, suffix] {
+                info.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+                info.extend_from_slice(&[0, 0]);
+            }
+        }
+        data.extend_from_slice(&info);
+        data
+    }
+
+    #[test]
+    fn reads_a_shortcut_target() {
+        let path = r"C:\Program Files\Google\Chrome\Application\chrome.exe";
+        assert_eq!(
+            lnk_target_path(&lnk_bytes(path, "", false, &[])),
+            Some(PathBuf::from(path))
+        );
+        assert_eq!(
+            lnk_target_path(&lnk_bytes(path, "", true, &[1, 2, 3, 4])),
+            Some(PathBuf::from(path)),
+            "skips the item list, and reads the Unicode form when there is one"
+        );
+        assert_eq!(
+            lnk_target_path(&lnk_bytes(r"C:\Program Files\", "App\\app.exe", false, &[])),
+            Some(PathBuf::from(r"C:\Program Files\App\app.exe")),
+            "the path can be split into a base and a suffix"
+        );
+    }
+
+    #[test]
+    fn a_shortcut_without_a_local_path_gives_nothing() {
+        let mut advertised = vec![0_u8; LNK_HEADER_SIZE as usize];
+        advertised[0..4].copy_from_slice(&LNK_HEADER_SIZE.to_le_bytes());
+        assert_eq!(lnk_target_path(&advertised), None);
+        assert_eq!(lnk_target_path(b"not a shortcut"), None);
+        assert_eq!(lnk_target_path(&[]), None);
+    }
+
+    #[test]
+    fn a_truncated_shortcut_does_not_panic() {
+        let whole = lnk_bytes(r"C:\App\app.exe", "", true, &[9, 9]);
+        for cut in 0..whole.len() {
+            let _ = lnk_target_path(&whole[..cut]);
+        }
+    }
+
+    #[test]
+    fn a_target_in_a_folder_with_a_longer_name_is_not_inside_the_install_folder() {
+        let context = ShortcutScanContext {
+            executable_path: PathBuf::from(r"C:\Program Files\Git\git-bash.exe"),
+            install_location: Some(PathBuf::from(r"C:\Program Files\Git")),
+        };
+        assert!(path_matches(
+            &context,
+            Path::new(r"C:\PROGRAM FILES\GIT\cmd\git.exe")
+        ));
+        assert!(!path_matches(
+            &context,
+            Path::new(r"C:\Program Files\GitHub CLI\gh.exe")
+        ));
+    }
 }

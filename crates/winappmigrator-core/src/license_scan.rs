@@ -22,6 +22,7 @@ use crate::models::{
     FileEntry, LicenseArtifact, LicenseArtifactKind, LicenseFramework, MatchConfidence,
     RegistryEntry, RegistryHive, RegistryValueKind, TransferableHint, Warning, WarningSeverity,
 };
+use crate::registry_scan::registry_value_text;
 use crate::system_context::SystemContext;
 
 /// File extensions that strongly indicate a license/activation file.
@@ -463,7 +464,7 @@ fn reg_value_to_entry(
     let value_kind = map_registry_type(value.vtype.clone());
     let (value_data, value_bytes_hex) = match value_kind {
         RegistryValueKind::String | RegistryValueKind::ExpandString => {
-            (Some(value.to_string()), None)
+            (Some(registry_value_text(value)), None)
         }
         _ => (None, Some(hex_lower(&value.bytes))),
     };

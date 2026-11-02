@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use winreg::enums::KEY_READ;
 
 use crate::models::{DriverEntry, DriverKind, ServiceEntry, Warning, WarningSeverity};
-use crate::path_utils::{escape_powershell_single, hidden_command, split_command_executable_path};
+use crate::path_utils::{
+    escape_powershell_single, hidden_command, path_is_within, split_command_executable_path,
+};
 use crate::system_context::SystemContext;
 
 const POWERSHELL_EXE: &str = "powershell.exe";
@@ -167,7 +169,7 @@ fn path_matches(context: &ServiceScanContext, candidate: &Path) -> bool {
         || context
             .install_location
             .as_ref()
-            .is_some_and(|root| path_starts_with_ignore_case(candidate, root))
+            .is_some_and(|root| path_is_within(candidate, root))
 }
 
 /// A driver image is application-owned when it lives inside the app's install
@@ -182,7 +184,7 @@ fn is_app_owned_driver(context: &ServiceScanContext, image_path: &Path) -> bool 
     let under_install = context
         .install_location
         .as_ref()
-        .is_some_and(|root| path_starts_with_ignore_case(image_path, root));
+        .is_some_and(|root| path_is_within(image_path, root));
     under_install && image_path.is_file()
 }
 
@@ -278,12 +280,6 @@ fn driver_kind(value: u32) -> DriverKind {
     } else {
         DriverKind::Unknown
     }
-}
-
-fn path_starts_with_ignore_case(path: &Path, root: &Path) -> bool {
-    path.to_string_lossy()
-        .to_ascii_lowercase()
-        .starts_with(&root.to_string_lossy().to_ascii_lowercase())
 }
 
 /// Expand a service/driver `ImagePath` to a filesystem path. The `\SystemRoot\`,

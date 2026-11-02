@@ -20,7 +20,7 @@ use crate::models::{
     VerificationStatus, Warning, WarningSeverity,
 };
 use crate::package::read_manifest;
-use crate::path_utils::{escape_powershell_single, hidden_command};
+use crate::path_utils::{escape_powershell_single, hidden_command, is_drive_root};
 use crate::prerequisites::is_present;
 use crate::registry_target::{
     app_path_entries, environment_registry_target, is_path_variable, path_contains_entry,
@@ -1046,9 +1046,19 @@ fn path_rewrites(
             destination.to_string_lossy().to_string(),
         ));
     }
-    if let Some(source_root) = manifest.main_executable_path.parent() {
+    // Files are stored relative to the install location, which can be above the
+    // executable's own folder (`Chrome` for `Chrome\Application\chrome.exe`).
+    let source_root = manifest
+        .application_metadata
+        .as_ref()
+        .and_then(|app| app.install_location.as_deref())
+        .or_else(|| manifest.main_executable_path.parent());
+    if let Some(source_root) = source_root.filter(|root| !is_drive_root(root)) {
         rewrites.push((
-            source_root.to_string_lossy().to_string(),
+            source_root
+                .to_string_lossy()
+                .trim_end_matches('\\')
+                .to_owned(),
             target_root.to_string_lossy().to_string(),
         ));
     }

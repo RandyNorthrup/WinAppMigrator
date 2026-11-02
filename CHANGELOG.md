@@ -22,6 +22,41 @@ All notable project changes are tracked here.
 - **The list shows real applications.** Entries marked `SystemComponent=1` are left out,
   as in Windows' own installed-apps list. They are parts of other products: on one test
   PC they were 481 of the 641 rows.
+- **Footprints match the product, not everything that sounds like it.** Folders and registry
+  keys now match the product's whole name, or `Vendor\Product`, never a substring. A publisher
+  or the install folder's parent can only qualify a parent folder, and selects nothing by
+  itself. On one test PC, VS Code went from 175,182 files and 46.83 GB to about 68,900 files
+  and 10.40 GB, most of it its own user data: Visual Studio and the rest of
+  `AppData\Local\Programs` are gone. Firefox no longer takes Thunderbird or `ms-playwright`,
+  NVIDIA App no longer takes `Razer\Installer`, PowerShell no longer takes Store packages, and
+  `Software\Logitech` is no longer part of Git.
+  - Roots from MSI, Inno Setup, and NSIS records are now the deepest folder that holds the
+    recorded files, and never a shared one. Cocos Dashboard no longer takes all 10.67 GB of
+    `C:\ProgramData\Microsoft`, and its files in `C:\CocosDashboard` are no longer lost for
+    being directly on the drive. An `InstallLocation` that is itself a shared folder is ignored.
+  - Install records now also name registry keys, which is how `Software\GitForWindows` is
+    still found. Matching covers `WOW6432Node`, looks one level under a vendor's key, and
+    ignores versions, so `7-Zip 25.01 (x64)` finds its own key. A key that records the
+    install folder in a value like `InstallDir` counts whatever its name.
+  - A Burn bundle's files now come from its hidden MSI packages. The .NET SDK, the Windows SDK,
+    Ableton Live, and Moonlight are bundles, and they used to rely on name matching or lose
+    everything but their bootstrapper.
+  - Nothing inside an install folder is skipped any more, however it is named. VS Code was
+    losing 1,173 files under `node-compile-cache`.
+  - Across all 160 apps on the test PC, the 142 that scan successfully have 424,319 files in
+    their install folders, and none are missing from the inventory.
+- **The main executable is the application.** Uninstallers, updaters, Windows hosts, and
+  installers' cached copies are rejected, and App Paths and Start Menu shortcuts are consulted.
+  Git was `unins000.exe`, an x86 file for an x64 app. It is now `git-bash.exe`. NVIDIA App was
+  `rundll32.exe`, whose name alone matched 1,258 registry entries including `Classes\htmlfile`.
+  It is now `NVIDIA App.exe`, with 102 entries. A bare file name no longer matches anything.
+  Chrome no longer fails with "no main executable": its MSI records no files, so only App Paths
+  knows where it is. A scan that finds nothing better warns when an uninstaller stands in, and
+  an entry with no program at all, such as a driver, fails and says why.
+- **Inno Setup logs parse properly.** The reader now follows the log's blocks and length
+  prefixes instead of scanning for path text, which a path's trailing bytes defeated. Git for
+  Windows went from no paths resolved to 9,220 files, and old ANSI logs work too.
+- **The MSI database is read once per scan,** not up to three times.
 - **Build progress and cancel.** Builds report each step with a progress bar and elapsed
   time, and can be cancelled. The window stays light while a build runs, because it no
   longer repaints continuously or touches the disk on every frame.
@@ -57,6 +92,12 @@ All notable project changes are tracked here.
   - A failed build no longer destroys the installer from an earlier run.
   - An empty or relative install location is refused, and headless `--apply` without
     `--target-root` now fails instead of doing nothing and exiting 0.
+  - A registry value whose bytes do not fit its type no longer panics the scan.
+  - Text that merely starts like the install path no longer matches it: `C:\Program Files\Git`
+    is not `C:\Program Files\GitHub CLI`. Registry values, environment variables, services,
+    tasks, and shortcuts all compare whole paths now, ignoring case.
+  - Restoring rewrites paths from the install location and not the executable's folder, so an
+    app whose executable is in a subfolder keeps its layout in rewritten values.
   - `cargo test --workspace` now works without elevation. The executables' tests could
     not start under their `requireAdministrator` manifests, so the logic moved to
     libraries.

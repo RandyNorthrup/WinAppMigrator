@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -169,6 +169,100 @@ pub fn normalize_name_for_match(value: &str) -> String {
         .collect()
 }
 
+/// A path as lowercase text with forward slashes and any trailing separator removed, for
+/// comparing paths that come from different records. `C:\` becomes `c:`.
+fn comparable_path(path: &Path) -> String {
+    let lower = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    lower.trim_end_matches('\\').to_owned()
+}
+
+/// True when `path` is `root` or lies inside it, ignoring case. Unlike a text prefix,
+/// `C:\Program Files\GitHub CLI` is not inside `C:\Program Files\Git`.
+pub fn path_is_within(path: &Path, root: &Path) -> bool {
+    let path = comparable_path(path);
+    let root = comparable_path(root);
+    !root.is_empty()
+        && (path == root
+            || path
+                .strip_prefix(root.as_str())
+                .is_some_and(|rest| rest.starts_with('\\')))
+}
+
+/// `path` relative to `root`, ignoring case: Windows paths from different records can
+/// differ in case while naming the same folder. `None` when `path` is not inside `root`.
+pub fn strip_prefix_ignore_case(path: &Path, root: &Path) -> Option<PathBuf> {
+    let mut remaining = path.components();
+    for expected in root.components() {
+        let actual = remaining.next()?;
+        if !actual
+            .as_os_str()
+            .eq_ignore_ascii_case(expected.as_os_str())
+        {
+            return None;
+        }
+    }
+    Some(remaining.as_path().to_path_buf())
+}
+
+/// True for `C:\` and other paths with nothing below the root.
+pub fn is_drive_root(path: &Path) -> bool {
+    !path
+        .components()
+        .any(|component| matches!(component, Component::Normal(_)))
+}
+
+/// True when text such as a registry value mentions `path` as a whole path. The next
+/// character must end the path, so `C:\Program Files\Git` is not mentioned by
+/// `C:\Program Files\GitHub CLI\gh.exe`, or by `C:\Program Files\Git Extensions`.
+/// `followed_by_arguments` also accepts a space, which is right for an executable in a
+/// command line and wrong for a directory.
+pub fn text_mentions_path(text: &str, path: &Path, followed_by_arguments: bool) -> bool {
+    let needle = comparable_path(path);
+    if needle.is_empty() {
+        return false;
+    }
+    // Both steps swap single bytes for single bytes, so `end` stays a char boundary.
+    let lower = text.to_ascii_lowercase().replace('/', "\\");
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(&needle) {
+        let end = from + found + needle.len();
+        match lower[end..].chars().next() {
+            None | Some('\\' | '"' | '\'' | ';' | ',' | '\0' | '\r' | '\n') => return true,
+            Some(' ' | '\t') if followed_by_arguments => return true,
+            _ => from = end,
+        }
+    }
+    false
+}
+
+/// True for an executable that exists to install, update, or support an application
+/// and is not the application itself.
+pub fn is_auxiliary_executable(path: &Path) -> bool {
+    const AUXILIARY_MARKERS: &[&str] = &[
+        "unins",
+        "setup",
+        "install",
+        "update",
+        "crashpad",
+        "crashreporter",
+        "crashhandler",
+        "bugreport",
+        "redist",
+        "dotnet",
+        "helper",
+        "maintenancetool",
+    ];
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    AUXILIARY_MARKERS.iter().any(|marker| stem.contains(marker))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +315,104 @@ mod tests {
 
         assert_eq!(parsed, PathBuf::from(r"C:\Program Files\App\App.exe"));
         Ok(())
+    }
+
+    #[test]
+    fn a_path_is_within_a_folder_only_at_a_segment_boundary() {
+        let git = Path::new(r"C:\Program Files\Git\");
+        assert!(path_is_within(Path::new(r"C:\Program Files\Git"), git));
+        assert!(path_is_within(
+            Path::new(r"c:\program files\git\bin\git.exe"),
+            git
+        ));
+        assert!(!path_is_within(
+            Path::new(r"C:\Program Files\GitHub CLI\gh.exe"),
+            git
+        ));
+        assert!(!path_is_within(Path::new(r"C:\Program Files"), git));
+    }
+
+    #[test]
+    fn strips_a_prefix_regardless_of_case() {
+        assert_eq!(
+            strip_prefix_ignore_case(
+                Path::new(r"C:\Program Files\NVIDIA app\CEF\app.exe"),
+                Path::new(r"c:\PROGRAM FILES\NVIDIA App\"),
+            ),
+            Some(PathBuf::from(r"CEF\app.exe"))
+        );
+        assert_eq!(
+            strip_prefix_ignore_case(
+                Path::new(r"C:\Program Files\GitHub"),
+                Path::new(r"C:\Program Files\Git")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn recognizes_drive_roots() {
+        assert!(is_drive_root(Path::new(r"C:\")));
+        assert!(is_drive_root(Path::new("C:")));
+        assert!(!is_drive_root(Path::new(r"C:\CocosDashboard")));
+    }
+
+    #[test]
+    fn text_mentions_a_path_only_as_a_whole_path() {
+        let git = Path::new(r"C:\Program Files\Git\");
+        assert!(text_mentions_path(r"C:\Program Files\Git", git, false));
+        assert!(text_mentions_path(
+            r#""C:\PROGRAM FILES\GIT\bin\git.exe" %1"#,
+            git,
+            false
+        ));
+        assert!(text_mentions_path(
+            r"C:\Windows;C:\Program Files\Git;C:\Tools",
+            git,
+            false
+        ));
+        assert!(!text_mentions_path(
+            r"C:\Program Files\GitHub CLI\gh.exe",
+            git,
+            false
+        ));
+        assert!(!text_mentions_path(
+            r"C:\Program Files\Git Extensions\x.exe",
+            git,
+            false
+        ));
+
+        assert!(text_mentions_path("C:/Program Files/Git/bin", git, false));
+
+        let exe = Path::new(r"C:\App\app.exe");
+        assert!(text_mentions_path(r"C:\App\app.exe --flag", exe, true));
+        assert!(text_mentions_path(r"C:\App\app.exe,0", exe, false));
+        assert!(!text_mentions_path(r"C:\App\app.exe.config", exe, true));
+    }
+
+    #[test]
+    fn recognizes_auxiliary_executables() {
+        for name in [
+            "unins000.exe",
+            "Uninstall OpenCode.exe",
+            "helper.exe",
+            "Update.exe",
+            "GoogleUpdate.exe",
+            "CocosDashboard_setup.exe",
+            "VC_redist.x64.exe",
+            "notification_helper.exe",
+        ] {
+            assert!(is_auxiliary_executable(Path::new(name)), "{name}");
+        }
+        for name in [
+            "git-bash.exe",
+            "chrome.exe",
+            "Code.exe",
+            "pwsh.exe",
+            "firefox.exe",
+        ] {
+            assert!(!is_auxiliary_executable(Path::new(name)), "{name}");
+        }
     }
 
     #[test]

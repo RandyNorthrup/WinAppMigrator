@@ -13,6 +13,7 @@ pub mod path_utils;
 pub mod pe_scan;
 pub mod prerequisites;
 pub mod privilege;
+mod product_match;
 pub mod progress;
 pub mod registry_scan;
 mod registry_target;

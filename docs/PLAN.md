@@ -69,72 +69,62 @@ From the audit of 2026-11-01. None of these are fixed yet.
 
 **Accuracy**
 
-1. **Footprint false positives.** Folder matching uses app, publisher, and parent-folder
-   names and matches substrings both ways, and a hit under Program Files counts as app-owned, so
-   no option excludes it. VS Code captured 175,176 files on one PC, including all of
-   Visual Studio. Fix by matching the product or `Vendor\Product` exactly, and offering
-   anything looser as an opt-in suggestion.
-2. **Wrong main executable.** The guess accepts uninstallers and Windows hosts: Git
-   resolved to `unins000.exe`, NVIDIA App to `rundll32.exe`.
-3. **Inno Setup log parsing.** Framing bytes after each path defeat the scan, so modern
-   logs yield no paths (0 of 10,083 on Git for Windows). The app then falls back to
-   folder matching.
-4. **Offline builds.** Registry values hold `C:\` paths but the scan compares them with
+1. **Offline builds.** Registry values hold `C:\` paths but the scan compares them with
    `E:\` paths, so COM, file associations, Run keys, App Paths, and environment variables
    do not match. The installer also defaults to the `E:\` location, and `UsrClass.dat` is
    not mounted.
-5. **Missing integrations.** URL protocols, shell extensions, TypeLib/AppID, firewall rules,
+2. **Missing integrations.** URL protocols, shell extensions, TypeLib/AppID, firewall rules,
    fonts, certificates, ODBC, event log sources, and 32-bit Run and App Paths keys.
-6. **User data routing.** Documents and Saved Games restore under the install folder, not
+3. **User data routing.** Documents and Saved Games restore under the install folder, not
    to the user's folders, and every profile's data collapses into one account's.
 
 **Security and data safety**
 
-7. **The package is not authenticated, and it directs an elevated process.** Its manifest
+4. **The package is not authenticated, and it directs an elevated process.** Its manifest
    can name any registry key, service, scheduled task, or shortcut, and which prerequisite
    to run. Hashes sit in the same archive they protect. Enforce app-scoped allowlists when
    restoring, take prerequisite details from compiled specs, and show persistence items in
    the preview.
-8. **Prerequisite downloads and payloads** are not checked by signature, and HTTPS is not
+5. **Prerequisite downloads and payloads** are not checked by signature, and HTTPS is not
    enforced on redirects.
-9. **Staging folders** are user-writable while elevated work reads from them. Use an
+6. **Staging folders** are user-writable while elevated work reads from them. Use an
    admin-only ACL and hash files while holding their handles.
-10. **Services** are restored with unquoted paths, lose their arguments, and LocalService or
-    NetworkService become LocalSystem.
-11. **No rollback.** The first copy failure stops the install part-way, and existing files
-    are overwritten with no backup.
-12. **Secrets.** All values under an app's registry keys and license files in its install
-    folder are captured even with the license option off. Apply the license classifiers
-    when opted out, and redact secret-named values.
+7. **Services** are restored with unquoted paths, lose their arguments, and LocalService or
+   NetworkService become LocalSystem.
+8. **No rollback.** The first copy failure stops the install part-way, and existing files
+   are overwritten with no backup.
+9. **Secrets.** All values under an app's registry keys and license files in its install
+   folder are captured even with the license option off. Apply the license classifiers
+   when opted out, and redact secret-named values.
 
 **Performance**
 
-13. The MSI sweep can run up to three times per scan, about 60 seconds per MSI app on one PC.
-14. Path rewriting checks every value against every file's rule, repeatedly: minutes at
+10. Path rewriting checks every value against every file's rule, repeatedly: minutes at
     100,000 files. Rewrite by root instead.
-15. Every byte is read about five times to build and four times to install. Hash while
+11. Every byte is read about five times to build and four times to install. Hash while
     copying, in parallel.
-16. Compression is single-threaded, and recompresses formats that are already compressed.
-17. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
+12. Compression is single-threaded, and recompresses formats that are already compressed.
+13. Scheduled tasks are read through PowerShell one at a time, 13 to 20 seconds, and all are
     lost if one contains a character that breaks the JSON. The offline XML reader could
     serve live scans too.
 
 **Features**
 
-18. Footprint preview with include and exclude before building.
-19. Size and free-space check before building.
-20. A way past the 4 GiB limit: a small loader plus a data file beside it.
-21. Installer progress, persistent logs, and a change journal enabling rollback and a
+14. Footprint preview with include and exclude before building, offering folders that nearly
+    match the product's name, which are now left out.
+15. Size and free-space check before building.
+16. A way past the 4 GiB limit: a small loader plus a data file beside it.
+17. Installer progress, persistent logs, and a change journal enabling rollback and a
     generated uninstaller.
-22. Target OS and architecture check.
+18. Target OS and architecture check.
 
 **Project health**
 
-23. GitHub shows no run of `ci.yml`, ever, though Release runs. Find out why, then require
+19. GitHub shows no run of `ci.yml`, ever, though Release runs. Find out why, then require
     it on `main`.
-24. Tags (`v0.4.2.1`) cannot match the SemVer version in `Cargo.toml` (`0.4.2`). Use SemVer
+20. Tags (`v0.4.2.1`) cannot match the SemVer version in `Cargo.toml` (`0.4.2`). Use SemVer
     tags and fail a release on a mismatch.
-25. The release workflow runs no tests and does not pin the toolchain.
+21. The release workflow runs no tests and does not pin the toolchain.
 
 ## Not in scope for this release line
 

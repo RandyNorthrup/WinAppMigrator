@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use tracing::warn;
@@ -14,8 +15,9 @@ use crate::models::{
     RegistryHive, RegistryValueKind, Warning, WarningSeverity,
 };
 use crate::path_utils::{
-    looks_like_executable, normalize_name_for_match, split_command_executable_path,
+    normalize_name_for_match, path_is_within, split_command_executable_path, text_mentions_path,
 };
+use crate::product_match::{MatchScope, ProductNames};
 use crate::system_context::{SystemContext, UserHive};
 
 /// A registry root to open logical key paths against. Live opens `predef`
@@ -47,8 +49,12 @@ const HKLM_UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninsta
 const HKLM_WOW6432_UNINSTALL: &str =
     r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
 const HKCU_UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
-const HKCU_SOFTWARE: &str = r"Software";
-const HKLM_SOFTWARE: &str = r"Software";
+const SOFTWARE: &str = r"Software";
+const WOW6432_SOFTWARE: &str = r"Software\WOW6432Node";
+const SOFTWARE_VIEWS: [&str; 2] = [SOFTWARE, WOW6432_SOFTWARE];
+const WOW6432_NODE: &str = "WOW6432Node";
+const MICROSOFT: &str = "Microsoft";
+const CLASSES: &str = "Classes";
 const HKCU_CLASSES: &str = r"Software\Classes";
 const HKLM_CLASSES: &str = r"Software\Classes";
 const HKCU_CLASSES_APPLICATIONS: &str = r"Software\Classes\Applications";
@@ -60,6 +66,61 @@ const MAX_REGISTRY_CAPTURE_DEPTH: usize = 8;
 const MAX_REGISTRY_CAPTURE_KEYS: usize = 512;
 const MAX_REGISTRY_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_REGISTRY_MATCH_SCAN_DEPTH: usize = 4;
+/// How far under `Software\<Vendor>` to look for a key recording the install folder.
+const MAX_INSTALL_PATH_KEY_DEPTH: usize = 3;
+/// `Software` children never searched for an install path: they hold everything, so a
+/// value there says nothing about who owns the key, and they are large.
+const INSTALL_PATH_SEARCH_SKIPPED_KEYS: &[&str] =
+    &["classes", "microsoft", "policies", "wow6432node"];
+/// Value names an installer uses to record where it installed. Other names can point at
+/// the folder too, but `MSysGit` in TortoiseGit's key does not make that key Git's.
+const INSTALL_PATH_VALUE_NAMES: &[&str] = &[
+    "path",
+    "exepath",
+    "apppath",
+    "installpath",
+    "installdir",
+    "installdirectory",
+    "installfolder",
+    "installlocation",
+    "installroot",
+    "location",
+    "home",
+    "rootdir",
+    "targetdir",
+];
+/// Keys that hold every app's entries side by side. A record naming one of these keys
+/// whole can never mean all of it belongs to one app; a record naming a single value in
+/// one still captures just that value.
+const SHARED_REGISTRY_KEYS: &[&str] = &[
+    r"software",
+    r"software\classes",
+    r"software\classes\clsid",
+    r"software\classes\interface",
+    r"software\classes\typelib",
+    r"software\classes\appid",
+    r"software\classes\applications",
+    r"software\classes\directory",
+    r"software\classes\directory\background",
+    r"software\classes\directory\background\shell",
+    r"software\classes\directory\shell",
+    r"software\classes\*",
+    r"software\classes\*\shell",
+    r"software\clients",
+    r"software\microsoft",
+    r"software\microsoft\windows",
+    r"software\microsoft\windows\currentversion",
+    r"software\microsoft\windows\currentversion\app paths",
+    r"software\microsoft\windows\currentversion\explorer",
+    r"software\microsoft\windows\currentversion\run",
+    r"software\microsoft\windows\currentversion\runonce",
+    r"software\microsoft\windows\currentversion\shareddlls",
+    r"software\microsoft\windows\currentversion\uninstall",
+    r"software\microsoft\windows nt",
+    r"software\microsoft\windows nt\currentversion",
+    r"software\policies",
+    r"software\registeredapplications",
+];
 const RUN_KEYS: &[&str] = &[
     r"Software\Microsoft\Windows\CurrentVersion\Run",
     r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
@@ -72,6 +133,45 @@ pub struct RegistryScanContext {
     pub display_name: Option<String>,
     pub publisher: Option<String>,
     pub source_registry_path: Option<String>,
+    /// Keys and values the app's install record names: exact, so they are captured
+    /// whatever they are called.
+    pub recorded_keys: Vec<RecordedRegistryKey>,
+}
+
+/// A registry root as an install record names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedRegistryRoot {
+    ClassesRoot,
+    CurrentUser,
+    LocalMachine,
+}
+
+/// A registry key an install record says belongs to the app (MSI component key paths and
+/// the registry records of an Inno Setup log).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedRegistryKey {
+    pub root: RecordedRegistryRoot,
+    pub key_path: String,
+    /// One value in the key, or `None` for the key and everything under it.
+    pub value_name: Option<String>,
+    /// Recorded in the 32-bit view, so on 64-bit Windows it lives under `WOW6432Node`.
+    pub wow64_32: bool,
+}
+
+impl RecordedRegistryKey {
+    /// Identifies a key regardless of case.
+    pub(crate) fn identity(&self) -> String {
+        format!(
+            "{:?}|{}|{}|{}",
+            self.root,
+            self.wow64_32,
+            self.key_path.to_ascii_lowercase(),
+            self.value_name
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default()
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -98,7 +198,9 @@ pub fn scan_registry_artifacts(
     let mut warnings = Vec::new();
     let mut file_associations = Vec::new();
 
+    let names = context_product_names(context);
     let hklm = RegRoot::Hklm(system);
+    scan_recorded_keys(context, &hklm, &mut entries, &mut warnings);
     scan_app_paths(context, &hklm, &mut entries, &mut warnings);
     scan_uninstall_entries(context, &hklm, HKLM_UNINSTALL, &mut entries, &mut warnings);
     scan_uninstall_entries(
@@ -109,7 +211,7 @@ pub fn scan_registry_artifacts(
         &mut warnings,
     );
     scan_run_keys(context, &hklm, &mut entries, &mut warnings);
-    scan_software_children(context, &hklm, &mut entries, &mut warnings);
+    scan_software_children(context, &names, &hklm, &mut entries, &mut warnings);
     scan_class_registrations(
         context,
         &hklm,
@@ -143,10 +245,11 @@ pub fn scan_registry_artifacts(
     // Per-user hives: live yields the current user; offline yields every profile.
     for user in system.user_hives() {
         let hkcu = RegRoot::User(&user);
+        scan_recorded_keys(context, &hkcu, &mut entries, &mut warnings);
         scan_app_paths(context, &hkcu, &mut entries, &mut warnings);
         scan_uninstall_entries(context, &hkcu, HKCU_UNINSTALL, &mut entries, &mut warnings);
         scan_run_keys(context, &hkcu, &mut entries, &mut warnings);
-        scan_software_children(context, &hkcu, &mut entries, &mut warnings);
+        scan_software_children(context, &names, &hkcu, &mut entries, &mut warnings);
         scan_class_registrations(
             context,
             &hkcu,
@@ -179,7 +282,7 @@ pub fn scan_registry_artifacts(
     });
     entries.dedup_by(|left, right| {
         left.hive == right.hive
-            && left.key_path == right.key_path
+            && left.key_path.eq_ignore_ascii_case(&right.key_path)
             && left.value_name == right.value_name
     });
 
@@ -268,7 +371,8 @@ fn scan_file_extension_associations(
             continue;
         }
         let prog_id_path = format!(r"{classes_path}\{prog_id}");
-        if !registry_tree_matches_context(root, &prog_id_path, context, 0) {
+        if !prog_id_opens_with_app(root, &prog_id_path, context) {
+            capture_verbs_pointing_at_app(root, &prog_id_path, context, entries, warnings);
             continue;
         }
 
@@ -292,6 +396,100 @@ fn scan_file_extension_associations(
             &extension_name,
             &prog_id,
         ));
+    }
+}
+
+/// True when a file type belongs to this app: double-clicking one opens it, or the app
+/// supplies its icon. Mentioning the app somewhere is not enough. PowerShell 7 adds a verb
+/// to Windows' `LibraryFolder`, and that does not make the type or its other verbs PowerShell's.
+fn prog_id_opens_with_app(
+    root: &RegRoot,
+    prog_id_path: &str,
+    context: &RegistryScanContext,
+) -> bool {
+    let default_value = |key_path: &str| {
+        root.open(key_path, KEY_READ)
+            .and_then(|key| key.get_raw_value(""))
+            .map(|value| raw_value_to_display(&value))
+            .unwrap_or_default()
+    };
+    let default_verb = default_value(&format!(r"{prog_id_path}\shell"));
+    prog_id_ownership_keys(prog_id_path, &default_verb)
+        .iter()
+        .any(|key_path| value_matches_context(context, &default_value(key_path)))
+}
+
+/// The keys that say what a file type opens with and how it looks.
+fn prog_id_ownership_keys(prog_id_path: &str, default_verb: &str) -> Vec<String> {
+    let mut keys = vec![format!(r"{prog_id_path}\shell\open\command")];
+    let default_verb = default_verb.trim();
+    if !default_verb.is_empty() && !default_verb.eq_ignore_ascii_case("open") {
+        keys.push(format!(r"{prog_id_path}\shell\{default_verb}\command"));
+    }
+    keys.push(format!(r"{prog_id_path}\DefaultIcon"));
+    keys
+}
+
+/// Capture just the verbs an app adds to a file type it does not own. Other apps' verbs
+/// and the type itself stay out, so restoring cannot overwrite them.
+fn capture_verbs_pointing_at_app(
+    root: &RegRoot,
+    prog_id_path: &str,
+    context: &RegistryScanContext,
+    entries: &mut Vec<RegistryEntry>,
+    warnings: &mut Vec<Warning>,
+) {
+    let mut matching = Vec::new();
+    collect_keys_matching_context(root, prog_id_path, context, 0, &mut matching);
+    for key_path in matching {
+        capture_registry_subtree(
+            root,
+            verb_key_of(&key_path),
+            MatchConfidence::High,
+            entries,
+            warnings,
+        );
+    }
+}
+
+/// The verb a matching key belongs to: a `command` key's parent, which also holds the
+/// verb's label and icon. Any other key stands for itself.
+fn verb_key_of(key_path: &str) -> &str {
+    key_path
+        .rsplit_once('\\')
+        .filter(|(_, leaf)| leaf.eq_ignore_ascii_case("command"))
+        .map_or(key_path, |(parent, _)| parent)
+}
+
+fn collect_keys_matching_context(
+    root: &RegRoot,
+    key_path: &str,
+    context: &RegistryScanContext,
+    depth: usize,
+    matching: &mut Vec<String>,
+) {
+    if depth > MAX_REGISTRY_MATCH_SCAN_DEPTH {
+        return;
+    }
+    let Ok(key) = root.open(key_path, KEY_READ) else {
+        return;
+    };
+    if key
+        .enum_values()
+        .flatten()
+        .any(|value| value_matches_context(context, &raw_value_to_display(&value.1)))
+    {
+        matching.push(key_path.to_owned());
+        return;
+    }
+    for child_name in key.enum_keys().flatten() {
+        collect_keys_matching_context(
+            root,
+            &format!(r"{key_path}\{child_name}"),
+            context,
+            depth + 1,
+            matching,
+        );
     }
 }
 
@@ -458,36 +656,233 @@ fn scan_run_keys(
     }
 }
 
-fn scan_software_children(
+/// The names this app's registry keys can go by, as for its folders.
+fn context_product_names(context: &RegistryScanContext) -> ProductNames {
+    let mut aliases = Vec::new();
+    if let Some(stem) = context.executable_path.file_stem().and_then(|s| s.to_str()) {
+        aliases.push(stem);
+    }
+    let vendor_folders: Vec<&str> = context
+        .install_location
+        .as_deref()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .into_iter()
+        .collect();
+    ProductNames::new(
+        context.display_name.as_deref(),
+        context.publisher.as_deref(),
+        &aliases,
+        &vendor_folders,
+    )
+}
+
+/// Capture the keys and values the app's install record names. Exact records need no
+/// matching, so this also finds keys named nothing like the product, such as Git for
+/// Windows' `Software\GitForWindows`. Records of other accounts and keys that are gone
+/// are skipped.
+fn scan_recorded_keys(
     context: &RegistryScanContext,
     root: &RegRoot,
     entries: &mut Vec<RegistryEntry>,
-    _warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Warning>,
 ) {
-    let software_path = match root.hive() {
-        RegistryHive::LocalMachine => HKLM_SOFTWARE,
-        RegistryHive::CurrentUser => HKCU_SOFTWARE,
-    };
-    let Ok(software) = root.open(software_path, KEY_READ) else {
-        return;
-    };
-    let tokens = related_tokens(context);
-    if tokens.is_empty() {
-        return;
-    }
-
-    for child_name in software.enum_keys().flatten() {
-        let normalized = normalize_name_for_match(&child_name);
-        if tokens.iter().any(|token| normalized.contains(token)) {
-            capture_registry_subtree(
-                root,
-                &format!(r"{software_path}\{child_name}"),
-                MatchConfidence::Medium,
-                entries,
-                _warnings,
-            );
+    for recorded in &context.recorded_keys {
+        for key_path in recorded_key_paths(recorded, &root.hive()) {
+            let Ok(key) = root.open(&key_path, KEY_READ) else {
+                continue;
+            };
+            match recorded.value_name.as_deref() {
+                Some(value_name) => {
+                    if let Ok(value) = key.get_raw_value(value_name)
+                        && value.bytes.len() <= MAX_REGISTRY_VALUE_BYTES
+                    {
+                        entries.push(entry_from_raw_value(
+                            root.hive(),
+                            key_path,
+                            value_name.to_owned(),
+                            value,
+                            MatchConfidence::High,
+                            root.hive() == RegistryHive::LocalMachine,
+                        ));
+                    }
+                }
+                None if is_shared_registry_key(&key_path) => {}
+                None => capture_registry_subtree(
+                    root,
+                    &key_path,
+                    MatchConfidence::High,
+                    entries,
+                    warnings,
+                ),
+            }
+            break;
         }
     }
+}
+
+/// Where a recorded key lives in `hive`, most likely path first. Empty when it belongs
+/// to the other hive. `HKEY_CLASSES_ROOT` is a merged view, so it can be either's
+/// `Software\Classes`. A key recorded in the 32-bit view is under `WOW6432Node` on 64-bit
+/// Windows, and at its plain path on 32-bit Windows.
+fn recorded_key_paths(recorded: &RecordedRegistryKey, hive: &RegistryHive) -> Vec<String> {
+    match recorded.root {
+        RecordedRegistryRoot::ClassesRoot => vec![format!(r"{HKLM_CLASSES}\{}", recorded.key_path)],
+        RecordedRegistryRoot::CurrentUser if *hive == RegistryHive::CurrentUser => {
+            vec![recorded.key_path.clone()]
+        }
+        RecordedRegistryRoot::LocalMachine if *hive == RegistryHive::LocalMachine => {
+            let plain = recorded.key_path.clone();
+            match wow6432_path(&plain).filter(|_| recorded.wow64_32) {
+                Some(redirected) => vec![redirected, plain],
+                None => vec![plain],
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `Software\Foo` as seen by a 32-bit process on 64-bit Windows.
+fn wow6432_path(key_path: &str) -> Option<String> {
+    let (first, rest) = key_path.split_once('\\')?;
+    (first.eq_ignore_ascii_case(SOFTWARE) && !rest.to_ascii_lowercase().starts_with("wow6432node"))
+        .then(|| format!(r"{WOW6432_SOFTWARE}\{rest}"))
+}
+
+fn is_shared_registry_key(key_path: &str) -> bool {
+    let lower = key_path.to_ascii_lowercase();
+    let plain = lower
+        .strip_prefix(r"software\wow6432node\")
+        .map_or(lower.clone(), |rest| format!(r"software\{rest}"));
+    SHARED_REGISTRY_KEYS.contains(&plain.as_str())
+}
+
+/// Capture this app's keys under `Software`, in both registry views. A key counts when it
+/// is named exactly for the product, either directly or under a vendor's key. A vendor's
+/// key by itself never selects anything: that is how `Mozilla` took Thunderbird and
+/// `Adobe` took every Adobe product.
+fn scan_software_children(
+    context: &RegistryScanContext,
+    names: &ProductNames,
+    root: &RegRoot,
+    entries: &mut Vec<RegistryEntry>,
+    warnings: &mut Vec<Warning>,
+) {
+    let children_of = |key_path: &str| -> Vec<String> {
+        root.open(key_path, KEY_READ)
+            .map(|key| key.enum_keys().flatten().collect())
+            .unwrap_or_default()
+    };
+    for software_path in SOFTWARE_VIEWS {
+        for key_path in product_keys_in_view(names, software_path, &children_of) {
+            capture_registry_subtree(root, &key_path, MatchConfidence::Medium, entries, warnings);
+        }
+        let Some(install) = context.install_location.as_deref() else {
+            continue;
+        };
+        for child_name in children_of(software_path) {
+            if !INSTALL_PATH_SEARCH_SKIPPED_KEYS.contains(&child_name.to_ascii_lowercase().as_str())
+            {
+                capture_keys_recording_install_path(
+                    root,
+                    &format!(r"{software_path}\{child_name}"),
+                    install,
+                    1,
+                    entries,
+                    warnings,
+                );
+            }
+        }
+    }
+}
+
+/// The keys in one `Software` view named for the product. `children_of` lists a key's
+/// children, which keeps these rules free of the live registry.
+fn product_keys_in_view(
+    names: &ProductNames,
+    software_path: &str,
+    children_of: &impl Fn(&str) -> Vec<String>,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    for child_name in children_of(software_path) {
+        if child_name.eq_ignore_ascii_case(WOW6432_NODE) || child_name.eq_ignore_ascii_case(CLASSES)
+        {
+            continue;
+        }
+        let child_path = format!(r"{software_path}\{child_name}");
+        if names.matches_top_level(&child_name, MatchScope::ProgramFolders) {
+            keys.push(child_path);
+            continue;
+        }
+        // Everything on Windows sits under Software\Microsoft, Windows' own components
+        // included, so being published by Microsoft qualifies nothing there.
+        let holds_everything = child_name.eq_ignore_ascii_case(MICROSOFT);
+        for grandchild_name in children_of(&child_path) {
+            let matched = if holds_everything {
+                names.spells_out_product(&child_name, &grandchild_name)
+            } else {
+                names.matches_nested(&child_name, &grandchild_name, MatchScope::ProgramFolders)
+            };
+            if matched {
+                keys.push(format!(r"{child_path}\{grandchild_name}"));
+            }
+        }
+    }
+    keys
+}
+
+/// Capture any key under a vendor's key that records the app's install folder in a value
+/// named for that, such as VLC's `Software\VideoLAN\VLC` with its `InstallDir`. This
+/// finds the app's own key when its name is not the product's, without taking the
+/// vendor's other products.
+fn capture_keys_recording_install_path(
+    root: &RegRoot,
+    key_path: &str,
+    install: &Path,
+    depth: usize,
+    entries: &mut Vec<RegistryEntry>,
+    warnings: &mut Vec<Warning>,
+) {
+    let Ok(key) = root.open(key_path, KEY_READ) else {
+        return;
+    };
+    let key_leaf = key_path.rsplit('\\').next().unwrap_or_default();
+    let records_install = key.enum_values().flatten().any(|(name, value)| {
+        let value_name = if name.is_empty() { key_leaf } else { &name };
+        value_records_install_path(value_name, &raw_value_to_display(&value), install)
+    });
+    if records_install {
+        capture_registry_subtree(root, key_path, MatchConfidence::Medium, entries, warnings);
+        return;
+    }
+    if depth >= MAX_INSTALL_PATH_KEY_DEPTH {
+        return;
+    }
+    for child_name in key.enum_keys().flatten() {
+        capture_keys_recording_install_path(
+            root,
+            &format!(r"{key_path}\{child_name}"),
+            install,
+            depth + 1,
+            entries,
+            warnings,
+        );
+    }
+}
+
+/// True for a value named like an install path whose data is the install folder or a
+/// path inside it.
+fn value_records_install_path(value_name: &str, data: &str, install: &Path) -> bool {
+    if !INSTALL_PATH_VALUE_NAMES.contains(&normalize_name_for_match(value_name).as_str()) {
+        return false;
+    }
+    // Usually a plain folder, with spaces and no quotes, but sometimes a command line.
+    let plain = Path::new(data.trim().trim_matches('"'));
+    let command = split_command_executable_path(data);
+    std::iter::once(plain)
+        .chain(command.as_deref())
+        .any(|path| path.is_absolute() && path_is_within(path, install))
 }
 
 fn capture_registry_subtree(
@@ -608,7 +1003,18 @@ fn display_value_name(value_name: &str) -> String {
 }
 
 fn raw_value_to_display(value: &RegValue<'_>) -> String {
-    value.to_string()
+    registry_value_text(value)
+}
+
+/// A registry value as text. winreg's `Display` fails on a value whose bytes do not fit
+/// its type, such as an empty `REG_DWORD`, and `to_string` turns that into a panic, so a
+/// single malformed value anywhere it looks would otherwise end the scan.
+pub(crate) fn registry_value_text(value: &RegValue<'_>) -> String {
+    let mut text = String::new();
+    if write!(text, "{value}").is_err() {
+        text.clear();
+    }
+    text
 }
 
 fn registry_value_kind(value_type: &RegType) -> RegistryValueKind {
@@ -706,71 +1112,32 @@ fn uninstall_key_matches_context(context: &RegistryScanContext, key: &RegKey) ->
     false
 }
 
+/// True when a registry value points at the app: its executable or something inside its
+/// install folder, as a whole path. A bare file name does not count: `rundll32.exe` in a
+/// shell command says nothing about which app it serves.
 fn value_matches_context(context: &RegistryScanContext, value: &str) -> bool {
-    let value_lower = value.to_ascii_lowercase();
-    if path_text_matches(&context.executable_path, &value_lower) {
+    if text_mentions_path(value, &context.executable_path, true) {
         return true;
     }
     if context
         .install_location
         .as_ref()
-        .is_some_and(|path| path_text_matches(path, &value_lower))
+        .is_some_and(|path| text_mentions_path(value, path, false))
     {
         return true;
     }
     split_command_executable_path(value).is_some_and(|path| command_path_matches(context, &path))
 }
 
-fn path_text_matches(path: &Path, lower_text: &str) -> bool {
-    lower_text.contains(&path.to_string_lossy().to_ascii_lowercase())
-}
-
 fn command_path_matches(context: &RegistryScanContext, candidate: &Path) -> bool {
-    if path_eq(candidate, &context.executable_path) {
-        return true;
+    if !candidate.is_absolute() {
+        return false;
     }
-    if candidate.is_absolute()
-        && context
+    path_is_within(candidate, &context.executable_path)
+        || context
             .install_location
             .as_ref()
-            .is_some_and(|root| path_starts_with_ignore_case(candidate, root))
-    {
-        return true;
-    }
-    if !candidate.is_absolute() && looks_like_executable(candidate) {
-        let candidate_name = candidate
-            .file_name()
-            .map(|value| value.to_string_lossy().to_ascii_lowercase());
-        let executable_name = context
-            .executable_path
-            .file_name()
-            .map(|value| value.to_string_lossy().to_ascii_lowercase());
-        return candidate_name.is_some() && candidate_name == executable_name;
-    }
-    false
-}
-
-fn path_eq(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy()
-        .eq_ignore_ascii_case(&right.to_string_lossy())
-}
-
-fn path_starts_with_ignore_case(path: &Path, root: &Path) -> bool {
-    path.to_string_lossy()
-        .to_ascii_lowercase()
-        .starts_with(&root.to_string_lossy().to_ascii_lowercase())
-}
-
-fn related_tokens(context: &RegistryScanContext) -> Vec<String> {
-    [
-        context.display_name.as_deref(),
-        context.publisher.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(normalize_name_for_match)
-    .filter(|token| token.len() >= 3)
-    .collect()
+            .is_some_and(|root| path_is_within(candidate, root))
 }
 
 fn classify_com_registrations(entries: &[RegistryEntry]) -> Vec<ComRegistrationEntry> {
@@ -915,8 +1282,337 @@ mod tests {
             display_name: Some("SumatraPDF".to_owned()),
             publisher: None,
             source_registry_path: None,
+            recorded_keys: Vec::new(),
         };
 
         assert!(!value_matches_context(&context, "ad 9.6.8"));
+    }
+
+    fn git_context() -> RegistryScanContext {
+        RegistryScanContext {
+            executable_path: PathBuf::from(r"C:\Program Files\Git\git-bash.exe"),
+            install_location: Some(PathBuf::from(r"C:\Program Files\Git")),
+            display_name: Some("Git".to_owned()),
+            publisher: Some("The Git Development Community".to_owned()),
+            source_registry_path: None,
+            recorded_keys: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn values_match_the_install_folder_only_as_a_whole_path() {
+        let context = git_context();
+        assert!(value_matches_context(&context, r"C:\Program Files\Git"));
+        assert!(value_matches_context(
+            &context,
+            r#""C:\Program Files\Git\bin\git.exe" "%1""#
+        ));
+        assert!(value_matches_context(
+            &context,
+            r"C:\Program Files\Git\git-bash.exe,0"
+        ));
+        assert!(!value_matches_context(
+            &context,
+            r"C:\Program Files\GitHub CLI\gh.exe"
+        ));
+        assert!(!value_matches_context(
+            &context,
+            r"C:\Program Files\Git Extensions\GitExtensions.exe"
+        ));
+    }
+
+    #[test]
+    fn a_malformed_registry_value_does_not_panic() {
+        // A REG_DWORD needs four bytes. This shape is on real machines, under vendor keys.
+        let value = RegValue {
+            bytes: std::borrow::Cow::Borrowed(&[]),
+            vtype: REG_DWORD,
+        };
+        assert_eq!(registry_value_text(&value), "");
+    }
+
+    #[test]
+    fn a_bare_file_name_does_not_match() {
+        // NVIDIA App's "main executable" used to be rundll32.exe, and this match then
+        // captured every shell verb on the machine that runs through it, including
+        // `Classes\htmlfile`.
+        let context = RegistryScanContext {
+            executable_path: PathBuf::from(
+                r"C:\Program Files\NVIDIA Corporation\NVIDIA app\rundll32.exe",
+            ),
+            install_location: Some(PathBuf::from(
+                r"C:\Program Files\NVIDIA Corporation\NVIDIA app",
+            )),
+            display_name: Some("NVIDIA App".to_owned()),
+            publisher: Some("NVIDIA Corporation".to_owned()),
+            source_registry_path: None,
+            recorded_keys: Vec::new(),
+        };
+        assert!(!value_matches_context(
+            &context,
+            r#"rundll32.exe "C:\Program Files\Common Files\System\wab32.dll",Open"#
+        ));
+        assert!(!value_matches_context(&context, "rundll32.exe"));
+    }
+
+    #[test]
+    fn software_keys_follow_the_same_name_rules_as_folders() {
+        let names = context_product_names(&git_context());
+        assert!(names.matches_top_level("Git", MatchScope::ProgramFolders));
+        assert!(!names.matches_top_level("Logitech", MatchScope::ProgramFolders));
+        assert!(!names.matches_top_level("GitHub", MatchScope::ProgramFolders));
+
+        let seven_zip = context_product_names(&RegistryScanContext {
+            executable_path: PathBuf::from(r"C:\Program Files\7-Zip\7zFM.exe"),
+            install_location: Some(PathBuf::from(r"C:\Program Files\7-Zip")),
+            display_name: Some("7-Zip 25.01 (x64)".to_owned()),
+            publisher: Some("Igor Pavlov".to_owned()),
+            source_registry_path: None,
+            recorded_keys: Vec::new(),
+        });
+        assert!(
+            seven_zip.matches_top_level("7-Zip", MatchScope::ProgramFolders),
+            "the version in the display name must not hide the app's own key"
+        );
+
+        let photoshop = context_product_names(&RegistryScanContext {
+            executable_path: PathBuf::from(r"C:\Program Files\Adobe\Photoshop\Photoshop.exe"),
+            install_location: Some(PathBuf::from(r"C:\Program Files\Adobe\Photoshop")),
+            display_name: Some("Adobe Photoshop 2024".to_owned()),
+            publisher: Some("Adobe Inc.".to_owned()),
+            source_registry_path: None,
+            recorded_keys: Vec::new(),
+        });
+        assert!(
+            !photoshop.matches_top_level("Adobe", MatchScope::ProgramFolders),
+            "a publisher never selects a whole tree"
+        );
+        assert!(photoshop.matches_nested("Adobe", "Photoshop", MatchScope::ProgramFolders));
+        assert!(!photoshop.matches_nested("Adobe", "Acrobat", MatchScope::ProgramFolders));
+    }
+
+    fn tree_children(tree: &[&str], key_path: &str) -> Vec<String> {
+        let prefix = format!(r"{key_path}\");
+        let mut children: Vec<String> = tree
+            .iter()
+            .filter_map(|path| path.strip_prefix(prefix.as_str()))
+            .filter_map(|rest| rest.split('\\').next())
+            .map(ToOwned::to_owned)
+            .collect();
+        children.sort();
+        children.dedup();
+        children
+    }
+
+    #[test]
+    fn selects_a_products_keys_and_not_its_publishers_in_either_view() {
+        let tree = [
+            r"Software\7-Zip\Compression",
+            r"Software\Adobe\Acrobat",
+            r"Software\Adobe\Photoshop\Settings",
+            r"Software\Classes\Photoshop",
+            r"Software\Logitech\Unifying",
+            r"Software\Microsoft\Photoshop",
+            r"Software\WOW6432Node\Adobe\Photoshop",
+            r"Software\WOW6432Node\Logitech\Unifying",
+        ];
+        let children_of = |path: &str| tree_children(&tree, path);
+        let names = ProductNames::new(
+            Some("Adobe Photoshop 2024"),
+            Some("Adobe Inc."),
+            &["Photoshop"],
+            &[],
+        );
+
+        assert_eq!(
+            product_keys_in_view(&names, SOFTWARE, &children_of),
+            vec![r"Software\Adobe\Photoshop".to_owned()],
+            "not the publisher's other products, and not another vendor's key of the same name"
+        );
+        assert_eq!(
+            product_keys_in_view(&names, WOW6432_SOFTWARE, &children_of),
+            vec![r"Software\WOW6432Node\Adobe\Photoshop".to_owned()]
+        );
+    }
+
+    #[test]
+    fn publishing_through_microsoft_qualifies_nothing_under_its_key() {
+        let tree = [
+            r"Software\Microsoft\Edge\Extensions",
+            r"Software\Microsoft\PowerShell\1\ShellIds",
+        ];
+        let children_of = |path: &str| tree_children(&tree, path);
+
+        let powershell = ProductNames::new(
+            Some("PowerShell 7.6.9.0-x64"),
+            Some("Microsoft Corporation"),
+            &["pwsh"],
+            &[],
+        );
+        assert!(
+            product_keys_in_view(&powershell, SOFTWARE, &children_of).is_empty(),
+            "`Software\\Microsoft\\PowerShell` is Windows' own"
+        );
+
+        let edge = ProductNames::new(
+            Some("Microsoft Edge"),
+            Some("Microsoft Corporation"),
+            &["msedge"],
+            &[],
+        );
+        assert_eq!(
+            product_keys_in_view(&edge, SOFTWARE, &children_of),
+            vec![r"Software\Microsoft\Edge".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_file_type_is_owned_through_its_open_verb_and_icon() {
+        assert_eq!(
+            prog_id_ownership_keys(r"Software\Classes\Demo.File", ""),
+            vec![
+                r"Software\Classes\Demo.File\shell\open\command".to_owned(),
+                r"Software\Classes\Demo.File\DefaultIcon".to_owned(),
+            ]
+        );
+        assert_eq!(
+            prog_id_ownership_keys(r"Software\Classes\Demo.File", " edit "),
+            vec![
+                r"Software\Classes\Demo.File\shell\open\command".to_owned(),
+                r"Software\Classes\Demo.File\shell\edit\command".to_owned(),
+                r"Software\Classes\Demo.File\DefaultIcon".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_added_verb_is_captured_without_the_type_it_was_added_to() {
+        assert_eq!(
+            verb_key_of(r"Software\Classes\LibraryFolder\background\shell\pwsh\command"),
+            r"Software\Classes\LibraryFolder\background\shell\pwsh"
+        );
+        assert_eq!(
+            verb_key_of(r"Software\Classes\Demo\DefaultIcon"),
+            r"Software\Classes\Demo\DefaultIcon"
+        );
+    }
+
+    #[test]
+    fn a_key_recording_the_install_folder_needs_a_value_named_for_that() {
+        let install = Path::new(r"C:\Program Files\Git");
+        assert!(value_records_install_path(
+            "InstallPath",
+            r"C:\Program Files\Git",
+            install
+        ));
+        assert!(value_records_install_path(
+            "InstallDir",
+            r"C:\Program Files\Git\",
+            install
+        ));
+        assert!(value_records_install_path(
+            "Path",
+            r#""C:\Program Files\Git\bin\git.exe" --flag"#,
+            install
+        ));
+        assert!(
+            !value_records_install_path("MSysGit", r"C:\Program Files\Git\bin", install),
+            "another app's setting that points at Git does not make its key Git's"
+        );
+        assert!(!value_records_install_path(
+            "InstallPath",
+            r"C:\Program Files\GitHub CLI",
+            install
+        ));
+        assert!(!value_records_install_path(
+            "InstallPath",
+            "git.exe",
+            install
+        ));
+    }
+
+    #[test]
+    fn recorded_keys_map_to_the_hive_and_view_they_live_in() {
+        let key = |root, key_path: &str, wow64_32| RecordedRegistryKey {
+            root,
+            key_path: key_path.to_owned(),
+            value_name: None,
+            wow64_32,
+        };
+        let machine = RegistryHive::LocalMachine;
+        let user = RegistryHive::CurrentUser;
+
+        assert_eq!(
+            recorded_key_paths(
+                &key(RecordedRegistryRoot::LocalMachine, r"Software\Foo", false),
+                &machine
+            ),
+            vec![r"Software\Foo".to_owned()]
+        );
+        assert_eq!(
+            recorded_key_paths(
+                &key(RecordedRegistryRoot::LocalMachine, r"Software\Foo", true),
+                &machine
+            ),
+            vec![
+                r"Software\WOW6432Node\Foo".to_owned(),
+                r"Software\Foo".to_owned()
+            ]
+        );
+        assert!(
+            recorded_key_paths(
+                &key(RecordedRegistryRoot::LocalMachine, r"Software\Foo", false),
+                &user
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            recorded_key_paths(
+                &key(RecordedRegistryRoot::CurrentUser, r"Software\Foo", true),
+                &user
+            ),
+            vec![r"Software\Foo".to_owned()]
+        );
+        assert!(
+            recorded_key_paths(
+                &key(RecordedRegistryRoot::CurrentUser, r"Software\Foo", true),
+                &machine
+            )
+            .is_empty()
+        );
+        for hive in [&machine, &user] {
+            assert_eq!(
+                recorded_key_paths(
+                    &key(
+                        RecordedRegistryRoot::ClassesRoot,
+                        r".foo\OpenWithProgids",
+                        false
+                    ),
+                    hive
+                ),
+                vec![r"Software\Classes\.foo\OpenWithProgids".to_owned()]
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_cannot_claim_a_shared_key_whole() {
+        for key in [
+            r"Software",
+            r"Software\Classes",
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+            r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"Software\RegisteredApplications",
+        ] {
+            assert!(is_shared_registry_key(key), "{key}");
+        }
+        for key in [
+            r"Software\GitForWindows",
+            r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Git_is1",
+            r"Software\Classes\VSCode.ascx",
+            r"Software\WOW6432Node\Foo",
+        ] {
+            assert!(!is_shared_registry_key(key), "{key}");
+        }
     }
 }

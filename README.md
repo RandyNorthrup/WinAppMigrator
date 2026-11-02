@@ -92,7 +92,7 @@ installer opens in the theme it was built with.</sub>
 
 | | Included | Notes |
 | --- | --- | --- |
-| **Program files** | Always | Found through MSI and Inno Setup records, NSIS logs, App Paths, and folder matching |
+| **Program files** | Always | Found through MSI and Inno Setup records, NSIS logs, App Paths, and folders named exactly for the product |
 | **Registry** | Always | The app's keys, plus COM and file associations pointing at it |
 | **Services and drivers** | Always | Drivers the app owns are re-registered. Vendor and inbox drivers are reported instead, because they cannot be redistributed |
 | **Scheduled tasks, shortcuts, environment variables** | Always | A captured `Path` is merged into the target's, never replaced |
@@ -104,9 +104,11 @@ installer opens in the theme it was built with.</sub>
 
 Please read these before relying on it, especially on a one-way trip from a failing PC.
 
-- **It can capture too much.** Folder matching uses app, publisher, and folder names as substrings, so an
-  app can pull in other products: VS Code picked up all of Visual Studio on one test PC. Check the file
-  count and size on the result. If they look wrong, don't rely on that installer.
+- **It can miss what is kept under another name.** Beyond what the install records name, folders and
+  registry keys are matched by the product's exact name, so data under a different name stays behind.
+  Check the file count and size on the result. If they look wrong, don't rely on that installer.
+- **An app made of several packages only gets its own.** NVIDIA App's `NvContainer` is a separate package,
+  for example, so an installer built from NVIDIA App alone does not have it.
 - **An installer cannot reach 4 GiB.** Windows cannot start an executable that large, so the build fails
   and says so. Large apps may not fit.
 - **Installs have no rollback, and no uninstaller is created.** A failure can leave an install part-way,

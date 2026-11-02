@@ -14,15 +14,22 @@
 //! of files an MSI installed, which we collapse into a minimal set of install
 //! roots.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use walkdir::WalkDir;
 use winreg::RegKey;
 use winreg::enums::{KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
 use crate::models::{InstallMethod, InstalledApp};
-use crate::path_utils::split_command_executable_path;
+use crate::path_utils::{
+    is_auxiliary_executable, is_drive_root, looks_like_executable, path_is_within,
+    split_command_executable_path,
+};
+use crate::product_match::{MatchScope, ProductNames};
+use crate::registry_scan::{RecordedRegistryKey, RecordedRegistryRoot, registry_value_text};
+use crate::shortcut_scan::lnk_target_path;
 use crate::system_context::SystemContext;
 
 const USERDATA_PATH: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
@@ -31,6 +38,39 @@ const SIGNATURE_SCAN_BYTES: u64 = 2_000_000;
 const SQUIRREL_APP_PREFIX: &str = "app-";
 const APPX_MANIFEST: &str = "AppxManifest.xml";
 const MSIX_PACKAGES_DIR: &str = "Packages";
+const START_MENU_PROGRAMS: &str = r"Microsoft\Windows\Start Menu\Programs";
+const USER_START_MENU_PROGRAMS: &str = r"AppData\Roaming\Microsoft\Windows\Start Menu\Programs";
+const MAX_START_MENU_DEPTH: usize = 5;
+const MAX_EXECUTABLE_SEARCH_DEPTH: usize = 5;
+/// Installers keep a copy of themselves in these folders. The copy can be what the
+/// uninstall entry points at, but it is not the application.
+const INSTALLER_CACHE_MARKERS: &[&str] = &[
+    r"\package cache\",
+    r"\caphyon\",
+    r"\installshield installation information\",
+];
+const WINDOWS_APPS_MARKER: &str = r"\windowsapps\";
+/// Where a Burn bundle's packages record that the bundle depends on them.
+const MSI_DEPENDENCIES_PATH: &str = r"Software\Classes\Installer\Dependencies";
+/// Runtimes a bundle can chain for its app. They are shared, so they are prerequisites
+/// to report and not part of the app, unless the app is that runtime.
+const SHARED_RUNTIME_MARKERS: &[&str] = &[".net", "visual c++", "webview2"];
+/// Folder names that hold an app's executables and little else, so the app's own folder
+/// is the one above.
+const EXECUTABLE_FOLDER_NAMES: &[&str] = &[
+    "bin",
+    "bin64",
+    "x64",
+    "x86",
+    "win32",
+    "win64",
+    "amd64",
+    "cmd",
+    "exe",
+    "app",
+    "application",
+    "program",
+];
 
 /// The result of reverse-engineering how and where an application was installed.
 #[derive(Debug, Clone)]
@@ -40,6 +80,14 @@ pub struct InstallSource {
     pub authoritative_file_count: usize,
     /// Install directories derived from authoritative or registered sources.
     pub roots: Vec<PathBuf>,
+    /// Recorded files with no folder of the app's own to walk, such as one directly under
+    /// `Common Files` or on the drive itself. Captured one by one.
+    pub loose_files: Vec<PathBuf>,
+    /// Every file the install record names, kept so the main executable can be chosen
+    /// from them without reading the record again.
+    pub recorded_files: Vec<PathBuf>,
+    /// Registry keys and values the install record names.
+    pub registry_keys: Vec<RecordedRegistryKey>,
     /// Human-readable signals used to reverse-engineer the install.
     pub evidence: Vec<String>,
 }
@@ -47,48 +95,62 @@ pub struct InstallSource {
 /// Authoritative key paths recorded for a product in the MSI component database.
 struct MsiComponentPaths {
     files: Vec<PathBuf>,
-    registry_count: usize,
+    registry_keys: Vec<RecordedRegistryKey>,
 }
 
 pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> InstallSource {
     let product_code = extract_product_code(app);
-    let method = classify_method(app, product_code.as_deref());
+    let method = classify_method(app, product_code.as_deref(), system);
+    let names = app_product_names(app);
 
     let mut roots = Vec::new();
+    let mut loose_files = Vec::new();
+    let mut recorded_files = Vec::new();
+    let mut registry_keys = Vec::new();
     let mut evidence = Vec::new();
     let mut authoritative_file_count = 0;
 
     match method {
         InstallMethod::WindowsInstaller => {
-            if let Some(code) = product_code.as_deref()
-                && let Some(paths) = msi_component_paths(code, system)
-            {
+            let products = product_code
+                .as_deref()
+                .map(|code| msi_products_of(code, &app.display_name, system))
+                .unwrap_or_default();
+            if products.len() > 1 {
+                evidence.push(format!(
+                    "Burn bundle of {} Windows Installer packages",
+                    products.len() - 1
+                ));
+            }
+            if let Some(paths) = msi_component_paths(&products, system) {
                 authoritative_file_count = paths.files.len();
-                roots.extend(minimal_install_roots(&paths.files));
                 evidence.push(format!(
                     "Windows Installer database: {} component key paths",
-                    authoritative_file_count + paths.registry_count
+                    authoritative_file_count + paths.registry_keys.len()
                 ));
+                let found = footprint_roots(&paths.files, &names, system);
+                roots.extend(found.dirs);
+                loose_files.extend(found.loose_files);
+                recorded_files = paths.files;
+                registry_keys = paths.registry_keys;
             }
         }
         InstallMethod::InnoSetup => {
-            if let Some(dir) = primary_install_dir(app)
-                && let Some(log) = find_inno_log(&dir)
-            {
-                let files = inno_manifest_files(&log, system);
-                if files.is_empty() {
+            if let Some(log) = inno_log_for(app, system) {
+                let manifest = inno_manifest(&log, system);
+                if manifest.files.is_empty() {
                     evidence.push("Inno Setup uninstall log (unins000.dat)".to_owned());
                 } else {
-                    authoritative_file_count = files.len();
-                    let footprint: Vec<PathBuf> = files
-                        .into_iter()
-                        .filter(|path| is_app_footprint_path(path))
-                        .collect();
-                    roots.extend(minimal_install_roots(&footprint));
+                    authoritative_file_count = manifest.files.len();
                     evidence.push(format!(
                         "Inno Setup uninstall log: {authoritative_file_count} recorded paths"
                     ));
+                    let found = footprint_roots(&manifest.files, &names, system);
+                    roots.extend(found.dirs);
+                    loose_files.extend(found.loose_files);
+                    recorded_files = manifest.files;
                 }
+                registry_keys = manifest.registry_keys;
             }
         }
         InstallMethod::Nsis => {
@@ -101,14 +163,13 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
                 let files = nsis_manifest_files(&log, system);
                 if !files.is_empty() {
                     authoritative_file_count = files.len();
-                    let footprint: Vec<PathBuf> = files
-                        .into_iter()
-                        .filter(|path| is_app_footprint_path(path))
-                        .collect();
-                    roots.extend(minimal_install_roots(&footprint));
                     evidence.push(format!(
                         "NSIS AdvUninstLog uninstall.log: {authoritative_file_count} recorded paths"
                     ));
+                    let found = footprint_roots(&files, &names, system);
+                    roots.extend(found.dirs);
+                    loose_files.extend(found.loose_files);
+                    recorded_files = files;
                 }
             }
         }
@@ -165,12 +226,16 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
     }
 
     // The uninstaller almost always lives in the install tree, so its directory
-    // is a reliable anchor even when InstallLocation is absent.
+    // is a reliable anchor even when InstallLocation is absent. A Windows host such
+    // as rundll32 or an installer's cached copy of itself says nothing about the app.
     if let Some(uninstall) = app.uninstall_string.as_deref()
         && let Some(executable) = split_command_executable_path(uninstall)
         && let Some(parent) = executable.parent()
     {
-        roots.push(system.resolve_source_path(parent));
+        let parent = system.resolve_source_path(parent);
+        if !is_windows_or_installer_cache_path(&parent, system) {
+            roots.push(parent);
+        }
     }
 
     InstallSource {
@@ -178,48 +243,409 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
         product_code,
         authoritative_file_count,
         roots: dedup_existing_dirs(roots),
+        loose_files,
+        recorded_files,
+        registry_keys,
         evidence,
     }
 }
 
-/// Best-effort resolution of an application's main executable when the uninstall
-/// registry entry recorded none. Many MSI products omit both `InstallLocation`
-/// and a usable `DisplayIcon`, so the inventory-time heuristic finds nothing.
-/// Here we consult the authoritative install source — the Windows Installer
-/// component database for MSI products, otherwise the resolved install roots —
-/// and pick a representative non-auxiliary executable. Used as a fallback so a
-/// scan or package by application name still succeeds for such apps.
-pub fn primary_executable(app: &InstalledApp, system: &SystemContext) -> Option<PathBuf> {
-    let source = detect_install_source(app, system);
-    let mut candidates: Vec<PathBuf> = Vec::new();
+/// Add the App Paths directories of an executable that was only chosen after
+/// `detect_install_source` ran, because the uninstall entry named none.
+pub fn add_app_paths_roots(source: &mut InstallSource, executable: &Path, system: &SystemContext) {
+    let Some(name) = executable.file_name().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let app_paths = app_paths_roots(name, system);
+    if !app_paths.is_empty() {
+        source.evidence.push("App Paths registration".to_owned());
+        let mut roots = std::mem::take(&mut source.roots);
+        roots.extend(app_paths);
+        source.roots = dedup_existing_dirs(roots);
+    }
+}
 
-    if source.method == InstallMethod::WindowsInstaller
-        && let Some(code) = source.product_code.as_deref()
-        && let Some(paths) = msi_component_paths(code, system)
-    {
-        candidates.extend(
-            paths
-                .files
-                .into_iter()
-                .filter(|path| is_executable_path(path)),
-        );
+/// The names to match an installed app against before its executable is known.
+pub(crate) fn app_product_names(app: &InstalledApp) -> ProductNames {
+    ProductNames::new(Some(&app.display_name), app.publisher.as_deref(), &[], &[])
+}
+
+/// True when an executable could be the application itself: it exists, is not an
+/// uninstaller or updater, and is neither a Windows host nor an installer's cached copy.
+pub(crate) fn is_usable_main_executable(path: &Path, system: &SystemContext) -> bool {
+    is_executable_path(path)
+        && !is_auxiliary_executable(path)
+        && !is_windows_or_installer_cache_path(path, system)
+}
+
+fn is_windows_or_installer_cache_path(path: &Path, system: &SystemContext) -> bool {
+    if path_is_within(path, &system.windows_dir()) {
+        return true;
+    }
+    let mut lower = path.to_string_lossy().to_ascii_lowercase();
+    lower.push('\\');
+    INSTALLER_CACHE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+/// App Paths registrations and Start Menu shortcuts, which say where an application's
+/// executable is when its uninstall entry does not. Read once per listing or scan.
+#[derive(Debug, Default)]
+pub(crate) struct ExecutableHints {
+    app_paths: Vec<PathBuf>,
+    shortcuts: Vec<ShortcutHint>,
+}
+
+#[derive(Debug)]
+struct ShortcutHint {
+    name: String,
+    target: PathBuf,
+}
+
+impl ExecutableHints {
+    pub(crate) fn read(system: &SystemContext) -> Self {
+        Self::keeping_usable(
+            read_app_paths_targets(system),
+            read_start_menu_shortcuts(system),
+            system,
+        )
     }
 
-    if candidates.is_empty() {
-        for dir in &source.roots {
-            collect_dir_executables(dir, &mut candidates);
+    /// Checked here, once, because a listing asks about every app in turn and each check
+    /// touches the disk.
+    fn keeping_usable(
+        mut app_paths: Vec<PathBuf>,
+        mut shortcuts: Vec<ShortcutHint>,
+        system: &SystemContext,
+    ) -> Self {
+        app_paths.retain(|path| is_usable_main_executable(path, system));
+        shortcuts.retain(|hint| is_usable_main_executable(&hint.target, system));
+        Self {
+            app_paths,
+            shortcuts,
         }
     }
 
-    pick_primary_executable(candidates, &app.display_name)
+    /// The executable these hints name for an app, if any. One that is both named for
+    /// the app and inside its install folder wins, then one named for the app, then
+    /// anything else inside its install folder. App Paths beats a shortcut at each step.
+    pub(crate) fn find(
+        &self,
+        names: &ProductNames,
+        install_location: Option<&Path>,
+    ) -> Option<PathBuf> {
+        let inside =
+            |path: &Path| install_location.is_some_and(|location| path_is_within(path, location));
+        // Store apps register App Paths too, and `notepad.exe` there is not Notepad++.
+        let usable = |path: &Path| {
+            inside(path)
+                || !path
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains(WINDOWS_APPS_MARKER)
+        };
+        // Side-by-side versions share a name: `Python 3.14.10` wants `Python 3.14`'s
+        // shortcut and not `Python 3.13`'s.
+        let same_version = self
+            .shortcuts
+            .iter()
+            .filter(|hint| usable(&hint.target))
+            .find(|hint| names.names_executable(&hint.name) && names.shares_version(&hint.name));
+        let app_path_named = |path: &&PathBuf| executable_stem_matches(path, names);
+        let shortcut_named = |hint: &&ShortcutHint| {
+            names.names_executable(&hint.name) || executable_stem_matches(&hint.target, names)
+        };
+        let app_paths = || self.app_paths.iter().filter(|path| usable(path));
+        let shortcuts = || self.shortcuts.iter().filter(|hint| usable(&hint.target));
+
+        app_paths()
+            .filter(app_path_named)
+            .find(|path| inside(path))
+            .or_else(|| {
+                shortcuts()
+                    .filter(shortcut_named)
+                    .find(|hint| inside(&hint.target))
+                    .map(|hint| &hint.target)
+            })
+            .or_else(|| same_version.map(|hint| &hint.target))
+            .or_else(|| app_paths().find(app_path_named))
+            .or_else(|| shortcuts().find(shortcut_named).map(|hint| &hint.target))
+            .or_else(|| app_paths().find(|path| inside(path)))
+            .or_else(|| {
+                shortcuts()
+                    .find(|hint| inside(&hint.target))
+                    .map(|hint| &hint.target)
+            })
+            .cloned()
+    }
+}
+
+fn executable_stem_matches(path: &Path, names: &ProductNames) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| names.names_executable(stem))
+}
+
+fn read_app_paths_targets(system: &SystemContext) -> Vec<PathBuf> {
+    let mut keys = Vec::new();
+    for flags in [KEY_READ | KEY_WOW64_64KEY, KEY_READ | KEY_WOW64_32KEY] {
+        keys.extend(system.open_hklm(APP_PATHS_PREFIX, flags).ok());
+    }
+    for user in system.user_hives() {
+        keys.extend(user.open(APP_PATHS_PREFIX, KEY_READ).ok());
+    }
+    let mut seen = BTreeSet::new();
+    let mut targets = Vec::new();
+    for key in keys {
+        for name in key.enum_keys().flatten() {
+            let Ok(child) = key.open_subkey_with_flags(&name, KEY_READ) else {
+                continue;
+            };
+            let Ok(value) = child.get_value::<String, _>("") else {
+                continue;
+            };
+            let target = value.trim().trim_matches('"');
+            // An unexpanded %SystemRoot% entry is a Windows component, never an app's.
+            if !target.is_empty()
+                && !target.contains('%')
+                && seen.insert(target.to_ascii_lowercase())
+            {
+                targets.push(system.resolve_source_path(Path::new(target)));
+            }
+        }
+    }
+    targets
+}
+
+fn read_start_menu_shortcuts(system: &SystemContext) -> Vec<ShortcutHint> {
+    let mut folders = Vec::new();
+    if let Some(program_data) = system.program_data() {
+        folders.push(program_data.join(START_MENU_PROGRAMS));
+    }
+    for profile in system.user_profiles() {
+        folders.push(profile.join(USER_START_MENU_PROGRAMS));
+    }
+    let mut shortcuts = Vec::new();
+    for folder in folders {
+        for entry in WalkDir::new(&folder)
+            .max_depth(MAX_START_MENU_DEPTH)
+            .into_iter()
+            .flatten()
+        {
+            let path = entry.path();
+            if !path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+            {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let Some(target) = std::fs::read(path)
+                .ok()
+                .and_then(|data| lnk_target_path(&data))
+            else {
+                continue;
+            };
+            shortcuts.push(ShortcutHint {
+                name: name.to_owned(),
+                target: system.resolve_source_path(&target),
+            });
+        }
+    }
+    shortcuts
+}
+
+/// Resolve an application's main executable when the uninstall entry led to none. Many
+/// MSI products omit both `InstallLocation` and a usable `DisplayIcon`, so the list
+/// has nothing to go on. In order: App Paths and shortcuts, then the files the install
+/// record names, then the install folders. When only an uninstaller or an installer's
+/// cached copy exists, as for a font pack or a runtime, that is returned as a last
+/// resort so the app can still be packaged. It never returns a Windows host.
+///
+/// Takes the `InstallSource` the scan already has: reading the MSI database is slow, and
+/// this must not do it again.
+pub fn primary_executable(
+    app: &InstalledApp,
+    source: &InstallSource,
+    system: &SystemContext,
+) -> Option<PathBuf> {
+    let names = app_product_names(app);
+    let location = app.install_location.as_deref();
+    if let Some(found) = ExecutableHints::read(system).find(&names, location) {
+        return Some(found);
+    }
+
+    let mut candidates: Vec<PathBuf> = source
+        .recorded_files
+        .iter()
+        .filter(|path| is_executable_path(path))
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        for dir in source.roots.iter().map(PathBuf::as_path).chain(location) {
+            collect_dir_executables(dir, &mut candidates);
+        }
+    }
+    let usable = |path: &PathBuf| is_usable_main_executable(path, system);
+    if let Some(found) = pick_primary_executable(
+        candidates
+            .iter()
+            .filter(|path| usable(path))
+            .cloned()
+            .collect(),
+        &names,
+        &app.display_name,
+    ) {
+        return Some(found);
+    }
+
+    for dir in source.roots.iter().map(PathBuf::as_path).chain(location) {
+        collect_tree_executables(dir, &mut candidates);
+    }
+    pick_primary_executable(
+        candidates
+            .iter()
+            .filter(|path| usable(path))
+            .cloned()
+            .collect(),
+        &names,
+        &app.display_name,
+    )
+    .or_else(|| last_resort_executable(app, source, candidates, system))
+}
+
+/// A Squirrel app's folder holds a small stub that starts the real executable in
+/// `app-<version>`, and the stub's architecture and imports say nothing about the app.
+/// Returns the real one when `executable` is such a stub.
+pub fn squirrel_current_executable(executable: &Path, source: &InstallSource) -> Option<PathBuf> {
+    if source.method != InstallMethod::Squirrel {
+        return None;
+    }
+    let current = latest_squirrel_app_dir(executable.parent()?)?;
+    Some(current.join(executable.file_name()?)).filter(|path| path.is_file())
+}
+
+/// An uninstaller or a cached installer, when that is all there is: architecture and
+/// import analysis then describe it and not the app, so the scan warns. Never a Windows
+/// host, which would say nothing at all and match every app that uses it. An executable
+/// the app's own install record puts in the Windows directory is real, though: that is
+/// where the Python launcher's `py.exe` goes.
+fn last_resort_executable(
+    app: &InstalledApp,
+    source: &InstallSource,
+    candidates: Vec<PathBuf>,
+    system: &SystemContext,
+) -> Option<PathBuf> {
+    let uninstaller = app
+        .uninstall_string
+        .as_deref()
+        .and_then(split_command_executable_path)
+        .map(|path| system.resolve_source_path(&path));
+    let windows_dir = system.windows_dir();
+    candidates
+        .iter()
+        .chain(uninstaller.iter())
+        .find(|path| is_executable_path(path) && !path_is_within(path, &windows_dir))
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|path| is_executable_path(path) && source.recorded_files.contains(path))
+        })
+        .cloned()
+}
+
+/// The folder an app's relative paths hang from, which is also where its installer
+/// offers to install. The uninstall entry's location, when the executable is in it.
+/// Otherwise the nearest folder above the executable named for the product, so that
+/// `Google\Chrome\Application\chrome.exe` installs as `Chrome` and keeps its layout, and
+/// NVIDIA App is not anchored to an installer cache it does not run from. Otherwise the
+/// shallowest recorded root holding the executable, or its own folder, moving up from a
+/// name like `bin`. Never a shared folder: an executable directly in the Windows directory
+/// has no install folder of its own, and calling that one its own would claim everything
+/// in it.
+pub fn resolve_install_location(
+    app: &InstalledApp,
+    executable: &Path,
+    source: &InstallSource,
+) -> Option<PathBuf> {
+    let recorded = app
+        .install_location
+        .as_ref()
+        .filter(|location| location.is_dir());
+    if let Some(location) = recorded
+        && path_is_within(executable, location)
+    {
+        return Some(location.clone());
+    }
+
+    let names = app_product_names(app);
+    let stem = executable.file_stem().and_then(|stem| stem.to_str());
+    let names_with_stem = ProductNames::new(
+        Some(&app.display_name),
+        app.publisher.as_deref(),
+        &stem.into_iter().collect::<Vec<_>>(),
+        &[],
+    );
+    let product_folder = executable
+        .ancestors()
+        .skip(1)
+        .take_while(|ancestor| !is_shared_folder(ancestor))
+        .find(|ancestor| {
+            ancestor
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    names_with_stem.matches_top_level(name, MatchScope::ProgramFolders)
+                })
+        });
+    if let Some(folder) = product_folder {
+        return Some(folder.to_path_buf());
+    }
+    if let Some(location) = recorded {
+        return Some(location.clone());
+    }
+    let shallowest_root = source
+        .roots
+        .iter()
+        .filter(|root| path_is_within(executable, root) && !is_shared_folder(root))
+        .min_by_key(|root| root.components().count());
+    if let Some(root) = shallowest_root {
+        return Some(root.clone());
+    }
+    let parent = executable.parent()?;
+    let folder = move_up_from_executable_folder(parent, &names);
+    (!is_shared_folder(folder)).then(|| folder.to_path_buf())
+}
+
+fn move_up_from_executable_folder<'a>(folder: &'a Path, names: &ProductNames) -> &'a Path {
+    let holds_executables = folder
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_executable_folder_name);
+    match folder.parent() {
+        Some(parent)
+            if holds_executables
+                && !is_shared_folder(parent)
+                && !parent
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| names.is_vendor_only_folder(name)) =>
+        {
+            parent
+        }
+        _ => folder,
+    }
+}
+
+fn is_executable_folder_name(name: &str) -> bool {
+    EXECUTABLE_FOLDER_NAMES.contains(&name.to_ascii_lowercase().as_str())
 }
 
 fn is_executable_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("exe"))
-        .unwrap_or(false)
-        && path.is_file()
+    looks_like_executable(path) && path.is_file()
 }
 
 fn collect_dir_executables(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -234,18 +660,37 @@ fn collect_dir_executables(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Pick the most representative main executable from a candidate set: drop
-/// uninstallers/helpers, prefer one whose file name matches the display name,
-/// and otherwise fall back to the largest remaining executable.
-fn pick_primary_executable(candidates: Vec<PathBuf>, display_name: &str) -> Option<PathBuf> {
-    let mut filtered: Vec<PathBuf> = candidates
+fn collect_tree_executables(dir: &Path, out: &mut Vec<PathBuf>) {
+    let executables = WalkDir::new(dir)
+        .max_depth(MAX_EXECUTABLE_SEARCH_DEPTH)
+        .follow_links(false)
         .into_iter()
-        .filter(|path| !is_auxiliary_executable_name(path))
-        .collect();
+        .flatten()
+        .filter(|entry| entry.file_type().is_file() && looks_like_executable(entry.path()))
+        .map(|entry| entry.into_path());
+    out.extend(executables);
+}
+
+/// Pick the most representative main executable from a candidate set: prefer one named
+/// for the product, then one whose file name overlaps the display name, and otherwise
+/// the largest of the shallowest. Depth first: the largest anywhere can be a tool for
+/// another platform, like the ARM64 host packed inside a .NET SDK.
+fn pick_primary_executable(
+    candidates: Vec<PathBuf>,
+    names: &ProductNames,
+    display_name: &str,
+) -> Option<PathBuf> {
+    let mut filtered = candidates;
     filtered.sort();
     filtered.dedup();
     if filtered.is_empty() {
         return None;
+    }
+    if let Some(named) = filtered
+        .iter()
+        .find(|path| executable_stem_matches(path, names))
+    {
+        return Some(named.clone());
     }
 
     let normalized_display = normalize_for_match(display_name);
@@ -265,32 +710,10 @@ fn pick_primary_executable(candidates: Vec<PathBuf>, display_name: &str) -> Opti
         return Some(matched.clone());
     }
 
-    filtered
-        .into_iter()
-        .max_by_key(|path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0))
-}
-
-fn is_auxiliary_executable_name(path: &Path) -> bool {
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    const AUXILIARY_MARKERS: &[&str] = &[
-        "unins",
-        "uninstall",
-        "setup",
-        "install",
-        "update",
-        "updater",
-        "crashpad",
-        "crashreporter",
-        "vcredist",
-        "vc_redist",
-        "dotnet",
-        "helper",
-    ];
-    AUXILIARY_MARKERS.iter().any(|marker| stem.contains(marker))
+    filtered.into_iter().min_by_key(|path| {
+        let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        (path.components().count(), std::cmp::Reverse(size))
+    })
 }
 
 fn normalize_for_match(value: &str) -> String {
@@ -301,7 +724,11 @@ fn normalize_for_match(value: &str) -> String {
         .collect()
 }
 
-fn classify_method(app: &InstalledApp, product_code: Option<&str>) -> InstallMethod {
+fn classify_method(
+    app: &InstalledApp,
+    product_code: Option<&str>,
+    system: &SystemContext,
+) -> InstallMethod {
     let location = app
         .install_location
         .as_ref()
@@ -328,14 +755,13 @@ fn classify_method(app: &InstalledApp, product_code: Option<&str>) -> InstallMet
     }
 
     // EXE installers: identify the toolkit from concrete on-disk evidence.
-    let primary_dir = primary_install_dir(app);
-    if let Some(dir) = primary_dir.as_deref() {
-        if find_inno_log(dir).is_some() {
-            return InstallMethod::InnoSetup;
-        }
-        if is_nsis_install(dir, app.uninstall_string.as_deref()) {
-            return InstallMethod::Nsis;
-        }
+    if inno_log_for(app, system).is_some() {
+        return InstallMethod::InnoSetup;
+    }
+    if let Some(dir) = primary_install_dir(app)
+        && is_nsis_install(&dir, app.uninstall_string.as_deref())
+    {
+        return InstallMethod::Nsis;
     }
     InstallMethod::Generic
 }
@@ -352,8 +778,24 @@ fn primary_install_dir(app: &InstalledApp) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Inno Setup records every installed file and registry key in an uninstall log
-/// named `unins000.dat` in the install directory; locate it.
+/// Inno Setup records every installed file and registry key in an uninstall log named
+/// `unins000.dat`, beside the uninstaller. That is usually the install directory, but
+/// not always: GIMP keeps it in `uninst`.
+fn inno_log_for(app: &InstalledApp, system: &SystemContext) -> Option<PathBuf> {
+    let beside_uninstaller = app
+        .uninstall_string
+        .as_deref()
+        .and_then(split_command_executable_path)
+        .and_then(|path| {
+            path.parent()
+                .map(|parent| system.resolve_source_path(parent))
+        });
+    beside_uninstaller
+        .as_deref()
+        .and_then(find_inno_log)
+        .or_else(|| primary_install_dir(app).as_deref().and_then(find_inno_log))
+}
+
 fn find_inno_log(dir: &Path) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
@@ -378,25 +820,229 @@ fn is_inno_log_name(name: &str) -> bool {
         && bytes[7].is_ascii_digit()
 }
 
-/// Extract the authoritative list of installed file paths from an Inno Setup
-/// uninstall log. The log stores each installed path as a resolved absolute
-/// string (UTF-16 in modern logs, ANSI in older ones); scanning those strings
-/// is version-independent and avoids decoding Inno's record framing.
-fn inno_manifest_files(log_path: &Path, system: &SystemContext) -> Vec<PathBuf> {
+/// The files and registry keys an Inno Setup uninstall log records.
+#[derive(Debug, Default)]
+struct InnoManifest {
+    /// Recorded files that still exist. A log grows with every update: on one PC, VS
+    /// Code's held 272,656 file records for 6,443 distinct files still on disk.
+    files: Vec<PathBuf>,
+    registry_keys: Vec<RecordedRegistryKey>,
+}
+
+/// Read an Inno Setup uninstall log. Logs in a framing this parser does not recognize
+/// fall back to scanning for path strings, which finds most ASCII paths but can return a
+/// path corrupted by the byte after it. Such a path fails the existence check, so the
+/// result is an undercount and never a wrong file.
+fn inno_manifest(log_path: &Path, system: &SystemContext) -> InnoManifest {
     let Ok(data) = std::fs::read(log_path) else {
-        return Vec::new();
+        return InnoManifest::default();
     };
     if !is_inno_log(&data) {
-        return Vec::new();
+        return InnoManifest::default();
     }
+    let (candidates, registry_keys) = match parse_inno_log(&data) {
+        Some(log) => (log.files, log.registry_keys),
+        None => (scanned_path_strings(&data), Vec::new()),
+    };
+    InnoManifest {
+        files: existing_files(candidates, system),
+        registry_keys,
+    }
+}
+
+/// Size of the fixed header before an Inno log's first block: a 64-byte signature, the
+/// 128-byte AppId and AppName, four 32-bit fields, 27 reserved ones, and a CRC.
+const INNO_HEADER_LEN: usize = 448;
+const INNO_END_OFFSET_FIELD: usize = 328;
+/// Each block starts with its 32-bit size, the size's complement, and a CRC.
+const INNO_BLOCK_HEADER_LEN: usize = 12;
+/// Each record starts with a 16-bit type, 32-bit extra data, and a 32-bit data size.
+const INNO_RECORD_HEADER_LEN: usize = 10;
+const INNO_RECORD_DELETE_FILE: u16 = 0x82;
+const INNO_RECORD_REG_DELETE_ENTIRE_KEY: u16 = 0x86;
+const INNO_RECORD_REG_CLEAR_VALUE: u16 = 0x87;
+const INNO_RECORD_REG_DELETE_KEY_IF_EMPTY: u16 = 0x88;
+const INNO_RECORD_REG_DELETE_VALUE: u16 = 0x89;
+const INNO_STRING_END: u8 = 0xFF;
+const INNO_STRING_LEN_I32: u8 = 0xFE;
+const INNO_STRING_LEN_U16: u8 = 0xFD;
+const INNO_REG_VIEW_64_BIT: u32 = 0x0100_0000;
+const INNO_REG_ROOT_MASK: u32 = 0x00FF_FFFF;
+const INNO_REG_ROOT_CLASSES: u32 = 0;
+const INNO_REG_ROOT_CURRENT_USER: u32 = 1;
+const INNO_REG_ROOT_LOCAL_MACHINE: u32 = 2;
+const LONG_PATH_PREFIX: &str = r"\\?\";
+
+/// What the records of an Inno log name, before checking the disk.
+#[derive(Debug, Default, PartialEq)]
+struct InnoLogRecords {
+    files: Vec<String>,
+    registry_keys: Vec<RecordedRegistryKey>,
+}
+
+/// Parse an Inno Setup uninstall log. After the header the file is a run of CRC-framed
+/// blocks whose bodies, joined, are a run of records, so a record can straddle two
+/// blocks. Each record's data is a list of length-prefixed strings. Reading the lengths
+/// is what makes this work: on a Unicode log, the end marker and the next record's type
+/// sit right after a path and can decode as a CJK letter, which defeated scanning for
+/// path text. `None` when the framing is not recognized.
+fn parse_inno_log(data: &[u8]) -> Option<InnoLogRecords> {
+    let body = inno_log_body(data)?;
+    let mut records = InnoLogRecords::default();
+    let mut seen_files = BTreeSet::new();
+    let mut seen_keys = BTreeSet::new();
+    let mut offset = 0;
+    while let Some(header) = body.get(offset..offset + INNO_RECORD_HEADER_LEN) {
+        let kind = u16::from_le_bytes([header[0], header[1]]);
+        let extra = u32::from_le_bytes([header[2], header[3], header[4], header[5]]);
+        let size = u32::from_le_bytes([header[6], header[7], header[8], header[9]]) as usize;
+        let start = offset + INNO_RECORD_HEADER_LEN;
+        let Some(record) = start.checked_add(size).and_then(|end| body.get(start..end)) else {
+            break;
+        };
+        offset = start + size;
+        match kind {
+            INNO_RECORD_DELETE_FILE => {
+                if let Some(path) = inno_strings(record).into_iter().next() {
+                    let path = path
+                        .strip_prefix(LONG_PATH_PREFIX)
+                        .map(ToOwned::to_owned)
+                        .unwrap_or(path);
+                    if seen_files.insert(path.to_ascii_lowercase()) {
+                        records.files.push(path);
+                    }
+                }
+            }
+            INNO_RECORD_REG_DELETE_ENTIRE_KEY | INNO_RECORD_REG_DELETE_KEY_IF_EMPTY => {
+                let strings = inno_strings(record);
+                if let Some(key) = strings
+                    .first()
+                    .and_then(|path| inno_registry_key(extra, path, None))
+                    && seen_keys.insert(key.identity())
+                {
+                    records.registry_keys.push(key);
+                }
+            }
+            INNO_RECORD_REG_CLEAR_VALUE | INNO_RECORD_REG_DELETE_VALUE => {
+                let strings = inno_strings(record);
+                if let [path, value, ..] = strings.as_slice()
+                    && let Some(key) = inno_registry_key(extra, path, Some(value))
+                    && seen_keys.insert(key.identity())
+                {
+                    records.registry_keys.push(key);
+                }
+            }
+            _ => {}
+        }
+    }
+    (!records.files.is_empty() || !records.registry_keys.is_empty()).then_some(records)
+}
+
+/// The joined bodies of an Inno log's blocks, stopping at the first one that fails its
+/// size check. `None` when the first block already fails.
+fn inno_log_body(data: &[u8]) -> Option<Vec<u8>> {
+    let end_field = data.get(INNO_END_OFFSET_FIELD..INNO_END_OFFSET_FIELD + 4)?;
+    let end = u32::from_le_bytes([end_field[0], end_field[1], end_field[2], end_field[3]]) as usize;
+    let end = end.min(data.len());
+    let mut body = Vec::with_capacity(end.saturating_sub(INNO_HEADER_LEN));
+    let mut offset = INNO_HEADER_LEN;
+    while offset + INNO_BLOCK_HEADER_LEN <= end {
+        let header = &data[offset..offset + INNO_BLOCK_HEADER_LEN];
+        let size = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        let complement = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+        let start = offset + INNO_BLOCK_HEADER_LEN;
+        let block_end = start.saturating_add(size as usize);
+        if size != !complement || block_end > end {
+            break;
+        }
+        body.extend_from_slice(&data[start..block_end]);
+        offset = block_end;
+    }
+    (!body.is_empty()).then_some(body)
+}
+
+/// Decode a record's strings. A length below 0xFD is the byte itself, 0xFD and 0xFE
+/// introduce a 16-bit and a 32-bit length, and 0xFF ends the list. A negative length is
+/// a byte count of UTF-16 text. A positive one is ANSI text, read as Latin-1: a path
+/// outside that code page then fails the existence check and falls to the install
+/// folder, as it did before. Stops without error at malformed data.
+fn inno_strings(record: &[u8]) -> Vec<String> {
+    let mut strings = Vec::new();
+    let mut offset = 0;
+    while let Some(&tag) = record.get(offset) {
+        offset += 1;
+        let length = match tag {
+            INNO_STRING_END => break,
+            INNO_STRING_LEN_I32 => {
+                let Some(bytes) = record.get(offset..offset + 4) else {
+                    break;
+                };
+                offset += 4;
+                i64::from(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            }
+            INNO_STRING_LEN_U16 => {
+                let Some(bytes) = record.get(offset..offset + 2) else {
+                    break;
+                };
+                offset += 2;
+                i64::from(u16::from_le_bytes([bytes[0], bytes[1]]))
+            }
+            short => i64::from(short),
+        };
+        let byte_count = length.unsigned_abs() as usize;
+        let Some(bytes) = offset
+            .checked_add(byte_count)
+            .and_then(|end| record.get(offset..end))
+        else {
+            break;
+        };
+        offset += byte_count;
+        strings.push(if length < 0 {
+            let (pairs, _) = bytes.as_chunks::<2>();
+            let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+            String::from_utf16_lossy(&units)
+        } else {
+            bytes.iter().map(|&byte| char::from(byte)).collect()
+        });
+    }
+    strings
+}
+
+/// A registry record's extra data holds the root key, plus a flag for the 64-bit view.
+fn inno_registry_key(extra: u32, path: &str, value: Option<&str>) -> Option<RecordedRegistryKey> {
+    let root = match extra & INNO_REG_ROOT_MASK {
+        INNO_REG_ROOT_CLASSES => RecordedRegistryRoot::ClassesRoot,
+        INNO_REG_ROOT_CURRENT_USER => RecordedRegistryRoot::CurrentUser,
+        INNO_REG_ROOT_LOCAL_MACHINE => RecordedRegistryRoot::LocalMachine,
+        _ => return None,
+    };
+    let key_path = path.trim_end_matches('\\');
+    (!key_path.is_empty()).then(|| RecordedRegistryKey {
+        root,
+        key_path: key_path.to_owned(),
+        value_name: value.map(ToOwned::to_owned),
+        wow64_32: extra & INNO_REG_VIEW_64_BIT == 0,
+    })
+}
+
+/// Paths found by scanning for path text, for logs with no framing to parse.
+fn scanned_path_strings(data: &[u8]) -> Vec<String> {
+    extract_utf16_paths(data)
+        .into_iter()
+        .chain(extract_ansi_paths(data))
+        .collect()
+}
+
+/// Recorded paths that exist as files on the scanned system, without duplicates.
+fn existing_files(candidates: Vec<String>, system: &SystemContext) -> Vec<PathBuf> {
     let mut seen = BTreeSet::new();
     let mut files = Vec::new();
-    for candidate in extract_utf16_paths(&data)
-        .into_iter()
-        .chain(extract_ansi_paths(&data))
-    {
+    for candidate in candidates {
+        if !seen.insert(candidate.to_ascii_lowercase()) {
+            continue;
+        }
         let path = system.resolve_source_path(&PathBuf::from(&candidate));
-        if path.is_file() && seen.insert(candidate.to_ascii_lowercase()) {
+        if path.is_file() {
             files.push(path);
         }
     }
@@ -433,18 +1079,7 @@ fn nsis_manifest_files(log_path: &Path, system: &SystemContext) -> Vec<PathBuf> 
     let Ok(data) = std::fs::read(log_path) else {
         return Vec::new();
     };
-    let mut seen = BTreeSet::new();
-    let mut files = Vec::new();
-    for candidate in extract_utf16_paths(&data)
-        .into_iter()
-        .chain(extract_ansi_paths(&data))
-    {
-        let path = system.resolve_source_path(&PathBuf::from(&candidate));
-        if path.is_file() && seen.insert(candidate.to_ascii_lowercase()) {
-            files.push(path);
-        }
-    }
-    files
+    existing_files(scanned_path_strings(&data), system)
 }
 
 fn extract_utf16_paths(data: &[u8]) -> Vec<String> {
@@ -521,14 +1156,23 @@ fn is_path_char(character: char) -> bool {
 }
 
 /// Exclude shortcut, Start Menu, Desktop and system paths so install-manifest
-/// entries do not turn an entire shared system folder into a footprint root.
-fn is_app_footprint_path(path: &Path) -> bool {
+/// entries do not turn an entire shared system folder into a footprint root. Inno also
+/// records a `.pif` beside each shortcut. A `windows` folder inside an app's own tree
+/// stays: only the real Windows directory is excluded.
+fn is_app_footprint_path(path: &Path, windows_dir: &Path) -> bool {
     let lower = path.to_string_lossy().to_ascii_lowercase();
     !(lower.ends_with(".lnk")
+        || lower.ends_with(".pif")
         || lower.contains(r"\start menu\")
-        || lower.contains(r"\desktop\")
+        || is_user_desktop_path(&lower)
         || lower.contains(r"\microsoft\windows\")
-        || lower.contains(r"\windows\"))
+        || path_is_within(path, windows_dir))
+}
+
+/// True for `<drive>\Users\<name>\Desktop\...`, and not an app's own `desktop` folder.
+fn is_user_desktop_path(lower: &str) -> bool {
+    let mut segments = lower.split('\\').skip(1);
+    segments.next() == Some("users") && segments.nth(1) == Some("desktop")
 }
 
 /// NSIS embeds the "Nullsoft.NSIS" / "Nullsoft Install System" marker in its
@@ -598,7 +1242,8 @@ fn dedup_existing_dirs(roots: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = BTreeSet::new();
     let mut output = Vec::new();
     for root in roots {
-        if !root.is_dir() {
+        // An uninstaller at `C:\uninst.exe` says nothing about the rest of the drive.
+        if !root.is_dir() || is_drive_root(&root) {
             continue;
         }
         if seen.insert(root.to_string_lossy().to_ascii_lowercase()) {
@@ -729,8 +1374,12 @@ fn is_guid(value: &str) -> bool {
 fn find_guid(value: &str) -> Option<String> {
     let bytes = value.as_bytes();
     for (index, &byte) in bytes.iter().enumerate() {
-        if byte == b'{' && index + 38 <= value.len() && is_guid(&value[index..index + 38]) {
-            return Some(value[index..index + 38].to_ascii_uppercase());
+        // `get`, because byte 38 can fall inside a non-ASCII character.
+        if byte == b'{'
+            && let Some(candidate) = value.get(index..index + 38)
+            && is_guid(candidate)
+        {
+            return Some(candidate.to_ascii_uppercase());
         }
     }
     None
@@ -757,17 +1406,79 @@ pub fn squish_guid(guid: &str) -> Option<String> {
     Some(squished.to_ascii_uppercase())
 }
 
-fn msi_component_paths(product_code: &str, system: &SystemContext) -> Option<MsiComponentPaths> {
-    let squished_product = squish_guid(product_code)?;
+/// The products to read from the MSI database for an entry's product code: the code
+/// itself, plus, for a Burn bundle, the packages it installed. A bundle is listed under a
+/// code of its own that owns no files, and only its hidden packages do. Each package's
+/// dependency key names the bundles that depend on it (WiX's dependency extension). A
+/// runtime the bundle merely chained is a prerequisite and stays out.
+fn msi_products_of(product_code: &str, display_name: &str, system: &SystemContext) -> Vec<String> {
+    let mut products = vec![product_code.to_owned()];
+    let mut dependency_keys: Vec<RegKey> = Vec::new();
+    dependency_keys.extend(system.open_hklm(MSI_DEPENDENCIES_PATH, KEY_READ).ok());
+    for user in system.user_hives() {
+        dependency_keys.extend(user.open(MSI_DEPENDENCIES_PATH, KEY_READ).ok());
+    }
+    for key in dependency_keys {
+        for provider in key.enum_keys().flatten() {
+            if key
+                .open_subkey_with_flags(format!(r"{provider}\Dependents\{product_code}"), KEY_READ)
+                .is_err()
+            {
+                continue;
+            }
+            let Ok(provider_key) = key.open_subkey_with_flags(&provider, KEY_READ) else {
+                continue;
+            };
+            let package_name: String = provider_key.get_value("DisplayName").unwrap_or_default();
+            if is_chained_runtime(&package_name, display_name) {
+                continue;
+            }
+            if let Ok(code) = provider_key.get_value::<String, _>("")
+                && is_guid(&code)
+                && !products
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(&code))
+            {
+                products.push(code);
+            }
+        }
+    }
+    products
+}
+
+/// True for a package that is a shared runtime the app did not set out to be.
+fn is_chained_runtime(package_name: &str, app_name: &str) -> bool {
+    let package = package_name.to_ascii_lowercase();
+    let app = app_name.to_ascii_lowercase();
+    SHARED_RUNTIME_MARKERS
+        .iter()
+        .any(|marker| package.contains(marker) && !app.contains(marker))
+}
+
+/// Read everything the MSI component database records for these products, in one pass.
+fn msi_component_paths(
+    product_codes: &[String],
+    system: &SystemContext,
+) -> Option<MsiComponentPaths> {
+    let squished_products: BTreeSet<String> = product_codes
+        .iter()
+        .filter_map(|code| squish_guid(code))
+        .collect();
+    if squished_products.is_empty() {
+        return None;
+    }
     let user_data = system
         .open_hklm(USERDATA_PATH, KEY_READ | KEY_WOW64_64KEY)
         .ok()?;
 
+    #[cfg(test)]
+    MSI_SWEEPS.with(|sweeps| sweeps.set(sweeps.get() + 1));
+
     let mut files = Vec::new();
-    let mut registry_count = 0;
+    let mut registry_keys = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for sid in component_sweep_sids(&user_data, &squished_product) {
+    for sid in component_sweep_sids(&user_data, &squished_products) {
         let Ok(sid_key) = user_data.open_subkey_with_flags(&sid, KEY_READ | KEY_WOW64_64KEY) else {
             continue;
         };
@@ -782,28 +1493,35 @@ fn msi_component_paths(product_code: &str, system: &SystemContext) -> Option<Msi
             else {
                 continue;
             };
-            let Ok(key_path) = component_key.get_value::<String, _>(&squished_product) else {
-                continue;
-            };
-            if key_path.is_empty() {
-                continue;
-            }
-            if is_registry_key_path(&key_path) {
-                registry_count += 1;
-            } else if seen.insert(key_path.to_ascii_lowercase()) {
-                // MSI records absolute source-machine paths; re-root onto the
-                // scanned volume so downstream reads hit the right disk.
-                files.push(system.resolve_source_path(&PathBuf::from(key_path)));
+            for (product, value) in component_key.enum_values().flatten() {
+                if !squished_products.contains(&product) {
+                    continue;
+                }
+                let key_path = registry_value_text(&value);
+                if key_path.is_empty() {
+                    continue;
+                }
+                if is_registry_key_path(&key_path) {
+                    if seen.insert(key_path.to_ascii_lowercase())
+                        && let Some(key) = msi_registry_key(&key_path)
+                    {
+                        registry_keys.push(key);
+                    }
+                } else if seen.insert(key_path.to_ascii_lowercase()) {
+                    // MSI records absolute source-machine paths; re-root onto the
+                    // scanned volume so downstream reads hit the right disk.
+                    files.push(system.resolve_source_path(Path::new(&msi_file_path(&key_path))));
+                }
             }
         }
     }
 
-    if files.is_empty() && registry_count == 0 {
+    if files.is_empty() && registry_keys.is_empty() {
         return None;
     }
     Some(MsiComponentPaths {
         files,
-        registry_count,
+        registry_keys,
     })
 }
 
@@ -817,17 +1535,19 @@ fn msi_component_paths(product_code: &str, system: &SystemContext) -> Option<Msi
 /// it cannot under-report. If no SID is found to register the product (an
 /// unexpected registry state), every SID is swept as a fallback so results are
 /// never worse than the exhaustive scan.
-fn component_sweep_sids(user_data: &RegKey, squished_product: &str) -> Vec<String> {
+fn component_sweep_sids(user_data: &RegKey, squished_products: &BTreeSet<String>) -> Vec<String> {
     let all_sids: Vec<String> = user_data.enum_keys().flatten().collect();
     let registering: Vec<String> = all_sids
         .iter()
         .filter(|sid| {
-            user_data
-                .open_subkey_with_flags(
-                    format!(r"{sid}\Products\{squished_product}"),
-                    KEY_READ | KEY_WOW64_64KEY,
-                )
-                .is_ok()
+            squished_products.iter().any(|squished_product| {
+                user_data
+                    .open_subkey_with_flags(
+                        format!(r"{sid}\Products\{squished_product}"),
+                        KEY_READ | KEY_WOW64_64KEY,
+                    )
+                    .is_ok()
+            })
         })
         .cloned()
         .collect();
@@ -852,54 +1572,234 @@ fn is_registry_key_path(value: &str) -> bool {
     }
 }
 
-/// Markers that identify a well-known base directory; the application's install
-/// root is the first path segment that follows one of these. Ordered
-/// most-specific first: the shared `Common Files` directories must be matched
-/// before the plain `Program Files` markers so a vendor's files under
-/// `Common Files\<Vendor>` resolve to that vendor sub-directory instead of
-/// collapsing the entire (multi-vendor) `Common Files` tree into one root.
-const ROOT_MARKERS: &[&str] = &[
-    r"\program files (x86)\common files\",
-    r"\program files\common files\",
-    r"\program files (x86)\",
-    r"\program files\",
-    r"\programdata\",
-    r"\appdata\roaming\",
-    r"\appdata\locallow\",
-    r"\appdata\local\",
+/// A component that counts its references to a shared DLL records its path with a `?`
+/// after the drive, as in `C:\?WINDOWS\system32\adal.dll`.
+fn msi_file_path(key_path: &str) -> String {
+    key_path.replacen(r":\?", r":\", 1)
+}
+
+/// Parse an MSI registry key path: `02:\Software\Foo\Bar` names the value `Bar`, and
+/// `02:\Software\Foo\` names the key. The tens digit marks the 64-bit view. The ones
+/// digit is the root, of which `3` (`HKEY_USERS`) names other accounts and is skipped.
+fn msi_registry_key(key_path: &str) -> Option<RecordedRegistryKey> {
+    let (code, path) = key_path.split_once(":\\")?;
+    let code: u32 = code.parse().ok()?;
+    let root = match code % 10 {
+        0 => RecordedRegistryRoot::ClassesRoot,
+        1 => RecordedRegistryRoot::CurrentUser,
+        2 => RecordedRegistryRoot::LocalMachine,
+        _ => return None,
+    };
+    let (key, value) = match path.strip_suffix('\\') {
+        Some(key) => (key, None),
+        None => {
+            let (key, value) = path.rsplit_once('\\')?;
+            (key, Some(value.to_owned()))
+        }
+    };
+    (!key.is_empty()).then(|| RecordedRegistryKey {
+        root,
+        key_path: key.to_owned(),
+        value_name: value,
+        wow64_32: code < 20,
+    })
+}
+
+/// Folder names that hold unrelated things side by side. One of these can never be an
+/// app's root, however many of its files sit under it.
+const SHARED_FOLDER_NAMES: &[&str] = &[
+    "program files",
+    "program files (x86)",
+    "program files (arm)",
+    "programdata",
+    "common files",
+    "microsoft shared",
+    "appdata",
+    "local",
+    "locallow",
+    "roaming",
+    "programs",
+    "users",
+    "public",
+    "documents",
+    "desktop",
+    "microsoft",
+    "windows",
+    "package cache",
 ];
 
-/// Collapse a set of installed file paths into the distinct top-level install
-/// roots that contain them (for example every file under
-/// `C:\Program Files\Inkscape\…` resolves to `C:\Program Files\Inkscape`).
-fn minimal_install_roots(files: &[PathBuf]) -> Vec<PathBuf> {
-    let mut seen = BTreeSet::new();
-    let mut roots = Vec::new();
-    for file in files {
-        let root = install_root_for_file(file);
-        if seen.insert(root.to_string_lossy().to_ascii_lowercase()) {
-            roots.push(root);
-        }
-    }
+/// Install roots and the recorded files no root can cover.
+#[derive(Debug, Default, PartialEq)]
+struct InstallRoots {
+    dirs: Vec<PathBuf>,
+    loose_files: Vec<PathBuf>,
+}
+
+/// A recorded file and the folder segments that hold it, the drive first.
+struct RecordedEntry<'a> {
+    file: &'a Path,
+    folder: Vec<String>,
+}
+
+/// The install roots of the recorded files that are part of the app's footprint.
+fn footprint_roots(
+    files: &[PathBuf],
+    names: &ProductNames,
+    system: &SystemContext,
+) -> InstallRoots {
+    let windows_dir = system.windows_dir();
+    let footprint: Vec<PathBuf> = files
+        .iter()
+        .filter(|path| path.is_absolute() && is_app_footprint_path(path, &windows_dir))
+        .cloned()
+        .collect();
+    let mut roots = minimal_install_roots(&footprint, names);
+    roots.loose_files.retain(|path| path.is_file());
     roots
 }
 
-fn install_root_for_file(file: &Path) -> PathBuf {
-    let display = file.to_string_lossy();
-    let lower = display.to_ascii_lowercase();
-    for marker in ROOT_MARKERS {
-        if let Some(position) = lower.find(marker) {
-            let after = position + marker.len();
-            let segment_end = display[after..]
-                .find('\\')
-                .map(|index| after + index)
-                .unwrap_or(display.len());
-            return PathBuf::from(&display[..segment_end]);
+/// Reduce recorded files to the deepest folders that hold them. Files under one folder
+/// share a root, so every file under `C:\Program Files\Inkscape\...` gives that folder,
+/// but the root stops short of anything shared: `C:\ProgramData\Microsoft` is not an
+/// app's root because one of its files is under it, and neither is a vendor's folder that
+/// may hold its other products. Those split into one root per child. A folder directly on
+/// a drive, like `C:\CocosDashboard`, is a root like any other.
+fn minimal_install_roots(files: &[PathBuf], names: &ProductNames) -> InstallRoots {
+    let mut entries: Vec<RecordedEntry<'_>> = files
+        .iter()
+        .map(|file| RecordedEntry {
+            file,
+            folder: recorded_folder_segments(file),
+        })
+        .collect();
+    // An MSI component keyed on a folder says the app uses that folder, not that it owns
+    // everything in it: the ODBC driver keys on `Microsoft SQL Server\`. It only names a
+    // root when nothing else is recorded under it.
+    let mut ancestors = BTreeSet::new();
+    for entry in &entries {
+        for count in 1..entry.folder.len() {
+            ancestors.insert(entry.folder[..count].join("\\").to_ascii_lowercase());
         }
     }
-    file.parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| file.to_path_buf())
+    entries.retain(|entry| {
+        !entry.file.to_string_lossy().ends_with('\\')
+            || !ancestors.contains(&entry.folder.join("\\").to_ascii_lowercase())
+    });
+    let mut roots = InstallRoots::default();
+    cover_recorded_files(&entries.iter().collect::<Vec<_>>(), 0, names, &mut roots);
+    roots
+}
+
+/// The folder a recorded path names: its parent, or itself when it ends in a separator,
+/// as an MSI component that keys on a folder does.
+fn recorded_folder_segments(path: &Path) -> Vec<String> {
+    let text = path.to_string_lossy();
+    let mut segments: Vec<String> = text.split('\\').map(ToOwned::to_owned).collect();
+    segments.pop();
+    segments
+}
+
+fn cover_recorded_files(
+    entries: &[&RecordedEntry<'_>],
+    known_shared: usize,
+    names: &ProductNames,
+    roots: &mut InstallRoots,
+) {
+    let Some(first) = entries.first() else {
+        return;
+    };
+    let common = common_segment_count(entries, known_shared);
+    let owner = &first.folder[..common];
+    let has_direct_files = entries.iter().any(|entry| entry.folder.len() == common);
+    let leaf = owner.last().map(String::as_str).unwrap_or_default();
+    let is_shared = owner.len() < 2 || is_shared_segments(owner);
+    // Below a folder that holds recorded files itself or is named for the product, the
+    // app owns everything. A folder that only joins subfolders may be a family of
+    // products: `Microsoft SQL Server` has the ODBC driver's subfolders and also LocalDB.
+    let is_own_folder =
+        has_direct_files || names.matches_top_level(leaf, MatchScope::ProgramFolders);
+    if !is_shared && is_own_folder {
+        let keep = owned_segment_count(owner, names);
+        roots.dirs.push(PathBuf::from(owner[..keep].join("\\")));
+        return;
+    }
+    let mut children: BTreeMap<String, Vec<&RecordedEntry<'_>>> = BTreeMap::new();
+    for entry in entries {
+        match entry.folder.get(common) {
+            Some(child) => children
+                .entry(child.to_ascii_lowercase())
+                .or_default()
+                .push(entry),
+            None => roots.loose_files.push(entry.file.to_path_buf()),
+        }
+    }
+    for group in children.values() {
+        cover_recorded_files(group, common + 1, names, roots);
+    }
+}
+
+/// How many leading folder segments all the entries share, at least `known`.
+fn common_segment_count(entries: &[&RecordedEntry<'_>], known: usize) -> usize {
+    let Some((first, rest)) = entries.split_first() else {
+        return known;
+    };
+    let mut count = known;
+    while let Some(segment) = first.folder.get(count) {
+        if !rest.iter().all(|entry| {
+            entry
+                .folder
+                .get(count)
+                .is_some_and(|other| other.eq_ignore_ascii_case(segment))
+        }) {
+            break;
+        }
+        count += 1;
+    }
+    count.min(first.folder.len())
+}
+
+/// A root ending in a folder like `bin` is usually one folder too deep: moving up keeps
+/// `Foo\lib` and `Foo\README` with `Foo\bin\foo.exe`. Not past a folder that might hold
+/// other products.
+fn owned_segment_count(owner: &[String], names: &ProductNames) -> usize {
+    let count = owner.len();
+    if count >= 3
+        && is_executable_folder_name(&owner[count - 1])
+        && !is_shared_segments(&owner[..count - 1])
+        && !names.is_vendor_only_folder(&owner[count - 2])
+    {
+        count - 1
+    } else {
+        count
+    }
+}
+
+fn is_shared_segments(segments: &[String]) -> bool {
+    let Some((leaf, parents)) = segments.split_last() else {
+        return true;
+    };
+    parents.is_empty()
+        || parents
+            .last()
+            .is_some_and(|parent| parent.eq_ignore_ascii_case("users"))
+        || SHARED_FOLDER_NAMES.contains(&leaf.to_ascii_lowercase().as_str())
+}
+
+/// True for a path that holds unrelated things side by side, or the drive itself.
+fn is_shared_folder(path: &Path) -> bool {
+    let segments: Vec<String> = path
+        .to_string_lossy()
+        .trim_end_matches('\\')
+        .split('\\')
+        .map(ToOwned::to_owned)
+        .collect();
+    is_shared_segments(&segments)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read the MSI component database.
+    static MSI_SWEEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -928,6 +1828,32 @@ mod tests {
         assert_eq!(
             code.as_deref(),
             Some("{C653D4A8-392F-476F-A1B5-C64F217938D7}")
+        );
+    }
+
+    #[test]
+    fn a_non_ascii_uninstall_string_does_not_panic() {
+        let value = format!("{{{}\u{e9}", "a".repeat(36));
+        assert_eq!(find_guid(&value), None);
+        assert_eq!(
+            find_guid("D\u{e9}sinstaller /X{C653D4A8-392F-476F-A1B5-C64F217938D7}").as_deref(),
+            Some("{C653D4A8-392F-476F-A1B5-C64F217938D7}")
+        );
+    }
+
+    #[test]
+    fn a_drive_is_never_an_install_root() {
+        assert!(dedup_existing_dirs(vec![PathBuf::from(r"C:\")]).is_empty());
+
+        let mut source = test_source(InstallMethod::Generic);
+        source.roots = vec![PathBuf::from(r"C:\")];
+        assert_eq!(
+            resolve_install_location(
+                &test_app("Nothing Like Its Folders", None),
+                Path::new(r"C:\tool.exe"),
+                &source,
+            ),
+            None
         );
     }
 
@@ -968,49 +1894,1025 @@ mod tests {
 
     #[test]
     fn excludes_shortcut_and_system_paths() {
-        assert!(is_app_footprint_path(Path::new(
-            r"C:\Program Files\Demo\app.exe"
-        )));
-        assert!(!is_app_footprint_path(Path::new(
-            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Demo\Demo.lnk"
-        )));
+        let windows = Path::new(r"C:\Windows");
+        for kept in [
+            r"C:\Program Files\Demo\app.exe",
+            r"C:\Program Files\Demo\windows\helper.dll",
+            r"C:\Program Files\GitHub Desktop\desktop\app.exe",
+            r"C:\Users\me\AppData\Local\Microsoft\Windows Terminal\Fragments\Git\git-bash.json",
+        ] {
+            assert!(is_app_footprint_path(Path::new(kept), windows), "{kept}");
+        }
+        for dropped in [
+            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Demo\Demo.lnk",
+            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Demo\Demo.pif",
+            r"C:\Users\Public\Desktop\Demo.pif",
+            r"C:\Users\me\Desktop\notes.txt",
+            r"C:\Windows\System32\demo.dll",
+            r"C:\WINDOWS\Installer\{5B686938-99D9-4ED6-94E2-59E5CC7C3D94}\atom.exe",
+        ] {
+            assert!(
+                !is_app_footprint_path(Path::new(dropped), windows),
+                "{dropped}"
+            );
+        }
+    }
+
+    // ---- Inno Setup logs ----
+
+    /// One record: a 16-bit type, 32-bit extra data, 32-bit size, then the data.
+    fn inno_record(kind: u16, extra: u32, data: &[u8]) -> Vec<u8> {
+        let mut record = kind.to_le_bytes().to_vec();
+        record.extend_from_slice(&extra.to_le_bytes());
+        record.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        record.extend_from_slice(data);
+        record
+    }
+
+    /// The string form a Unicode log uses: 0xFE, a negative byte count, UTF-16 text.
+    fn inno_unicode_strings(strings: &[&str]) -> Vec<u8> {
+        let mut data = Vec::new();
+        for text in strings {
+            let bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            data.push(INNO_STRING_LEN_I32);
+            data.extend_from_slice(&(-(bytes.len() as i32)).to_le_bytes());
+            data.extend_from_slice(&bytes);
+        }
+        data.push(INNO_STRING_END);
+        data
+    }
+
+    /// The string form an old ANSI log uses: a single length byte, then the text.
+    fn inno_ansi_strings(strings: &[&str]) -> Vec<u8> {
+        let mut data = Vec::new();
+        for text in strings {
+            data.push(text.len() as u8);
+            data.extend_from_slice(text.as_bytes());
+        }
+        data.push(INNO_STRING_END);
+        data
+    }
+
+    /// A whole log: the header, then `body` cut into CRC-framed blocks.
+    fn inno_log(body: &[u8], block_size: usize) -> Vec<u8> {
+        let mut log = b"Inno Setup Uninstall Log (b) 64-bit".to_vec();
+        log.resize(INNO_HEADER_LEN, 0);
+        for block in body.chunks(block_size) {
+            log.extend_from_slice(&(block.len() as u32).to_le_bytes());
+            log.extend_from_slice(&(!(block.len() as u32)).to_le_bytes());
+            log.extend_from_slice(&[0; 4]);
+            log.extend_from_slice(block);
+        }
+        let end = log.len() as u32;
+        log[INNO_END_OFFSET_FIELD..INNO_END_OFFSET_FIELD + 4].copy_from_slice(&end.to_le_bytes());
+        log
+    }
+
+    #[test]
+    fn parses_unicode_inno_logs_past_the_bytes_that_follow_each_path() {
+        // The real Git for Windows failure: a path's end marker 0xFF and the next record's
+        // type 0x82 read as one UTF-16 unit, U+82FF, a CJK letter that looks like path text.
+        let first = r"C:\Program Files\Git\etc\package-versions.txt";
+        let second = r"C:\Program Files\Git\git-bash.exe";
+        let mut body = inno_record(
+            0x10,
+            0,
+            &inno_unicode_strings(&["PC", "me", r"C:\Program Files\Git"]),
+        );
+        body.extend(inno_record(
+            INNO_RECORD_DELETE_FILE,
+            0x800,
+            &inno_unicode_strings(&[first]),
+        ));
+        body.extend(inno_record(
+            INNO_RECORD_DELETE_FILE,
+            0x800,
+            &inno_unicode_strings(&[second]),
+        ));
+        let log = inno_log(&body, 4096);
+
+        let scanned = extract_utf16_paths(&log);
+        assert!(
+            !scanned.iter().any(|path| path == first),
+            "the fixture must reproduce the corruption, got {scanned:?}"
+        );
+
+        let Some(parsed) = parse_inno_log(&log) else {
+            panic!("a framed log should parse");
+        };
+        assert_eq!(parsed.files, vec![first.to_owned(), second.to_owned()]);
+    }
+
+    #[test]
+    fn parses_old_ansi_inno_logs() {
+        // 0x2E is both a valid length and a path character, so a following record
+        // would corrupt a scanned path here too.
+        let path = r"C:\Program Files (x86)\TouchOSC Bridge\Bridge.exe";
+        let mut body = inno_record(
+            INNO_RECORD_DELETE_FILE,
+            0,
+            &inno_ansi_strings(&[path, "", "", ""]),
+        );
+        body.extend(inno_record(
+            INNO_RECORD_DELETE_FILE,
+            0,
+            &inno_ansi_strings(&[r"C:\Program Files (x86)\TouchOSC Bridge\readme.txt"]),
+        ));
+        let Some(parsed) = parse_inno_log(&inno_log(&body, 4096)) else {
+            panic!("a framed ANSI log should parse");
+        };
+        assert_eq!(parsed.files[0], path);
+        assert_eq!(parsed.files.len(), 2);
+    }
+
+    #[test]
+    fn inno_records_may_straddle_blocks() {
+        let path = r"C:\Program Files\Demo\a-file-with-a-rather-long-name.dll";
+        let body = inno_record(INNO_RECORD_DELETE_FILE, 0, &inno_unicode_strings(&[path]));
+        let Some(parsed) = parse_inno_log(&inno_log(&body, 16)) else {
+            panic!("a log cut into small blocks should parse");
+        };
+        assert_eq!(parsed.files, vec![path.to_owned()]);
+    }
+
+    #[test]
+    fn inno_long_paths_lose_their_prefix_and_repeats_are_dropped() {
+        // GIMP records \\?\C:\..., and every update of an app records its files again.
+        let mut body = Vec::new();
+        for _ in 0..2 {
+            body.extend(inno_record(
+                INNO_RECORD_DELETE_FILE,
+                0x80,
+                &inno_unicode_strings(&[r"\\?\C:\Program Files\GIMP 3\bin\gimp.exe"]),
+            ));
+        }
+        let Some(parsed) = parse_inno_log(&inno_log(&body, 4096)) else {
+            panic!("the log should parse");
+        };
+        assert_eq!(
+            parsed.files,
+            vec![r"C:\Program Files\GIMP 3\bin\gimp.exe".to_owned()]
+        );
+    }
+
+    #[test]
+    fn inno_logs_record_registry_keys_with_their_root_and_view() {
+        let mut body = inno_record(
+            INNO_RECORD_REG_DELETE_KEY_IF_EMPTY,
+            0x8100_0002,
+            &inno_unicode_strings(&[r"Software\GitForWindows"]),
+        );
+        body.extend(inno_record(
+            INNO_RECORD_REG_DELETE_VALUE,
+            0x8100_0001,
+            &inno_unicode_strings(&[r"Software\RegisteredApplications", "GIMP 3"]),
+        ));
+        body.extend(inno_record(
+            INNO_RECORD_REG_DELETE_ENTIRE_KEY,
+            0x8000_0000,
+            &inno_ansi_strings(&[r"*\shell\HxD"]),
+        ));
+        body.extend(inno_record(
+            INNO_RECORD_REG_DELETE_ENTIRE_KEY,
+            0x8000_0002,
+            &inno_ansi_strings(&[r"Software\Tickr"]),
+        ));
+        let Some(parsed) = parse_inno_log(&inno_log(&body, 4096)) else {
+            panic!("the log should parse");
+        };
+        assert!(parsed.files.is_empty());
+        assert_eq!(
+            parsed.registry_keys,
+            vec![
+                RecordedRegistryKey {
+                    root: RecordedRegistryRoot::LocalMachine,
+                    key_path: r"Software\GitForWindows".to_owned(),
+                    value_name: None,
+                    wow64_32: false,
+                },
+                RecordedRegistryKey {
+                    root: RecordedRegistryRoot::CurrentUser,
+                    key_path: r"Software\RegisteredApplications".to_owned(),
+                    value_name: Some("GIMP 3".to_owned()),
+                    wow64_32: false,
+                },
+                RecordedRegistryKey {
+                    root: RecordedRegistryRoot::ClassesRoot,
+                    key_path: r"*\shell\HxD".to_owned(),
+                    value_name: None,
+                    wow64_32: true,
+                },
+                RecordedRegistryKey {
+                    root: RecordedRegistryRoot::LocalMachine,
+                    key_path: r"Software\Tickr".to_owned(),
+                    value_name: None,
+                    wow64_32: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_inno_record_naming_no_key_is_ignored() {
+        // Trimmed, `\` would mean the root of the hive, and capturing that takes everything.
+        assert_eq!(inno_registry_key(0x8100_0002, "\\", None), None);
+        assert_eq!(inno_registry_key(0x8100_0002, "", None), None);
+        assert_eq!(inno_registry_key(0x8100_0003, r"S-1-5-18\Foo", None), None);
+    }
+
+    #[test]
+    fn unrecognized_inno_framing_is_not_parsed() {
+        let mut log = b"Inno Setup Uninstall Log (b)".to_vec();
+        log.resize(INNO_HEADER_LEN + 64, 0xAB);
+        assert!(parse_inno_log(&log).is_none());
+        assert!(parse_inno_log(b"short").is_none());
+    }
+
+    #[test]
+    fn truncated_inno_records_do_not_panic() {
+        let body = inno_record(
+            INNO_RECORD_DELETE_FILE,
+            0,
+            &inno_unicode_strings(&[r"C:\Program Files\Demo\app.exe"]),
+        );
+        for cut in 0..body.len() {
+            let _ = parse_inno_log(&inno_log(&body[..cut], 4096));
+            let _ = inno_strings(&body[..cut]);
+        }
+        assert!(inno_strings(&[INNO_STRING_LEN_I32, 0xFF, 0xFF, 0xFF, 0x7F, 0]).is_empty());
+    }
+
+    #[test]
+    fn inno_manifest_keeps_only_files_that_exist()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let base = unique_temp("wam-inno-test");
+        std::fs::create_dir_all(&base)?;
+        let installed = base.join("app.exe");
+        std::fs::write(&installed, b"binary")?;
+        let stale = base.join("removed-by-an-update.dll");
+        let installed_text = installed.display().to_string();
+        let stale_text = stale.display().to_string();
+        let mut body = inno_record(
+            INNO_RECORD_DELETE_FILE,
+            0,
+            &inno_unicode_strings(&[installed_text.as_str()]),
+        );
+        body.extend(inno_record(
+            INNO_RECORD_DELETE_FILE,
+            0,
+            &inno_unicode_strings(&[stale_text.as_str()]),
+        ));
+        let log_path = base.join("unins000.dat");
+        std::fs::write(&log_path, inno_log(&body, 4096))?;
+
+        let manifest = inno_manifest(&log_path, &SystemContext::live());
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(manifest.files, vec![installed]);
+        Ok(())
+    }
+
+    #[test]
+    fn finds_an_inno_log_beside_the_uninstaller_when_it_is_not_in_the_install_folder()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let base = unique_temp("wam-inno-uninst");
+        let uninst = base.join("uninst");
+        std::fs::create_dir_all(&uninst)?;
+        std::fs::write(uninst.join("unins000.dat"), b"log")?;
+        let mut app = test_app("GIMP 3.2.6", None);
+        app.install_location = Some(base.clone());
+        app.uninstall_string = Some(format!(
+            "\"{}\" /SILENT",
+            uninst.join("unins000.exe").display()
+        ));
+
+        let found = inno_log_for(&app, &SystemContext::live());
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(found, Some(uninst.join("unins000.dat")));
+        Ok(())
+    }
+
+    // ---- The main executable ----
+
+    fn test_app(display_name: &str, publisher: Option<&str>) -> InstalledApp {
+        InstalledApp {
+            display_name: display_name.to_owned(),
+            publisher: publisher.map(ToOwned::to_owned),
+            version: None,
+            install_location: None,
+            uninstall_string: None,
+            main_executable: None,
+            registry_source_path: r"HKLM\Software\Test".to_owned(),
+            architecture: crate::models::AppArchitecture::X64,
+            install_scope: crate::models::InstallScope::PerMachine,
+        }
+    }
+
+    fn test_source(method: InstallMethod) -> InstallSource {
+        InstallSource {
+            method,
+            product_code: None,
+            authoritative_file_count: 0,
+            roots: Vec::new(),
+            loose_files: Vec::new(),
+            recorded_files: Vec::new(),
+            registry_keys: Vec::new(),
+            evidence: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn choosing_the_executable_never_reads_the_msi_database_again()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let base = unique_temp("wam-msi-once");
+        std::fs::create_dir_all(&base)?;
+        let exe = base.join("wam-msi-once-demo.exe");
+        std::fs::write(&exe, b"MZ")?;
+        let mut source = test_source(InstallMethod::WindowsInstaller);
+        source.product_code = Some("{1D1D1768-10D8-3DFF-9AD9-1E26B6323A29}".to_owned());
+        source.recorded_files = vec![exe.clone()];
+
+        let before = MSI_SWEEPS.with(std::cell::Cell::get);
+        let found = primary_executable(
+            &test_app("WAM MSI Once Demo", None),
+            &source,
+            &SystemContext::live(),
+        );
+        let after = MSI_SWEEPS.with(std::cell::Cell::get);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(found, Some(exe));
+        assert_eq!(after, before, "the sweep must not run again");
+        Ok(())
+    }
+
+    #[test]
+    fn prefers_the_executable_named_for_the_product()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let base = unique_temp("wam-primary");
+        std::fs::create_dir_all(&base)?;
+        for name in ["aaa-big-tool.exe", "demo.exe"] {
+            std::fs::write(base.join(name), b"MZ")?;
+        }
+        std::fs::write(base.join("zzz-bigger.exe"), vec![0_u8; 4096])?;
+        std::fs::create_dir_all(base.join("packs"))?;
+        std::fs::write(base.join(r"packs\biggest.exe"), vec![0_u8; 8192])?;
+        let names = ProductNames::new(Some("Demo"), None, &[], &[]);
+        let candidates = [
+            "aaa-big-tool.exe",
+            "demo.exe",
+            "zzz-bigger.exe",
+            r"packs\biggest.exe",
+        ]
+        .map(|name| base.join(name))
+        .to_vec();
+
+        let named = pick_primary_executable(candidates.clone(), &names, "Demo");
+        let unnamed = pick_primary_executable(
+            candidates,
+            &ProductNames::new(Some("Other"), None, &[], &[]),
+            "Other",
+        );
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(named, Some(base.join("demo.exe")));
+        assert_eq!(
+            unnamed,
+            Some(base.join("zzz-bigger.exe")),
+            "else the largest of the shallowest"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_uninstallers_windows_hosts_and_installer_caches()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let system = SystemContext::live();
+        let host = system.windows_dir().join(r"System32\rundll32.exe");
+        assert!(host.is_file(), "every Windows has rundll32");
+        assert!(!is_usable_main_executable(&host, &system));
+
+        let base = unique_temp("wam-usable");
+        let cache = base.join("Package Cache").join("{guid}");
+        std::fs::create_dir_all(&cache)?;
+        for path in [
+            base.join("app.exe"),
+            base.join("unins000.exe"),
+            cache.join("bootstrap.exe"),
+        ] {
+            std::fs::write(path, b"MZ")?;
+        }
+        let app = is_usable_main_executable(&base.join("app.exe"), &system);
+        let uninstaller = is_usable_main_executable(&base.join("unins000.exe"), &system);
+        let cached = is_usable_main_executable(&cache.join("bootstrap.exe"), &system);
+        let missing = is_usable_main_executable(&base.join("missing.exe"), &system);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(app);
+        assert!(!uninstaller);
+        assert!(!cached);
+        assert!(!missing);
+        Ok(())
+    }
+
+    #[test]
+    fn hints_find_an_app_with_no_install_location_from_app_paths_or_shortcuts()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // Chrome's MSI records no files and its uninstall entry names no location: only
+        // App Paths and a shortcut say where it is.
+        let base = unique_temp("wam-hints");
+        std::fs::create_dir_all(&base)?;
+        for name in [
+            "chrome.exe",
+            "chrome_proxy.exe",
+            "nvapp.exe",
+            "unins000.exe",
+        ] {
+            std::fs::write(base.join(name), b"MZ")?;
+        }
+        let system = SystemContext::live();
+        let hints = ExecutableHints::keeping_usable(
+            vec![
+                base.join("chrome_proxy.exe"),
+                base.join("chrome.exe"),
+                base.join("no-longer-installed.exe"),
+            ],
+            vec![
+                ShortcutHint {
+                    name: "NVIDIA App Uninstall".to_owned(),
+                    target: base.join("unins000.exe"),
+                },
+                ShortcutHint {
+                    name: "NVIDIA App".to_owned(),
+                    target: base.join("nvapp.exe"),
+                },
+            ],
+            &system,
+        );
+
+        let chrome = ProductNames::new(Some("Google Chrome"), Some("Google LLC"), &[], &[]);
+        let nvidia = ProductNames::new(
+            Some("NVIDIA App 11.0"),
+            Some("NVIDIA Corporation"),
+            &[],
+            &[],
+        );
+        let other = ProductNames::new(Some("Unrelated"), Some("Nobody"), &[], &[]);
+        let found_chrome = hints.find(&chrome, None);
+        let found_nvidia = hints.find(&nvidia, None);
+        let found_other = hints.find(&other, None);
+        let found_inside = hints.find(&other, Some(&base));
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(found_chrome, Some(base.join("chrome.exe")));
+        assert_eq!(found_nvidia, Some(base.join("nvapp.exe")));
+        assert_eq!(found_other, None);
+        assert_eq!(
+            found_inside,
+            Some(base.join("chrome_proxy.exe")),
+            "anything inside the install folder beats nothing"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hints_skip_a_store_app_with_the_same_name()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let base = unique_temp("wam-store");
+        let store = base.join("WindowsApps").join("Microsoft.Notepad");
+        std::fs::create_dir_all(&store)?;
+        std::fs::write(store.join("notepad.exe"), b"MZ")?;
+        let hints = ExecutableHints::keeping_usable(
+            vec![store.join("notepad.exe")],
+            Vec::new(),
+            &SystemContext::live(),
+        );
+        let names = ProductNames::new(Some("Notepad++"), Some("Notepad++ Team"), &[], &[]);
+
+        let found = hints.find(&names, None);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(found, None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_squirrel_stub_gives_way_to_the_current_version()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let base = unique_temp("wam-squirrel-exe");
+        for version in ["app-3.5.9", "app-3.5.11"] {
+            std::fs::create_dir_all(base.join(version))?;
+            std::fs::write(base.join(version).join("Demo.exe"), b"MZ")?;
+        }
+        let stub = base.join("Demo.exe");
+        std::fs::write(&stub, b"MZ")?;
+
+        let squirrel = squirrel_current_executable(&stub, &test_source(InstallMethod::Squirrel));
+        let other = squirrel_current_executable(&stub, &test_source(InstallMethod::Generic));
+        let unmatched = squirrel_current_executable(
+            &base.join("Other.exe"),
+            &test_source(InstallMethod::Squirrel),
+        );
+        let expected = base.join("app-3.5.11").join("Demo.exe");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(squirrel, Some(expected));
+        assert_eq!(other, None);
+        assert_eq!(unmatched, None);
+        Ok(())
+    }
+
+    #[test]
+    fn hints_prefer_the_shortcut_for_the_same_version()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let base = unique_temp("wam-versions");
+        for version in ["313", "314"] {
+            std::fs::create_dir_all(base.join(version))?;
+            std::fs::write(base.join(version).join("python.exe"), b"MZ")?;
+        }
+        let hints = ExecutableHints::keeping_usable(
+            vec![base.join("313").join("python.exe")],
+            vec![
+                ShortcutHint {
+                    name: "Python 3.13 (64-bit)".to_owned(),
+                    target: base.join("313").join("python.exe"),
+                },
+                ShortcutHint {
+                    name: "Python 3.14 (64-bit)".to_owned(),
+                    target: base.join("314").join("python.exe"),
+                },
+            ],
+            &SystemContext::live(),
+        );
+        let python = ProductNames::new(
+            Some("Python 3.14.10 (64-bit)"),
+            Some("Python Software Foundation"),
+            &[],
+            &[],
+        );
+
+        let found = hints.find(&python, None);
+        let expected = base.join("314").join("python.exe");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(found, Some(expected));
+        Ok(())
+    }
+
+    #[test]
+    fn a_runtime_chained_by_a_bundle_stays_out_unless_the_app_is_that_runtime() {
+        let app = "Moonlight Game Streaming Client";
+        assert!(is_chained_runtime(
+            "Microsoft .NET Runtime - 8.0.1 (x64)",
+            app
+        ));
+        assert!(is_chained_runtime(
+            "Microsoft Visual C++ 2015-2022 Redistributable",
+            app
+        ));
+        assert!(!is_chained_runtime("Moonlight Game Streaming Client", app));
+        assert!(!is_chained_runtime(
+            "Microsoft .NET Runtime - 10.0.14 (x64)",
+            "Microsoft .NET SDK 10.0.403 (x64)"
+        ));
+    }
+
+    #[test]
+    fn an_uninstaller_is_only_a_last_resort_and_a_windows_host_never_is()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let system = SystemContext::live();
+        let base = unique_temp("wam-last-resort");
+        std::fs::create_dir_all(&base)?;
+        let uninstaller = base.join("unins000.exe");
+        std::fs::write(&uninstaller, b"MZ")?;
+
+        let mut font_pack = test_app("WAM Last Resort Font Pack", None);
+        font_pack.install_location = Some(base.clone());
+        let found = primary_executable(&font_pack, &test_source(InstallMethod::Generic), &system);
+
+        let mut hosted = test_app("WAM Last Resort Hosted", None);
+        hosted.uninstall_string = Some(format!(
+            "\"{}\" \"C:\\Program Files\\Vendor\\Core.dll\",Uninstall",
+            system
+                .windows_dir()
+                .join(r"System32\rundll32.exe")
+                .display()
+        ));
+        let hosted_found =
+            primary_executable(&hosted, &test_source(InstallMethod::Generic), &system);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(found, Some(uninstaller));
+        assert_eq!(hosted_found, None);
+        Ok(())
+    }
+
+    #[test]
+    fn an_executable_the_install_record_puts_in_the_windows_directory_counts() {
+        // The Python launcher's py.exe lives in C:\Windows, and its MSI says so.
+        let system = SystemContext::live();
+        let notepad = system.windows_dir().join("notepad.exe");
+        assert!(notepad.is_file(), "every Windows has notepad");
+        let mut source = test_source(InstallMethod::WindowsInstaller);
+        source.recorded_files = vec![notepad.clone()];
+
+        assert_eq!(
+            primary_executable(&test_app("WAM Recorded Launcher", None), &source, &system),
+            Some(notepad)
+        );
+    }
+
+    #[test]
+    fn install_location_is_the_recorded_one_when_it_holds_the_executable()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let base = unique_temp("wam-location");
+        let location = base.join("Foo Suite");
+        std::fs::create_dir_all(location.join("bin"))?;
+        let mut app = test_app("Foo", None);
+        app.install_location = Some(location.clone());
+
+        let resolved = resolve_install_location(
+            &app,
+            &location.join(r"bin\foo.exe"),
+            &test_source(InstallMethod::Generic),
+        );
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(resolved, Some(location));
+        Ok(())
+    }
+
+    #[test]
+    fn install_location_climbs_to_the_product_folder_above_the_executable()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = test_source(InstallMethod::WindowsInstaller);
+        let chrome = test_app("Google Chrome", Some("Google LLC"));
+        assert_eq!(
+            resolve_install_location(
+                &chrome,
+                Path::new(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+                &source,
+            ),
+            Some(PathBuf::from(r"C:\Program Files\Google\Chrome"))
+        );
+
+        let powershell = test_app("PowerShell 7.6.9.0-x64", Some("Microsoft Corporation"));
+        assert_eq!(
+            resolve_install_location(
+                &powershell,
+                Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+                &source,
+            ),
+            Some(PathBuf::from(r"C:\Program Files\PowerShell"))
+        );
+
+        // NVIDIA App's recorded location is an installer cache that does not hold it.
+        let base = unique_temp("wam-nvidia-cache");
+        std::fs::create_dir_all(&base)?;
+        let mut nvidia = test_app("NVIDIA App 11.0.4.526", Some("NVIDIA Corporation"));
+        nvidia.install_location = Some(base.clone());
+        let resolved = resolve_install_location(
+            &nvidia,
+            Path::new(r"C:\Program Files\NVIDIA Corporation\NVIDIA app\CEF\NVIDIA App.exe"),
+            &source,
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from(
+                r"C:\Program Files\NVIDIA Corporation\NVIDIA app"
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_executable_in_a_shared_folder_has_no_install_location() {
+        let source = test_source(InstallMethod::WindowsInstaller);
+        let launcher = test_app("Python Launcher", Some("Python Software Foundation"));
+        assert_eq!(
+            resolve_install_location(&launcher, Path::new(r"C:\Windows\py.exe"), &source),
+            None,
+            "the Windows directory would claim every service and registry value in it"
+        );
+    }
+
+    #[test]
+    fn install_location_stops_at_shared_folders_and_moves_up_from_generic_ones() {
+        let source = test_source(InstallMethod::Generic);
+        let app = test_app("Nothing Like Its Folders", None);
+        assert_eq!(
+            resolve_install_location(
+                &app,
+                Path::new(r"C:\Program Files\Acme Toolkit\bin\tool.exe"),
+                &source,
+            ),
+            Some(PathBuf::from(r"C:\Program Files\Acme Toolkit")),
+            "bin is one level too deep"
+        );
+        assert_eq!(
+            resolve_install_location(&app, Path::new(r"C:\Program Files\bin\tool.exe"), &source),
+            Some(PathBuf::from(r"C:\Program Files\bin")),
+            "never up to a shared folder"
+        );
+        // A product named like a shared folder must not claim it.
+        let programs = test_app("Programs", None);
+        assert_eq!(
+            resolve_install_location(
+                &programs,
+                Path::new(r"C:\Users\me\AppData\Local\Programs\Tool\tool.exe"),
+                &source,
+            ),
+            Some(PathBuf::from(r"C:\Users\me\AppData\Local\Programs\Tool"))
+        );
+    }
+
+    // ---- MSI registry key paths ----
+
+    #[test]
+    fn parses_msi_registry_key_paths() {
+        assert_eq!(
+            msi_registry_key(r"22:\SOFTWARE\GitHub\CLI\InstallDir"),
+            Some(RecordedRegistryKey {
+                root: RecordedRegistryRoot::LocalMachine,
+                key_path: r"SOFTWARE\GitHub\CLI".to_owned(),
+                value_name: Some("InstallDir".to_owned()),
+                wow64_32: false,
+            })
+        );
+        assert_eq!(
+            msi_registry_key(r"02:\Software\Xiamen Yaji Software Co., Ltd.\Cocos Dashboard\"),
+            Some(RecordedRegistryKey {
+                root: RecordedRegistryRoot::LocalMachine,
+                key_path: r"Software\Xiamen Yaji Software Co., Ltd.\Cocos Dashboard".to_owned(),
+                value_name: None,
+                wow64_32: true,
+            })
+        );
+        assert_eq!(
+            msi_registry_key(r"20:\Directory\Background\shell\PowerShell7x64\Icon"),
+            Some(RecordedRegistryKey {
+                root: RecordedRegistryRoot::ClassesRoot,
+                key_path: r"Directory\Background\shell\PowerShell7x64".to_owned(),
+                value_name: Some("Icon".to_owned()),
+                wow64_32: false,
+            })
+        );
+        assert_eq!(
+            msi_registry_key(r"1:\Software\Demo\Value"),
+            Some(RecordedRegistryKey {
+                root: RecordedRegistryRoot::CurrentUser,
+                key_path: r"Software\Demo".to_owned(),
+                value_name: Some("Value".to_owned()),
+                wow64_32: true,
+            })
+        );
+        assert_eq!(msi_registry_key(r"03:\S-1-5-21\Software\Demo"), None);
+        assert_eq!(msi_registry_key(r"C:\Program Files\Demo\app.exe"), None);
+    }
+
+    fn roots_of(files: &[&str], publisher: Option<&str>, display: &str) -> InstallRoots {
+        let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+        let names = ProductNames::new(Some(display), publisher, &[], &[]);
+        let mut roots = minimal_install_roots(&files, &names);
+        roots.dirs.sort();
+        roots.loose_files.sort();
+        roots
+    }
+
+    fn dirs(paths: &[&str]) -> Vec<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
     }
 
     #[test]
     fn collapses_nested_install_roots() {
-        let files = vec![
-            PathBuf::from(r"C:\Program Files\Inkscape\bin\inkscape.exe"),
-            PathBuf::from(r"C:\Program Files\Inkscape\share\icons\a.svg"),
-            PathBuf::from(r"C:\ProgramData\Inkscape\config.ini"),
-        ];
-        let mut roots = minimal_install_roots(&files);
-        roots.sort();
-        assert_eq!(
-            roots,
-            vec![
-                PathBuf::from(r"C:\Program Files\Inkscape"),
-                PathBuf::from(r"C:\ProgramData\Inkscape"),
-            ]
+        let roots = roots_of(
+            &[
+                r"C:\Program Files\Inkscape\bin\inkscape.exe",
+                r"C:\Program Files\Inkscape\share\icons\a.svg",
+                r"C:\ProgramData\Inkscape\config.ini",
+            ],
+            Some("Inkscape Project"),
+            "Inkscape",
         );
+        assert_eq!(
+            roots.dirs,
+            dirs(&[r"C:\Program Files\Inkscape", r"C:\ProgramData\Inkscape"])
+        );
+        assert!(roots.loose_files.is_empty());
     }
 
     #[test]
     fn common_files_root_is_vendor_scoped_not_the_whole_shared_dir() {
         // A vendor file under the shared Common Files tree must resolve to the
         // vendor sub-directory, never the multi-vendor Common Files root.
-        let files = vec![
-            PathBuf::from(r"C:\Program Files (x86)\Common Files\Esoteric Technologies\shared.dll"),
-            PathBuf::from(r"C:\Program Files (x86)\SolarFire9\SolarFire.exe"),
-        ];
-        let mut roots = minimal_install_roots(&files);
-        roots.sort();
-        assert_eq!(
-            roots,
-            vec![
-                PathBuf::from(r"C:\Program Files (x86)\Common Files\Esoteric Technologies"),
-                PathBuf::from(r"C:\Program Files (x86)\SolarFire9"),
-            ]
+        let roots = roots_of(
+            &[
+                r"C:\Program Files (x86)\Common Files\Esoteric Technologies\shared.dll",
+                r"C:\Program Files (x86)\SolarFire9\SolarFire.exe",
+            ],
+            None,
+            "Solar Fire 9",
         );
+        assert_eq!(
+            roots.dirs,
+            dirs(&[
+                r"C:\Program Files (x86)\Common Files\Esoteric Technologies",
+                r"C:\Program Files (x86)\SolarFire9",
+            ])
+        );
+    }
+
+    #[test]
+    fn a_file_under_a_shared_folder_never_claims_the_folder() {
+        // Cocos Dashboard recorded a file under C:\ProgramData\Microsoft and took all
+        // 10.67 GB of it.
+        let roots = roots_of(
+            &[
+                r"C:\CocosDashboard\CocosDashboard.exe",
+                r"C:\CocosDashboard\resources\app.asar",
+                r"C:\ProgramData\Microsoft\Cocos\state.dat",
+                r"C:\ProgramData\Microsoft\Other\more.dat",
+            ],
+            Some("Xiamen Yaji Software Co., Ltd."),
+            "Cocos Dashboard",
+        );
+        assert_eq!(
+            roots.dirs,
+            dirs(&[
+                r"C:\CocosDashboard",
+                r"C:\ProgramData\Microsoft\Cocos",
+                r"C:\ProgramData\Microsoft\Other",
+            ])
+        );
+    }
+
+    #[test]
+    fn a_folder_directly_on_a_drive_is_a_root_and_the_drive_is_not() {
+        let roots = roots_of(
+            &[
+                r"C:\CocosDashboard\ffmpeg.dll",
+                r"C:\CocosDashboard\locales\am.pak",
+                r"C:\stray.ini",
+            ],
+            None,
+            "Cocos Dashboard",
+        );
+        assert_eq!(roots.dirs, dirs(&[r"C:\CocosDashboard"]));
+        assert_eq!(roots.loose_files, dirs(&[r"C:\stray.ini"]));
+    }
+
+    #[test]
+    fn a_file_directly_in_a_shared_folder_is_kept_by_itself() {
+        let roots = roots_of(
+            &[
+                r"C:\Program Files\Common Files\demo.dll",
+                r"C:\Program Files\Demo\demo.exe",
+            ],
+            None,
+            "Demo",
+        );
+        assert_eq!(roots.dirs, dirs(&[r"C:\Program Files\Demo"]));
+        assert_eq!(
+            roots.loose_files,
+            dirs(&[r"C:\Program Files\Common Files\demo.dll"])
+        );
+    }
+
+    #[test]
+    fn a_folder_that_only_joins_subfolders_is_not_claimed_whole() {
+        // The ODBC driver's files share `Microsoft SQL Server` with LocalDB.
+        let roots = roots_of(
+            &[
+                r"C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\odbc.dll",
+                r"C:\Program Files\Microsoft SQL Server\170\Shared\x.dll",
+            ],
+            Some("Microsoft Corporation"),
+            "Microsoft ODBC Driver 17 for SQL Server",
+        );
+        assert_eq!(
+            roots.dirs,
+            dirs(&[
+                r"C:\Program Files\Microsoft SQL Server\170\Shared",
+                r"C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170",
+            ])
+        );
+
+        // Named for the product, the same shape is the app's own folder.
+        let roots = roots_of(
+            &[
+                r"C:\Program Files\Inkscape\share\a.svg",
+                r"C:\Program Files\Inkscape\lib\b.dll",
+            ],
+            None,
+            "Inkscape",
+        );
+        assert_eq!(roots.dirs, dirs(&[r"C:\Program Files\Inkscape"]));
+    }
+
+    #[test]
+    fn a_vendor_folder_splits_into_its_recorded_products() {
+        let roots = roots_of(
+            &[
+                r"C:\Program Files\NVIDIA Corporation\NvContainer\a.dll",
+                r"C:\Program Files\NVIDIA Corporation\NVIDIA app\b.exe",
+            ],
+            Some("NVIDIA Corporation"),
+            "NVIDIA App 11.0.4.526",
+        );
+        assert_eq!(
+            roots.dirs,
+            dirs(&[
+                r"C:\Program Files\NVIDIA Corporation\NVIDIA app",
+                r"C:\Program Files\NVIDIA Corporation\NvContainer",
+            ])
+        );
+    }
+
+    #[test]
+    fn a_vendor_folder_holding_recorded_files_directly_is_the_apps_own() {
+        let roots = roots_of(
+            &[
+                r"C:\Program Files\Acme\bar.exe",
+                r"C:\Program Files\Acme\plugins\p.dll",
+            ],
+            Some("Acme Corp"),
+            "Bar",
+        );
+        assert_eq!(roots.dirs, dirs(&[r"C:\Program Files\Acme"]));
+    }
+
+    #[test]
+    fn the_per_user_programs_folder_is_not_a_root() {
+        let roots = roots_of(
+            &[
+                r"C:\Users\me\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+                r"C:\Users\me\AppData\Local\Programs\Microsoft VS Code\2c33b50b16\resources\app\main.js",
+            ],
+            Some("Microsoft Corporation"),
+            "Microsoft Visual Studio Code (User)",
+        );
+        assert_eq!(
+            roots.dirs,
+            dirs(&[r"C:\Users\me\AppData\Local\Programs\Microsoft VS Code"])
+        );
+    }
+
+    #[test]
+    fn a_root_moves_up_from_a_generic_folder_but_not_into_a_shared_one() {
+        let roots = roots_of(&[r"C:\Program Files\Foo\bin\foo.exe"], None, "Foo");
+        assert_eq!(roots.dirs, dirs(&[r"C:\Program Files\Foo"]));
+
+        let roots = roots_of(&[r"C:\Program Files\bin\foo.exe"], None, "Foo");
+        assert_eq!(roots.dirs, dirs(&[r"C:\Program Files\bin"]));
+
+        let roots = roots_of(
+            &[r"C:\Program Files\Acme\bin\foo.exe"],
+            Some("Acme Corp"),
+            "Foo",
+        );
+        assert_eq!(roots.dirs, dirs(&[r"C:\Program Files\Acme\bin"]));
+    }
+
+    #[test]
+    fn an_msi_component_keyed_on_a_folder_names_that_folder() {
+        let roots = roots_of(&[r"C:\Program Files\PowerShell\7\"], None, "PowerShell 7");
+        assert_eq!(roots.dirs, dirs(&[r"C:\Program Files\PowerShell\7"]));
+    }
+
+    #[test]
+    fn a_folder_key_above_recorded_files_does_not_claim_the_folder() {
+        let roots = roots_of(
+            &[
+                r"C:\Program Files\Microsoft SQL Server\",
+                r"C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\odbc.dll",
+            ],
+            Some("Microsoft Corporation"),
+            "Microsoft ODBC Driver 17 for SQL Server",
+        );
+        assert_eq!(
+            roots.dirs,
+            dirs(&[r"C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170"])
+        );
+    }
+
+    #[test]
+    fn a_reference_counted_msi_path_loses_its_marker() {
+        assert_eq!(
+            msi_file_path(r"C:\?WINDOWS\system32\adal.dll"),
+            r"C:\WINDOWS\system32\adal.dll"
+        );
+        assert_eq!(
+            msi_file_path(r"C:\Program Files\Demo\app.exe"),
+            r"C:\Program Files\Demo\app.exe"
+        );
+    }
+
+    #[test]
+    fn files_on_several_drives_keep_separate_roots() {
+        let roots = roots_of(&[r"C:\Tools\a.exe", r"D:\Data\b.db"], None, "Demo");
+        assert_eq!(roots.dirs, dirs(&[r"C:\Tools", r"D:\Data"]));
     }
 
     #[test]
