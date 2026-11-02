@@ -885,6 +885,27 @@ fn value_records_install_path(value_name: &str, data: &str, install: &Path) -> b
         .any(|path| path.is_absolute() && path_is_within(path, install))
 }
 
+/// Capture a machine-wide key and everything under it. A key that is not there yields
+/// nothing and no warning.
+pub(crate) fn capture_hklm_subtree(
+    system: &SystemContext,
+    key_path: &str,
+    warnings: &mut Vec<Warning>,
+) -> Vec<RegistryEntry> {
+    let root = RegRoot::Hklm(system);
+    let mut entries = Vec::new();
+    if root.open(key_path, KEY_READ).is_ok() {
+        capture_registry_subtree(
+            &root,
+            key_path,
+            MatchConfidence::High,
+            &mut entries,
+            warnings,
+        );
+    }
+    entries
+}
+
 fn capture_registry_subtree(
     root: &RegRoot,
     key_path: &str,

@@ -343,7 +343,10 @@ copyable_bytes, included }` groups the inventory by root for the report.
   Every value under a matched key is captured, whatever its name, so a key's license or token
   values come along even with the license option off.
 - `service_scan.rs` captures services and drivers whose image is the main executable or
-  under the install location.
+  under the install location, with a service's arguments and `Parameters` key.
+  `parse_image_path` reads an `ImagePath` however it is written: quoted or not, `\??\` and
+  other NT forms, or relative to the Windows folder. A service hosted by `svchost.exe` is not
+  captured: its binary is Windows', and only its `ServiceDll` would be the app's.
 - `task_scan.rs` captures scheduled tasks whose actions point at the app, through
   PowerShell on a live scan and from the Task XML files on a drive.
 - `shortcut_scan.rs` captures Start Menu and Desktop shortcuts on a live scan.

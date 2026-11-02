@@ -2,10 +2,11 @@ use std::path::{Path, PathBuf};
 
 use winreg::enums::KEY_READ;
 
+use crate::file_discovery::expand_env_vars;
 use crate::models::{DriverEntry, DriverKind, ServiceEntry, Warning, WarningSeverity};
-use crate::path_utils::{
-    escape_powershell_single, hidden_command, path_is_within, split_command_executable_path,
-};
+use crate::path_utils::{escape_powershell_single, hidden_command, path_is_within};
+use crate::registry_scan::capture_hklm_subtree;
+use crate::restore_policy::service_image_path_value;
 use crate::system_context::SystemContext;
 
 const POWERSHELL_EXE: &str = "powershell.exe";
@@ -14,6 +15,19 @@ const SERVICES_KEY: &str = r"SYSTEM\CurrentControlSet\Services";
 const SERVICE_KERNEL_DRIVER: u32 = 0x0000_0001;
 const SERVICE_FILE_SYSTEM_DRIVER: u32 = 0x0000_0002;
 const SERVICE_RECOGNIZER_DRIVER: u32 = 0x0000_0008;
+const PARAMETERS_SUBKEY: &str = "Parameters";
+/// What an unquoted `ImagePath` can end in. Without quotes, nothing else says where a
+/// path with spaces stops and its arguments start.
+const IMAGE_EXTENSIONS: [&str; 5] = [".exe", ".sys", ".dll", ".com", ".bat"];
+/// Prefixes the kernel's namespace puts on a path. They mean the same as the path without.
+const NT_PATH_PREFIXES: [&str; 4] = [r"\??\", r"\\?\", r"\DosDevices\", r"\GLOBAL??\"];
+/// Ways of writing the Windows folder at the start of an `ImagePath`.
+const WINDOWS_DIR_PREFIXES: [&str; 4] = [
+    r"\SystemRoot\",
+    r"%SystemRoot%\",
+    r"%windir%\",
+    r"SystemRoot\",
+];
 
 #[derive(Debug, Clone)]
 pub struct ServiceScanContext {
@@ -54,10 +68,8 @@ pub fn scan_services(
         let Ok(image_path) = service_key.get_value::<String, _>("ImagePath") else {
             continue;
         };
-        let image_path = expand_image_path(&image_path, &windows_dir);
-        let binary_path = split_command_executable_path(&image_path)
-            .unwrap_or_else(|| PathBuf::from(image_path.trim()));
-        let binary_path = system.resolve_source_path(&binary_path);
+        let image_path = parse_image_path(&image_path, &windows_dir);
+        let binary_path = system.resolve_source_path(&image_path.path);
         if !path_matches(context, &binary_path) {
             continue;
         }
@@ -73,19 +85,27 @@ pub fn scan_services(
             .get_value::<Vec<String>, _>("DependOnService")
             .unwrap_or_default();
 
+        let parameters = capture_hklm_subtree(
+            system,
+            &format!(r"{SERVICES_KEY}\{service_name}\{PARAMETERS_SUBKEY}"),
+            &mut warnings,
+        );
+
         services.push(ServiceEntry {
             service_name: service_name.clone(),
             display_name,
             binary_path: binary_path.clone(),
+            arguments: image_path.arguments.clone(),
+            parameters,
             start_type,
             account_name,
             dependencies,
             description,
             requires_admin: true,
             restore_command_suggestion: format!(
-                "sc.exe create \"{}\" binPath= \"{}\"",
+                "sc.exe create \"{}\" binPath= {}",
                 service_name,
-                binary_path.display()
+                service_image_path_value(&binary_path, image_path.arguments.as_deref())
             ),
         });
     }
@@ -126,10 +146,8 @@ pub fn scan_drivers(
         let Ok(image_path) = service_key.get_value::<String, _>("ImagePath") else {
             continue;
         };
-        let image_path = expand_image_path(&image_path, &windows_dir);
-        let binary_path = split_command_executable_path(&image_path)
-            .unwrap_or_else(|| PathBuf::from(image_path.trim()));
-        let binary_path = system.resolve_source_path(&binary_path);
+        let binary_path =
+            system.resolve_source_path(&parse_image_path(&image_path, &windows_dir).path);
         if !path_matches(context, &binary_path) {
             continue;
         }
@@ -282,30 +300,197 @@ fn driver_kind(value: u32) -> DriverKind {
     }
 }
 
-/// Expand a service/driver `ImagePath` to a filesystem path. The `\SystemRoot\`,
-/// `%SystemRoot%\`, and `%windir%\` prefixes resolve against `windows_dir` (the
-/// scanned system's Windows directory — the mounted volume's offline). Any other
-/// `%VAR%` markers are expanded from the live environment (a no-op offline,
-/// where those variables are absent).
-fn expand_image_path(value: &str, windows_dir: &Path) -> String {
-    let trimmed = value.trim();
-    for marker in [r"\SystemRoot\", r"%SystemRoot%\", r"%windir%\"] {
-        if let Some(rest) = strip_prefix_ci(trimmed, marker) {
-            return windows_dir.join(rest).display().to_string();
+/// A service's or driver's `ImagePath`, split into what it runs and what it passes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImagePath {
+    pub path: PathBuf,
+    pub arguments: Option<String>,
+}
+
+/// Read a service's or driver's `ImagePath`. It is either a command line, quoted or not,
+/// or for a driver an NT path, and can be relative to the Windows folder. The Windows
+/// folder is `windows_dir`, the scanned system's, which is the mounted volume's offline.
+pub(crate) fn parse_image_path(raw: &str, windows_dir: &Path) -> ImagePath {
+    let trimmed = raw.trim();
+    let (path, arguments) = match trimmed.strip_prefix('"') {
+        Some(rest) => match rest.split_once('"') {
+            Some((path, arguments)) => (path, arguments),
+            None => (rest, ""),
+        },
+        None => split_unquoted_image_path(trimmed),
+    };
+    let arguments = arguments.trim();
+    ImagePath {
+        path: expand_image_file(path.trim(), windows_dir),
+        arguments: (!arguments.is_empty()).then(|| arguments.to_owned()),
+    }
+}
+
+/// Where an unquoted path stops: after the first file extension that ends a word. Spaces
+/// alone do not say, and `C:\Program Files\Vendor\flt.sys` is a normal value. With no known
+/// extension the first word is all that can be said to be the path.
+fn split_unquoted_image_path(value: &str) -> (&str, &str) {
+    let lower = value.to_ascii_lowercase();
+    let end = IMAGE_EXTENSIONS
+        .iter()
+        .filter_map(|extension| {
+            lower.match_indices(extension).find_map(|(start, _)| {
+                let end = start + extension.len();
+                lower[end..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
+                    .then_some(end)
+            })
+        })
+        .min();
+    let end = end.or_else(|| value.find(char::is_whitespace));
+    match end {
+        Some(end) => value.split_at(end),
+        None => (value, ""),
+    }
+}
+
+/// Turn the path part of an `ImagePath` into a file path.
+fn expand_image_file(path: &str, windows_dir: &Path) -> PathBuf {
+    let mut path = path;
+    for prefix in NT_PATH_PREFIXES {
+        if let Some(rest) = strip_prefix_ci(path, prefix) {
+            path = rest;
+            break;
         }
     }
-    let mut expanded = trimmed.to_owned();
-    for (key, val) in std::env::vars() {
-        expanded = expanded.replace(&format!("%{key}%"), &val);
+    for marker in WINDOWS_DIR_PREFIXES {
+        if let Some(rest) = strip_prefix_ci(path, marker) {
+            return windows_dir.join(rest);
+        }
+    }
+    // Other `%VAR%` markers expand from the live environment, which does nothing offline,
+    // where those variables are absent.
+    let expanded = PathBuf::from(expand_env_vars(path));
+    // Windows resolves a driver's relative path, usually `system32\drivers\x.sys`, against
+    // its own folder.
+    if expanded.is_relative() && !expanded.as_os_str().is_empty() {
+        return windows_dir.join(expanded);
     }
     expanded
 }
 
 /// Strip a leading prefix case-insensitively, returning the remainder.
 fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    if value.len() >= prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        Some(&value[prefix.len()..])
-    } else {
-        None
+    let head = value.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &value[prefix.len()..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WINDOWS: &str = r"C:\Windows";
+
+    fn parsed(raw: &str) -> (String, Option<String>) {
+        let image = parse_image_path(raw, Path::new(WINDOWS));
+        (image.path.display().to_string(), image.arguments)
+    }
+
+    fn path_only(path: &str) -> (String, Option<String>) {
+        (path.to_owned(), None)
+    }
+
+    #[test]
+    fn a_quoted_command_line_splits_at_the_quote() {
+        assert_eq!(
+            parsed(r#""C:\Program Files\Acme\svc.exe" --run -v"#),
+            (
+                r"C:\Program Files\Acme\svc.exe".to_owned(),
+                Some("--run -v".to_owned())
+            )
+        );
+        assert_eq!(
+            parsed(r#""C:\Program Files\Acme\svc.exe""#),
+            path_only(r"C:\Program Files\Acme\svc.exe")
+        );
+    }
+
+    #[test]
+    fn an_unquoted_command_line_keeps_spaces_in_the_path_and_its_arguments() {
+        assert_eq!(
+            parsed(r"C:\Program Files\Acme\svc.exe --config C:\x.conf"),
+            (
+                r"C:\Program Files\Acme\svc.exe".to_owned(),
+                Some(r"--config C:\x.conf".to_owned())
+            )
+        );
+        assert_eq!(
+            parsed(r"C:\Program Files\Vendor Name\flt.sys"),
+            path_only(r"C:\Program Files\Vendor Name\flt.sys")
+        );
+    }
+
+    #[test]
+    fn a_name_that_merely_contains_an_extension_does_not_end_the_path() {
+        assert_eq!(
+            parsed(r"C:\Tools.exe.d\My App\svc.exe -x"),
+            (
+                r"C:\Tools.exe.d\My App\svc.exe".to_owned(),
+                Some("-x".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn nt_paths_lose_their_prefix() {
+        assert_eq!(
+            parsed(r"\??\C:\Program Files\Vendor Name\flt.sys"),
+            path_only(r"C:\Program Files\Vendor Name\flt.sys")
+        );
+        assert_eq!(parsed(r"\\?\C:\App\flt.sys"), path_only(r"C:\App\flt.sys"));
+        assert_eq!(
+            parsed(r"\DosDevices\D:\App\flt.sys"),
+            path_only(r"D:\App\flt.sys")
+        );
+    }
+
+    #[test]
+    fn windows_folder_forms_resolve_against_the_scanned_system() {
+        for raw in [
+            r"\SystemRoot\System32\drivers\acme.sys",
+            r"%SystemRoot%\System32\drivers\acme.sys",
+            r"%windir%\System32\drivers\acme.sys",
+            r"System32\drivers\acme.sys",
+            r"system32\DRIVERS\..\drivers\acme.sys",
+        ] {
+            let image = parse_image_path(raw, Path::new(r"E:\Windows"));
+            assert!(
+                image.path.starts_with(r"E:\Windows"),
+                "{raw} became {:?}",
+                image.path
+            );
+            assert!(image.path.ends_with("acme.sys"), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_shared_host_keeps_its_group_as_arguments() {
+        assert_eq!(
+            parsed(r"%SystemRoot%\system32\svchost.exe -k netsvcs -p"),
+            (
+                r"C:\Windows\system32\svchost.exe".to_owned(),
+                Some("-k netsvcs -p".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn empty_and_odd_values_do_not_panic() {
+        assert_eq!(parsed(""), path_only(""));
+        assert_eq!(parsed(r#"""#), path_only(""));
+        assert_eq!(parsed(r#""C:\App\svc.exe"#), path_only(r"C:\App\svc.exe"));
+        assert_eq!(parsed("é"), path_only(r"C:\Windows\é"));
+        assert_eq!(
+            parsed(r"C:\Ünï\svc.exe é"),
+            (r"C:\Ünï\svc.exe".to_owned(), Some("é".to_owned()))
+        );
     }
 }

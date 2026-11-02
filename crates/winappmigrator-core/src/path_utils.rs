@@ -207,6 +207,17 @@ pub fn strip_prefix_ignore_case(path: &Path, root: &Path) -> Option<PathBuf> {
     Some(remaining.as_path().to_path_buf())
 }
 
+/// True when `path` names something strictly below `root` by its components alone. Unlike
+/// [`path_is_within`], a `..` in `path` means no, because it may not stay inside.
+pub fn path_is_strictly_inside(path: &Path, root: &Path) -> bool {
+    strip_prefix_ignore_case(path, root).is_some_and(|relative| {
+        !relative.as_os_str().is_empty()
+            && relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+    })
+}
+
 /// True for `C:\` and other paths with nothing below the root.
 pub fn is_drive_root(path: &Path) -> bool {
     !path
@@ -348,6 +359,24 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn being_strictly_inside_rules_out_the_folder_itself_and_parent_steps() {
+        let root = Path::new(r"C:\Program Files\Acme");
+        assert!(path_is_strictly_inside(
+            Path::new(r"c:\program files\acme\bin\svc.exe"),
+            root
+        ));
+        assert!(!path_is_strictly_inside(root, root));
+        assert!(!path_is_strictly_inside(
+            Path::new(r"C:\Program Files\Acme\..\Other\svc.exe"),
+            root
+        ));
+        assert!(!path_is_strictly_inside(
+            Path::new(r"C:\Program Files\Acme Other\svc.exe"),
+            root
+        ));
     }
 
     #[test]

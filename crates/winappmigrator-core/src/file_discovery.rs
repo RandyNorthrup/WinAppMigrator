@@ -759,7 +759,7 @@ fn user_shell_folder(value_name: &str) -> Option<PathBuf> {
 
 /// Expand `%VAR%` references using the current process environment. Unknown
 /// variables are left intact.
-fn expand_env_vars(value: &str) -> String {
+pub(crate) fn expand_env_vars(value: &str) -> String {
     let mut output = String::new();
     let mut rest = value;
     while let Some(start) = rest.find('%') {

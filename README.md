@@ -94,7 +94,7 @@ installer opens in the theme it was built with.</sub>
 | --- | --- | --- |
 | **Program files** | Always | Found through MSI and Inno Setup records, NSIS logs, App Paths, and folders named exactly for the product |
 | **Registry** | Always | The app's keys, plus COM and file associations pointing at it |
-| **Services and drivers** | Always | Drivers the app owns are re-registered. Vendor and inbox drivers are reported instead, because they cannot be redistributed |
+| **Services and drivers** | Always | Services keep their arguments, settings, and built-in account. A custom account's password cannot be moved, so that service is set up as LocalService and the installer says so. Drivers the app owns are re-registered. Vendor and inbox drivers are reported instead, because they cannot be redistributed |
 | **Scheduled tasks, shortcuts, environment variables** | Always | A captured `Path` is merged into the target's, never replaced |
 | **Runtimes** | Always | Visual C++ is embedded, or comes through winget if its download failed at build time. .NET comes through winget or a Windows feature, or is part of Windows already, so it can need internet on the target |
 | **User data** | Your choice | AppData, ProgramData, Documents, and Saved Games. Online-only OneDrive files are skipped |

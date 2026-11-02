@@ -4,6 +4,17 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **Services come back as they were.** A service's path is now stored quoted, so that
+  `C:\My Apps\Foo Bar\svc.exe` cannot be hijacked by `C:\My Apps\Foo.exe`. A code comment
+  claimed the quoting was handled, but what reached `sc.exe` was unquoted. Arguments are kept, and
+  so are the `Parameters` key and the display name. LocalService and NetworkService stay what they were,
+  where they used to become LocalSystem. A custom account cannot be restored without its
+  password, so its service is set up as LocalService, with less access rather than more, and
+  the installer says so. A service already on the PC that runs from outside the install
+  location is left alone, even with `--force`. Verification compares the binary, arguments, and
+  account exactly: it used to pass any `ImagePath` that merely contained the path.
+- **Drivers are found wherever they live.** `\??\` paths are understood and an unquoted path no
+  longer stops at its first space, so drivers under `Program Files` are no longer missed.
 - **Paths are rewritten exactly.** `C:\App\a.exe` no longer becomes `C:\App22\a.exe` for a
   target of `C:\App2`, `C:\Application Data` is left alone, and a rule for
   `C:\Program Files\Git` no longer touches `C:\Program Files\GitHub CLI`. Verification used

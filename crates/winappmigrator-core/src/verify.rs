@@ -17,12 +17,14 @@ use crate::models::{
 };
 use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
-use crate::path_utils::{escape_powershell_single, hidden_command};
+use crate::path_utils::{escape_powershell_single, hidden_command, system_root};
 use crate::prerequisites::is_present;
 use crate::registry_target::{
     app_path_entries, environment_registry_target, is_path_variable, path_contains_entry,
-    registry_hive_name, registry_raw_type, registry_root, registry_value_name,
+    registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
+    service_object_name,
 };
+use crate::restore_policy::{ServiceAccount, image_path_matches, paths_equal};
 
 const VERIFICATION_REPORT_JSON: &str = "verification_report.json";
 const VERIFICATION_REPORT_MARKDOWN: &str = "verification_report.md";
@@ -733,28 +735,47 @@ fn verify_services(
         let expected_binary = map
             .destination_of(&service.binary_path)
             .unwrap_or(&service.binary_path);
-        let item = match read_service_image_path(&service.service_name) {
-            Ok(actual) => {
-                if command_path_matches(&actual, expected_binary) {
-                    passed_item(
-                        VerificationCategory::Service,
-                        service.service_name.clone(),
-                        "Service exists and binary path matches restored target.",
-                        Some(actual),
-                    )
-                } else {
+        let expected_arguments = service.arguments.as_deref().map(|text| map.rewrite(text));
+        let item = match service_image_path(&service.service_name) {
+            Ok(Some(actual)) => {
+                if !image_path_matches(
+                    &actual,
+                    expected_binary,
+                    expected_arguments.as_deref(),
+                    system_root(),
+                ) {
                     failed_item(
                         VerificationCategory::Service,
                         service.service_name.clone(),
-                        "Service exists but binary path does not match restored target.",
+                        "Service exists but does not run the restored binary with its arguments.",
+                        Some(actual),
+                    )
+                } else if !service_account_matches(service) {
+                    failed_item(
+                        VerificationCategory::Service,
+                        service.service_name.clone(),
+                        "Service exists but does not run as the expected account.",
+                        service_object_name(&service.service_name),
+                    )
+                } else {
+                    passed_item(
+                        VerificationCategory::Service,
+                        service.service_name.clone(),
+                        "Service exists, and runs the restored binary with its arguments and account.",
                         Some(actual),
                     )
                 }
             }
+            Ok(None) => failed_item(
+                VerificationCategory::Service,
+                service.service_name.clone(),
+                "Service is missing.",
+                Some(service.service_name.clone()),
+            ),
             Err(error) => failed_item(
                 VerificationCategory::Service,
                 service.service_name.clone(),
-                format!("Service is missing or unreadable: {error}"),
+                format!("Service is unreadable: {error}"),
                 Some(service.service_name.clone()),
             ),
         };
@@ -767,6 +788,7 @@ fn verify_services(
             ));
         }
         items.push(item);
+        verify_registry_entries(&service.parameters, map, items, errors);
     }
     if !services.is_empty() {
         warnings.push(Warning::new(
@@ -776,6 +798,19 @@ fn verify_services(
             None,
         ));
     }
+}
+
+/// The account on the target is the one restoring asked for, and that is not always the
+/// recorded one: a custom account is set up as LocalService.
+fn service_account_matches(service: &ServiceEntry) -> bool {
+    let expected =
+        ServiceAccount::from_recorded(service.account_name.as_deref(), &service.service_name);
+    let Some(expected) = expected.sc_object_name() else {
+        return true;
+    };
+    let actual = service_object_name(&service.service_name);
+    ServiceAccount::from_recorded(actual.as_deref(), &service.service_name).sc_object_name()
+        == Some(expected)
 }
 
 fn verify_drivers(
@@ -915,7 +950,7 @@ fn verify_shortcuts(
             .unwrap_or(&shortcut.target_path);
         let item = match shortcut_target(&shortcut.original_lnk_path) {
             Ok(Some(actual)) => {
-                if command_path_matches(&actual, expected_target) {
+                if paths_equal(Path::new(&actual), expected_target) {
                     passed_item(
                         VerificationCategory::Shortcut,
                         shortcut.original_lnk_path.display().to_string(),
@@ -987,12 +1022,6 @@ fn registry_value_matches(
     }
 }
 
-fn read_service_image_path(service_name: &str) -> std::io::Result<String> {
-    let root = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let key = root.open_subkey(format!(r"SYSTEM\CurrentControlSet\Services\{service_name}"))?;
-    key.get_value::<String, _>("ImagePath")
-}
-
 fn scheduled_task_xml(task: &ScheduledTaskEntry) -> std::io::Result<Option<String>> {
     let script = format!(
         "$task = Get-ScheduledTask -TaskName '{}' -TaskPath '{}' -ErrorAction SilentlyContinue; if ($null -eq $task) {{ exit 2 }}; Export-ScheduledTask -TaskName '{}' -TaskPath '{}'",
@@ -1036,11 +1065,6 @@ fn shortcut_target(path: &Path) -> std::io::Result<Option<String>> {
             String::from_utf8_lossy(&output.stderr).to_string(),
         ))
     }
-}
-
-fn command_path_matches(actual_command: &str, expected_path: &Path) -> bool {
-    let expected = expected_path.to_string_lossy().to_ascii_lowercase();
-    actual_command.to_ascii_lowercase().contains(&expected)
 }
 
 fn registry_entry_name(entry: &RegistryEntry) -> String {

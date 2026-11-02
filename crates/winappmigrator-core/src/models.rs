@@ -578,6 +578,13 @@ pub struct ServiceEntry {
     pub service_name: String,
     pub display_name: Option<String>,
     pub binary_path: PathBuf,
+    /// What followed the executable in the service's `ImagePath`.
+    #[serde(default)]
+    pub arguments: Option<String>,
+    /// The values under the service's `Parameters` key, which many services read their
+    /// settings from. Written back only when the service itself is restored.
+    #[serde(default)]
+    pub parameters: Vec<RegistryEntry>,
     pub start_type: Option<String>,
     pub account_name: Option<String>,
     pub dependencies: Vec<String>,

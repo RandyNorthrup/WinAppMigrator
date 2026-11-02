@@ -20,6 +20,7 @@ pub mod registry_scan;
 mod registry_target;
 pub mod reporting;
 pub mod restore;
+pub mod restore_policy;
 pub mod scan;
 pub mod service_scan;
 pub mod shortcut_scan;

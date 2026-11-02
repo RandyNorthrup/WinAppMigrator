@@ -44,6 +44,29 @@ pub(crate) fn environment_registry_target(scope: &EnvironmentScope) -> (RegKey, 
     }
 }
 
+/// The `ImagePath` of a service on this PC. `Ok(None)` when no such service exists. A
+/// service with no `ImagePath` reads as an empty one, which matches nothing.
+pub(crate) fn service_image_path(service_name: &str) -> std::io::Result<Option<String>> {
+    let key = match RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(format!(r"SYSTEM\CurrentControlSet\Services\{service_name}"))
+    {
+        Ok(key) => key,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(
+        key.get_value::<String, _>("ImagePath").unwrap_or_default(),
+    ))
+}
+
+/// The account a service on this PC is set to run as, if it records one.
+pub(crate) fn service_object_name(service_name: &str) -> Option<String> {
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(format!(r"SYSTEM\CurrentControlSet\Services\{service_name}"))
+        .and_then(|key| key.get_value::<String, _>("ObjectName"))
+        .ok()
+}
+
 /// `Path` is shared with everything else on the machine, so it is merged entry by
 /// entry instead of being replaced with the source machine's value.
 pub(crate) fn is_path_variable(name: &str) -> bool {

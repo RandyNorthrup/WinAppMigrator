@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
@@ -25,12 +26,16 @@ use crate::package::{PreparedPackage, read_manifest};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     escape_powershell_single, hidden_command, sanitize_filename, strip_prefix_ignore_case,
+    system_root,
 };
 use crate::prerequisites::{PrerequisiteInstallOutcome, install_bundle, is_present};
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
 use crate::registry_target::{
     app_path_entries, environment_registry_target, is_path_variable, merge_path_entries,
-    registry_hive_name, registry_raw_type, registry_root, registry_value_name,
+    registry_hive_name, registry_raw_type, registry_root, registry_value_name, service_image_path,
+};
+use crate::restore_policy::{
+    ServiceAccount, existing_service_refusal, is_valid_service_name, service_image_path_value,
 };
 use crate::verify::verify_prepared_package;
 
@@ -375,32 +380,59 @@ fn restore_services(
         let binary_path = map
             .destination_of(&service.binary_path)
             .map_or_else(|| service.binary_path.clone(), Path::to_path_buf);
+        let arguments = service.arguments.as_deref().map(|text| map.rewrite(text));
+        let account =
+            ServiceAccount::from_recorded(service.account_name.as_deref(), &service.service_name);
         if !options.apply {
             changes_logged.push(format!(
-                "would restore service {} -> {}",
+                "would restore service {} -> {} (runs as {})",
                 service.service_name,
-                binary_path.display()
+                service_image_path_value(&binary_path, arguments.as_deref()),
+                account.label()
             ));
+            if let ServiceAccount::Custom(original) = &account {
+                warnings.push(custom_account_warning(service, original));
+            }
             continue;
         }
-        match apply_service(service, &binary_path, options.force) {
+        match apply_service(
+            service,
+            &binary_path,
+            arguments.as_deref(),
+            &account,
+            &options.target_root,
+            options.force,
+        ) {
             Ok(messages) => changes_logged.extend(messages),
-            Err(warning) => errors.push(warning),
+            Err(warning) => {
+                errors.push(warning);
+                continue;
+            }
         }
-        if service.account_name.as_ref().is_some_and(|account| {
-            !matches!(
-                account.to_ascii_lowercase().as_str(),
-                "localsystem" | "nt authority\\localservice" | "nt authority\\networkservice"
-            )
-        }) {
-            warnings.push(Warning::new(
-                "service_account_secret_not_restored",
-                WarningSeverity::Warning,
-                "Service account credentials are never archived; review this service account after restore.",
-                Some(service.service_name.clone()),
-            ));
+        if let ServiceAccount::Custom(original) = &account {
+            warnings.push(custom_account_warning(service, original));
+        }
+        for entry in &service.parameters {
+            match apply_registry_entry(entry, true, map) {
+                Ok(message) => changes_logged.push(message),
+                Err(warning) => errors.push(warning),
+            }
         }
     }
+}
+
+fn custom_account_warning(service: &ServiceEntry, account: &str) -> Warning {
+    Warning::new(
+        "service_account_not_restored",
+        WarningSeverity::Warning,
+        format!(
+            "The service {} ran as {account} on the source. Its password is not in the installer, \
+             so the service is set up as LocalService. If it does not work, set its account and \
+             password in Services.",
+            service.service_name
+        ),
+        Some(service.service_name.clone()),
+    )
 }
 
 /// Install runtime prerequisites recorded in the manifest. Each prerequisite is
@@ -774,9 +806,16 @@ fn apply_driver(
     image_path: &Path,
     force: bool,
 ) -> std::result::Result<Vec<String>, Warning> {
-    let mut query = hidden_command(SC_EXE);
-    query.arg("query").arg(&driver.service_name);
-    let exists = command_success(&mut query);
+    let exists = service_image_path(&driver.service_name)
+        .map_err(|error| {
+            Warning::new(
+                "driver_query_failed",
+                WarningSeverity::Error,
+                format!("Could not read the driver's current settings: {error}"),
+                Some(driver.service_name.clone()),
+            )
+        })?
+        .is_some();
     if exists && !force {
         return Err(Warning::new(
             "driver_exists",
@@ -787,9 +826,9 @@ fn apply_driver(
     }
 
     let type_flag = driver_sc_type(&driver.driver_kind);
-    // Pass the raw path: std::process::Command applies the single layer of
-    // Windows argument quoting, and sc.exe stores it verbatim. Manually quoting
-    // here would embed literal quote characters in the registered ImagePath.
+    // Pass the raw path: a driver's ImagePath is a path, not a command line, and the
+    // kernel does not remove quotes from it. A service's is the opposite, see
+    // `service_image_path_value`.
     let mut messages = Vec::new();
     if exists {
         let mut command = hidden_command(SC_EXE);
@@ -1144,48 +1183,98 @@ fn registry_value_from_entry(
     }
 }
 
+/// The arguments for `sc.exe create` or `sc.exe config`, apart from what they run.
+fn sc_service_arguments(
+    verb: &str,
+    service: &ServiceEntry,
+    binary_path: &Path,
+    arguments: Option<&str>,
+    account: &ServiceAccount,
+) -> Vec<OsString> {
+    let mut command: Vec<OsString> = vec![
+        verb.into(),
+        service.service_name.as_str().into(),
+        "binPath=".into(),
+        service_image_path_value(binary_path, arguments).into(),
+    ];
+    if let Some(start_type) = service.start_type.as_deref().and_then(sc_start_type) {
+        command.extend(["start=".into(), start_type.into()]);
+    }
+    if let Some(display_name) = service.display_name.as_deref() {
+        command.extend(["DisplayName=".into(), display_name.into()]);
+    }
+    if let Some(object_name) = account.sc_object_name() {
+        command.extend(["obj=".into(), object_name.into()]);
+        if account.sc_takes_empty_password() {
+            command.extend(["password=".into(), "".into()]);
+        }
+    }
+    command
+}
+
 fn apply_service(
     service: &ServiceEntry,
     binary_path: &Path,
+    arguments: Option<&str>,
+    account: &ServiceAccount,
+    target_root: &Path,
     force: bool,
 ) -> std::result::Result<Vec<String>, Warning> {
-    let mut query = hidden_command(SC_EXE);
-    query.arg("query").arg(&service.service_name);
-    let exists = command_success(&mut query);
-    if exists && !force {
+    let name = service.service_name.as_str();
+    if !is_valid_service_name(name) {
+        return Err(Warning::new(
+            "service_name_invalid",
+            WarningSeverity::Error,
+            "The service's name is not one Windows accepts, so it was not set up.",
+            Some(name.to_owned()),
+        ));
+    }
+    let current = service_image_path(name).map_err(|error| {
+        Warning::new(
+            "service_query_failed",
+            WarningSeverity::Error,
+            format!("Could not read the service's current settings: {error}"),
+            Some(name.to_owned()),
+        )
+    })?;
+    if current.is_some() && !force {
         return Err(Warning::new(
             "service_exists",
             WarningSeverity::Warning,
             "Service exists; use --force to reconfigure it.",
-            Some(service.service_name.clone()),
+            Some(name.to_owned()),
+        ));
+    }
+    if let Some(refusal) = current
+        .as_deref()
+        .and_then(|current| existing_service_refusal(name, current, target_root, system_root()))
+    {
+        return Err(Warning::new(
+            "service_exists_elsewhere",
+            WarningSeverity::Error,
+            refusal,
+            Some(name.to_owned()),
         ));
     }
 
-    let mut messages = Vec::new();
-    // Pass the raw path so Command applies exactly one layer of Windows argument
-    // quoting; sc.exe stores it verbatim. Pre-quoting would embed literal quotes.
-    if exists {
-        let mut command = hidden_command(SC_EXE);
-        command
-            .arg("config")
-            .arg(&service.service_name)
-            .arg("binPath=")
-            .arg(binary_path);
-        run_checked(&mut command, "service_config_failed", &service.service_name)?;
-        messages.push(format!("configured service {}", service.service_name));
+    let (verb, error_code, done) = if current.is_some() {
+        ("config", "service_config_failed", "configured")
     } else {
-        let mut command = hidden_command(SC_EXE);
-        command
-            .arg("create")
-            .arg(&service.service_name)
-            .arg("binPath=")
-            .arg(binary_path);
-        if let Some(start_type) = service.start_type.as_deref().and_then(sc_start_type) {
-            command.arg("start=").arg(start_type);
-        }
-        run_checked(&mut command, "service_create_failed", &service.service_name)?;
-        messages.push(format!("created service {}", service.service_name));
-    }
+        ("create", "service_create_failed", "created")
+    };
+    let mut command = hidden_command(SC_EXE);
+    command.args(sc_service_arguments(
+        verb,
+        service,
+        binary_path,
+        arguments,
+        account,
+    ));
+    run_checked(&mut command, error_code, name)?;
+    let messages = vec![format!(
+        "{done} service {name} (runs as {})",
+        account.label()
+    )];
 
     if let Some(description) = service.description.as_deref() {
         let mut command = hidden_command(SC_EXE);
@@ -1563,10 +1652,6 @@ fn run_checked(
     ))
 }
 
-fn command_success(command: &mut Command) -> bool {
-    command.output().is_ok_and(|output| output.status.success())
-}
-
 fn scheduled_task_exists(task: &ScheduledTaskEntry) -> std::result::Result<bool, Warning> {
     let script = format!(
         "$task = Get-ScheduledTask -TaskName '{}' -TaskPath '{}' -ErrorAction SilentlyContinue; if ($null -eq $task) {{ exit 1 }}",
@@ -1631,6 +1716,84 @@ mod tests {
         };
 
         assert!(restore_package(&options).is_err());
+    }
+
+    fn sample_service() -> ServiceEntry {
+        ServiceEntry {
+            service_name: "AcmeSync".to_owned(),
+            display_name: Some("Acme Sync".to_owned()),
+            binary_path: PathBuf::from(r"C:\My Apps\Foo Bar\svc.exe"),
+            arguments: Some("--run".to_owned()),
+            parameters: Vec::new(),
+            start_type: Some("automatic".to_owned()),
+            account_name: Some(r"NT AUTHORITY\LocalService".to_owned()),
+            dependencies: Vec::new(),
+            description: None,
+            requires_admin: true,
+            restore_command_suggestion: String::new(),
+        }
+    }
+
+    fn strings(arguments: &[OsString]) -> Vec<String> {
+        arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// What reaches `sc.exe`, and so the registry, keeps its quotes and arguments.
+    #[test]
+    fn sc_receives_a_quoted_path_its_arguments_and_the_account() {
+        let service = sample_service();
+        let account =
+            ServiceAccount::from_recorded(service.account_name.as_deref(), &service.service_name);
+        let arguments = sc_service_arguments(
+            "create",
+            &service,
+            Path::new(r"D:\My Apps\Foo Bar\svc.exe"),
+            Some("--run"),
+            &account,
+        );
+        assert_eq!(
+            strings(&arguments),
+            [
+                "create",
+                "AcmeSync",
+                "binPath=",
+                r#""D:\My Apps\Foo Bar\svc.exe" --run"#,
+                "start=",
+                "auto",
+                "DisplayName=",
+                "Acme Sync",
+                "obj=",
+                r"NT AUTHORITY\LocalService",
+                "password=",
+                "",
+            ]
+        );
+        let mut command = hidden_command(SC_EXE);
+        command.args(&arguments);
+        let passed: Vec<_> = command.get_args().collect();
+        assert_eq!(passed[3], r#""D:\My Apps\Foo Bar\svc.exe" --run"#);
+    }
+
+    #[test]
+    fn a_service_with_no_recorded_account_passes_no_obj() {
+        let mut service = sample_service();
+        service.account_name = None;
+        service.display_name = None;
+        service.start_type = None;
+        let arguments = sc_service_arguments(
+            "config",
+            &service,
+            Path::new(r"D:\App\svc.exe"),
+            None,
+            &ServiceAccount::Unspecified,
+        );
+        assert_eq!(
+            strings(&arguments),
+            ["config", "AcmeSync", "binPath=", r#""D:\App\svc.exe""#]
+        );
     }
 
     fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
