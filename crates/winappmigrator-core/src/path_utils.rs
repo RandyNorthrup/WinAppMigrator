@@ -9,6 +9,7 @@ use winreg::enums::HKEY_LOCAL_MACHINE;
 const EXE_EXTENSION: &str = "exe";
 const WINDOWS_VERSION_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
 const SYSTEM_ROOT_VALUE: &str = "SystemRoot";
+const BUILD_NUMBER_VALUE: &str = "CurrentBuildNumber";
 const PROFILE_LIST_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
 const SYSTEM_DRIVE_MARKER: &str = "%SystemDrive%";
 const DEFAULT_SYSTEM_ROOT: &str = r"C:\Windows";
@@ -118,6 +119,25 @@ pub fn system_root() -> &'static Path {
     })
 }
 
+/// A path as Windows' own functions hand it back, without the `\\?\` they put on it.
+pub fn without_verbatim_prefix(path: &str) -> &str {
+    path.strip_prefix(r"\\?\").unwrap_or(path)
+}
+
+/// Which build of Windows this is, from the admin-only registry. Zero if that cannot be read,
+/// which reads as older than anything.
+pub fn windows_build() -> u32 {
+    static BUILD: OnceLock<u32> = OnceLock::new();
+    *BUILD.get_or_init(|| {
+        RegKey::predef(HKEY_LOCAL_MACHINE)
+            .open_subkey(WINDOWS_VERSION_KEY)
+            .and_then(|key| key.get_value::<String, _>(BUILD_NUMBER_VALUE))
+            .ok()
+            .and_then(|build| build.trim().parse().ok())
+            .unwrap_or_default()
+    })
+}
+
 /// `ProgramData`, from the admin-only registry.
 pub fn program_data_dir() -> Option<&'static Path> {
     static FOLDER: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -141,13 +161,23 @@ pub fn user_profile_dir() -> Option<&'static Path> {
     FOLDER.get_or_init(query_user_profile).as_deref()
 }
 
+/// The SID of the account running this process, from `whoami`, because a variable could
+/// name any other.
+pub fn current_user_sid() -> Option<&'static str> {
+    static SID: OnceLock<Option<String>> = OnceLock::new();
+    SID.get_or_init(|| {
+        let output = hidden_command("whoami")
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()
+            .ok()?;
+        let line = String::from_utf8_lossy(&output.stdout);
+        sid_from_whoami_line(&line).map(str::to_owned)
+    })
+    .as_deref()
+}
+
 fn query_user_profile() -> Option<PathBuf> {
-    let output = hidden_command("whoami")
-        .args(["/user", "/fo", "csv", "/nh"])
-        .output()
-        .ok()?;
-    let line = String::from_utf8_lossy(&output.stdout);
-    let sid = sid_from_whoami_line(&line)?;
+    let sid = current_user_sid()?;
     let recorded = RegKey::predef(HKEY_LOCAL_MACHINE)
         .open_subkey(format!(r"{PROFILE_LIST_KEY}\{sid}"))
         .and_then(|key| key.get_value::<String, _>("ProfileImagePath"))
@@ -519,6 +549,12 @@ mod tests {
         let script = format!("{POWERSHELL_UTF8_OUTPUT}Write-Output 'größe'");
         assert_eq!(powershell_output(&script)?.trim_end(), "größe");
         Ok(())
+    }
+
+    #[test]
+    fn this_windows_has_a_build_number_and_this_account_a_sid() {
+        assert!(windows_build() > 0);
+        assert!(current_user_sid().is_some_and(|sid| sid.starts_with("S-1-")));
     }
 
     #[test]

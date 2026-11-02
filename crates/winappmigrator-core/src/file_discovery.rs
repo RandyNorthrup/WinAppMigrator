@@ -16,12 +16,16 @@ use crate::models::{
 use crate::path_utils::{
     file_name_string, is_auxiliary_executable, is_drive_root, path_has_extension, path_is_within,
     program_data_dir, public_profile_dir, strip_prefix_ignore_case, user_profile_dir,
+    windows_build,
 };
-use crate::privilege::hold_folder;
+use crate::privilege::{hold_folder, hold_real_folder};
 use crate::product_match::{MatchScope, ProductNames};
 use crate::system_context::SystemContext;
 
 const MAX_WALK_DEPTH: usize = 24;
+/// The first build of Windows 11. From here on, a device's name with an extension, such as
+/// `aux.h`, is an ordinary file.
+const FIRST_BUILD_WITH_ORDINARY_DEVICE_EXTENSIONS: u32 = 22000;
 /// `User Shell Folders` holds the (possibly redirected) per-user known-folder
 /// paths as `REG_EXPAND_SZ` values such as `%USERPROFILE%\Documents`.
 const USER_SHELL_FOLDERS_KEY: &str =
@@ -263,6 +267,43 @@ pub fn ensure_within_root(root: &Path, candidate: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Hold every folder from below `root` to the one `candidate` is in, then check the path
+/// with [`ensure_within_root`]. Used to delete or put back a file with full rights, where a
+/// folder swapped for a link in the moment after the check would carry that somewhere else.
+/// Each folder is opened as what has that name, not what a link points at, and while held it
+/// cannot be swapped, so what this checked is what the caller acts on. Keep the result until
+/// done. Holding `root` and above is the caller's business, since it can be a mounted volume.
+pub(crate) fn hold_path_below_root(root: &Path, candidate: &Path) -> Result<Vec<fs::File>> {
+    let relative = strip_prefix_ignore_case(candidate, root)
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .ok_or_else(|| {
+            WinAppMigratorError::InvalidInput(format!(
+                "path escapes intended root: {}",
+                candidate.display()
+            ))
+        })?;
+    let mut holds = Vec::new();
+    let mut current = root.to_path_buf();
+    if let Some(folders) = relative.parent() {
+        for component in folders.components() {
+            current.push(component);
+            match hold_real_folder(&current) {
+                Ok(hold) => holds.push(hold),
+                // Nothing below a missing folder can exist.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_) => {
+                    return Err(WinAppMigratorError::InvalidInput(format!(
+                        "refusing to go through a link: {}",
+                        current.display()
+                    )));
+                }
+            }
+        }
+    }
+    ensure_within_root(root, candidate)?;
+    Ok(holds)
+}
+
 /// Create the install location, hold it open, and confirm it is a real folder. Run once,
 /// before anything is written: a junction planted there would carry the whole install
 /// somewhere else. The result keeps it and the folders above it from being renamed and
@@ -304,8 +345,7 @@ pub fn write_root_for(destination: &Path, target_root: &Path) -> Option<PathBuf>
 
 /// True for the names Windows opens as a device instead of a file. A trailing dot or space
 /// changes nothing. With an extension, as in `aux.h`, Windows 11 treats it as an ordinary
-/// file, and Windows 10 does not. Opening one there reaches the device or fails, which
-/// harms nothing and shows up as an error, so only a real app's file is at stake either way.
+/// file and Windows 10 does not, and [`opens_as_device_on`] is what knows that.
 pub fn is_reserved_device_name(component: &str) -> bool {
     let upper = component.trim_end_matches(['.', ' ']).to_ascii_uppercase();
     if matches!(
@@ -343,14 +383,41 @@ pub fn has_reserved_device_name(path: &Path) -> bool {
     })
 }
 
-fn reject_reserved_device_names(path: &Path) -> Result<()> {
+/// True when this build of Windows would open a file or folder with this name as a device.
+/// Before Windows 11, `aux.h` reaches `AUX` and `nul.txt` reaches `NUL`. Unpacking one there
+/// would throw its data away, or hang writing to a real serial port. This cannot be run on
+/// anything older than the Windows 11 it was written on, so it goes by the documented rule.
+fn opens_as_device_on(component: &str, windows_build: u32) -> bool {
+    is_reserved_device_name(component)
+        || (windows_build < FIRST_BUILD_WITH_ORDINARY_DEVICE_EXTENSIONS
+            && component
+                .split_once('.')
+                .is_some_and(|(stem, _)| is_reserved_device_name(stem)))
+}
+
+fn reject_device_names_on(path: &Path, windows_build: u32) -> Result<()> {
     if has_reserved_device_name(path) {
         return Err(WinAppMigratorError::InvalidInput(format!(
             "path uses a name reserved for a Windows device: {}",
             path.display()
         )));
     }
+    let older_windows_device = path.components().any(|component| match component {
+        Component::Normal(value) => opens_as_device_on(&value.to_string_lossy(), windows_build),
+        _ => false,
+    });
+    if older_windows_device {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "{} has a name that this version of Windows opens as a device and not as a file, so \
+             nothing was written to it. It can be installed on Windows 11",
+            path.display()
+        )));
+    }
     Ok(())
+}
+
+fn reject_reserved_device_names(path: &Path) -> Result<()> {
+    reject_device_names_on(path, windows_build())
 }
 
 /// Refuse a path relative to some root unless every part of it is an ordinary name.
@@ -1417,6 +1484,72 @@ mod tests {
             .arg(target)
             .output()
             .is_ok_and(|output| output.status.success())
+    }
+
+    #[test]
+    fn before_windows_11_a_devices_name_with_an_extension_is_refused_with_a_clear_message() {
+        const WINDOWS_10: u32 = 19045;
+        const WINDOWS_11: u32 = 22621;
+        for name in ["aux.h", "NUL.txt", "com1.log", "con.tar.gz", "LPT3.dat"] {
+            let path = Path::new("include").join(name);
+            assert!(reject_device_names_on(&path, WINDOWS_11).is_ok(), "{name}");
+            let refused = reject_device_names_on(&path, WINDOWS_10);
+            assert!(
+                matches!(&refused, Err(WinAppMigratorError::InvalidInput(message))
+                    if message.contains("opens as a device") && message.contains(name)),
+                "{name}: {refused:?}"
+            );
+            // A build that cannot be read counts as old, which fails and says so.
+            assert!(reject_device_names_on(&path, 0).is_err(), "{name}");
+        }
+        for name in [
+            "auxiliary.h",
+            "console.txt",
+            "com10.log",
+            "aux_h",
+            "readme.aux",
+        ] {
+            let path = Path::new("include").join(name);
+            assert!(reject_device_names_on(&path, WINDOWS_10).is_ok(), "{name}");
+        }
+        // A folder's name counts too, and with no extension no Windows takes it as a file.
+        assert!(reject_device_names_on(Path::new(r"aux.d\file.txt"), WINDOWS_10).is_err());
+        assert!(reject_device_names_on(Path::new(r"aux.d\file.txt"), WINDOWS_11).is_ok());
+        assert!(reject_device_names_on(Path::new("aux"), WINDOWS_11).is_err());
+    }
+
+    #[test]
+    fn holding_the_way_to_a_file_refuses_a_link_on_the_way() -> Result<()> {
+        let base = temp_base()?;
+        let root = base.path().join("root");
+        fs::create_dir_all(root.join(r"real\deep"))
+            .map_err(|error| WinAppMigratorError::io(&root, error))?;
+        let elsewhere = base.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere)
+            .map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
+        let made = crate::path_utils::hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(root.join("linked"))
+            .arg(&elsewhere)
+            .output()
+            .map_err(|error| WinAppMigratorError::io(&root, error))?;
+        assert!(made.status.success());
+
+        let holds = hold_path_below_root(&root, &root.join(r"real\deep\file.txt"))?;
+        assert_eq!(holds.len(), 2);
+        // Held, so it cannot be swapped for a link now.
+        assert!(fs::rename(root.join(r"real\deep"), root.join(r"real\moved")).is_err());
+        assert!(fs::rename(root.join("real"), root.join("moved")).is_err());
+        drop(holds);
+
+        assert!(hold_path_below_root(&root, &root.join(r"linked\file.txt")).is_err());
+        assert!(hold_path_below_root(&root, &elsewhere.join("file.txt")).is_err());
+        assert!(hold_path_below_root(&root, &root).is_err());
+        // A folder that is not there has nothing below it to go through.
+        assert!(hold_path_below_root(&root, &root.join(r"gone\file.txt")).is_ok());
+        Ok(())
     }
 
     fn temp_base() -> Result<tempfile::TempDir> {

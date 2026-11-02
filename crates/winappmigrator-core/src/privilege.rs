@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::windows::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use tempfile::TempDir;
@@ -29,6 +29,11 @@ const FILE_SHARE_READ: u32 = 0x0000_0001;
 const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 /// What lets `CreateFile` open a folder at all.
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+/// Opens whatever has the name, rather than what a link with that name points at.
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+/// Lets someone who is not elevated start a file, which is how Windows finds out from its
+/// manifest that it has to ask for elevation. No one but administrators can change it.
+const USERS_MAY_START_GRANT: &str = "*S-1-5-32-545:(RX)";
 
 /// Whether this process runs with full administrator rights.
 pub fn is_elevated() -> bool {
@@ -95,6 +100,12 @@ impl ProtectedFolder {
     pub fn path(&self) -> &Path {
         self.temp.path()
     }
+
+    /// Keep the folder from being removed when this is dropped, and go on holding it.
+    pub fn keep(self) -> (PathBuf, File) {
+        let Self { _hold: hold, temp } = self;
+        (temp.keep(), hold)
+    }
 }
 
 /// Hold a folder open with no delete sharing. While the result is alive, neither it nor
@@ -105,6 +116,103 @@ pub fn hold_folder(folder: &Path) -> io::Result<File> {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(folder)
+}
+
+/// [`hold_folder`], for a folder that must be the real thing. This opens whatever has that
+/// name and not what a link there points at, so what it checks is what it holds. Once held
+/// it cannot be swapped for a link, and a cloud placeholder, which redirects nothing, passes.
+pub fn hold_real_folder(folder: &Path) -> io::Result<File> {
+    let hold = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(folder)?;
+    if hold.metadata()?.is_dir() {
+        return Ok(hold);
+    }
+    Err(io::Error::other(format!(
+        "{} is a link or a file, not a folder",
+        folder.display()
+    )))
+}
+
+/// A folder elevated code keeps things in from one run to the next. It is used only if it
+/// is a real folder, administrators own it, and only they can change it. Its parent must
+/// exist.
+///
+/// Anyone can create a folder in `ProgramData`, so one may be there first, made by someone
+/// who can go on changing it, and whoever made it may hold a handle that keeps its rights
+/// after the permissions change. So one that fails the check is never adopted. An empty one
+/// is replaced, which also fails while anyone holds it open, and any other means an
+/// administrator has to look at it.
+///
+/// Without elevation there is no boundary to protect, as for [`ProtectedFolder`].
+pub fn ensure_protected_folder(folder: &Path) -> io::Result<()> {
+    match fs::create_dir(folder) {
+        Ok(()) => return protect_new_folder(folder),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    drop(hold_real_folder(folder)?);
+    match elevation() {
+        Some(true) => {}
+        Some(false) => return Ok(()),
+        None => return Err(unknown_elevation()),
+    }
+    if confirm_administrators_only(folder).is_ok() {
+        return Ok(());
+    }
+    fs::remove_dir(folder).map_err(|error| {
+        io::Error::other(format!(
+            "{} was not made by WinAppMigrator, and others can change what is in it. An \
+             administrator should check it and remove it: {error}",
+            folder.display()
+        ))
+    })?;
+    fs::create_dir(folder)?;
+    protect_new_folder(folder)
+}
+
+fn protect_new_folder(folder: &Path) -> io::Result<()> {
+    let _hold = hold_real_folder(folder)?;
+    protect_staging_folder(folder)
+}
+
+/// Check a folder [`ensure_protected_folder`] looks after, without changing anything. A
+/// failure means what is in it cannot be trusted.
+pub fn confirm_protected_folder(folder: &Path) -> io::Result<()> {
+    drop(hold_real_folder(folder)?);
+    match elevation() {
+        Some(true) => confirm_administrators_only(folder),
+        Some(false) => Ok(()),
+        None => Err(unknown_elevation()),
+    }
+}
+
+/// Let someone who is not elevated start a file in an administrators-only folder. They could
+/// not otherwise open it to find out it needs elevation. It stays theirs to read and not to
+/// change, and the folder stays closed to them. Without elevation there is nothing to add.
+pub fn allow_users_to_start(file: &Path) -> io::Result<()> {
+    if !is_elevated() {
+        return Ok(());
+    }
+    let output = hidden_command("icacls")
+        .arg(file)
+        .args(["/grant", USERS_MAY_START_GRANT])
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "could not let users start {}: {}{}",
+        file.display(),
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
+fn unknown_elevation() -> io::Error {
+    io::Error::other("could not tell whether this process is elevated")
 }
 
 /// Make a freshly created staging folder writable only by administrators, so a process
@@ -123,9 +231,7 @@ fn protect_staging_folder(folder: &Path) -> io::Result<()> {
             refuse_anything_already_inside(folder)
         }
         Some(false) => Ok(()),
-        None => Err(io::Error::other(
-            "could not tell whether this process is elevated",
-        )),
+        None => Err(unknown_elevation()),
     }
 }
 
@@ -432,6 +538,71 @@ mod tests {
 
         drop(hold);
         fs::rename(&above, parent.path().join("moved"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn holding_a_real_folder_refuses_a_link_and_a_file() -> io::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let real = parent.path().join("real");
+        fs::create_dir(&real)?;
+        let link = parent.path().join("link");
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&link)
+            .arg(&real)
+            .output()?;
+        assert!(made.status.success());
+        let file = parent.path().join("file.txt");
+        fs::write(&file, b"x")?;
+
+        assert!(hold_real_folder(&real).is_ok());
+        assert!(hold_real_folder(&link).is_err());
+        assert!(hold_real_folder(&file).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_kept_folder_stays_after_it_is_dropped() -> io::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let folder = ProtectedFolder::new_in(parent.path(), "kept-")?;
+        let (path, hold) = folder.keep();
+        drop(hold);
+        assert!(path.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn a_folder_that_lasts_is_made_once_and_then_used_as_it_is() -> io::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let folder = parent.path().join("state");
+        ensure_protected_folder(&folder)?;
+        fs::write(folder.join("kept.txt"), b"x")?;
+        ensure_protected_folder(&folder)?;
+        confirm_protected_folder(&folder)?;
+        assert!(folder.join("kept.txt").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn a_link_is_not_used_as_a_folder_that_lasts() -> io::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let elsewhere = parent.path().join("elsewhere");
+        fs::create_dir(&elsewhere)?;
+        let link = parent.path().join("state");
+        let made = hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&link)
+            .arg(&elsewhere)
+            .output()?;
+        assert!(made.status.success());
+
+        assert!(ensure_protected_folder(&link).is_err());
+        assert!(confirm_protected_folder(&link).is_err());
         Ok(())
     }
 

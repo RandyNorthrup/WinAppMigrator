@@ -19,6 +19,10 @@ const SERVICE_KERNEL_DRIVER: u32 = 0x0000_0001;
 const SERVICE_FILE_SYSTEM_DRIVER: u32 = 0x0000_0002;
 const SERVICE_RECOGNIZER_DRIVER: u32 = 0x0000_0008;
 const PARAMETERS_SUBKEY: &str = "Parameters";
+const AUTOMATIC_START: u32 = 2;
+const DELAYED_AUTOSTART_VALUE: &str = "DelayedAutostart";
+/// How a delayed automatic start is recorded in `ServiceEntry::start_type`.
+pub(crate) const DELAYED_AUTOMATIC_START_LABEL: &str = "delayed-automatic";
 /// What an unquoted `ImagePath` can end in. Without quotes, nothing else says where a
 /// path with spaces stops and its arguments start.
 const IMAGE_EXTENSIONS: [&str; 5] = [".exe", ".sys", ".dll", ".com", ".bat"];
@@ -80,10 +84,13 @@ pub fn scan_services(
         let display_name = service_key.get_value::<String, _>("DisplayName").ok();
         let description = service_key.get_value::<String, _>("Description").ok();
         let account_name = service_key.get_value::<String, _>("ObjectName").ok();
+        let delayed = service_key
+            .get_value::<u32, _>(DELAYED_AUTOSTART_VALUE)
+            .is_ok_and(|value| value != 0);
         let start_type = service_key
             .get_value::<u32, _>("Start")
             .ok()
-            .map(start_type_label);
+            .map(|start| service_start_type_label(start, delayed));
         let dependencies = service_key
             .get_value::<Vec<String>, _>("DependOnService")
             .unwrap_or_default();
@@ -275,6 +282,16 @@ fn path_eq(left: &Path, right: &Path) -> bool {
         .eq_ignore_ascii_case(&right.to_string_lossy())
 }
 
+/// A service set to start automatically can also be set to wait until the PC has settled,
+/// which is kept in a value of its own.
+fn service_start_type_label(start: u32, delayed: bool) -> String {
+    if start == AUTOMATIC_START && delayed {
+        DELAYED_AUTOMATIC_START_LABEL.to_owned()
+    } else {
+        start_type_label(start)
+    }
+}
+
 fn start_type_label(value: u32) -> String {
     match value {
         0 => "boot",
@@ -389,6 +406,15 @@ fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_delayed_start_is_kept_apart_from_a_plain_automatic_one() {
+        assert_eq!(service_start_type_label(2, true), "delayed-automatic");
+        assert_eq!(service_start_type_label(2, false), "automatic");
+        // The value means nothing for any other start type.
+        assert_eq!(service_start_type_label(3, true), "manual");
+        assert_eq!(service_start_type_label(4, true), "disabled");
+    }
 
     const WINDOWS: &str = r"C:\Windows";
 
