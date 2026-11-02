@@ -24,6 +24,8 @@ const COLUMN_GUTTER: f32 = 12.0;
 const COLUMN_FRACTIONS: [f32; 5] = [0.38, 0.25, 0.14, 0.13, 0.10];
 /// How many warnings to list before summarizing the rest.
 const MAX_LISTED_WARNINGS: usize = 200;
+/// How many accounts' names fit across the details panel, of a width anyone would have.
+const MAX_PROFILES_IN_A_ROW: usize = 3;
 
 const COLUMNS: [(&str, SortColumn); 5] = [
     ("Name", SortColumn::Name),
@@ -384,6 +386,7 @@ impl WinAppMigratorApp {
         }
         self.selected_app_index = Some(index);
         self.output_dir = crate::default_output_for(&self.apps[index].display_name);
+        self.start_profile_lookup(self.apps[index].clone());
         // A fresh selection starts a fresh migration result.
         self.migrate_state = OperationState::Idle;
         self.last_outcome = None;
@@ -459,8 +462,7 @@ impl WinAppMigratorApp {
             theme,
             &mut always,
             "Program files and registry",
-            "Always included, with services, tasks, and runtimes. Shortcuts too, when building \
-             from this PC.",
+            "Always included, with services, tasks, shortcuts, and runtimes.",
             false,
         );
         widgets::option_row(
@@ -479,6 +481,7 @@ impl WinAppMigratorApp {
             "Settings, Documents, Saved Games, and ProgramData.",
             enabled,
         );
+        self.draw_profile_choice(ui, theme, enabled);
 
         ui.add_space(SPACE_MD);
         widgets::path_field(
@@ -498,6 +501,51 @@ impl WinAppMigratorApp {
                 "Enter a full folder path, such as D:\\Installers.",
             );
         }
+    }
+
+    /// Whose data goes in, shown only when more than one account has any, or when something about
+    /// that is worth saying. An installer holds one account's.
+    fn draw_profile_choice(&mut self, ui: &mut egui::Ui, theme: &Theme, enabled: bool) {
+        let Some(picker) = self.profile_picker.clone() else {
+            return;
+        };
+        if let Some(note) = picker.note.as_deref() {
+            ui.add_space(SPACE_SM);
+            widgets::notice(ui, theme, Role::Warning, note);
+        }
+        if !self.backup_user_data || !picker.offers_a_choice() {
+            return;
+        }
+        ui.add_space(SPACE_SM);
+        widgets::field_label(ui, theme, "Whose data");
+        ui.add_space(2.0);
+        let mut chosen = picker
+            .rows
+            .iter()
+            .position(|row| self.chosen_profile.as_deref() == Some(row.id.as_str()));
+        for (row_number, rows) in picker.rows.chunks(MAX_PROFILES_IN_A_ROW).enumerate() {
+            let options: Vec<(&str, Option<usize>)> = rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let index = row_number * MAX_PROFILES_IN_A_ROW + index;
+                    (row.name.as_str(), Some(index))
+                })
+                .collect();
+            widgets::control_row(ui, |ui| {
+                widgets::segmented(ui, theme, &mut chosen, &options, enabled);
+            });
+        }
+        self.chosen_profile = chosen
+            .and_then(|index| picker.rows.get(index))
+            .map(|row| row.id.clone());
+        ui.add_space(SPACE_XS);
+        widgets::hint(
+            ui,
+            theme,
+            "An installer holds one account's data. It goes to whoever is signed in where it \
+             runs.",
+        );
     }
 
     pub(crate) fn output_dir_is_valid(&self) -> bool {

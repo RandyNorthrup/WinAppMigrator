@@ -9,8 +9,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 
 use winappmigrator_core::{
-    AppArchitecture, BuildStep, InstallScope, InstalledApp, PackageResult, VerificationReport,
-    Warning, WarningSeverity,
+    AppArchitecture, BuildStep, InstallScope, InstalledApp, PackageResult, ProfileChoice,
+    ProfilePicker, ProfileRow, VerificationReport, Warning, WarningSeverity,
 };
 
 use crate::theme::{Role, ThemeMode};
@@ -200,6 +200,121 @@ fn selected_app_offers_the_build() {
         );
         preview(&mut harness, &format!("selected-{name}"));
     }
+}
+
+fn profile_row(name: &str, is_default: bool) -> ProfileRow {
+    ProfileRow {
+        id: format!("id of {name}"),
+        name: name.to_owned(),
+        has_data: true,
+        is_default,
+    }
+}
+
+fn with_picker(app: &mut WinAppMigratorApp, picker: ProfilePicker) {
+    select_first(app);
+    app.picker_receiver = None;
+    app.chosen_profile = picker.selected.clone();
+    app.profile_picker = Some(picker);
+}
+
+#[test]
+fn with_one_account_there_is_nothing_to_choose() {
+    let mut harness = harness_with(ThemeMode::Dark, |app| {
+        with_picker(
+            app,
+            ProfilePicker {
+                rows: Vec::new(),
+                selected: Some("id of alice".to_owned()),
+                note: None,
+            },
+        );
+        app.backup_user_data = true;
+    });
+    harness.run_steps(1);
+    assert!(harness.query_by_label("Whose data").is_none());
+    assert_eq!(
+        harness.state().profile_choice(),
+        ProfileChoice::Profile("id of alice".to_owned())
+    );
+}
+
+#[test]
+fn accounts_with_data_can_be_chosen_between_and_a_build_goes_by_the_choice() {
+    let picker = ProfilePicker {
+        rows: vec![profile_row("alice", true), profile_row("bob", false)],
+        selected: Some("id of alice".to_owned()),
+        note: None,
+    };
+    let mut harness = harness_with(ThemeMode::Dark, |app| {
+        with_picker(app, picker);
+        app.backup_user_data = true;
+    });
+    harness.run_steps(1);
+    assert!(harness.query_by_label("Whose data").is_some());
+    assert_eq!(
+        harness.state().profile_choice(),
+        ProfileChoice::Profile("id of alice".to_owned())
+    );
+    preview(&mut harness, "profiles-dark");
+
+    harness.get_by_label("bob").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().profile_choice(),
+        ProfileChoice::Profile("id of bob".to_owned())
+    );
+}
+
+#[test]
+fn the_choice_is_about_user_data_and_only_shows_with_it() {
+    let picker = ProfilePicker {
+        rows: vec![profile_row("alice", true), profile_row("bob", false)],
+        selected: Some("id of alice".to_owned()),
+        note: None,
+    };
+    let mut harness = harness_with(ThemeMode::Dark, |app| {
+        with_picker(app, picker);
+        app.backup_user_data = false;
+    });
+    harness.run_steps(1);
+    assert!(harness.query_by_label("Whose data").is_none());
+}
+
+#[test]
+fn when_who_is_signed_in_cannot_be_told_that_is_said_and_no_one_is_assumed() {
+    let picker = ProfilePicker {
+        rows: vec![profile_row("alice", false), profile_row("bob", false)],
+        selected: None,
+        note: Some(
+            "Could not tell who is signed in (no reason). Choose whose data to include.".to_owned(),
+        ),
+    };
+    let mut harness = harness_with(ThemeMode::Dark, |app| {
+        with_picker(app, picker);
+        app.backup_user_data = true;
+    });
+    harness.run_steps(1);
+    assert!(
+        harness
+            .query_by_label_contains("Could not tell who is signed in")
+            .is_some()
+    );
+    assert_eq!(harness.state().profile_choice(), ProfileChoice::Nobody);
+    preview(&mut harness, "profiles-unknown-dark");
+
+    harness.get_by_label("alice").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().profile_choice(),
+        ProfileChoice::Profile("id of alice".to_owned())
+    );
+}
+
+#[test]
+fn before_the_accounts_have_been_looked_at_a_build_goes_by_the_default() {
+    let harness = harness_with(ThemeMode::Dark, select_first);
+    assert_eq!(harness.state().profile_choice(), ProfileChoice::Default);
 }
 
 #[test]

@@ -7,6 +7,7 @@ mod views;
 mod ui_tests;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,12 +15,13 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use winappmigrator_core::logging;
-use winappmigrator_core::path_utils::system_root;
+use winappmigrator_core::path_utils::{signed_in_user, signed_in_user_if_known, system_root};
 use winappmigrator_core::privilege::ProtectedFolder;
 use winappmigrator_core::{
     AppSelection, BuildMonitor, BuildStep, InstalledApp, InstallerStub, PackageOptions,
-    PackageResult, ScanSource, SystemContext, VerificationOptions, VerificationReport,
-    WinAppMigratorError, create_package_monitored, hidden_command, list_installed_apps_from,
+    PackageResult, ProfileChoice, ProfilePicker, ProfileSurvey, ScanSource, SystemContext,
+    VerificationOptions, VerificationReport, WinAppMigratorError, create_package_monitored,
+    hidden_command, list_installed_apps_from, survey_profiles, sweep_leaked_hive_mounts,
     verify_package,
 };
 use winappmigrator_ui::theme::{self, Theme, ThemeMode};
@@ -41,6 +43,12 @@ pub fn run() -> eframe::Result {
     logging::install("app");
     // Setting up the folder runs other programs, and nothing should wait for that.
     thread::spawn(logging::open_machine_log);
+    // A run that died can have left another PC's registry loaded. And who is signed in takes a
+    // moment to find out, and the app is about to want to know.
+    thread::spawn(|| {
+        sweep_leaked_hive_mounts();
+        signed_in_user();
+    });
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT])
         .with_min_inner_size([MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
@@ -151,6 +159,13 @@ pub struct WinAppMigratorApp {
     scan_source: ScanSource,
     /// A problem selecting the offline drive (not a Windows volume, etc.).
     source_error: Option<String>,
+    /// What was found about the accounts on that source, when its apps were listed.
+    profile_survey: Option<Arc<ProfileSurvey>>,
+    /// Whose data can go in an installer of the selected app, once that has been looked at.
+    profile_picker: Option<ProfilePicker>,
+    picker_receiver: Option<Receiver<ProfilePicker>>,
+    /// Whose data is to go in it, by account.
+    chosen_profile: Option<String>,
     /// Whether an installer stub exists to build from, checked once at startup.
     stub_available: bool,
     migrate_state: OperationState,
@@ -184,6 +199,10 @@ impl WinAppMigratorApp {
             backup_license: false,
             scan_source: ScanSource::Live,
             source_error: None,
+            profile_survey: None,
+            profile_picker: None,
+            picker_receiver: None,
+            chosen_profile: None,
             stub_available: installer_stub().is_some(),
             migrate_state: OperationState::Idle,
             migrate_receiver: None,
@@ -204,6 +223,10 @@ impl WinAppMigratorApp {
     fn start_inventory_load(&mut self) {
         self.inventory_state = InventoryState::Loading;
         self.selected_app_index = None;
+        self.profile_survey = None;
+        self.profile_picker = None;
+        self.picker_receiver = None;
+        self.chosen_profile = None;
         let (sender, receiver) = mpsc::channel();
         self.inventory_receiver = Some(receiver);
         // Build the source context (mounting offline hives if needed) on the
@@ -211,15 +234,47 @@ impl WinAppMigratorApp {
         let source = self.scan_source.clone();
         let ctx = self.ctx.clone();
         thread::spawn(move || {
-            let message = match SystemContext::open(&source)
-                .and_then(|system| list_installed_apps_from(&system))
-            {
-                Ok(apps) => InventoryMessage::Loaded(apps),
+            let listed =
+                SystemContext::open(&source).and_then(|system| list_installed_apps_from(&system));
+            let message = match listed {
+                // Not being able to read this says nothing about the apps. Each just goes by
+                // whoever it would be by default, and the app says what it could not tell.
+                Ok(apps) => {
+                    InventoryMessage::Loaded(apps, survey_profiles(&source).ok().map(Arc::new))
+                }
                 Err(error) => InventoryMessage::Failed(error.to_string()),
             };
             let _send_result = sender.send(message);
             ctx.request_repaint();
         });
+    }
+
+    /// Find out whose data can go in an installer of this app. It looks at folders, which on a
+    /// failing drive can take a while, so a window does not wait for that.
+    fn start_profile_lookup(&mut self, app: InstalledApp) {
+        self.profile_picker = None;
+        self.chosen_profile = None;
+        let Some(survey) = self.profile_survey.clone() else {
+            self.picker_receiver = None;
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        self.picker_receiver = Some(receiver);
+        let ctx = self.ctx.clone();
+        thread::spawn(move || {
+            let _send_result = sender.send(survey.picker_for(&app));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Whose data a build is to include. Until that has been looked at, or if it could not be, a
+    /// build goes by the default, which says what it could not tell.
+    fn profile_choice(&self) -> ProfileChoice {
+        match (self.profile_picker.as_ref(), self.chosen_profile.as_ref()) {
+            (Some(_), Some(id)) => ProfileChoice::Profile(id.clone()),
+            (Some(_), None) => ProfileChoice::Nobody,
+            (None, _) => ProfileChoice::Default,
+        }
     }
 
     /// Scan the live machine.
@@ -304,6 +359,7 @@ impl WinAppMigratorApp {
             include_user_data: self.backup_user_data,
             include_license_data: self.backup_license,
             source: self.scan_source.clone(),
+            user_profile: self.profile_choice(),
             // Record the active theme so the produced installer presents to match.
             ui_theme: self.theme.mode.as_tag().to_owned(),
         };
@@ -337,9 +393,23 @@ impl WinAppMigratorApp {
     }
 
     fn poll_workers(&mut self) {
+        if let Some(receiver) = self.picker_receiver.take() {
+            match receiver.try_recv() {
+                Ok(picker) => {
+                    self.chosen_profile = picker.selected.clone();
+                    self.profile_picker = Some(picker);
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.picker_receiver = Some(receiver);
+                    self.ctx.request_repaint_after(BUSY_REPAINT_INTERVAL);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+
         if let Some(receiver) = self.inventory_receiver.take() {
             match receiver.try_recv() {
-                Ok(InventoryMessage::Loaded(apps)) => {
+                Ok(InventoryMessage::Loaded(apps, survey)) => {
                     theme::add_fallback_fonts(
                         &self.ctx,
                         &fonts_dir(),
@@ -349,6 +419,7 @@ impl WinAppMigratorApp {
                         }),
                     );
                     self.apps = apps;
+                    self.profile_survey = survey;
                     self.inventory_state = InventoryState::Loaded;
                 }
                 Ok(InventoryMessage::Failed(error)) => {
@@ -444,6 +515,7 @@ struct BuildJob {
     include_user_data: bool,
     include_license_data: bool,
     source: ScanSource,
+    user_profile: ProfileChoice,
     ui_theme: String,
 }
 
@@ -500,7 +572,7 @@ fn run_build(
         bundle_prerequisites: true,
         // Read the app from the live OS or the connected offline drive.
         source: job.source,
-        user_profile: winappmigrator_core::ProfileChoice::Default,
+        user_profile: job.user_profile,
         ui_theme: Some(job.ui_theme),
     };
 
@@ -575,8 +647,12 @@ fn sanitized_app_label(app_name: &str) -> String {
 /// common path does not require the user to choose a folder manually.
 pub(crate) fn default_output_for(app_name: &str) -> String {
     let safe = sanitized_app_label(app_name);
-    let base = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
+    // The folders of the person at the PC, not those of an administrator named at the UAC prompt,
+    // which they could not get to. Only if that is known yet: nothing here should wait for it.
+    let base = signed_in_user_if_known()
+        .and_then(|signed_in| signed_in.account())
+        .map(|account| account.profile.clone())
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("WinAppMigrator")
         .join(if safe.is_empty() {
@@ -656,7 +732,7 @@ pub(crate) struct MigrationOutcome {
 }
 
 enum InventoryMessage {
-    Loaded(Vec<InstalledApp>),
+    Loaded(Vec<InstalledApp>, Option<Arc<ProfileSurvey>>),
     Failed(String),
 }
 
