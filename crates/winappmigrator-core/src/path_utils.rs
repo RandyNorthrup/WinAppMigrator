@@ -558,6 +558,115 @@ fn comparable_path(path: &Path) -> String {
     text.to_ascii_lowercase()
 }
 
+/// How deep to go where nothing says how deep. Far past anything real, and a walk holds one folder
+/// open for each level.
+pub const DEEPEST_WALK: usize = 64;
+
+/// What a walk came to.
+#[derive(Debug)]
+pub struct WalkedEntry {
+    pub path: PathBuf,
+    pub file_type: std::fs::FileType,
+}
+
+/// A folder a walk could not read.
+#[derive(Debug)]
+pub struct WalkFailure {
+    pub path: PathBuf,
+    pub error: std::io::Error,
+}
+
+impl std::fmt::Display for WalkFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.path.display(), self.error)
+    }
+}
+
+/// A folder's contents, with `may_look` asked about each thing, by its path and whether its listing
+/// calls it a folder, before anything is done with it. `walkdir` opens a folder before its filter
+/// sees it, and on a drive only opening one can connect to a share: what a listing calls the folder
+/// `x.` opens as the link `x` beside it. Links are not followed below the root.
+pub struct AskingWalk<F> {
+    open: Vec<std::fs::ReadDir>,
+    max_depth: usize,
+    may_look: F,
+    failed: Option<WalkFailure>,
+}
+
+pub fn walk_asking<F: FnMut(&Path, bool) -> bool>(
+    root: &Path,
+    max_depth: usize,
+    may_look: F,
+) -> AskingWalk<F> {
+    let mut walk = AskingWalk {
+        open: Vec::new(),
+        max_depth,
+        may_look,
+        failed: None,
+    };
+    if (walk.may_look)(root, true) {
+        walk.enter(root);
+    }
+    walk
+}
+
+impl<F> AskingWalk<F> {
+    fn enter(&mut self, folder: &Path) {
+        match std::fs::read_dir(folder) {
+            Ok(entries) => self.open.push(entries),
+            Err(error) => {
+                self.failed = Some(WalkFailure {
+                    path: folder.to_path_buf(),
+                    error,
+                });
+            }
+        }
+    }
+}
+
+impl<F: FnMut(&Path, bool) -> bool> Iterator for AskingWalk<F> {
+    type Item = Result<WalkedEntry, WalkFailure>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(failure) = self.failed.take() {
+                return Some(Err(failure));
+            }
+            let entry = match self.open.last_mut()?.next() {
+                Some(Ok(entry)) => entry,
+                Some(Err(error)) => {
+                    return Some(Err(WalkFailure {
+                        path: PathBuf::new(),
+                        error,
+                    }));
+                }
+                None => {
+                    self.open.pop();
+                    continue;
+                }
+            };
+            let path = entry.path();
+            // From the listing, which opens nothing. A link is neither a file nor a folder here.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !(self.may_look)(&path, file_type.is_dir()) {
+                continue;
+            }
+            if file_type.is_dir() && self.open.len() < self.max_depth {
+                self.enter(&path);
+            }
+            return Some(Ok(WalkedEntry { path, file_type }));
+        }
+    }
+}
+
+/// Whether a path climbs anywhere. Lexically, `C:\\app\\..\\..\\Users` is inside `C:\\app`.
+pub fn has_parent_step(path: &Path) -> bool {
+    path.components()
+        .any(|component| component == Component::ParentDir)
+}
+
 /// Whether a path is on a disk of this PC, going by how it is written. Only looking at a share
 /// connects to it, as whoever is looking, which here is an administrator. That is what a value in
 /// any account's registry could ask for, and `\\?\GLOBALROOT` and `\??\UNC` are other ways to say it.
@@ -895,6 +1004,50 @@ mod tests {
     fn this_windows_has_a_build_number_and_this_account_a_sid() {
         assert!(windows_build() > 0);
         assert!(current_user_sid().is_some_and(|sid| sid.starts_with("S-1-")));
+    }
+
+    #[test]
+    fn a_walk_asks_before_it_goes_in() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        std::fs::create_dir_all(work.path().join(r"a\deep\deeper"))?;
+        std::fs::create_dir_all(work.path().join("not this"))?;
+        std::fs::write(work.path().join(r"a\one.txt"), b"1")?;
+        std::fs::write(work.path().join(r"a\deep\two.txt"), b"2")?;
+        std::fs::write(work.path().join(r"a\deep\deeper\three.txt"), b"3")?;
+        std::fs::write(work.path().join(r"not this\four.txt"), b"4")?;
+        let names = |max_depth| -> Vec<String> {
+            let mut names: Vec<String> = walk_asking(work.path(), max_depth, |path, _| {
+                file_name_string(path) != "not this"
+            })
+            .flatten()
+            .filter(|entry| entry.file_type.is_file())
+            .map(|entry| file_name_string(&entry.path))
+            .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(DEEPEST_WALK), ["one.txt", "three.txt", "two.txt"]);
+        assert_eq!(names(3), ["one.txt", "two.txt"], "that far and no further");
+
+        let mut asked = 0;
+        let found = walk_asking(work.path(), DEEPEST_WALK, |_, _| {
+            asked += 1;
+            false
+        })
+        .count();
+        assert_eq!(
+            (found, asked),
+            (0, 1),
+            "not even the top, if the answer is no"
+        );
+
+        let missing = work.path().join("not there");
+        let failures: Vec<String> = walk_asking(&missing, DEEPEST_WALK, |_, _| true)
+            .filter_map(|entry| entry.err().map(|failure| failure.to_string()))
+            .collect();
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("not there"));
+        Ok(())
     }
 
     #[test]

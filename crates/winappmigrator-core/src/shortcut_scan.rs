@@ -1,15 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use walkdir::WalkDir;
 
 use crate::file_discovery::{
     DESKTOP_FALLBACK, DESKTOP_VALUE, START_MENU_FALLBACK, START_MENU_VALUE, user_folder_of,
 };
 use crate::models::{ShortcutEntry, Warning, WarningSeverity};
 use crate::path_utils::{
-    POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT,
+    DEEPEST_WALK, POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT,
     escape_powershell_single, hidden_command, path_has_extension, path_is_strictly_inside,
+    walk_asking,
 };
 use crate::system_context::SystemContext;
 
@@ -110,14 +110,9 @@ fn read_shortcuts_on_a_drive(
     let mut entries = Vec::new();
     let mut unreadable = Vec::new();
     for folder in folders {
-        for entry in WalkDir::new(folder)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|entry| system.may_read(entry.path()))
-            .flatten()
-        {
-            let path = entry.path();
-            if !entry.file_type().is_file() || !path_has_extension(path, SHORTCUT_EXTENSION) {
+        for entry in walk_asking(folder, DEEPEST_WALK, |path, _| system.may_read(path)).flatten() {
+            let path = entry.path.as_path();
+            if !entry.file_type.is_file() || !path_has_extension(path, SHORTCUT_EXTENSION) {
                 continue;
             }
             let Some(link) = read_shortcut_file(path).and_then(|data| read_lnk(&data)) else {

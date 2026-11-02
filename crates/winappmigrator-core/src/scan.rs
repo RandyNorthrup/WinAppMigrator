@@ -21,7 +21,9 @@ use crate::models::{
     RuntimePrerequisite, RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport,
     ScheduledTaskEntry, ServiceEntry, ShortcutEntry, Warning, WarningSeverity,
 };
-use crate::path_utils::{is_drive_root, looks_like_executable, path_is_within};
+use crate::path_utils::{
+    has_parent_step, is_drive_root, looks_like_executable, path_is_within, resolved_location,
+};
 use crate::pe_scan::scan_pe;
 use crate::registry_scan::{
     RegistryScanContext, recorded_keys_of_one_account, scan_registry_artifacts,
@@ -120,18 +122,26 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     let machine_record = source_app
         .as_ref()
         .filter(|_| !installed_for_one_account)
-        .and_then(|app| app.install_location.clone());
+        .and_then(|app| app.install_location.clone())
+        // As it is written, with no link on the way. On `C:\` any account may be able to make the
+        // folder it names, and make that a link to someone else's.
+        .filter(|recorded| {
+            let real = resolved_location(recorded);
+            path_is_within(&real, recorded) && path_is_within(recorded, &real)
+        });
     let is_someone_elses = |path: &Path| {
+        let is_where_its_record_says = machine_record
+            .as_deref()
+            .is_some_and(|recorded| path_is_within(path, recorded) && !has_parent_step(path));
         source_app.is_some()
-            && !machine_record
-                .as_deref()
-                .is_some_and(|recorded| path_is_within(path, recorded))
-            && system.is_in_another_profile(path)
+            && !is_where_its_record_says
+            && (system.is_in_another_profile(path)
+                || (installed_for_one_account && !system.is_the_accounts_own(path)))
     };
     if is_someone_elses(&executable_path) {
         return Err(WinAppMigratorError::InvalidInput(format!(
-            "{} is in another account's folders, and this app's own record does not say it belongs \
-             there, so it was not read.",
+            "{} is in another account's folders or is not this account's, and this app's own \
+             record does not say it belongs there, so it was not read.",
             executable_path.display()
         )));
     }
@@ -192,7 +202,8 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     .filter(|location| !is_someone_elses(location));
     let recorded_location = source_app
         .as_ref()
-        .and_then(|app| app.install_location.clone());
+        .and_then(|app| app.install_location.clone())
+        .filter(|location| !is_someone_elses(location));
     // What the report and the installer work from: files are stored relative to this
     // location, so the installer has to offer the same one.
     if let Some(app) = source_app.as_mut() {
@@ -282,7 +293,20 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     .iter()
     .filter_map(|root| system.resolve_source_path(root))
     .collect();
-    if let Some(source) = install_source.as_ref() {
+    if let Some(source) = install_source.as_mut() {
+        // What an install record says for an app of one account's is a file in that account's own
+        // folder, which could say anything. It goes no further than the app and that account.
+        if installed_for_one_account {
+            let stays = |path: &PathBuf| {
+                !has_parent_step(path)
+                    && (install_location
+                        .as_deref()
+                        .is_some_and(|location| path_is_within(path, location))
+                        || system.is_in_the_accounts_profile(path))
+            };
+            source.roots.retain(stays);
+            source.loose_files.retain(stays);
+        }
         extra_roots.extend(source.roots.iter().cloned());
     }
     let (file_inventory, footprint_locations, file_warnings) = discover_files(
@@ -294,6 +318,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             include_hashes: options.include_hashes,
             include_user_data: options.include_user_data,
             include_program_data: options.include_program_data,
+            installed_for_one_account,
             extra_roots,
             extra_files: install_source
                 .as_ref()

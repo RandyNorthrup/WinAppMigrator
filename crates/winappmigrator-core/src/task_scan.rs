@@ -1,12 +1,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use walkdir::WalkDir;
-
 use crate::models::{ScheduledTaskEntry, Warning, WarningSeverity};
 use crate::path_utils::{
-    POWERSHELL_IMPORT_TASKS, POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command,
-    path_is_strictly_inside,
+    DEEPEST_WALK, POWERSHELL_IMPORT_TASKS, POWERSHELL_UTF8_OUTPUT, escape_powershell_single,
+    hidden_command, path_is_strictly_inside, walk_asking,
 };
 use crate::restore_policy::{is_system_account, node_text};
 use crate::system_context::SystemContext;
@@ -153,11 +151,7 @@ fn for_each_task_file(
     visit: &mut dyn FnMut(TaskFile),
 ) -> Vec<Warning> {
     let mut warnings = Vec::new();
-    let entries = WalkDir::new(tasks_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| may_read(entry.path()));
-    for entry in entries {
+    for entry in walk_asking(tasks_root, DEEPEST_WALK, |path, _| may_read(path)) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -170,10 +164,10 @@ fn for_each_task_file(
                 continue;
             }
         };
-        if !entry.file_type().is_file() {
+        if !entry.file_type.is_file() {
             continue;
         }
-        match read_task_file(tasks_root, entry.path()) {
+        match read_task_file(tasks_root, &entry.path) {
             Ok(file) => visit(file),
             Err(reason) => warnings.push(Warning::new(
                 "scheduled_task_unreadable",
@@ -181,9 +175,9 @@ fn for_each_task_file(
                 format!(
                     "Could not read the scheduled task {}: {reason}. If it runs the app, it was \
                      not included.",
-                    entry.path().display()
+                    entry.path.display()
                 ),
-                Some(entry.path().display().to_string()),
+                Some(entry.path.display().to_string()),
             )),
         }
     }

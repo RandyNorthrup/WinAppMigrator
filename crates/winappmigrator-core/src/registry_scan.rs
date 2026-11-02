@@ -66,6 +66,9 @@ const MAX_REGISTRY_CAPTURE_DEPTH: usize = 8;
 const MAX_REGISTRY_CAPTURE_KEYS: usize = 512;
 /// Each value is kept as text and hex too, so this is a good deal more in memory.
 const MAX_REGISTRY_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
+/// Across everything captured for an app. A hive could otherwise have this many subtrees to take.
+const MAX_REGISTRY_ENTRIES: usize = 100_000;
+const MAX_REGISTRY_HEX_KEPT: usize = 512 * 1024 * 1024;
 const MAX_REGISTRY_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_REGISTRY_MATCH_SCAN_DEPTH: usize = 4;
 /// How far under `Software\<Vendor>` to look for a key recording the install folder.
@@ -694,6 +697,9 @@ fn scan_recorded_keys(
     warnings: &mut Vec<Warning>,
 ) {
     for recorded in &context.recorded_keys {
+        if entries.len() >= MAX_REGISTRY_ENTRIES {
+            break;
+        }
         for key_path in recorded_key_paths(recorded, &root.hive()) {
             let Ok(key) = root.open(&key_path, KEY_READ) else {
                 continue;
@@ -929,6 +935,15 @@ pub(crate) fn capture_hklm_subtree(
     entries
 }
 
+fn registry_capture_is_full(entries: &[RegistryEntry]) -> bool {
+    entries.len() >= MAX_REGISTRY_ENTRIES
+        || entries
+            .iter()
+            .map(|entry| entry.value_bytes_hex.as_ref().map_or(0, String::len))
+            .sum::<usize>()
+            >= MAX_REGISTRY_HEX_KEPT
+}
+
 fn capture_registry_subtree(
     root: &RegRoot,
     key_path: &str,
@@ -936,6 +951,20 @@ fn capture_registry_subtree(
     entries: &mut Vec<RegistryEntry>,
     warnings: &mut Vec<Warning>,
 ) {
+    if registry_capture_is_full(entries) {
+        if warnings
+            .last()
+            .is_none_or(|warning| warning.code != "registry_capture_truncated")
+        {
+            warnings.push(Warning::new(
+                "registry_capture_truncated",
+                WarningSeverity::Warning,
+                "Registry capture reached the configured safety limit.",
+                Some(key_path.to_owned()),
+            ));
+        }
+        return;
+    }
     let hive = root.hive();
     let mut context = RegistryCaptureContext {
         root,

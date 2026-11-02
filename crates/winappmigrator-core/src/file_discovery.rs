@@ -5,7 +5,6 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
 use winreg::RegKey;
 use winreg::enums::{HKEY_USERS, KEY_READ};
 
@@ -16,9 +15,10 @@ use crate::models::{
     Warning, WarningSeverity,
 };
 use crate::path_utils::{
-    UserAccount, file_name_string, is_auxiliary_executable, is_drive_root, path_has_extension,
-    path_is_strictly_inside, path_is_within, program_data_dir, public_profile_dir,
-    resolved_location, signed_in_user, strip_prefix_ignore_case, windows_build,
+    UserAccount, file_name_string, has_parent_step, is_auxiliary_executable, is_drive_root,
+    path_has_extension, path_is_strictly_inside, path_is_within, program_data_dir,
+    public_profile_dir, resolved_location, signed_in_user, strip_prefix_ignore_case, walk_asking,
+    windows_build,
 };
 use crate::privilege::{hold_folder, hold_real_folder, pin_held_folder};
 use crate::product_match::{MatchScope, ProductNames};
@@ -86,6 +86,10 @@ pub struct FileDiscoveryContext {
     pub include_hashes: bool,
     pub include_user_data: bool,
     pub include_program_data: bool,
+    /// Nothing machine-wide goes by the name of such an app. It could not have written to most of
+    /// those places, its name is whatever it says in its own registry, and in `ProgramData` a
+    /// folder of that name can be whatever any account or an administrator made it.
+    pub installed_for_one_account: bool,
     /// Additional roots discovered elsewhere (service binaries, shortcut
     /// targets, scheduled task actions, App Paths) to fold into the footprint.
     pub extra_roots: Vec<PathBuf>,
@@ -965,7 +969,7 @@ fn is_a_link(path: &Path) -> bool {
 /// link on the way. And another account's folder is its own, unless it is where this app is.
 fn may_take_from(path: &Path, install_root: Option<&Path>, system: &SystemContext) -> bool {
     system.may_read(path)
-        && (install_root.is_some_and(|root| path_is_within(path, root))
+        && (install_root.is_some_and(|root| path_is_within(path, root) && !has_parent_step(path))
             || !system.is_in_another_profile(path))
 }
 
@@ -1036,10 +1040,18 @@ fn collect_roots(
         push_root(&mut raw, extra.clone(), kind);
     }
 
-    collect_program_files_roots(names, &mut raw, system, warnings);
-    collect_program_data_roots(names, &mut raw, system, warnings);
+    if !context.installed_for_one_account {
+        collect_program_files_roots(names, &mut raw, system, warnings);
+        collect_program_data_roots(names, &mut raw, system, warnings);
+    }
     collect_appdata_roots(names, &mut raw, system, warnings);
-    collect_known_user_folder_roots(names, &mut raw, system, warnings);
+    collect_known_user_folder_roots(
+        names,
+        !context.installed_for_one_account,
+        &mut raw,
+        system,
+        warnings,
+    );
 
     let known_base_dirs = known_base_dirs(system);
     let windows_dir = system.windows_dir();
@@ -1150,6 +1162,7 @@ fn collect_appdata_roots(
 /// `User Shell Folders` registry key before falling back to the profile path.
 fn collect_known_user_folder_roots(
     names: &ProductNames,
+    include_machine_wide: bool,
     roots: &mut Vec<DiscoveryRoot>,
     system: &SystemContext,
     warnings: &mut Vec<Warning>,
@@ -1189,7 +1202,7 @@ fn collect_known_user_folder_roots(
     // Shared Public Documents: some apps keep machine-wide data here rather than
     // in ProgramData (e.g. YDIS's diagnostic database at
     // C:\Users\Public\Documents\YDIS_Data).
-    if let Some(public_documents) = public_documents_dir(system) {
+    if include_machine_wide && let Some(public_documents) = public_documents_dir(system) {
         collect_matching_dirs(
             &public_documents,
             FootprintKind::PublicDocuments,
@@ -1375,8 +1388,8 @@ pub(crate) fn collect_matching_dirs(
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let link = is_a_link(&path);
         let not_to_follow = is_not_to_follow(&path);
+        let link = !not_to_follow && is_a_link(&path);
         if (!not_to_follow && !path.is_dir()) || is_volatile_dir(&path, true) {
             continue;
         }
@@ -1462,15 +1475,10 @@ fn discover_tree(
     warnings: &mut Vec<Warning>,
 ) {
     let prune_volatile = holds_disposable_data(&root.kind);
-    let walker = WalkDir::new(&root.path)
-        .max_depth(MAX_WALK_DEPTH)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| {
-            // Asked of each by name, not by what the listing says it is. See `collect_matching_dirs`.
-            system.may_read(entry.path())
-                && (!prune_volatile || !is_volatile_dir(entry.path(), entry.file_type().is_dir()))
-        });
+    // Asked about by name before each is looked at. See `walk_asking`.
+    let walker = walk_asking(&root.path, MAX_WALK_DEPTH, |path, is_dir| {
+        system.may_read(path) && (!prune_volatile || !is_volatile_dir(path, is_dir))
+    });
 
     for entry in walker {
         let entry = match entry {
@@ -1485,11 +1493,11 @@ fn discover_tree(
                 continue;
             }
         };
-        if entry.file_type().is_file() {
+        if entry.file_type.is_file() {
             add_file(
                 files,
                 seen,
-                entry.path(),
+                &entry.path,
                 install_root,
                 root.kind.clone(),
                 include_hashes,
@@ -2507,6 +2515,7 @@ mod tests {
                 include_hashes: false,
                 include_user_data: true,
                 include_program_data: true,
+                installed_for_one_account: false,
                 extra_roots: vec![bob.join(r"AppData\Roaming\Taxes"), volume.join("Elsewhere")],
                 extra_files: vec![bob.join(r"Documents\letter.txt")],
             },
@@ -2862,6 +2871,7 @@ mod tests {
             include_hashes: false,
             include_user_data: true,
             include_program_data: true,
+            installed_for_one_account: false,
             extra_roots: Vec::new(),
             extra_files: Vec::new(),
         };
@@ -3050,6 +3060,7 @@ mod tests {
                 include_hashes: false,
                 include_user_data: true,
                 include_program_data: true,
+                installed_for_one_account: false,
                 extra_roots: vec![recorded.clone()],
                 extra_files: vec![loose.clone()],
             },

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,7 +20,9 @@ use crate::models::{
     RegistryEntry, RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions, ScanReport,
     ScheduledTaskEntry, Warning, WarningSeverity,
 };
-use crate::path_utils::{hidden_command, is_on_a_local_disk, sanitize_filename};
+use crate::path_utils::{
+    DEEPEST_WALK, hidden_command, is_on_a_local_disk, sanitize_filename, walk_asking,
+};
 use crate::prerequisites::PREREQUISITES_DIR;
 use crate::privilege::ProtectedFolder;
 use crate::progress::{BuildMonitor, BuildStep};
@@ -91,7 +92,7 @@ pub fn create_package_monitored(
 
     // The scan looked before anything was read, and this looks again just before, as anything
     // read from here on goes in the package.
-    let mut reader = SourceReader::new(&report);
+    let reader = SourceReader::new(&report);
     let total_files = report
         .file_inventory
         .iter()
@@ -125,6 +126,7 @@ pub fn create_package_monitored(
         match reader
             .check(&file.path)
             .and_then(|()| copy_file_preserving_basic_metadata(&file.path, &destination))
+            .and_then(|()| reader.check_after_copying(&file.path))
             .and_then(|()| staged_fingerprint(&destination))
         {
             Ok(fingerprint) => {
@@ -168,7 +170,7 @@ pub fn create_package_monitored(
     let license_artifacts_detected = package_license_artifacts(
         &options.output_dir,
         &report.license_artifacts,
-        &mut reader,
+        &reader,
         &mut warnings,
     );
 
@@ -182,12 +184,8 @@ pub fn create_package_monitored(
         &report.runtime_prerequisites,
         &mut warnings,
     );
-    let drivers_detected = package_drivers(
-        &options.output_dir,
-        &report.drivers,
-        &mut reader,
-        &mut warnings,
-    );
+    let drivers_detected =
+        package_drivers(&options.output_dir, &report.drivers, &reader, &mut warnings);
 
     let manifest = PackageManifest {
         schema_version: PACKAGE_SCHEMA_VERSION.to_owned(),
@@ -272,7 +270,6 @@ pub fn create_package_monitored(
 /// that is simply where it is.
 struct SourceReader {
     volume: Option<VolumeMap>,
-    checked: HashSet<String>,
     other_accounts: OtherAccountsFolders,
 }
 
@@ -280,16 +277,16 @@ impl SourceReader {
     fn new(report: &ScanReport) -> Self {
         Self {
             volume: report.source_volume.clone(),
-            checked: HashSet::new(),
             other_accounts: report.other_accounts.clone(),
         }
     }
 
     /// Fails for a path on a drive that goes off it or through a link, and on this PC, for one that
-    /// is not on a disk here, or that leads into another account's folders by now.
-    fn check(&mut self, path: &Path) -> Result<()> {
+    /// is not on a disk here, or that leads into another account's folders by now. All from the top
+    /// each time, since a folder that was fine for the last file may not be now.
+    fn check(&self, path: &Path) -> Result<()> {
         let refusal = match self.volume.as_ref() {
-            Some(volume) if !volume.may_read_noting(path, &mut self.checked) => {
+            Some(volume) if !volume.may_read(path) => {
                 Some("goes through a link or is not on the connected drive")
             }
             None if !is_on_a_local_disk(path) => Some("is not on a disk of this PC"),
@@ -305,8 +302,18 @@ impl SourceReader {
         }
     }
 
+    /// [`Self::check`] again once a file has been copied, on this PC. Looking twice leaves only a
+    /// link that is made and undone again around the moment it is opened. A drive that may be
+    /// failing is not asked for that, and nothing is expected to be changing it.
+    fn check_after_copying(&self, path: &Path) -> Result<()> {
+        if self.volume.is_some() {
+            return Ok(());
+        }
+        self.check(path)
+    }
+
     /// Where something the source PC calls `logical` can be read, if it can.
-    fn locate(&mut self, logical: &Path) -> Result<PathBuf> {
+    fn locate(&self, logical: &Path) -> Result<PathBuf> {
         let located = match self.volume.as_ref() {
             Some(volume) => volume.to_volume(logical).ok_or_else(|| {
                 WinAppMigratorError::InvalidInput(format!(
@@ -464,7 +471,7 @@ fn plan_one_prerequisite(
 fn package_drivers(
     output_dir: &Path,
     drivers: &[DriverEntry],
-    reader: &mut SourceReader,
+    reader: &SourceReader,
     warnings: &mut Vec<Warning>,
 ) -> Vec<DriverEntry> {
     let mut packaged = Vec::with_capacity(drivers.len());
@@ -532,7 +539,7 @@ fn package_drivers(
 fn package_license_artifacts(
     output_dir: &Path,
     artifacts: &[LicenseArtifact],
-    reader: &mut SourceReader,
+    reader: &SourceReader,
     warnings: &mut Vec<Warning>,
 ) -> Vec<LicenseArtifact> {
     let mut packaged = Vec::with_capacity(artifacts.len());
@@ -564,7 +571,7 @@ fn package_license_artifacts(
 fn package_one_license_artifact(
     output_dir: &Path,
     artifact: &mut LicenseArtifact,
-    reader: &mut SourceReader,
+    reader: &SourceReader,
     warnings: &mut Vec<Warning>,
 ) -> bool {
     let Some(logical) = artifact.path.clone() else {
@@ -606,18 +613,16 @@ fn package_one_license_artifact(
 fn copy_license_store(
     source: &Path,
     destination: &Path,
-    reader: &mut SourceReader,
+    reader: &SourceReader,
     warnings: &mut Vec<Warning>,
 ) -> Vec<LicenseStoreFile> {
     let mut copied = Vec::new();
-    // Each is asked about, by name. Nothing is followed, not even at the top: it was a folder when
-    // it was scanned, and any account can make what is there now.
-    let entries = walkdir::WalkDir::new(source)
-        .follow_links(false)
-        .follow_root_links(false)
-        .into_iter()
-        .filter_entry(|entry| reader.check(entry.path()).is_ok());
-    for entry in entries {
+    // Nothing is followed, not even at the top: it was a folder when it was scanned, and any account
+    // can make what is there now.
+    if fs::symlink_metadata(source).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return copied;
+    }
+    for entry in walk_asking(source, DEEPEST_WALK, |path, _| reader.check(path).is_ok()) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -630,17 +635,18 @@ fn copy_license_store(
                 continue;
             }
         };
-        if !entry.file_type().is_file() {
+        if !entry.file_type.is_file() {
             continue;
         }
-        let Ok(relative) = entry.path().strip_prefix(source) else {
+        let Ok(relative) = entry.path.strip_prefix(source) else {
             continue;
         };
         if has_reserved_device_name(relative) || relative.to_str().is_none() {
             continue;
         }
         let target = destination.join(safe_relative_path(relative));
-        match copy_file_preserving_basic_metadata(entry.path(), &target)
+        match copy_file_preserving_basic_metadata(&entry.path, &target)
+            .and_then(|()| reader.check_after_copying(&entry.path))
             .and_then(|()| staged_fingerprint(&target))
         {
             Ok((hash_sha256, size_bytes)) => copied.push(LicenseStoreFile {
@@ -654,7 +660,7 @@ fn copy_license_store(
                     "license_store_file_skipped",
                     WarningSeverity::Info,
                     format!("Skipped a license store file: {error}"),
-                    Some(entry.path().display().to_string()),
+                    Some(entry.path.display().to_string()),
                 ));
             }
         }
@@ -1068,17 +1074,12 @@ mod tests {
             .map_err(|error| WinAppMigratorError::io(&store, error))?;
         let mut warnings = Vec::new();
 
-        let mut reader = SourceReader {
+        let reader = SourceReader {
             volume: None,
-            checked: HashSet::new(),
             other_accounts: OtherAccountsFolders::default(),
         };
-        let mut copied = copy_license_store(
-            &store,
-            &root.path().join("stage"),
-            &mut reader,
-            &mut warnings,
-        );
+        let mut copied =
+            copy_license_store(&store, &root.path().join("stage"), &reader, &mut warnings);
         copied.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
 
         assert_eq!(copied.len(), 2);

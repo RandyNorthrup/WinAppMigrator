@@ -50,11 +50,11 @@ use crate::journal::machine_state_root;
 use crate::models::{Warning, WarningSeverity};
 use crate::package::copy_file_backup_mode;
 use crate::path_utils::{
-    SignedInUser, file_name_string, hidden_command, is_on_a_local_disk, is_person_sid,
-    path_is_within, resolved_location, signed_in_user, strip_prefix_ignore_case, system_root,
-    windows_build,
+    SignedInUser, file_name_string, has_parent_step, hidden_command, is_on_a_local_disk,
+    is_person_sid, path_is_within, resolved_location, signed_in_user, strip_prefix_ignore_case,
+    system_root, windows_build,
 };
-use crate::privilege::{ProtectedFolder, ensure_protected_folder, is_elevated};
+use crate::privilege::{ProtectedFolder, ensure_protected_folder, is_elevated, owner_of};
 
 /// Profile directory names under `Users\` that are not real user profiles.
 pub const NON_USER_PROFILE_NAMES: &[&str] = &["All Users", "Default", "Default User", "Public"];
@@ -348,7 +348,7 @@ fn mounted_user_key(mount: &str, classes: Option<&str>, logical: &str) -> String
 struct HiveMounts {
     id: String,
     next_folder: usize,
-    copied_bytes: u64,
+    bytes_left: u64,
     mounts: Vec<String>,
     // In this order, because a field drops in the order it is declared, and the folder cannot
     // be removed while anything in it is held.
@@ -390,7 +390,7 @@ impl HiveMounts {
         Ok(Self {
             id,
             next_folder: 0,
-            copied_bytes: 0,
+            bytes_left: MAX_HIVE_BYTES_IN_ALL,
             mounts: Vec::new(),
             _lease: lease,
             folder,
@@ -399,16 +399,9 @@ impl HiveMounts {
 
     /// Copy a hive here and load the copy, returning the key under `HKEY_LOCAL_MACHINE`.
     fn load(&mut self, label: &str, hive_file: &Path) -> Result<String> {
-        if self.copied_bytes >= MAX_HIVE_BYTES_IN_ALL {
-            return Err(WinAppMigratorError::InvalidInput(format!(
-                "{} was not read: this drive's registry hives add up to too much to be real",
-                hive_file.display()
-            )));
-        }
         let copy_folder = self.folder.path().join(self.next_folder.to_string());
         self.next_folder += 1;
-        let (copy, bytes) = copy_hive(hive_file, &copy_folder)?;
-        self.copied_bytes += bytes;
+        let copy = copy_hive(hive_file, &copy_folder, &mut self.bytes_left)?;
         let mount = format!("{MOUNT_PREFIX}{}_{label}", self.id);
         reg_load(&mount, &copy)?;
         self.mounts.push(mount.clone());
@@ -549,38 +542,39 @@ fn lease_is_held(lease: &Path) -> bool {
 /// copy replays them into the copy, so that what was on the drive is read in full and the drive
 /// is not written to. Failing to copy a log loses at most what it held, and says nothing is wrong
 /// with the hive.
-fn copy_hive(hive_file: &Path, into: &Path) -> Result<(PathBuf, u64)> {
+fn copy_hive(hive_file: &Path, into: &Path, bytes_left: &mut u64) -> Result<PathBuf> {
     let name = hive_file.file_name().ok_or_else(|| {
         WinAppMigratorError::InvalidInput(format!("not a hive file: {}", hive_file.display()))
     })?;
     fs::create_dir_all(into).map_err(|error| WinAppMigratorError::io(into, error))?;
     let copy = into.join(name);
-    let mut bytes = copy_a_hive_file(hive_file, &copy)?;
+    copy_a_hive_file(hive_file, &copy, bytes_left)?;
     for suffix in HIVE_LOG_SUFFIXES {
         let mut log_name = name.to_os_string();
         log_name.push(suffix);
         let log = hive_file.with_file_name(&log_name);
-        if fs::symlink_metadata(&log).is_ok_and(|metadata| metadata.is_file()) {
-            match copy_a_hive_file(&log, &into.join(&log_name)) {
-                Ok(size) => bytes += size,
-                Err(error) => warn!(%error, log = %log.display(), "could not copy a hive's log"),
-            }
+        if fs::symlink_metadata(&log).is_ok_and(|metadata| metadata.is_file())
+            && let Err(error) = copy_a_hive_file(&log, &into.join(&log_name), bytes_left)
+        {
+            warn!(%error, log = %log.display(), "could not copy a hive's log");
         }
     }
-    Ok((copy, bytes))
+    Ok(copy)
 }
 
 /// Hives are protected on a drive that kept its permissions, and its accounts are not this PC's,
 /// so a plain read may be refused where one in backup mode is not. A copy has to be writable to
 /// load, whatever the original was marked.
-fn copy_a_hive_file(source: &Path, destination: &Path) -> Result<u64> {
+fn copy_a_hive_file(source: &Path, destination: &Path, bytes_left: &mut u64) -> Result<()> {
     let size = fs::symlink_metadata(source).map_or(0, |metadata| metadata.len());
-    if size > MAX_HIVE_BYTES {
+    if size > MAX_HIVE_BYTES.min(*bytes_left) {
         return Err(WinAppMigratorError::InvalidInput(format!(
-            "{} is {size} bytes, too large to be a registry hive",
+            "{} is {size} bytes, too large to be a registry hive, or more than this drive's \
+             hives could add up to",
             source.display()
         )));
     }
+    *bytes_left -= size;
     // By reading it, since `fs::copy` also brings the streams stored under its name, of any size.
     match File::open(source) {
         Ok(from) => {
@@ -603,7 +597,7 @@ fn copy_a_hive_file(source: &Path, destination: &Path) -> Result<u64> {
         fs::set_permissions(destination, permissions)
             .map_err(|error| WinAppMigratorError::io(destination, error))?;
     }
-    Ok(metadata.len())
+    Ok(())
 }
 
 /// The hives of a drive, and what could be read from them. Only `SOFTWARE` is required.
@@ -1291,6 +1285,40 @@ impl SystemContext {
             .any(|folder| path_is_within(&path, folder))
     }
 
+    /// Whether a path is in the profile of the account this scan is about, by where it really is.
+    pub fn is_in_the_accounts_profile(&self, path: &Path) -> bool {
+        if !self.may_read(path) || has_parent_step(path) {
+            return false;
+        }
+        let real = resolved_location(path);
+        self.user_hives()
+            .iter()
+            .any(|user| path_is_within(&real, &resolved_location(&user.profile_dir)))
+    }
+
+    /// Whether what an app installed for one account says is its own could be. Its entry in that
+    /// account's registry takes no rights to write, and can name anything an administrator can
+    /// read, so it has to be in that account's profile, or that account has to own it. On a drive,
+    /// all of it is the owner's to read, and accounts there are checked by whose folder it is.
+    pub fn is_the_accounts_own(&self, path: &Path) -> bool {
+        if self.offline.is_some() || !is_elevated() {
+            return self.may_read(path);
+        }
+        if self.is_in_the_accounts_profile(path) {
+            return true;
+        }
+        if !self.may_read(path) || has_parent_step(path) {
+            return false;
+        }
+        owner_of(&resolved_location(path)).is_some_and(|owner| {
+            self.user_hives().iter().any(|user| {
+                user.sid
+                    .as_deref()
+                    .is_some_and(|sid| sid.eq_ignore_ascii_case(&owner))
+            })
+        })
+    }
+
     /// Where every account's folder is but those of who this scan is about.
     fn folders_of_others(&self) -> Vec<PathBuf> {
         let readers: Vec<String> = self
@@ -1759,13 +1787,20 @@ fn enumerate_user_hives(map: &VolumeMap) -> Vec<(String, PathBuf, PathBuf)> {
     };
     for entry in entries.flatten() {
         let profile_dir = entry.path();
+        // Asked first, by name: `x ` can be a link and read as the real `x` beside it, until
+        // something is asked for inside it.
+        if !map.may_read(&profile_dir) {
+            continue;
+        }
         let is_real_folder = fs::symlink_metadata(&profile_dir)
             .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
         if !is_real_folder || is_non_user_profile(&profile_dir) {
             continue;
         }
         let ntuser = profile_dir.join(NTUSER_DAT);
-        if fs::symlink_metadata(&ntuser).is_ok_and(|metadata| metadata.is_file()) {
+        if map.may_read(&ntuser)
+            && fs::symlink_metadata(&ntuser).is_ok_and(|metadata| metadata.is_file())
+        {
             let name = profile_dir
                 .file_name()
                 .and_then(|value| value.to_str())

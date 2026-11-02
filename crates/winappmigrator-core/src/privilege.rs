@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 use tempfile::TempDir;
 
-use crate::path_utils::{POWERSHELL_IMPORT_SECURITY, hidden_command};
+use crate::path_utils::{POWERSHELL_IMPORT_SECURITY, hidden_command, without_verbatim_prefix};
 
 /// SIDs rather than names, because the names are translated on other Windows languages.
 const ADMINISTRATORS_SID: &str = "*S-1-5-32-544";
@@ -20,6 +20,14 @@ const POWERSHELL_EXE: &str = "powershell.exe";
 /// The path travels in this variable, so that no quoting can go wrong.
 const ACL_PATH_VARIABLE: &str = "WAM_ACL_PATH";
 const READ_SDDL_SCRIPT: &str = "(Get-Acl -LiteralPath $env:WAM_ACL_PATH).Sddl";
+const READ_OWNER_SCRIPT: &str = "(Get-Acl -LiteralPath $env:WAM_ACL_PATH).\
+GetOwner([Security.Principal.SecurityIdentifier]).Value";
+/// Who owns what an elevated installer wrote: Administrators, SYSTEM, and TrustedInstaller.
+const ADMINISTRATIVE_OWNERS: &[&str] = &[
+    "S-1-5-32-544",
+    "S-1-5-18",
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+];
 /// The owner a protected folder has in SDDL, the form that reads the same in any language.
 const SDDL_ADMINISTRATORS_OWNER: &str = "O:BA";
 const SDDL_GROUP_MARKER: &str = "G:";
@@ -426,6 +434,36 @@ fn refuse_anything_already_inside(folder: &Path) -> io::Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Whose a file or folder is, as a SID: whoever made it, unless someone with the rights to changed
+/// that. `None` if that cannot be told.
+pub fn owner_of(path: &Path) -> Option<String> {
+    let text = path.to_string_lossy();
+    let output = hidden_command(POWERSHELL_EXE)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("{POWERSHELL_IMPORT_SECURITY}{READ_OWNER_SCRIPT}"),
+        ])
+        .env(ACL_PATH_VARIABLE, without_verbatim_prefix(&text))
+        .output()
+        .ok()?;
+    let owner = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (output.status.success() && owner.starts_with("S-1-")).then_some(owner)
+}
+
+/// Whether only someone with administrator rights could have written this file, going by who it
+/// says owns it. Without elevation there is no one to be fooled, since this reads only what its
+/// own account can.
+pub fn was_written_by_an_administrator(path: &Path) -> bool {
+    !is_elevated()
+        || owner_of(path).is_some_and(|owner| {
+            ADMINISTRATIVE_OWNERS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&owner))
+        })
 }
 
 pub fn target_requires_admin(target_root: &Path) -> bool {

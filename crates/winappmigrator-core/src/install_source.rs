@@ -18,15 +18,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use walkdir::WalkDir;
 use winreg::RegKey;
 use winreg::enums::{KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
-use crate::models::{InstallMethod, InstalledApp};
+use crate::models::{InstallMethod, InstallScope, InstalledApp};
 use crate::path_utils::{
     is_auxiliary_executable, is_drive_root, looks_like_executable, path_is_within,
-    split_command_executable_path,
+    split_command_executable_path, walk_asking,
 };
+use crate::privilege::was_written_by_an_administrator;
 use crate::product_match::{MatchScope, ProductNames};
 use crate::registry_scan::{RecordedRegistryKey, RecordedRegistryRoot, registry_value_text};
 use crate::shortcut_scan::{lnk_target_path, read_shortcut_file};
@@ -76,6 +76,29 @@ const EXECUTABLE_FOLDER_NAMES: &[&str] = &[
 /// updates. On a drive from elsewhere, one could be made big enough to run this out of memory.
 const MAX_INSTALL_LOG_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_APPX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Whether what an install log says can be taken at its word. It names files and registry values
+/// to package, and it is a file in the app's own folder, which any account may be able to write to
+/// if that folder is somewhere like `C:\Tools`. A machine-wide app's log is written by an
+/// administrator. An app of one account's is held to that account's own things anyway, and on a
+/// drive none of what it says can lead off the drive.
+fn record_can_be_believed(
+    app: &InstalledApp,
+    log: &Path,
+    system: &SystemContext,
+    evidence: &mut Vec<String>,
+) -> bool {
+    let believed = system.is_offline()
+        || app.install_scope == InstallScope::PerUser
+        || was_written_by_an_administrator(log);
+    if !believed {
+        evidence.push(format!(
+            "{} was not used: an administrator did not write it, so anyone could have",
+            log.display()
+        ));
+    }
+    believed
+}
 
 /// A file read whole, if it is of a size that makes sense for it.
 fn read_within(path: &Path, limit: u64, system: &SystemContext) -> Option<Vec<u8>> {
@@ -150,7 +173,9 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
             }
         }
         InstallMethod::InnoSetup => {
-            if let Some(log) = inno_log_for(app, system) {
+            if let Some(log) = inno_log_for(app, system)
+                .filter(|log| record_can_be_believed(app, log, system, &mut evidence))
+            {
                 let manifest = inno_manifest(&log, system);
                 if manifest.files.is_empty() {
                     evidence.push("Inno Setup uninstall log (unins000.dat)".to_owned());
@@ -172,7 +197,9 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
             // NSIS keeps no manifest by default, but the AdvUninstLog macro
             // writes an `uninstall.log` of installed paths in the install dir.
             if let Some(dir) = primary_install_dir(app)
-                && let Some(log) = find_nsis_log(&dir).filter(|log| system.may_read(log))
+                && let Some(log) = find_nsis_log(&dir).filter(|log| {
+                    system.may_read(log) && record_can_be_believed(app, log, system, &mut evidence)
+                })
             {
                 let files = nsis_manifest_files(&log, system);
                 if !files.is_empty() {
@@ -445,13 +472,12 @@ fn read_start_menu_shortcuts(system: &SystemContext) -> Vec<ShortcutHint> {
     }
     let mut shortcuts = Vec::new();
     for folder in folders.into_iter().filter(|folder| system.may_read(folder)) {
-        for entry in WalkDir::new(&folder)
-            .max_depth(MAX_START_MENU_DEPTH)
-            .into_iter()
-            .filter_entry(|entry| system.may_read(entry.path()))
-            .flatten()
+        for entry in walk_asking(&folder, MAX_START_MENU_DEPTH, |path, _| {
+            system.may_read(path)
+        })
+        .flatten()
         {
-            let path = entry.path();
+            let path = entry.path.as_path();
             if !path
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
@@ -461,7 +487,7 @@ fn read_start_menu_shortcuts(system: &SystemContext) -> Vec<ShortcutHint> {
             let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            if !entry.file_type().is_file() {
+            if !entry.file_type.is_file() {
                 continue;
             }
             let Some(target) = read_shortcut_file(path)
@@ -689,14 +715,12 @@ fn collect_dir_executables(dir: &Path, out: &mut Vec<PathBuf>, system: &SystemCo
 }
 
 fn collect_tree_executables(dir: &Path, out: &mut Vec<PathBuf>, system: &SystemContext) {
-    let executables = WalkDir::new(dir)
-        .max_depth(MAX_EXECUTABLE_SEARCH_DEPTH)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| system.may_read(entry.path()))
-        .flatten()
-        .filter(|entry| entry.file_type().is_file() && looks_like_executable(entry.path()))
-        .map(|entry| entry.into_path());
+    let executables = walk_asking(dir, MAX_EXECUTABLE_SEARCH_DEPTH, |path, _| {
+        system.may_read(path)
+    })
+    .flatten()
+    .filter(|entry| entry.file_type.is_file() && looks_like_executable(&entry.path))
+    .map(|entry| entry.path);
     out.extend(executables);
 }
 

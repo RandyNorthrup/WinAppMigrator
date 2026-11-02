@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use walkdir::WalkDir;
 use winreg::enums::KEY_READ;
 
 use crate::errors::Result;
@@ -17,7 +16,7 @@ use crate::file_discovery::{
     appdata_bases_of, collect_matching_dirs, names_of_app, user_folders_of,
 };
 use crate::models::{FootprintKind, InstallScope, InstalledApp};
-use crate::path_utils::{SignedInUser, signed_in_user};
+use crate::path_utils::{DEEPEST_WALK, SignedInUser, signed_in_user, walk_asking};
 use crate::product_match::{MatchScope, ProductNames};
 use crate::registry_scan::product_keys_in_view;
 use crate::system_context::{ScanSource, SystemContext, UserHive, VolumeMap};
@@ -222,13 +221,11 @@ impl ProfileSurvey {
             }
         }
         roots.iter().any(|root| {
-            drive.is_none_or(|drive| drive.may_read(&root.path))
-                && WalkDir::new(&root.path)
-                    .follow_links(false)
-                    .into_iter()
-                    .filter_entry(|entry| drive.is_none_or(|drive| drive.may_read(entry.path())))
-                    .flatten()
-                    .any(|entry| entry.file_type().is_file())
+            walk_asking(&root.path, DEEPEST_WALK, |path, _| {
+                drive.is_none_or(|drive| drive.may_read(path))
+            })
+            .flatten()
+            .any(|entry| entry.file_type.is_file())
         })
     }
 }

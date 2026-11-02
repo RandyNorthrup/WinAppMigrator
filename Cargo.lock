@@ -4232,7 +4232,6 @@ dependencies = [
  "egui_kittest",
  "embed-manifest",
  "rfd",
- "roxmltree",
  "serde_json",
  "tempfile",
  "tracing",
