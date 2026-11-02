@@ -257,6 +257,30 @@ impl VolumeMap {
     }
 }
 
+/// A recorded path as Windows would read it. A name cannot end in a dot or a space, so Windows drops
+/// them, and an installer told to use `C:\\Program Files\\Acme, Inc.\\App` makes `Acme, Inc` and
+/// records what it was told. Read this way it is the real name that is asked about. `None` for a name
+/// with nothing else in it, which is how `..` can be spelled.
+fn as_windows_reads_it(recorded: &Path) -> Option<PathBuf> {
+    let mut read = PathBuf::new();
+    for component in recorded.components() {
+        match component {
+            Component::Normal(name) => match name.to_str() {
+                Some(text) => {
+                    let name = text.trim_end_matches(['.', ' ']);
+                    if name.is_empty() {
+                        return None;
+                    }
+                    read.push(name);
+                }
+                None => read.push(name),
+            },
+            other => read.push(other.as_os_str()),
+        }
+    }
+    Some(read)
+}
+
 /// What a name on a drive may not be: a stream, a device, a second separator after a `\\?\`, or
 /// what Windows would strip from the end of a name. That is how `..` can be spelled so that nothing
 /// here sees it, and how a real folder `x.` opens the link `x` beside it. A name that is not text
@@ -1043,8 +1067,8 @@ impl SystemContext {
                     WarningSeverity::Warning,
                     format!(
                         "{some} recorded on this PC could not be read, so nothing there was \
-                         included. Each is not on a disk of this PC, and looking at it would \
-                         connect to it: {shown}{more}"
+                         included. Each is not on a disk of this PC, where looking at it would \
+                         connect to it, or has a name that would open something else: {shown}{more}"
                     ),
                     None,
                 )
@@ -1442,16 +1466,16 @@ impl SystemContext {
     /// drive, where that is now, if it can be read at all. See [`VolumeMap::to_volume`] and
     /// [`Self::may_read`]. What it will not follow is listed in [`Self::warnings`].
     pub fn resolve_source_path(&self, recorded: &Path) -> Option<PathBuf> {
+        let read = as_windows_reads_it(recorded);
         let Some(hives) = &self.offline else {
-            if self.may_read(recorded) {
-                return Some(recorded.to_path_buf());
+            if let Some(read) = read.filter(|read| self.may_read(read)) {
+                return Some(read);
             }
             self.note_refused(recorded);
             return None;
         };
-        let on_volume = hives
-            .map
-            .to_volume(recorded)
+        let on_volume = read
+            .and_then(|read| hives.map.to_volume(&read))
             .filter(|on_volume| self.may_read(on_volume));
         if on_volume.is_none() {
             self.note_refused(recorded);
@@ -2333,6 +2357,30 @@ mod tests {
             .collect();
         assert_eq!(found, ["own.txt"], "not what is past the link");
         Ok(())
+    }
+
+    #[test]
+    fn a_recorded_path_is_read_as_windows_would_read_it() {
+        let read = |text: &str| as_windows_reads_it(Path::new(text));
+        assert_eq!(
+            read(r"C:\Program Files\Acme, Inc.\App"),
+            Some(PathBuf::from(r"C:\Program Files\Acme, Inc\App"))
+        );
+        assert_eq!(read(r"C:\a. .\b "), Some(PathBuf::from(r"C:\a\b")));
+        assert_eq!(read(r"C:\a\b.txt"), Some(PathBuf::from(r"C:\a\b.txt")));
+        assert_eq!(
+            read(r"C:\a\..\b"),
+            Some(PathBuf::from(r"C:\a\..\b")),
+            "a real parent step stays, for what looks for one"
+        );
+        for spelled in [r"C:\a\.. \b", r"C:\a\...\b", r"C:\a\ \b", r"C:\a\. "] {
+            assert_eq!(read(spelled), None, "{spelled}");
+        }
+        let system = SystemContext::live();
+        assert_eq!(
+            system.resolve_source_path(Path::new(r"C:\Windows.\System32")),
+            Some(PathBuf::from(r"C:\Windows\System32"))
+        );
     }
 
     #[test]

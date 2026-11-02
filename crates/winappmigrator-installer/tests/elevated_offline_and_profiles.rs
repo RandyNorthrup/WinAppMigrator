@@ -3157,6 +3157,26 @@ fn what_can_name_another_accounts_folder(
     ))?;
     let holding = files_holding(&package.package_root, "private to theirs")?;
     checks.same("what is past the link is not in it", holding.trim(), "");
+    fs::remove_dir(&twin)?;
+    fs::remove_dir(format!(r"\\?\{}.", twin.display()))?;
+
+    section(
+        "A link with a space beside a real folder named for the app, in this account's AppData",
+    );
+    let named_for_it = my_profile.join(r"AppData\Roaming\WAM By A Share");
+    fs::create_dir_all(&named_for_it)?;
+    let spaced = format!(r"\\?\{} ", named_for_it.display());
+    std::os::windows::fs::symlink_dir(not_mine, &spaced)?;
+    let package = create_package(&package_options(
+        &find_app(&apps, "WAM By A Share")?,
+        &work.join("spaced"),
+        ScanSource::Live,
+        ProfileChoice::Default,
+    ))?;
+    let holding = files_holding(&package.package_root, "private to theirs")?;
+    checks.same("what is past that link is not in it", holding.trim(), "");
+    fs::remove_dir(&spaced)?;
+    fs::remove_dir(&named_for_it)?;
     reg_delete_key(entry);
 
     section("A link in this account's AppData to a shadow copy, which has no name to give");

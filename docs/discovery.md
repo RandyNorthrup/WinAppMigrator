@@ -510,7 +510,8 @@ name a share, and looking at it connects as the administrator running this. `Sys
 `\\?\UNC`, `\\.\`, `\\?\GLOBALROOT`, `\\?\Volume{}`, and rooted forms such as `\??\UNC`, by how the path is written.
 A known folder there gets `user_folder_out_of_reach`, and anything else is listed in `network_paths_not_followed`. Names
 Windows would read as another are refused on this PC as they are on a drive, since any account can make a real folder `x.`
-beside a link `x`.
+beside a link `x`. A recorded path is first read as Windows would read it, without what it drops from the end of a name, so
+a value naming `Acme, Inc.\App` is asked about as the real `Acme, Inc\App`.
 
 **No link on a drive is followed,** since a junction or symbolic link on another PC's disk resolves against
 this PC. `VolumeMap::may_read` walks from the drive's root to a path, and everything that opens a file or

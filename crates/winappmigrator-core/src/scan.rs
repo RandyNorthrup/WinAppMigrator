@@ -105,7 +105,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         let why = if system.is_offline() {
             "goes through a link or is not on the connected drive"
         } else {
-            "is not on a disk of this PC"
+            "is not on a disk of this PC, or has a name that would open something else"
         };
         return Err(WinAppMigratorError::InvalidInput(format!(
             "{} {why}, so it was not read.",
