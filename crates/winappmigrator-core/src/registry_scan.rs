@@ -10,9 +10,13 @@ use winreg::enums::{
 use winreg::{RegKey, RegValue};
 
 use crate::hashing::hex_lower;
+use crate::integration_scan::{
+    IntegrationInputs, Integrations, certificate_named_by, scan_integrations,
+};
 use crate::models::{
-    ComRegistrationEntry, ComServerKind, FileAssociationEntry, MatchConfidence, RegistryEntry,
-    RegistryHive, RegistryValueKind, Warning, WarningSeverity,
+    CertificateEntry, ComRegistrationEntry, ComServerKind, FileAssociationEntry, FileEntry,
+    FirewallRuleEntry, MatchConfidence, RegistryEntry, RegistryHive, RegistryValueKind, Warning,
+    WarningSeverity,
 };
 use crate::path_utils::{
     normalize_name_for_match, path_is_within, split_command_executable_path, text_mentions_path,
@@ -23,20 +27,20 @@ use crate::system_context::{SystemContext, UserHive};
 /// A registry root to open logical key paths against. Live opens `predef`
 /// hives; offline maps each logical path onto the mounted hive while callers
 /// keep the logical path for capture/restore.
-enum RegRoot<'a> {
+pub(crate) enum RegRoot<'a> {
     Hklm(&'a SystemContext),
     User(&'a UserHive),
 }
 
 impl RegRoot<'_> {
-    fn open(&self, logical: &str, flags: u32) -> std::io::Result<RegKey> {
+    pub(crate) fn open(&self, logical: &str, flags: u32) -> std::io::Result<RegKey> {
         match self {
             RegRoot::Hklm(system) => system.open_hklm(logical, flags),
             RegRoot::User(user) => user.open(logical, flags),
         }
     }
 
-    fn hive(&self) -> RegistryHive {
+    pub(crate) fn hive(&self) -> RegistryHive {
         match self {
             RegRoot::Hklm(_) => RegistryHive::LocalMachine,
             RegRoot::User(_) => RegistryHive::CurrentUser,
@@ -44,7 +48,10 @@ impl RegRoot<'_> {
     }
 }
 
-const APP_PATHS: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths";
+const APP_PATHS: [&str; 2] = [
+    r"Software\Microsoft\Windows\CurrentVersion\App Paths",
+    r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths",
+];
 const HKLM_UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const HKLM_WOW6432_UNINSTALL: &str =
     r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
@@ -55,13 +62,9 @@ const SOFTWARE_VIEWS: [&str; 2] = [SOFTWARE, WOW6432_SOFTWARE];
 const WOW6432_NODE: &str = "WOW6432Node";
 const MICROSOFT: &str = "Microsoft";
 const CLASSES: &str = "Classes";
-const HKCU_CLASSES: &str = r"Software\Classes";
 const HKLM_CLASSES: &str = r"Software\Classes";
-const HKCU_CLASSES_APPLICATIONS: &str = r"Software\Classes\Applications";
-const HKCU_CLASSES_CLSID: &str = r"Software\Classes\CLSID";
-const HKLM_CLASSES_APPLICATIONS: &str = r"Software\Classes\Applications";
-const HKLM_CLASSES_CLSID: &str = r"Software\Classes\CLSID";
-const HKLM_WOW6432_CLASSES_CLSID: &str = r"Software\WOW6432Node\Classes\CLSID";
+const CLASSES_APPLICATIONS: &str = r"Software\Classes\Applications";
+const SYSTEM_CERTIFICATES_KEY: &str = r"software\microsoft\systemcertificates";
 const MAX_REGISTRY_CAPTURE_DEPTH: usize = 8;
 const MAX_REGISTRY_CAPTURE_KEYS: usize = 512;
 /// Each value is kept as text and hex too, so this is a good deal more in memory.
@@ -129,6 +132,8 @@ const SHARED_REGISTRY_KEYS: &[&str] = &[
 const RUN_KEYS: &[&str] = &[
     r"Software\Microsoft\Windows\CurrentVersion\Run",
     r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
+    r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+    r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce",
 ];
 
 /// The app's paths are as its own PC calls them, since that is what the values they are
@@ -189,24 +194,21 @@ pub struct RegistryScanArtifacts {
     pub entries: Vec<RegistryEntry>,
     pub com_registrations: Vec<ComRegistrationEntry>,
     pub file_associations: Vec<FileAssociationEntry>,
+    pub firewall_rules: Vec<FirewallRuleEntry>,
+    pub certificates: Vec<CertificateEntry>,
+    pub fonts_reported: Vec<String>,
+    /// Fonts from the Windows folder that are the app's, which are files to copy as well.
+    pub font_files: Vec<FileEntry>,
     pub warnings: Vec<Warning>,
 }
 
-pub fn scan_registry(
+pub(crate) fn scan_registry_artifacts(
     context: &RegistryScanContext,
-    system: &SystemContext,
-) -> (Vec<RegistryEntry>, Vec<Warning>) {
-    let artifacts = scan_registry_artifacts(context, system);
-    (artifacts.entries, artifacts.warnings)
-}
-
-pub fn scan_registry_artifacts(
-    context: &RegistryScanContext,
+    integrations: &IntegrationInputs<'_>,
     system: &SystemContext,
 ) -> RegistryScanArtifacts {
     let mut entries = Vec::new();
     let mut warnings = Vec::new();
-    let mut file_associations = Vec::new();
 
     let names = context_product_names(context);
     let hklm = RegRoot::Hklm(system);
@@ -229,31 +231,9 @@ pub fn scan_registry_artifacts(
     scan_class_registrations(
         context,
         &hklm,
-        HKLM_CLASSES_APPLICATIONS,
+        CLASSES_APPLICATIONS,
         &mut entries,
         &mut warnings,
-    );
-    scan_class_registrations(
-        context,
-        &hklm,
-        HKLM_CLASSES_CLSID,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_class_registrations(
-        context,
-        &hklm,
-        HKLM_WOW6432_CLASSES_CLSID,
-        &mut entries,
-        &mut warnings,
-    );
-    scan_file_extension_associations(
-        context,
-        &hklm,
-        HKLM_CLASSES,
-        &mut entries,
-        &mut warnings,
-        &mut file_associations,
     );
 
     // Per-user hives: live yields the current user; offline yields every profile.
@@ -267,26 +247,24 @@ pub fn scan_registry_artifacts(
         scan_class_registrations(
             context,
             &hkcu,
-            HKCU_CLASSES_APPLICATIONS,
+            CLASSES_APPLICATIONS,
             &mut entries,
             &mut warnings,
-        );
-        scan_class_registrations(
-            context,
-            &hkcu,
-            HKCU_CLASSES_CLSID,
-            &mut entries,
-            &mut warnings,
-        );
-        scan_file_extension_associations(
-            context,
-            &hkcu,
-            HKCU_CLASSES,
-            &mut entries,
-            &mut warnings,
-            &mut file_associations,
         );
     }
+
+    let Integrations {
+        entries: integration_entries,
+        mut file_associations,
+        firewall_rules,
+        mut certificates,
+        fonts_reported,
+        font_files,
+        warnings: integration_warnings,
+    } = scan_integrations(integrations, system);
+    entries.extend(integration_entries);
+    warnings.extend(integration_warnings);
+    leave_stores_of_certificates_out(&mut entries, &mut certificates);
 
     entries.sort_by(|left, right| {
         left.key_path
@@ -325,8 +303,39 @@ pub fn scan_registry_artifacts(
         entries,
         com_registrations,
         file_associations,
+        firewall_rules,
+        certificates,
+        fonts_reported,
+        font_files,
         warnings,
     }
+}
+
+/// A store of certificates can come along by a name or an install record, and a package must never
+/// add to a trust store. What it was is said, and it goes no further than that.
+fn leave_stores_of_certificates_out(
+    entries: &mut Vec<RegistryEntry>,
+    certificates: &mut Vec<CertificateEntry>,
+) {
+    entries.retain(|entry| {
+        let lower = entry.key_path.to_ascii_lowercase();
+        let plain = lower
+            .strip_prefix(r"software\wow6432node\")
+            .map_or(lower.clone(), |rest| format!(r"software\{rest}"));
+        let is_a_store = plain
+            .strip_prefix(SYSTEM_CERTIFICATES_KEY)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\'));
+        if is_a_store
+            && let Some(named) = certificate_named_by(entry)
+            && !certificates.iter().any(|known| {
+                known.thumbprint.eq_ignore_ascii_case(&named.thumbprint)
+                    && known.store.eq_ignore_ascii_case(&named.store)
+            })
+        {
+            certificates.push(named);
+        }
+        !is_a_store
+    });
 }
 
 struct RegistryCaptureContext<'a> {
@@ -357,158 +366,7 @@ fn scan_class_registrations(
     }
 }
 
-fn scan_file_extension_associations(
-    context: &RegistryScanContext,
-    root: &RegRoot,
-    classes_path: &str,
-    entries: &mut Vec<RegistryEntry>,
-    warnings: &mut Vec<Warning>,
-    file_associations: &mut Vec<FileAssociationEntry>,
-) {
-    let Ok(classes_key) = root.open(classes_path, KEY_READ) else {
-        return;
-    };
-
-    for extension_name in classes_key
-        .enum_keys()
-        .flatten()
-        .filter(|name| name.starts_with('.'))
-    {
-        let extension_path = format!(r"{classes_path}\{extension_name}");
-        let Ok(extension_key) = root.open(&extension_path, KEY_READ) else {
-            continue;
-        };
-        let Ok(default_value) = extension_key.get_raw_value("") else {
-            continue;
-        };
-        let prog_id = raw_value_to_display(&default_value);
-        if prog_id.trim().is_empty() {
-            continue;
-        }
-        let prog_id_path = format!(r"{classes_path}\{prog_id}");
-        if !prog_id_opens_with_app(root, &prog_id_path, context) {
-            capture_verbs_pointing_at_app(root, &prog_id_path, context, entries, warnings);
-            continue;
-        }
-
-        capture_registry_subtree(
-            root,
-            &extension_path,
-            MatchConfidence::High,
-            entries,
-            warnings,
-        );
-        capture_registry_subtree(
-            root,
-            &prog_id_path,
-            MatchConfidence::High,
-            entries,
-            warnings,
-        );
-        file_associations.extend(file_associations_from_prog_id(
-            root,
-            classes_path,
-            &extension_name,
-            &prog_id,
-        ));
-    }
-}
-
-/// True when a file type belongs to this app: double-clicking one opens it, or the app
-/// supplies its icon. Mentioning the app somewhere is not enough. PowerShell 7 adds a verb
-/// to Windows' `LibraryFolder`, and that does not make the type or its other verbs PowerShell's.
-fn prog_id_opens_with_app(
-    root: &RegRoot,
-    prog_id_path: &str,
-    context: &RegistryScanContext,
-) -> bool {
-    let default_value = |key_path: &str| {
-        root.open(key_path, KEY_READ)
-            .and_then(|key| key.get_raw_value(""))
-            .map(|value| raw_value_to_display(&value))
-            .unwrap_or_default()
-    };
-    let default_verb = default_value(&format!(r"{prog_id_path}\shell"));
-    prog_id_ownership_keys(prog_id_path, &default_verb)
-        .iter()
-        .any(|key_path| value_matches_context(context, &default_value(key_path)))
-}
-
-/// The keys that say what a file type opens with and how it looks.
-fn prog_id_ownership_keys(prog_id_path: &str, default_verb: &str) -> Vec<String> {
-    let mut keys = vec![format!(r"{prog_id_path}\shell\open\command")];
-    let default_verb = default_verb.trim();
-    if !default_verb.is_empty() && !default_verb.eq_ignore_ascii_case("open") {
-        keys.push(format!(r"{prog_id_path}\shell\{default_verb}\command"));
-    }
-    keys.push(format!(r"{prog_id_path}\DefaultIcon"));
-    keys
-}
-
-/// Capture just the verbs an app adds to a file type it does not own. Other apps' verbs
-/// and the type itself stay out, so restoring cannot overwrite them.
-fn capture_verbs_pointing_at_app(
-    root: &RegRoot,
-    prog_id_path: &str,
-    context: &RegistryScanContext,
-    entries: &mut Vec<RegistryEntry>,
-    warnings: &mut Vec<Warning>,
-) {
-    let mut matching = Vec::new();
-    collect_keys_matching_context(root, prog_id_path, context, 0, &mut matching);
-    for key_path in matching {
-        capture_registry_subtree(
-            root,
-            verb_key_of(&key_path),
-            MatchConfidence::High,
-            entries,
-            warnings,
-        );
-    }
-}
-
-/// The verb a matching key belongs to: a `command` key's parent, which also holds the
-/// verb's label and icon. Any other key stands for itself.
-fn verb_key_of(key_path: &str) -> &str {
-    key_path
-        .rsplit_once('\\')
-        .filter(|(_, leaf)| leaf.eq_ignore_ascii_case("command"))
-        .map_or(key_path, |(parent, _)| parent)
-}
-
-fn collect_keys_matching_context(
-    root: &RegRoot,
-    key_path: &str,
-    context: &RegistryScanContext,
-    depth: usize,
-    matching: &mut Vec<String>,
-) {
-    if depth > MAX_REGISTRY_MATCH_SCAN_DEPTH {
-        return;
-    }
-    let Ok(key) = root.open(key_path, KEY_READ) else {
-        return;
-    };
-    if key
-        .enum_values()
-        .flatten()
-        .any(|value| value_matches_context(context, &raw_value_to_display(&value.1)))
-    {
-        matching.push(key_path.to_owned());
-        return;
-    }
-    for child_name in key.enum_keys().flatten() {
-        collect_keys_matching_context(
-            root,
-            &format!(r"{key_path}\{child_name}"),
-            context,
-            depth + 1,
-            matching,
-        );
-    }
-}
-
-fn file_associations_from_prog_id(
+pub(crate) fn file_associations_from_prog_id(
     root: &RegRoot,
     classes_path: &str,
     extension: &str,
@@ -600,7 +458,19 @@ fn scan_app_paths(
     entries: &mut Vec<RegistryEntry>,
     warnings: &mut Vec<Warning>,
 ) {
-    let key = match root.open(APP_PATHS, KEY_READ) {
+    for view in APP_PATHS {
+        scan_app_paths_view(context, root, view, entries, warnings);
+    }
+}
+
+fn scan_app_paths_view(
+    context: &RegistryScanContext,
+    root: &RegRoot,
+    view: &str,
+    entries: &mut Vec<RegistryEntry>,
+    warnings: &mut Vec<Warning>,
+) {
+    let key = match root.open(view, KEY_READ) {
         Ok(key) => key,
         Err(error) => {
             warn!(%error, "App Paths registry key unavailable");
@@ -633,7 +503,7 @@ fn scan_app_paths(
         if matched {
             capture_registry_subtree(
                 root,
-                &format!(r"{APP_PATHS}\{child_name}"),
+                &format!(r"{view}\{child_name}"),
                 MatchConfidence::High,
                 entries,
                 warnings,
@@ -672,7 +542,7 @@ fn scan_run_keys(
 }
 
 /// The names this app's registry keys can go by, as for its folders.
-fn context_product_names(context: &RegistryScanContext) -> ProductNames {
+pub(crate) fn context_product_names(context: &RegistryScanContext) -> ProductNames {
     let mut aliases = Vec::new();
     if let Some(stem) = context.executable_path.file_stem().and_then(|s| s.to_str()) {
         aliases.push(stem);
@@ -951,7 +821,7 @@ fn registry_capture_is_full(entries: &[RegistryEntry]) -> bool {
             >= MAX_REGISTRY_HEX_KEPT
 }
 
-fn capture_registry_subtree(
+pub(crate) fn capture_registry_subtree(
     root: &RegRoot,
     key_path: &str,
     confidence: MatchConfidence,
@@ -1067,7 +937,7 @@ fn capture_registry_subtree_inner(
     }
 }
 
-fn entry_from_raw_value(
+pub(crate) fn entry_from_raw_value(
     hive: RegistryHive,
     key_path: String,
     value_name: String,
@@ -1095,7 +965,7 @@ fn display_value_name(value_name: &str) -> String {
     }
 }
 
-fn raw_value_to_display(value: &RegValue<'_>) -> String {
+pub(crate) fn raw_value_to_display(value: &RegValue<'_>) -> String {
     registry_value_text(value)
 }
 
@@ -1597,34 +1467,29 @@ mod tests {
     }
 
     #[test]
-    fn a_file_type_is_owned_through_its_open_verb_and_icon() {
-        assert_eq!(
-            prog_id_ownership_keys(r"Software\Classes\Demo.File", ""),
-            vec![
-                r"Software\Classes\Demo.File\shell\open\command".to_owned(),
-                r"Software\Classes\Demo.File\DefaultIcon".to_owned(),
-            ]
-        );
-        assert_eq!(
-            prog_id_ownership_keys(r"Software\Classes\Demo.File", " edit "),
-            vec![
-                r"Software\Classes\Demo.File\shell\open\command".to_owned(),
-                r"Software\Classes\Demo.File\shell\edit\command".to_owned(),
-                r"Software\Classes\Demo.File\DefaultIcon".to_owned(),
-            ]
-        );
-    }
-
-    #[test]
-    fn an_added_verb_is_captured_without_the_type_it_was_added_to() {
-        assert_eq!(
-            verb_key_of(r"Software\Classes\LibraryFolder\background\shell\pwsh\command"),
-            r"Software\Classes\LibraryFolder\background\shell\pwsh"
-        );
-        assert_eq!(
-            verb_key_of(r"Software\Classes\Demo\DefaultIcon"),
-            r"Software\Classes\Demo\DefaultIcon"
-        );
+    fn a_store_of_certificates_is_named_and_goes_no_further() {
+        let value = |key: &str| RegistryEntry {
+            hive: RegistryHive::LocalMachine,
+            key_path: key.to_owned(),
+            value_name: Some("Blob".to_owned()),
+            value_data: None,
+            value_kind: Some(RegistryValueKind::Binary),
+            value_bytes_hex: Some("00".to_owned()),
+            confidence: MatchConfidence::High,
+            requires_admin: true,
+        };
+        let mut entries = vec![
+            value(r"SOFTWARE\Microsoft\SystemCertificates\ROOT\Certificates\ABC"),
+            value(r"SOFTWARE\WOW6432Node\Microsoft\SystemCertificates\ROOT\Certificates\ABC"),
+            value(r"SOFTWARE\Microsoft\SystemCertificates\CA"),
+            value(r"SOFTWARE\Acme\SystemCertificates"),
+        ];
+        let mut certificates = Vec::new();
+        leave_stores_of_certificates_out(&mut entries, &mut certificates);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].key_path, r"SOFTWARE\Acme\SystemCertificates");
+        assert_eq!(certificates.len(), 1, "{certificates:?}");
+        assert_eq!(certificates[0].thumbprint.to_ascii_lowercase(), "abc");
     }
 
     #[test]

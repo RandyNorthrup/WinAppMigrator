@@ -207,6 +207,22 @@ pub struct ScanReport {
     /// only) so the installer can restore them automatically.
     #[serde(default)]
     pub license_registry_entries: Vec<RegistryEntry>,
+    /// What was not captured because it looks like a credential. Names only.
+    #[serde(default)]
+    pub secrets_left_out: Vec<LeftOutItem>,
+    /// What was not captured because the License option is off. Names only.
+    #[serde(default)]
+    pub licenses_left_out: Vec<LeftOutItem>,
+    /// The app's own rules in Windows Firewall.
+    #[serde(default)]
+    pub firewall_rules: Vec<FirewallRuleEntry>,
+    /// Certificates the app seems to rely on, which are reported and never restored.
+    #[serde(default)]
+    pub certificates: Vec<CertificateEntry>,
+    /// Fonts in the Windows folder that go by the app's name, and that nothing says are its own.
+    /// Only what they are called: they stay behind.
+    #[serde(default)]
+    pub fonts_reported: Vec<String>,
     pub warnings: Vec<Warning>,
     pub items_excluded: Vec<String>,
     pub confidence_score: u8,
@@ -305,6 +321,24 @@ pub struct PackageManifest {
     /// Transferable license values to restore into the registry on the target.
     #[serde(default)]
     pub license_registry_entries: Vec<RegistryEntry>,
+    /// What is not in this package because it looks like a credential, for the person installing
+    /// to know. Names only. There is nothing in a package to restore for these, so what the other
+    /// PC has of them stays as it is.
+    #[serde(default)]
+    pub secrets_left_out: Vec<LeftOutItem>,
+    /// What is not in this package because the License option was off. Names only.
+    #[serde(default)]
+    pub licenses_left_out: Vec<LeftOutItem>,
+    /// The app's own rules in Windows Firewall, which go through their own rules on restore.
+    #[serde(default)]
+    pub firewall_rules_detected: Vec<FirewallRuleEntry>,
+    /// Certificates the app seems to rely on. These are only shown to the person installing: a
+    /// package never adds to a trust store.
+    #[serde(default)]
+    pub certificates_reported: Vec<CertificateEntry>,
+    /// Fonts in the Windows folder that go by the app's name, and that nothing says are its own.
+    #[serde(default)]
+    pub fonts_reported: Vec<String>,
     pub warnings: Vec<Warning>,
     pub items_intentionally_excluded: Vec<String>,
     /// Whether per-user application data was captured at build time. Drives the
@@ -327,6 +361,65 @@ pub struct PackageManifest {
     /// The account on the source PC whose per-user data and settings are in the package.
     #[serde(default)]
     pub user_data_profile: Option<String>,
+}
+
+/// A rule in Windows Firewall, as much of it as can be set again. Everything here comes from a
+/// package and is checked when restoring, so it is all plain text, and what is not known is refused
+/// rather than failing to read the whole manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FirewallRuleEntry {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// `In` or `Out`.
+    pub direction: String,
+    /// `Allow` or `Block`.
+    pub action: String,
+    pub enabled: bool,
+    /// The program it is for, as its PC called it.
+    pub program: PathBuf,
+    /// The one service in that program it is for, if it says.
+    #[serde(default)]
+    pub service: Option<String>,
+    /// A protocol's number, or `None` for any.
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub local_ports: Vec<String>,
+    #[serde(default)]
+    pub remote_ports: Vec<String>,
+    #[serde(default)]
+    pub local_addresses: Vec<String>,
+    #[serde(default)]
+    pub remote_addresses: Vec<String>,
+    /// `Domain`, `Private`, and `Public`. Empty means all of them.
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    /// What the rule said that cannot be set again, or must not be, by the names Windows has for
+    /// them. Each of those is a reason not to restore it. See `restore_policy::firewall_refusal`.
+    #[serde(default)]
+    pub not_carried: Vec<String>,
+}
+
+/// A certificate in a store on the source PC that the app seems to rely on. Only what names it: it
+/// is shown to the person installing, to decide about, and never restored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CertificateEntry {
+    /// `Root`, `TrustedPublisher`, and so on.
+    pub store: String,
+    pub hive: RegistryHive,
+    pub thumbprint: String,
+    pub subject: String,
+    /// What ties it to the app.
+    pub why: String,
+}
+
+/// Something a scan found and did not capture, by name alone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LeftOutItem {
+    /// A key and value's name, a file's path, or the name of an option.
+    pub name: String,
+    pub why: String,
 }
 
 /// The installer stub an installer is built from.

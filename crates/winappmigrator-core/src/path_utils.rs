@@ -519,7 +519,7 @@ pub fn normalize_name_for_match(value: &str) -> String {
 /// that come from different records. `C:\` becomes `c:`. It goes by the path's parts, because
 /// Windows reads `C:\.\Windows`, `C:\\Windows`, and `\\?\C:\Windows` all as `C:\Windows`, and
 /// what decides where something may go cannot be told apart from it by how it is written.
-fn comparable_path(path: &Path) -> String {
+pub(crate) fn comparable_path(path: &Path) -> String {
     let mut text = String::new();
     for component in path.components() {
         match component {

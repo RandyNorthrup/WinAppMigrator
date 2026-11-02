@@ -15,7 +15,10 @@ use crate::install_source::{
     InstallSource, add_app_paths_roots, detect_install_source, is_usable_main_executable,
     primary_executable, resolve_install_location, squirrel_current_executable,
 };
-use crate::license_scan::{LicenseScanContext, scan_license_artifacts};
+use crate::integration_scan::{IntegrationInputs, OwnedFiles};
+use crate::license_scan::{
+    LicenseScanContext, is_license_env_var, is_license_file, scan_license_artifacts,
+};
 use crate::models::{
     AppArchitecture, AppSelection, DependencyEntry, DotNetFlavor, DriverEntry, FileEntry,
     InstallScope, InstalledApp, RuntimePrerequisite, RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION,
@@ -27,10 +30,14 @@ use crate::path_utils::{
 };
 use crate::pe_scan::scan_pe;
 use crate::registry_scan::{
-    RegistryScanContext, recorded_keys_of_one_account, scan_registry_artifacts,
+    RegistryScanContext, context_product_names, recorded_keys_of_one_account,
+    scan_registry_artifacts,
 };
 use crate::reporting::{artifact_paths, write_scan_reports};
 use crate::runtime_detection::{AppRuntimes, ArchitectureKey, DotNetNeed, inspect_app_runtimes};
+use crate::secret_rules::{
+    LeftOut, is_license_registry_entry, take_secret_files, take_secrets_from_settings,
+};
 use crate::service_scan::{ServiceScanContext, scan_drivers, scan_services};
 use crate::shortcut_scan::{ShortcutScanContext, scan_shortcuts};
 use crate::system_context::SystemContext;
@@ -227,29 +234,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         .as_deref()
         .map(|location| system.logical_path(location));
 
-    let registry_artifacts = scan_registry_artifacts(
-        &RegistryScanContext {
-            executable_path: logical_executable.clone(),
-            install_location: logical_location.clone(),
-            display_name: app_name.clone(),
-            publisher: publisher.clone(),
-            source_registry_path,
-            recorded_keys: install_source
-                .as_ref()
-                .map(|source| source.registry_keys.clone())
-                .map(|keys| {
-                    if installed_for_one_account {
-                        recorded_keys_of_one_account(keys)
-                    } else {
-                        keys
-                    }
-                })
-                .unwrap_or_default(),
-            installed_for_one_account,
-        },
-        &system,
-    );
-    let (services, service_warnings) = scan_services(
+    let (mut services, service_warnings) = scan_services(
         &ServiceScanContext {
             executable_path: logical_executable.clone(),
             install_location: logical_location.clone(),
@@ -263,21 +248,21 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         },
         &system,
     );
-    let (scheduled_tasks, task_warnings) = scan_scheduled_tasks(
+    let (mut scheduled_tasks, task_warnings) = scan_scheduled_tasks(
         &TaskScanContext {
             executable_path: logical_executable.clone(),
             install_location: logical_location.clone(),
         },
         &system,
     );
-    let (shortcuts, shortcut_warnings) = scan_shortcuts(
+    let (mut shortcuts, shortcut_warnings) = scan_shortcuts(
         &ShortcutScanContext {
             executable_path: logical_executable.clone(),
             install_location: logical_location.clone(),
         },
         &system,
     );
-    let (environment_variables, environment_warnings) = scan_environment(
+    let (mut environment_variables, environment_warnings) = scan_environment(
         &EnvironmentScanContext {
             executable_path: logical_executable.clone(),
             install_location: logical_location.clone(),
@@ -314,12 +299,12 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         }
         extra_roots.extend(source.roots.iter().cloned());
     }
-    let (file_inventory, footprint_locations, file_warnings) = discover_files(
+    let (mut file_inventory, footprint_locations, file_warnings) = discover_files(
         &FileDiscoveryContext {
             executable_path: executable_path.clone(),
             install_location: install_location.clone(),
-            app_name,
-            publisher,
+            app_name: app_name.clone(),
+            publisher: publisher.clone(),
             include_hashes: options.include_hashes,
             include_user_data: options.include_user_data,
             include_program_data: options.include_program_data,
@@ -332,6 +317,65 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         },
         &system,
     );
+
+    // What an entry in the registry points at says whose it is, so this comes after what the app has
+    // is known. As its PC calls them, which is what those values say.
+    let registry_context = RegistryScanContext {
+        executable_path: logical_executable.clone(),
+        install_location: logical_location.clone(),
+        display_name: app_name.clone(),
+        publisher: publisher.clone(),
+        source_registry_path,
+        recorded_keys: install_source
+            .as_ref()
+            .map(|source| source.registry_keys.clone())
+            .map(|keys| {
+                if installed_for_one_account {
+                    recorded_keys_of_one_account(keys)
+                } else {
+                    keys
+                }
+            })
+            .unwrap_or_default(),
+        installed_for_one_account,
+    };
+    let names = context_product_names(&registry_context);
+    let windows_dir = system.logical_path(&system.windows_dir());
+    let owned_files = OwnedFiles::new(
+        &logical_executable,
+        logical_location.as_deref(),
+        &windows_dir,
+        file_inventory
+            .iter()
+            .filter(|file| file.should_copy)
+            .map(|file| system.logical_path(&file.path)),
+    );
+    let recorded_files: Vec<PathBuf> = install_source
+        .as_ref()
+        .map(|source| source.recorded_files.clone())
+        .unwrap_or_default()
+        .iter()
+        .map(|file| system.logical_path(file))
+        .collect();
+    let mut registry_artifacts = scan_registry_artifacts(
+        &registry_context,
+        &IntegrationInputs {
+            owned: &owned_files,
+            names: &names,
+            display_name: registry_context.display_name.as_deref(),
+            publisher: registry_context.publisher.as_deref(),
+            recorded_files: &recorded_files,
+        },
+        &system,
+    );
+    // A font in the Windows folder the app's install record names is copied like any of its files.
+    for mut font in std::mem::take(&mut registry_artifacts.font_files) {
+        font.package_relative_path = Some(package_relative_path(
+            &font.original_path,
+            install_location.as_deref(),
+        ));
+        file_inventory.push(font);
+    }
 
     let app_runtimes = inspect_app_runtimes(
         &file_inventory,
@@ -348,15 +392,50 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         &pe_scan.architecture,
         system.is_offline(),
     );
+    let mut left_out = LeftOut::default();
     let (license_artifacts, license_registry_entries, license_warnings) = scan_license_artifacts(
         &LicenseScanContext {
             publisher: source_app.as_ref().and_then(|app| app.publisher.as_deref()),
             discovered_files: &file_inventory,
+            registry_entries: &registry_artifacts.entries,
+            names: &names,
+            executable: &logical_executable,
+            install_location: logical_location.as_deref(),
             include_license_data: options.include_license_data,
             include_hashes: options.include_hashes,
         },
         &system,
+        &mut left_out,
     );
+    // What is license data goes by the License option, and nowhere else: a value, a file, or a
+    // variable that was captured to be restored as anything else would not.
+    registry_artifacts
+        .entries
+        .retain(|entry| !is_license_registry_entry(entry, &names));
+    file_inventory.retain(|file| !is_license_file(&file.original_path));
+    if !options.include_license_data {
+        environment_variables.retain(|variable| {
+            let is_a_license = is_license_env_var(&variable.name);
+            if is_a_license {
+                left_out.license(format!("The environment variable {}", variable.name));
+            }
+            !is_a_license
+        });
+    }
+    // And what looks like a credential goes nowhere at all, whatever else was asked for.
+    take_secrets_from_settings(
+        &mut registry_artifacts.entries,
+        &mut services,
+        &mut scheduled_tasks,
+        &mut shortcuts,
+        &mut environment_variables,
+        &mut left_out,
+    );
+    take_secret_files(&mut file_inventory, &system, &mut left_out);
+    let license_registry_entries: Vec<_> = license_registry_entries
+        .into_iter()
+        .filter(|entry| !crate::secret_rules::is_secret_registry_value(entry))
+        .collect();
     let mut warnings = system.warnings();
     warnings.extend(pe_scan.warnings);
     warnings.extend(resolver_warnings);
@@ -371,6 +450,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     warnings.extend(missing_dependency_warnings(&dependencies));
     warnings.extend(driver_component_warnings(&drivers));
     warnings.extend(license_warnings);
+    warnings.extend(left_out_warnings(&left_out));
 
     let artifacts = artifact_paths(&options.output_dir);
 
@@ -445,6 +525,11 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         runtime_prerequisites,
         license_artifacts,
         license_registry_entries,
+        secrets_left_out: left_out.secrets,
+        licenses_left_out: left_out.licenses,
+        firewall_rules: registry_artifacts.firewall_rules,
+        certificates: registry_artifacts.certificates,
+        fonts_reported: registry_artifacts.fonts_reported,
         warnings,
         items_excluded: vec![
             "Windows directory, System32, and SysWOW64 files are reported but not copied."
@@ -867,6 +952,29 @@ fn runtime_prerequisites_from_signals(
     }
 
     prerequisites
+}
+
+/// Each thing left out, for whoever is building to see. Only ever what it is called.
+fn left_out_warnings(left_out: &LeftOut) -> Vec<Warning> {
+    let about = |code: &'static str, item: &crate::models::LeftOutItem| {
+        Warning::new(
+            code,
+            WarningSeverity::Info,
+            format!("Left out of the package: {}.", item.why),
+            Some(item.name.clone()),
+        )
+    };
+    left_out
+        .secrets
+        .iter()
+        .map(|item| about("secret_left_out", item))
+        .chain(
+            left_out
+                .licenses
+                .iter()
+                .map(|item| about("license_left_out", item)),
+        )
+        .collect()
 }
 
 fn missing_dependency_warnings(dependencies: &[DependencyEntry]) -> Vec<Warning> {

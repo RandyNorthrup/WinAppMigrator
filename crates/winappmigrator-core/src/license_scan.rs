@@ -10,19 +10,18 @@
 
 use std::path::Path;
 
-use winreg::enums::{
-    KEY_READ, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN, REG_EXPAND_SZ,
-    REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD, REG_RESOURCE_LIST,
-    REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, RegType,
-};
-use winreg::{RegKey, RegValue};
+use winreg::RegKey;
+use winreg::enums::KEY_READ;
 
-use crate::hashing::{hex_lower, sha256_file};
+use crate::hashing::sha256_file;
 use crate::models::{
-    FileEntry, LicenseArtifact, LicenseArtifactKind, LicenseFramework, MatchConfidence,
-    RegistryEntry, RegistryHive, RegistryValueKind, TransferableHint, Warning, WarningSeverity,
+    FileEntry, LicenseArtifact, LicenseArtifactKind, LicenseFramework, RegistryEntry, RegistryHive,
+    RegistryValueKind, TransferableHint, Warning, WarningSeverity,
 };
+use crate::path_utils::text_mentions_path;
+use crate::product_match::{MatchScope, ProductNames};
 use crate::registry_scan::registry_value_text;
+use crate::secret_rules::{LeftOut, is_dpapi_hex, is_license_registry_entry, registry_entry_name};
 use crate::system_context::SystemContext;
 
 /// File extensions that strongly indicate a license/activation file.
@@ -33,6 +32,8 @@ const STRONG_LICENSE_EXTENSIONS: &[&str] = &["lic", "lservrc", "v2c", "rlm", "en
 /// activation data, and produced false positives.
 const AMBIGUOUS_LICENSE_EXTENSIONS: &[&str] = &["dat", "key", "bin", "xml"];
 const LICENSE_NAME_SIGNALS: &[&str] = &["license", "licence", "activation", "entitlement"];
+/// How many dots make a name a namespace rather than a file with an extension.
+const NAMESPACE_DOTS: usize = 3;
 /// Registry value/sub-key names that indicate stored licensing data.
 const LICENSE_REGISTRY_SIGNALS: &[&str] = &[
     "license",
@@ -40,7 +41,7 @@ const LICENSE_REGISTRY_SIGNALS: &[&str] = &[
     "licensing",
     "activation",
     "serialnumber",
-    "serial",
+    "serialkey",
     "productkey",
     "regcode",
     "registrationcode",
@@ -51,10 +52,25 @@ const MACHINE_ENVIRONMENT_KEY: &str =
 const USER_ENVIRONMENT_KEY: &str = "Environment";
 /// Cap on registry sub-keys enumerated per vendor key to keep the scan bounded.
 const MAX_VENDOR_SUBKEYS: usize = 256;
+/// `serial` by itself is a word many a setting has: `SerialPort` says nothing about a license.
+const SERIAL_WORD: &str = "serial";
+/// What says an app uses a license framework, by how a file of it starts, in lowercase. A store is
+/// on the PC for whatever uses that framework, and without one of these, this app is not one.
+const FLEXLM_CLIENT_FILES: &[&str] = &["lmgr", "lmutil", "lmgrd", "flexnet", "fnp_", "fnpcommsvc"];
+const CODEMETER_CLIENT_FILES: &[&str] = &["wibucm", "codemeter", "axprotector"];
+const SENTINEL_CLIENT_FILES: &[&str] = &["hasp", "aksusb", "sntl", "apidsp", "lsapi", "lsdsp"];
+const LICENSE_FILE_VARIABLE_SUFFIX: &str = "_LICENSE_FILE";
 
-pub struct LicenseScanContext<'a> {
+pub(crate) struct LicenseScanContext<'a> {
     pub publisher: Option<&'a str>,
     pub discovered_files: &'a [FileEntry],
+    /// What was captured from under the app's own keys, which is where its license values are.
+    pub registry_entries: &'a [RegistryEntry],
+    /// The names the app goes by, and where it is, as its PC calls them. A variable that names
+    /// neither is another app's business.
+    pub names: &'a ProductNames,
+    pub executable: &'a Path,
+    pub install_location: Option<&'a Path>,
     pub include_license_data: bool,
     pub include_hashes: bool,
 }
@@ -66,24 +82,25 @@ struct LicenseFileClass {
     machine_bound: bool,
 }
 
-pub fn scan_license_artifacts(
+/// Whether a file is what these rules call a license.
+pub(crate) fn is_license_file(path: &Path) -> bool {
+    license_file_match(path).is_some()
+}
+
+pub(crate) fn scan_license_artifacts(
     context: &LicenseScanContext<'_>,
     system: &SystemContext,
+    left_out: &mut LeftOut,
 ) -> (Vec<LicenseArtifact>, Vec<RegistryEntry>, Vec<Warning>) {
     let mut artifacts = Vec::new();
     let mut registry_entries = Vec::new();
     let mut warnings = Vec::new();
 
-    detect_license_files(context, &mut artifacts);
+    detect_license_files(context, &mut artifacts, left_out);
     detect_framework_stores(context, system, &mut artifacts);
-    detect_license_env_vars(system, &mut artifacts);
-    detect_registry_licenses(
-        context,
-        system,
-        &mut artifacts,
-        &mut registry_entries,
-        &mut warnings,
-    );
+    detect_license_env_vars(context, system, &mut artifacts);
+    detect_captured_license_values(context, &mut artifacts, &mut registry_entries, left_out);
+    detect_vendor_license_values(context, system, &mut artifacts);
     dedupe_registry_entries(&mut registry_entries);
 
     if !artifacts.is_empty() {
@@ -121,18 +138,25 @@ fn dedupe_registry_entries(entries: &mut Vec<RegistryEntry>) {
     });
 }
 
-fn detect_license_files(context: &LicenseScanContext<'_>, artifacts: &mut Vec<LicenseArtifact>) {
+/// Each license file. With the License option off that is all that is known about one: where it
+/// is, to say that it was left out. It is not read, and goes in no package.
+fn detect_license_files(
+    context: &LicenseScanContext<'_>,
+    artifacts: &mut Vec<LicenseArtifact>,
+    left_out: &mut LeftOut,
+) {
     for file in context.discovered_files {
         let Some(class) = license_file_match(&file.original_path) else {
             continue;
         };
         let requires_admin = is_protected_path(&file.original_path);
         let should_copy = context.include_license_data;
-        let hash_sha256 = if should_copy && context.include_hashes {
-            sha256_file(&file.path).ok()
-        } else {
-            file.hash_sha256.clone()
-        };
+        if !should_copy {
+            left_out.license(file.original_path.display().to_string());
+        }
+        let hash_sha256 = (should_copy && context.include_hashes)
+            .then(|| sha256_file(&file.path).ok())
+            .flatten();
         artifacts.push(LicenseArtifact {
             kind: LicenseArtifactKind::File,
             framework: class.framework,
@@ -150,7 +174,7 @@ fn detect_license_files(context: &LicenseScanContext<'_>, artifacts: &mut Vec<Li
             transferable: class.transferable,
             should_copy,
             package_relative_path: None,
-            size_bytes: file.size_bytes,
+            size_bytes: file.size_bytes.filter(|_| should_copy),
             hash_sha256,
             store_files: Vec::new(),
         });
@@ -192,10 +216,13 @@ fn license_file_match(path: &Path) -> Option<LicenseFileClass> {
         });
     }
 
-    // Ambiguous extensions only count when the file name itself signals a license.
+    // Ambiguous extensions only count when the file name itself signals a license. One named like
+    // `Windows.ApplicationModel.Activation.Thing.xml` is the documentation of a library by that
+    // name, and says nothing about anyone's license.
     let name_signals = LICENSE_NAME_SIGNALS
         .iter()
-        .any(|signal| name.contains(signal));
+        .any(|signal| name.contains(signal))
+        && name.matches('.').count() < NAMESPACE_DOTS;
     if name_signals && AMBIGUOUS_LICENSE_EXTENSIONS.contains(&extension.as_str()) {
         return Some(LicenseFileClass {
             framework: LicenseFramework::FileBased,
@@ -214,13 +241,37 @@ fn detect_framework_stores(
     let Some(program_data) = system.program_data() else {
         return;
     };
-    let stores: &[(&str, LicenseFramework, bool)] = &[
-        (r"CodeMeter\CmAct", LicenseFramework::CodeMeter, true),
-        (r"Safenet Sentinel", LicenseFramework::SentinelHaspLdk, true),
-        ("FlexLM", LicenseFramework::FlexLm, false),
-        ("FLEXlm", LicenseFramework::FlexLm, false),
+    let stores: &[(&str, LicenseFramework, bool, &[&str])] = &[
+        (
+            r"CodeMeter\CmAct",
+            LicenseFramework::CodeMeter,
+            true,
+            CODEMETER_CLIENT_FILES,
+        ),
+        (
+            r"Safenet Sentinel",
+            LicenseFramework::SentinelHaspLdk,
+            true,
+            SENTINEL_CLIENT_FILES,
+        ),
+        (
+            "FlexLM",
+            LicenseFramework::FlexLm,
+            false,
+            FLEXLM_CLIENT_FILES,
+        ),
+        (
+            "FLEXlm",
+            LicenseFramework::FlexLm,
+            false,
+            FLEXLM_CLIENT_FILES,
+        ),
     ];
-    for (relative, framework, machine_bound) in stores {
+    for (relative, framework, machine_bound, client_files) in stores {
+        // These are on the PC for whatever uses the framework, and may hold other apps' licenses.
+        if !app_has_a_file_starting(context.discovered_files, client_files) {
+            continue;
+        }
         let path = program_data.join(relative);
         // Any account can make a folder in `ProgramData`, so one by this name can be a link to
         // whatever an administrator can read, and it would be packaged as a license.
@@ -255,9 +306,23 @@ fn detect_framework_stores(
     }
 }
 
+fn app_has_a_file_starting(files: &[FileEntry], starts: &[&str]) -> bool {
+    files.iter().any(|file| {
+        file.original_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .is_some_and(|name| starts.iter().any(|start| name.starts_with(start)))
+    })
+}
+
 /// From the registry of the PC and of the account being scanned. This process's own could be
-/// another administrator's, named at the UAC prompt.
-fn detect_license_env_vars(system: &SystemContext, artifacts: &mut Vec<LicenseArtifact>) {
+/// another administrator's, named at the UAC prompt. Only by name, however it was asked for, and
+/// only one that is this app's: it names the app's own place, or is named for the app.
+fn detect_license_env_vars(
+    context: &LicenseScanContext<'_>,
+    system: &SystemContext,
+    artifacts: &mut Vec<LicenseArtifact>,
+) {
     let mut keys: Vec<RegKey> = system
         .open_hklm(MACHINE_ENVIRONMENT_KEY, KEY_READ)
         .into_iter()
@@ -267,7 +332,9 @@ fn detect_license_env_vars(system: &SystemContext, artifacts: &mut Vec<LicenseAr
     }
     let variables = keys.iter().flat_map(|key| key.enum_values().flatten());
     for (name, value) in variables {
-        if !is_license_env_var(&name) {
+        if !is_license_env_var(&name)
+            || !license_variable_is_the_apps(context, &name, &registry_value_text(&value))
+        {
             continue;
         }
         artifacts.push(LicenseArtifact {
@@ -275,10 +342,7 @@ fn detect_license_env_vars(system: &SystemContext, artifacts: &mut Vec<LicenseAr
             framework: LicenseFramework::EnvironmentVariable,
             path: None,
             registry_location: None,
-            detail: format!(
-                "License environment variable {name}={}",
-                registry_value_text(&value)
-            ),
+            detail: format!("License environment variable {name}"),
             machine_bound: false,
             requires_admin: false,
             transferable: TransferableHint::Unknown,
@@ -291,31 +355,89 @@ fn detect_license_env_vars(system: &SystemContext, artifacts: &mut Vec<LicenseAr
     }
 }
 
-fn is_license_env_var(name: &str) -> bool {
+/// `ACME_LICENSE_FILE` is Acme's, and any such variable is the app's if it points at the app.
+/// `LM_LICENSE_FILE` is for everything on the PC that uses FlexLM, so only what it says counts.
+fn license_variable_is_the_apps(context: &LicenseScanContext<'_>, name: &str, value: &str) -> bool {
+    let points_at_the_app = text_mentions_path(value, context.executable, true)
+        || context
+            .install_location
+            .is_some_and(|location| text_mentions_path(value, location, false));
+    let upper = name.to_ascii_uppercase();
+    let prefix = upper
+        .strip_suffix(LICENSE_FILE_VARIABLE_SUFFIX)
+        .unwrap_or_default();
+    points_at_the_app
+        || context
+            .names
+            .matches_top_level(prefix, MatchScope::ProgramFolders)
+}
+
+pub(crate) fn is_license_env_var(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     // Skip build-tool variables that merely end with the suffix (e.g. cargo sets
     // CARGO_PKG_LICENSE_FILE) — they are not the application's license.
     if upper.starts_with("CARGO_") || upper.starts_with("RUST") {
         return false;
     }
-    upper == "LM_LICENSE_FILE" || upper.ends_with("_LICENSE_FILE")
+    upper == "LM_LICENSE_FILE" || upper.ends_with(LICENSE_FILE_VARIABLE_SUFFIX)
 }
 
-/// Context for a single hive sweep, threaded through the vendor-key walk so the
-/// captured registry values carry the right hive and transferability.
-struct RegistryScanCtx {
-    hive: RegistryHive,
-    hive_name: &'static str,
-    requires_admin: bool,
-    include_license_data: bool,
+/// License values among what was captured from under the app's own keys. Their locations are
+/// always reported. A per-user one is passed on with the License option on, and a machine-wide one
+/// is only ever reported. The scan takes all of them out of what it restores as settings, so that
+/// they go by the option, and by `--no-restore-license`.
+fn detect_captured_license_values(
+    context: &LicenseScanContext<'_>,
+    artifacts: &mut Vec<LicenseArtifact>,
+    captured: &mut Vec<RegistryEntry>,
+    left_out: &mut LeftOut,
+) {
+    for entry in context
+        .registry_entries
+        .iter()
+        .filter(|entry| is_license_registry_entry(entry, context.names))
+    {
+        let Some(value_name) = entry.value_name.as_deref() else {
+            continue;
+        };
+        let machine_wide = entry.hive == RegistryHive::LocalMachine;
+        // A blob DPAPI made is bound to that account on that PC, and will need reactivating.
+        let dpapi = entry.value_kind == Some(RegistryValueKind::Binary)
+            && entry.value_bytes_hex.as_deref().is_some_and(is_dpapi_hex);
+        artifacts.push(registry_artifact(
+            hive_label(&entry.hive),
+            &entry.key_path,
+            Some(value_name),
+            machine_wide,
+            machine_wide || dpapi,
+            format!("Registry value suggests licensing data: {value_name}"),
+        ));
+        if !context.include_license_data {
+            left_out.license(registry_entry_name(entry));
+        } else if !machine_wide
+            && entry
+                .value_kind
+                .as_ref()
+                .is_some_and(is_restorable_value_kind)
+        {
+            captured.push(entry.clone());
+        }
+    }
 }
 
-fn detect_registry_licenses(
+fn hive_label(hive: &RegistryHive) -> &'static str {
+    match hive {
+        RegistryHive::LocalMachine => "HKLM",
+        RegistryHive::CurrentUser => "HKCU",
+    }
+}
+
+/// What a publisher's own key says about a license, which could be for any of its products, so it
+/// is only reported, and only by name.
+fn detect_vendor_license_values(
     context: &LicenseScanContext<'_>,
     system: &SystemContext,
     artifacts: &mut Vec<LicenseArtifact>,
-    entries: &mut Vec<RegistryEntry>,
-    warnings: &mut Vec<Warning>,
 ) {
     let Some(publisher) = context.publisher else {
         return;
@@ -324,173 +446,43 @@ fn detect_registry_licenses(
     if vendor.is_empty() {
         return;
     }
-    // Read the native view for the plain `SOFTWARE` prefix and the 32-bit view
-    // via the explicit `WOW6432Node` prefix, for both the machine hive and each
-    // user hive (live: current user; offline: every profile).
-    let hklm_ctx = RegistryScanCtx {
-        hive: RegistryHive::LocalMachine,
-        hive_name: "HKLM",
-        requires_admin: true,
-        include_license_data: context.include_license_data,
+    let report = |key: &RegKey, key_path: &str, hive: &str, admin: bool, found: &mut Vec<_>| {
+        for (value_name, _) in key.enum_values().flatten() {
+            if is_license_registry_name(&value_name) {
+                found.push(registry_artifact(
+                    hive,
+                    key_path,
+                    Some(&value_name),
+                    admin,
+                    admin,
+                    format!("Registry value suggests licensing data: {value_name}"),
+                ));
+            }
+        }
+        for subkey in key.enum_keys().flatten().take(MAX_VENDOR_SUBKEYS) {
+            if is_license_registry_name(&subkey) {
+                let sub_path = format!(r"{key_path}\{subkey}");
+                found.push(registry_artifact(
+                    hive,
+                    &sub_path,
+                    None,
+                    admin,
+                    admin,
+                    format!("Registry key suggests licensing data: {hive}\\{sub_path}"),
+                ));
+            }
+        }
     };
     for prefix in [r"SOFTWARE", r"SOFTWARE\WOW6432Node"] {
         let key_path = format!(r"{prefix}\{vendor}");
-        if let Ok(vendor_key) = system.open_hklm(&key_path, KEY_READ) {
-            scan_vendor_key(
-                &vendor_key,
-                &hklm_ctx,
-                &key_path,
-                artifacts,
-                entries,
-                warnings,
-            );
+        if let Ok(key) = system.open_hklm(&key_path, KEY_READ) {
+            report(&key, &key_path, "HKLM", true, artifacts);
         }
-    }
-    for user in system.user_hives() {
-        let user_ctx = RegistryScanCtx {
-            hive: RegistryHive::CurrentUser,
-            hive_name: "HKCU",
-            requires_admin: false,
-            include_license_data: context.include_license_data,
-        };
-        for prefix in [r"SOFTWARE", r"SOFTWARE\WOW6432Node"] {
-            let key_path = format!(r"{prefix}\{vendor}");
-            if let Ok(vendor_key) = user.open(&key_path, KEY_READ) {
-                scan_vendor_key(
-                    &vendor_key,
-                    &user_ctx,
-                    &key_path,
-                    artifacts,
-                    entries,
-                    warnings,
-                );
+        for user in system.user_hives() {
+            if let Ok(key) = user.open(&key_path, KEY_READ) {
+                report(&key, &key_path, "HKCU", false, artifacts);
             }
         }
-    }
-}
-
-/// Inspect a vendor key (and its immediate sub-keys) for value names that look
-/// like stored licensing data. Locations are always reported. Transferable
-/// (non-machine-bound, user-scoped) values are additionally captured so the
-/// installer can restore them; machine-bound (HKLM) values are reported only.
-fn scan_vendor_key(
-    vendor_key: &RegKey,
-    ctx: &RegistryScanCtx,
-    key_path: &str,
-    artifacts: &mut Vec<LicenseArtifact>,
-    entries: &mut Vec<RegistryEntry>,
-    warnings: &mut Vec<Warning>,
-) {
-    report_license_values(vendor_key, ctx, key_path, artifacts, entries);
-    for subkey_name in vendor_key.enum_keys().flatten().take(MAX_VENDOR_SUBKEYS) {
-        let sub_path = format!(r"{key_path}\{subkey_name}");
-        // The key name alone can signal licensing data, so report the location
-        // even when the key's values cannot be read below — a locked license key
-        // must never be dropped without a trace.
-        if is_license_registry_name(&subkey_name) {
-            artifacts.push(registry_artifact(
-                ctx.hive_name,
-                &sub_path,
-                None,
-                ctx.requires_admin,
-                ctx.requires_admin,
-                format!(
-                    "Registry key suggests licensing data: {}\\{sub_path}",
-                    ctx.hive_name
-                ),
-            ));
-        }
-        match vendor_key.open_subkey_with_flags(&subkey_name, KEY_READ) {
-            Ok(subkey) => report_license_values(&subkey, ctx, &sub_path, artifacts, entries),
-            Err(error) => warnings.push(Warning::new(
-                "license_subkey_unreadable",
-                WarningSeverity::Info,
-                format!(
-                    "Could not read license registry key {}\\{sub_path} ({error}); any values it holds were not captured.",
-                    ctx.hive_name
-                ),
-                Some(format!("{}\\{sub_path}", ctx.hive_name)),
-            )),
-        }
-    }
-}
-
-fn report_license_values(
-    key: &RegKey,
-    ctx: &RegistryScanCtx,
-    key_path: &str,
-    artifacts: &mut Vec<LicenseArtifact>,
-    entries: &mut Vec<RegistryEntry>,
-) {
-    for (value_name, value) in key.enum_values().flatten() {
-        if !is_license_registry_name(&value_name) {
-            continue;
-        }
-        let value_kind = map_registry_type(value.vtype.clone());
-        // A DPAPI-encrypted binary blob is bound to the source user's master key,
-        // so it is reported (and restored best-effort) but flagged machine-bound:
-        // it will likely need reactivation rather than decrypting on the target.
-        let dpapi = matches!(value_kind, RegistryValueKind::Binary) && is_dpapi_blob(&value.bytes);
-        let machine_bound = ctx.requires_admin || dpapi;
-        artifacts.push(registry_artifact(
-            ctx.hive_name,
-            key_path,
-            Some(&value_name),
-            ctx.requires_admin,
-            machine_bound,
-            format!("Registry value suggests licensing data: {value_name}"),
-        ));
-        // Capture user-scoped (HKCU) license values — including plain binary
-        // serials/tokens and DPAPI blobs (best-effort, may need reactivation).
-        // Machine-scoped (HKLM) license data is left as metadata only.
-        if ctx.include_license_data && !ctx.requires_admin && is_restorable_value_kind(&value_kind)
-        {
-            entries.push(reg_value_to_entry(
-                ctx.hive.clone(),
-                key_path,
-                &value_name,
-                &value,
-                ctx.requires_admin,
-            ));
-        }
-    }
-}
-
-/// DPAPI provider GUID `{df9d8cd0-1501-11d1-8c7a-00c04fc297eb}` in the on-disk
-/// (mixed-endian) byte order it appears in a `CryptProtectData` blob header.
-const DPAPI_PROVIDER_GUID: [u8; 16] = [
-    0xD0, 0x8C, 0x9D, 0xDF, 0x01, 0x15, 0xD1, 0x11, 0x8C, 0x7A, 0x00, 0xC0, 0x4F, 0xC2, 0x97, 0xEB,
-];
-
-/// Heuristically detect a DPAPI blob: a 4-byte version, then the DPAPI provider
-/// GUID at offset 4.
-fn is_dpapi_blob(bytes: &[u8]) -> bool {
-    bytes.len() >= DPAPI_PROVIDER_GUID.len() + 4 && bytes[4..20] == DPAPI_PROVIDER_GUID
-}
-
-fn reg_value_to_entry(
-    hive: RegistryHive,
-    key_path: &str,
-    value_name: &str,
-    value: &RegValue,
-    requires_admin: bool,
-) -> RegistryEntry {
-    let value_kind = map_registry_type(value.vtype.clone());
-    let (value_data, value_bytes_hex) = match value_kind {
-        RegistryValueKind::String | RegistryValueKind::ExpandString => {
-            (Some(registry_value_text(value)), None)
-        }
-        _ => (None, Some(hex_lower(&value.bytes))),
-    };
-    RegistryEntry {
-        hive,
-        key_path: key_path.to_owned(),
-        value_name: Some(value_name.to_owned()),
-        value_data,
-        value_kind: Some(value_kind),
-        value_bytes_hex,
-        confidence: MatchConfidence::Medium,
-        requires_admin,
     }
 }
 
@@ -508,23 +500,6 @@ fn is_restorable_value_kind(kind: &RegistryValueKind) -> bool {
             | RegistryValueKind::MultiString
             | RegistryValueKind::Binary
     )
-}
-
-fn map_registry_type(vtype: RegType) -> RegistryValueKind {
-    match vtype {
-        REG_NONE => RegistryValueKind::None,
-        REG_SZ => RegistryValueKind::String,
-        REG_EXPAND_SZ => RegistryValueKind::ExpandString,
-        REG_BINARY => RegistryValueKind::Binary,
-        REG_DWORD => RegistryValueKind::Dword,
-        REG_DWORD_BIG_ENDIAN => RegistryValueKind::DwordBigEndian,
-        REG_LINK => RegistryValueKind::Link,
-        REG_MULTI_SZ => RegistryValueKind::MultiString,
-        REG_RESOURCE_LIST => RegistryValueKind::ResourceList,
-        REG_FULL_RESOURCE_DESCRIPTOR => RegistryValueKind::FullResourceDescriptor,
-        REG_RESOURCE_REQUIREMENTS_LIST => RegistryValueKind::ResourceRequirementsList,
-        REG_QWORD => RegistryValueKind::Qword,
-    }
 }
 
 fn registry_artifact(
@@ -560,7 +535,7 @@ fn registry_artifact(
     }
 }
 
-fn is_license_registry_name(name: &str) -> bool {
+pub(crate) fn is_license_registry_name(name: &str) -> bool {
     let normalized: String = name
         .chars()
         .filter(|character| character.is_ascii_alphanumeric())
@@ -569,6 +544,7 @@ fn is_license_registry_name(name: &str) -> bool {
     LICENSE_REGISTRY_SIGNALS
         .iter()
         .any(|signal| normalized.contains(signal))
+        || normalized == SERIAL_WORD
 }
 
 fn is_protected_path(path: &Path) -> bool {
@@ -618,6 +594,14 @@ mod tests {
         // license (regression: 7za_license.txt false positive on Solar Fire).
         assert!(license_file_match(Path::new(r"C:\App\7za_license.txt")).is_none());
         assert!(license_file_match(Path::new(r"C:\App\license.txt")).is_none());
+        assert!(license_file_match(Path::new(r"C:\App\app.license.xml")).is_some());
+        assert!(
+            license_file_match(Path::new(
+                r"C:\Kits\Windows.ApplicationModel.Activation.Contract.xml"
+            ))
+            .is_none(),
+            "the documentation of a library of that name"
+        );
     }
 
     #[test]
@@ -627,6 +611,137 @@ mod tests {
         assert!(!is_license_env_var("PATH"));
         // Build-tool variables that merely end with the suffix are not licenses.
         assert!(!is_license_env_var("CARGO_PKG_LICENSE_FILE"));
+    }
+
+    fn context_of<'a>(names: &'a ProductNames, location: &'a Path) -> LicenseScanContext<'a> {
+        LicenseScanContext {
+            publisher: None,
+            discovered_files: &[],
+            registry_entries: &[],
+            names,
+            executable: Path::new(r"C:\Program Files\Acme\acme.exe"),
+            install_location: Some(location),
+            include_license_data: false,
+            include_hashes: false,
+        }
+    }
+
+    #[test]
+    fn a_license_variable_is_the_apps_if_it_says_so_and_not_otherwise() {
+        let names = ProductNames::new(Some("Acme"), None, &[], &[]);
+        let context = context_of(&names, Path::new(r"C:\Program Files\Acme"));
+        for (name, value) in [
+            ("ACME_LICENSE_FILE", r"\\server\licenses\site.lic"),
+            ("LM_LICENSE_FILE", r"C:\Program Files\Acme\site.lic"),
+            ("OTHER_LICENSE_FILE", r"C:\Program Files\Acme\site.lic"),
+        ] {
+            assert!(
+                license_variable_is_the_apps(&context, name, value),
+                "{name}"
+            );
+        }
+        for (name, value) in [
+            ("LM_LICENSE_FILE", r"\\server\licenses\site.lic"),
+            ("LM_LICENSE_FILE", r"C:\Program Files\Other\site.lic"),
+            ("OTHER_LICENSE_FILE", r"C:\Program Files\Other\site.lic"),
+            (
+                "ACMEOTHER_LICENSE_FILE",
+                r"C:\Program Files\Acme Other\x.lic",
+            ),
+        ] {
+            assert!(
+                !license_variable_is_the_apps(&context, name, value),
+                "{name}"
+            );
+        }
+    }
+
+    fn found_file(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.into(),
+            original_path: path.into(),
+            package_relative_path: Some("files/x".into()),
+            suggested_destination_path: None,
+            size_bytes: Some(7),
+            hash_sha256: Some("00".repeat(32)),
+            classification: crate::models::FileClassification::AppOwned,
+            should_copy: true,
+            reason: String::new(),
+            user_folder: None,
+        }
+    }
+
+    #[test]
+    fn with_the_option_off_a_license_file_is_a_name_and_nothing_more() {
+        let names = ProductNames::new(Some("Acme"), None, &[], &[]);
+        let files = [found_file(r"C:\A\license.lic"), found_file(r"C:\A\app.exe")];
+        let context = LicenseScanContext {
+            discovered_files: &files,
+            ..context_of(&names, Path::new(r"C:\A"))
+        };
+        let mut artifacts = Vec::new();
+        let mut left_out = LeftOut::default();
+        detect_license_files(&context, &mut artifacts, &mut left_out);
+        assert_eq!(artifacts.len(), 1);
+        let artifact = &artifacts[0];
+        assert!(!artifact.should_copy);
+        assert_eq!(artifact.hash_sha256, None);
+        assert_eq!(artifact.size_bytes, None);
+        assert_eq!(artifact.package_relative_path, None);
+        assert_eq!(left_out.licenses.len(), 1);
+        assert_eq!(left_out.licenses[0].name, r"C:\A\license.lic");
+    }
+
+    #[test]
+    fn a_license_store_is_only_for_an_app_that_uses_that_framework() {
+        let with = [found_file(r"C:\A\lmgr11.dll")];
+        let without = [found_file(r"C:\A\app.exe")];
+        assert!(app_has_a_file_starting(&with, FLEXLM_CLIENT_FILES));
+        assert!(!app_has_a_file_starting(&without, FLEXLM_CLIENT_FILES));
+    }
+
+    fn registry_value(hive: RegistryHive, name: &str) -> RegistryEntry {
+        RegistryEntry {
+            hive,
+            key_path: r"Software\Acme\App".to_owned(),
+            value_name: Some(name.to_owned()),
+            value_data: Some("x".to_owned()),
+            value_kind: Some(RegistryValueKind::String),
+            value_bytes_hex: Some("7800".to_owned()),
+            confidence: crate::models::MatchConfidence::Medium,
+            requires_admin: false,
+        }
+    }
+
+    #[test]
+    fn a_license_value_goes_by_the_option_and_a_machine_wide_one_is_only_reported() {
+        let names = ProductNames::new(Some("Acme"), None, &[], &[]);
+        let entries = [
+            registry_value(RegistryHive::CurrentUser, "LicenseKey"),
+            registry_value(RegistryHive::LocalMachine, "SerialNumber"),
+            registry_value(RegistryHive::CurrentUser, "Theme"),
+        ];
+        let context = LicenseScanContext {
+            registry_entries: &entries,
+            ..context_of(&names, Path::new(r"C:\A"))
+        };
+        let (mut artifacts, mut captured, mut left_out) =
+            (Vec::new(), Vec::new(), LeftOut::default());
+        detect_captured_license_values(&context, &mut artifacts, &mut captured, &mut left_out);
+        assert!(captured.is_empty(), "off means not captured");
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(left_out.licenses.len(), 2);
+
+        let on = LicenseScanContext {
+            include_license_data: true,
+            ..context
+        };
+        let (mut artifacts, mut captured, mut left_out) =
+            (Vec::new(), Vec::new(), LeftOut::default());
+        detect_captured_license_values(&on, &mut artifacts, &mut captured, &mut left_out);
+        assert_eq!(captured.len(), 1, "only the per-user one");
+        assert_eq!(captured[0].value_name.as_deref(), Some("LicenseKey"));
+        assert!(left_out.licenses.is_empty());
     }
 
     #[test]
@@ -644,21 +759,14 @@ mod tests {
     }
 
     #[test]
-    fn detects_dpapi_blob() {
-        let mut blob = vec![0x01, 0x00, 0x00, 0x00];
-        blob.extend_from_slice(&DPAPI_PROVIDER_GUID);
-        blob.extend_from_slice(&[0u8; 8]);
-        assert!(is_dpapi_blob(&blob));
-        // A plain serial/token is not flagged as DPAPI.
-        assert!(!is_dpapi_blob(b"ACME-1234-5678-PLAINKEY"));
-        assert!(!is_dpapi_blob(&[0u8; 10]));
-    }
-
-    #[test]
     fn recognizes_license_registry_names() {
         assert!(is_license_registry_name("LicenseKey"));
         assert!(is_license_registry_name("Serial Number"));
         assert!(is_license_registry_name("ProductKey"));
+        assert!(is_license_registry_name("Serial"));
         assert!(!is_license_registry_name("InstallPath"));
+        assert!(!is_license_registry_name("SerialPort"));
+        assert!(!is_license_registry_name("Serializer"));
+        assert!(!is_license_registry_name("SerializationFormat"));
     }
 }

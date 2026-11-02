@@ -16,9 +16,10 @@ use std::path::{Path, PathBuf};
 use winappmigrator_core::hashing::sha256_file;
 use winappmigrator_core::logging::LogSink;
 use winappmigrator_core::{
-    EnvironmentScope, EnvironmentVariableEntry, FileClassification, FileEntry, MatchConfidence,
-    PACKAGE_SCHEMA_VERSION, PackageManifest, RegistryEntry, RegistryHive, RegistryValueKind,
-    RestoreOptions, restore_package,
+    CertificateEntry, EnvironmentScope, EnvironmentVariableEntry, FileClassification, FileEntry,
+    FirewallRuleEntry, LeftOutItem, MatchConfidence, PACKAGE_SCHEMA_VERSION, PackageManifest,
+    PackageOptions, RegistryEntry, RegistryHive, RegistryValueKind, RestoreOptions, create_package,
+    restore_package,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -60,6 +61,23 @@ fn manifest_for(files: Vec<FileEntry>) -> PackageManifest {
                 "Evil",
                 format!(r"C:\Windows\System32\cmd.exe /c {SECRET}"),
             ),
+            // The same, in what a package registers: a protocol, a shell extension, and a font.
+            value(
+                r"Software\Classes\acme\shell\open\command",
+                "(Default)",
+                format!(r"C:\Windows\System32\cmd.exe /c {SECRET}"),
+            ),
+            value(r"Software\Classes\acme", "URL Protocol", String::new()),
+            value(
+                r"Software\Classes\*\shellex\ContextMenuHandlers\Evil",
+                "(Default)",
+                SECRET.to_owned(),
+            ),
+            value(
+                r"Software\Microsoft\Windows NT\CurrentVersion\Fonts",
+                "Evil (TrueType)",
+                SECRET.to_owned(),
+            ),
         ],
         com_registrations_detected: Vec::new(),
         file_associations_detected: Vec::new(),
@@ -78,6 +96,35 @@ fn manifest_for(files: Vec<FileEntry>) -> PackageManifest {
         runtime_prerequisites: Vec::new(),
         license_artifacts_detected: Vec::new(),
         license_registry_entries: vec![value(r"Software\Acme\License", "Key", SECRET.to_owned())],
+        secrets_left_out: vec![LeftOutItem {
+            name: r"HKLM\Software\Acme\ApiKey".to_owned(),
+            why: "it looks like a credential".to_owned(),
+        }],
+        licenses_left_out: Vec::new(),
+        firewall_rules_detected: vec![FirewallRuleEntry {
+            name: "Evil".to_owned(),
+            description: Some(SECRET.to_owned()),
+            direction: "In".to_owned(),
+            action: "AllowBypass".to_owned(),
+            enabled: true,
+            program: PathBuf::from(format!(r"C:\Windows\{SECRET}.exe")),
+            service: None,
+            protocol: None,
+            local_ports: vec![SECRET.to_owned()],
+            remote_ports: Vec::new(),
+            local_addresses: Vec::new(),
+            remote_addresses: Vec::new(),
+            profiles: Vec::new(),
+            not_carried: Vec::new(),
+        }],
+        certificates_reported: vec![CertificateEntry {
+            store: "ROOT".to_owned(),
+            hive: RegistryHive::LocalMachine,
+            thumbprint: "ABC".to_owned(),
+            subject: "CN=Named Only".to_owned(),
+            why: "it is named for it".to_owned(),
+        }],
+        fonts_reported: Vec::new(),
         warnings: Vec::new(),
         items_intentionally_excluded: Vec::new(),
         included_user_data: false,
@@ -184,5 +231,124 @@ fn the_log_never_holds_what_values_hold() -> TestResult {
         );
     }
     assert!(!log.contains(SECRET), "{log}");
+    Ok(())
+}
+
+/// A real app's folder in a temp folder, through the real scan and packaging, with a program it can
+/// read and what must not reach a package beside it. Reads the registry and writes nothing to it.
+/// What a registry value holds is only tried for real on the throwaway runner, since setting one
+/// would change this machine, and the rules for those are tested by themselves.
+///
+/// What it looks for is made up as it runs, since the program it copies holds its own constants.
+fn app_with_secrets(root: &Path, secret: &str, license: &str) -> TestResult<PathBuf> {
+    let app = root.join("Secret Holder");
+    fs::create_dir_all(app.join("conf"))?;
+    let program = app.join("holder.exe");
+    fs::copy(std::env::current_exe()?, &program)?;
+    fs::write(app.join(".env"), format!("API_KEY={secret}"))?;
+    fs::write(
+        app.join(r"conf\server.pem"),
+        format!("-----BEGIN RSA PRIVATE KEY-----\n{secret}\n-----END RSA PRIVATE KEY-----\n"),
+    )?;
+    fs::write(app.join("license.lic"), format!("LICENSE {license}"))?;
+    fs::write(app.join(r"conf\settings.json"), b"{}")?;
+    fs::write(
+        app.join(r"conf\cacert.pem"),
+        b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+    )?;
+    Ok(program)
+}
+
+fn files_holding(folder: &Path, needle: &str) -> TestResult<Vec<PathBuf>> {
+    let wide: Vec<u8> = needle.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut holding = Vec::new();
+    let mut folders = vec![folder.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                folders.push(entry.path());
+                continue;
+            }
+            let bytes = fs::read(entry.path())?;
+            let has = |what: &[u8]| bytes.windows(what.len()).any(|window| window == what);
+            if has(needle.as_bytes()) || has(&wide) {
+                holding.push(entry.path());
+            }
+        }
+    }
+    Ok(holding)
+}
+
+#[test]
+fn credentials_reach_no_package_and_licenses_only_go_by_the_option() -> TestResult {
+    let work = tempfile::tempdir()?;
+    let secret = format!("canary-{}-secret", std::process::id());
+    let license = format!("canary-{}-license", std::process::id());
+    let program = app_with_secrets(work.path(), &secret, &license)?;
+    let package_of = |name: &str, license: bool| {
+        create_package(&PackageOptions {
+            include_user_data: false,
+            include_program_data: false,
+            include_license_data: license,
+            ..PackageOptions::for_executable(&program, work.path().join(name))
+        })
+    };
+
+    let off = package_of("off", false)?;
+    assert_eq!(
+        files_holding(&off.package_root, &secret)?,
+        Vec::<PathBuf>::new()
+    );
+    assert_eq!(
+        files_holding(&off.package_root, &license)?,
+        Vec::<PathBuf>::new()
+    );
+    let manifest: PackageManifest = serde_json::from_slice(&fs::read(&off.manifest_path)?)?;
+    let names: Vec<&str> = manifest
+        .secrets_left_out
+        .iter()
+        .map(|item| item.name.as_str())
+        .collect();
+    for wanted in [".env", "server.pem"] {
+        assert!(
+            names.iter().any(|name| name.ends_with(wanted)),
+            "{wanted} in {names:?}"
+        );
+    }
+    assert!(
+        manifest
+            .licenses_left_out
+            .iter()
+            .any(|item| item.name.ends_with("license.lic")),
+        "{:?}",
+        manifest.licenses_left_out
+    );
+    let copied: Vec<String> = manifest
+        .file_inventory
+        .iter()
+        .filter(|file| file.should_copy)
+        .map(|file| file.original_path.display().to_string())
+        .collect();
+    assert!(
+        copied.iter().any(|file| file.ends_with("settings.json")),
+        "{copied:?}"
+    );
+    assert!(
+        copied.iter().any(|file| file.ends_with("cacert.pem")),
+        "a certificate an app ships is not a secret: {copied:?}"
+    );
+    let every_warning = serde_json::to_string(&manifest.warnings)?;
+    assert!(!every_warning.contains(&secret), "{every_warning}");
+
+    let on = package_of("on", true)?;
+    assert_eq!(
+        files_holding(&on.package_root, &secret)?,
+        Vec::<PathBuf>::new()
+    );
+    assert!(
+        !files_holding(&on.package_root, &license)?.is_empty(),
+        "with the option on, it is what the option asked for"
+    );
     Ok(())
 }

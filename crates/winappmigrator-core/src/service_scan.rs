@@ -550,4 +550,113 @@ mod tests {
             (r"C:\Ünï\svc.exe".to_owned(), Some("é".to_owned()))
         );
     }
+
+    fn context_of(executable: &str, location: Option<&str>) -> ServiceScanContext {
+        ServiceScanContext {
+            executable_path: PathBuf::from(executable),
+            install_location: location.map(PathBuf::from),
+        }
+    }
+
+    #[test]
+    fn a_service_is_the_apps_by_its_program_or_being_in_its_folder() {
+        let context = context_of(
+            r"C:\Program Files\Acme\acme.exe",
+            Some(r"C:\Program Files\Acme"),
+        );
+        for ours in [
+            r"C:\Program Files\Acme\acme.exe",
+            r"c:\program files\acme\ACME.EXE",
+            r"C:\Program Files\Acme\bin\svc.exe",
+        ] {
+            assert!(path_matches(&context, Path::new(ours)), "{ours}");
+        }
+        for not in [
+            r"C:\Program Files\Acme",
+            r"C:\Program Files\Acme Other\svc.exe",
+            r"C:\Program Files\Acme\..\Other\svc.exe",
+            r"C:\Windows\System32\svchost.exe",
+        ] {
+            assert!(!path_matches(&context, Path::new(not)), "{not}");
+        }
+        let with_no_folder = context_of(r"C:\Tools\acme.exe", None);
+        assert!(path_matches(
+            &with_no_folder,
+            Path::new(r"C:\Tools\acme.exe")
+        ));
+        assert!(!path_matches(
+            &with_no_folder,
+            Path::new(r"C:\Tools\other.exe")
+        ));
+    }
+
+    #[test]
+    fn a_driver_is_the_apps_only_in_its_folder_and_not_in_windows() -> std::io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        let image = folder.path().join("acme.sys");
+        std::fs::write(&image, b"x")?;
+        let location = folder.path().display().to_string();
+        let context = context_of(r"C:\Elsewhere\acme.exe", Some(&location));
+        assert!(is_app_owned_driver(&context, &image, &image));
+        assert!(
+            !is_app_owned_driver(
+                &context,
+                &folder.path().join("gone.sys"),
+                &folder.path().join("gone.sys")
+            ),
+            "it has to be there to be bundled"
+        );
+        let elsewhere = Path::new(r"C:\Program Files\Other\acme.sys");
+        assert!(!is_app_owned_driver(&context, elsewhere, &image));
+        let in_windows = context_of(r"C:\A\a.exe", Some(r"C:\Windows\Vendor"));
+        let inbox = Path::new(r"C:\Windows\Vendor\drivers\inbox.sys");
+        assert!(
+            !is_app_owned_driver(&in_windows, inbox, &image),
+            "what is in the Windows folder is not bundled, whatever a location says"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn what_a_service_type_and_a_start_say_are_read_by_their_numbers() {
+        for (start, label) in [
+            (0, "boot"),
+            (1, "system"),
+            (2, "automatic"),
+            (3, "manual"),
+            (4, "disabled"),
+            (99, "unknown"),
+        ] {
+            assert_eq!(start_type_label(start), label);
+        }
+        assert!(is_driver_service_type(1));
+        assert!(is_driver_service_type(2));
+        assert!(is_driver_service_type(8));
+        for service in [0x10, 0x20, 0x110] {
+            assert!(!is_driver_service_type(service), "{service}");
+        }
+        assert_eq!(driver_kind(1), DriverKind::Kernel);
+        assert_eq!(driver_kind(2), DriverKind::FileSystem);
+        assert_eq!(driver_kind(8), DriverKind::Recognizer);
+        assert_eq!(driver_kind(0x10), DriverKind::Unknown);
+    }
+
+    #[test]
+    fn the_instructions_for_a_driver_say_what_will_happen_to_it() {
+        let image = Path::new(r"C:\Program Files\Acme\acme.sys");
+        let owned = driver_restore_instructions(
+            "AcmeFlt",
+            image,
+            &DriverKind::FileSystem,
+            true,
+            &Some("CN=Acme".to_owned()),
+        );
+        assert!(owned.contains("AcmeFlt"), "{owned}");
+        assert!(owned.contains("signed by CN=Acme"), "{owned}");
+        assert!(owned.contains("re-registers"), "{owned}");
+        let vendor =
+            driver_restore_instructions("AcmeFlt", image, &DriverKind::Kernel, false, &None);
+        assert!(vendor.contains("signature unknown"), "{vendor}");
+        assert!(vendor.contains("does not redistribute"), "{vendor}");
+    }
 }

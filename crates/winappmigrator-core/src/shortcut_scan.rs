@@ -635,4 +635,81 @@ mod tests {
             Path::new(r"C:\Program Files\GitHub CLI\gh.exe")
         ));
     }
+
+    fn context_at(executable: &str, location: Option<&str>) -> ShortcutScanContext {
+        ShortcutScanContext {
+            executable_path: PathBuf::from(executable),
+            install_location: location.map(PathBuf::from),
+        }
+    }
+
+    fn powershell_shortcut(target: Option<&str>, path: Option<&str>) -> PowerShellShortcut {
+        PowerShellShortcut {
+            path: path.map(ToOwned::to_owned),
+            target_path: target.map(ToOwned::to_owned),
+            arguments: Some("  ".to_owned()),
+            working_directory: Some(String::new()),
+            icon_location: Some(r"C:\Program Files\Acme\acme.ico,0".to_owned()),
+        }
+    }
+
+    #[test]
+    fn what_windows_says_about_a_shortcut_is_only_kept_if_it_opens_the_app() {
+        let context = context_at(
+            r"C:\Program Files\Acme\acme.exe",
+            Some(r"C:\Program Files\Acme"),
+        );
+        let link = r"C:\Users\me\Desktop\Acme.lnk";
+        let kept = shortcut_entry(
+            &context,
+            powershell_shortcut(Some(r"C:\Program Files\Acme\acme.exe"), Some(link)),
+        );
+        let Some(kept) = kept else {
+            panic!("it opens the app");
+        };
+        assert_eq!(kept.original_lnk_path, Path::new(link));
+        assert_eq!(kept.arguments, None, "what is only spaces is nothing");
+        assert_eq!(kept.working_directory, None);
+        assert_eq!(
+            kept.icon_path,
+            Some(PathBuf::from(r"C:\Program Files\Acme\acme.ico,0"))
+        );
+        assert!(kept.target_is_selected_app);
+
+        for (target, path) in [
+            (Some(r"C:\Windows\System32\cmd.exe"), Some(link)),
+            (None, Some(link)),
+            (Some(r"C:\Program Files\Acme\acme.exe"), None),
+        ] {
+            assert!(
+                shortcut_entry(&context, powershell_shortcut(target, path)).is_none(),
+                "{target:?} {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shortcut_opens_the_app_by_its_program_or_being_in_its_folder() {
+        let with_folder = context_at(r"C:\Tools\acme.exe", Some(r"C:\Program Files\Acme"));
+        for ours in [r"C:\Tools\ACME.exe", r"C:\Program Files\Acme\sub\tool.exe"] {
+            assert!(path_matches(&with_folder, Path::new(ours)), "{ours}");
+        }
+        for not in [
+            r"C:\Tools\other.exe",
+            r"C:\Program Files\Acme",
+            r"C:\Program Files\Acme\..\Other\x.exe",
+        ] {
+            assert!(!path_matches(&with_folder, Path::new(not)), "{not}");
+        }
+    }
+
+    #[test]
+    fn powershell_gives_one_item_or_a_list_or_nothing() -> serde_json::Result<()> {
+        assert_eq!(parse_json_array::<u32>("")?, Vec::<u32>::new());
+        assert_eq!(parse_json_array::<u32>("  \r\n")?, Vec::<u32>::new());
+        assert_eq!(parse_json_array::<u32>("7")?, [7]);
+        assert_eq!(parse_json_array::<u32>(" [1,2] ")?, [1, 2]);
+        assert!(parse_json_array::<u32>("not json").is_err());
+        Ok(())
+    }
 }
