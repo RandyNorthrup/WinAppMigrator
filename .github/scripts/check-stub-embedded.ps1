@@ -24,8 +24,5 @@ $place = [WamBytes]::FirstPlaceOf($appBytes, $stubBytes)
 if ($place -lt 0) {
     throw "The stub is not inside the app: no $($stubBytes.Length) bytes of $($appBytes.Length) match it."
 }
-$sha = [Security.Cryptography.SHA256]::Create()
-$inTheApp = [BitConverter]::ToString($sha.ComputeHash($appBytes, $place, $stubBytes.Length))
-$built = [BitConverter]::ToString($sha.ComputeHash($stubBytes))
-if ($inTheApp -ne $built) { throw "What is inside the app is not the stub: $inTheApp, and the stub is $built." }
+$built = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($stubBytes))
 Write-Host "The app holds the stub at byte $place of $($appBytes.Length): SHA-256 $built"

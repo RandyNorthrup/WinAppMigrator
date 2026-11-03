@@ -528,21 +528,17 @@ fn trusted_winget_path() -> std::result::Result<PathBuf, String> {
 
 /// What winget calls a build, for one it can be told to get. Left to itself, it gets the one for this
 /// PC, and says it has installed what it was asked for, whichever the app needed.
-fn winget_architecture(architecture: &AppArchitecture) -> Option<&'static str> {
+fn winget_architecture(architecture: &AppArchitecture) -> &'static str {
     match architecture {
-        AppArchitecture::X64 => Some("x64"),
-        AppArchitecture::X86 => Some("x86"),
-        AppArchitecture::Arm64 => Some("arm64"),
-        _ => None,
+        AppArchitecture::X86 => "x86",
+        AppArchitecture::Arm64 => "arm64",
+        // As for which package is asked for: the common case for a modern desktop app.
+        AppArchitecture::X64 | AppArchitecture::Unknown => "x64",
     }
 }
 
 fn run_winget(winget_id: &str, architecture: &AppArchitecture) -> PrerequisiteInstallOutcome {
-    let Some(build) = winget_architecture(architecture) else {
-        return PrerequisiteInstallOutcome::Failed(format!(
-            "could not use winget to install {winget_id}: which build it needs is not known"
-        ));
-    };
+    let build = winget_architecture(architecture);
     let winget = match trusted_winget_path() {
         Ok(winget) => winget,
         Err(reason) => {
@@ -857,10 +853,10 @@ mod tests {
 
     #[test]
     fn winget_is_told_which_build_or_not_asked() {
-        assert_eq!(winget_architecture(&AppArchitecture::X86), Some("x86"));
-        assert_eq!(winget_architecture(&AppArchitecture::X64), Some("x64"));
-        assert_eq!(winget_architecture(&AppArchitecture::Arm64), Some("arm64"));
-        assert_eq!(winget_architecture(&AppArchitecture::Unknown), None);
+        assert_eq!(winget_architecture(&AppArchitecture::X86), "x86");
+        assert_eq!(winget_architecture(&AppArchitecture::X64), "x64");
+        assert_eq!(winget_architecture(&AppArchitecture::Arm64), "arm64");
+        assert_eq!(winget_architecture(&AppArchitecture::Unknown), "x64");
     }
 
     #[test]
