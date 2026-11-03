@@ -177,15 +177,17 @@ impl<'a> ReviewedPackage<'a> {
 
     /// What a package would be allowed, for showing before an install location has been chosen, as
     /// the installer's window does and as the app does before anything is built. Whether an item is
-    /// allowed does not depend on where the app is installed.
+    /// allowed does not depend on where the app is installed, and it does depend on these two
+    /// options, which are the ones an install will be given.
     pub(crate) fn before_a_location_is_chosen(
         manifest: &'a PackageManifest,
+        restore_user_data: bool,
         restore_license: bool,
     ) -> Result<Self> {
         Self::with_folders(
             manifest,
             Path::new(NO_TARGET_YET),
-            true,
+            restore_user_data,
             restore_license,
             &current_known_folders(),
             &expand_env_vars,
@@ -426,7 +428,7 @@ impl<'a> ReviewedPackage<'a> {
             }
             // With no fallback to the manifest's own path: a service runs elevated, and the
             // only thing it may run is a file this package puts in place.
-            let Some(binary) = self.map.destination_of(&service.binary_path) else {
+            let Some(binary) = self.map.runnable_destination_of(&service.binary_path) else {
                 self.refuse(
                     item,
                     format!(
@@ -597,7 +599,7 @@ impl<'a> ReviewedPackage<'a> {
                 self.refuse(item, reason);
                 continue;
             }
-            let Some(program) = self.map.destination_of(&rule.program) else {
+            let Some(program) = self.map.runnable_destination_of(&rule.program) else {
                 continue;
             };
             let program = program.to_path_buf();
@@ -764,7 +766,7 @@ impl<'a> ReviewedPackage<'a> {
                     continue;
                 }
             };
-            let Some(target) = self.map.destination_of(&shortcut.target_path) else {
+            let Some(target) = self.map.runnable_destination_of(&shortcut.target_path) else {
                 self.refuse(
                     item,
                     format!(
@@ -1014,20 +1016,29 @@ pub struct SystemChanges {
     pub notes: Vec<String>,
 }
 
-/// Describe what a package would do, for showing before anything is installed. Whether an
-/// item is allowed does not depend on where the app is installed, so this is right for any
-/// install location chosen later. `Err` means the package would be refused whole.
+/// Describe what a package would do with the options an installer's window starts on. See
+/// [`system_changes_restoring`].
 pub fn system_changes(manifest: &PackageManifest) -> Result<SystemChanges> {
-    system_changes_restoring(manifest, manifest.included_license_data)
+    system_changes_restoring(
+        manifest,
+        manifest.included_user_data || manifest.included_program_data,
+        manifest.included_license_data,
+    )
 }
 
-/// The same, for when what is asked of licenses comes from a command line.
+/// Describe what an install with these options would do, for showing before anything is installed.
+/// It goes by the same review an install does, given the same two options, so what this says was
+/// left out is left out. Whether an item is allowed does not depend on where the app is installed,
+/// so this is right for any install location chosen later. `Err` means the package would be refused
+/// whole.
 pub fn system_changes_restoring(
     manifest: &PackageManifest,
+    restore_user_data: bool,
     restore_license: bool,
 ) -> Result<SystemChanges> {
     let fit = refuse_what_cannot_run_here(manifest)?;
-    let review = ReviewedPackage::before_a_location_is_chosen(manifest, restore_license)?;
+    let review =
+        ReviewedPackage::before_a_location_is_chosen(manifest, restore_user_data, restore_license)?;
     let mut changes = describe(&review, Path::new(NO_TARGET_YET));
     changes.notes.extend(fit.warnings);
     Ok(changes)
@@ -2740,6 +2751,181 @@ mod tests {
         assert_eq!(changes.changes[4].detail, "The install folder");
         assert_eq!(changes.refused.len(), 1);
         assert!(changes.refused[0].contains("Evil"));
+        Ok(())
+    }
+
+    fn every_choice() -> [(bool, bool); 4] {
+        [(false, false), (false, true), (true, false), (true, true)]
+    }
+
+    /// Where a file from `C:\ProgramData` is, with what would run it if the rules let it: as the
+    /// review of a hostile package found it.
+    fn package_that_runs_something_from_a_data_folder(data: &str) -> PackageManifest {
+        let mut manifest = acme_manifest();
+        manifest.file_inventory.push(external_data(data));
+        manifest.services_detected = vec![service("AcmeHidden", data)];
+        manifest.registry_keys_exported = vec![value(
+            RegistryHive::LocalMachine,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            "AcmeHidden",
+            data,
+        )];
+        manifest.scheduled_tasks_detected = vec![task(
+            "\\Acme\\",
+            "Hidden",
+            Some(format!(
+                r#"<?xml version="1.0"?><Task><Principals><Principal><UserId>S-1-5-18</UserId></Principal></Principals><Actions><Exec><Command>{data}</Command></Exec></Actions></Task>"#
+            )),
+        )];
+        manifest
+    }
+
+    fn rows_of(changes: &SystemChanges) -> Vec<(SystemChangeKind, String)> {
+        let mut rows: Vec<_> = changes
+            .changes
+            .iter()
+            .map(|change| (change.kind, change.title.clone()))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// What a person is shown is worked out for no location, and an install for a real one.
+    fn what_is_shown_and_what_is_done(
+        manifest: &PackageManifest,
+        restore_user_data: bool,
+        restore_license: bool,
+    ) -> Result<(SystemChanges, SystemChanges)> {
+        let shown = ReviewedPackage::with_folders(
+            manifest,
+            Path::new(NO_TARGET_YET),
+            restore_user_data,
+            restore_license,
+            &folders(),
+            &|text| text.to_owned(),
+            &|_| Ok(None),
+        )?;
+        let done = ReviewedPackage::with_folders(
+            manifest,
+            Path::new(TARGET),
+            restore_user_data,
+            restore_license,
+            &folders(),
+            &|text| text.to_owned(),
+            &|_| Ok(None),
+        )?;
+        Ok((
+            describe(&shown, Path::new(NO_TARGET_YET)),
+            describe(&done, Path::new(TARGET)),
+        ))
+    }
+
+    #[test]
+    fn what_is_shown_is_what_is_done_for_every_choice() -> Result<()> {
+        for data in [
+            r"C:\ProgramData\Microsoft\Windows\Acme\evil.exe",
+            r"C:\ProgramData\Acme\helper.exe",
+        ] {
+            let manifest = package_that_runs_something_from_a_data_folder(data);
+            for (user_data, license) in every_choice() {
+                let (shown, done) = what_is_shown_and_what_is_done(&manifest, user_data, license)?;
+                assert_eq!(
+                    rows_of(&shown),
+                    rows_of(&done),
+                    "{data}, user data {user_data}, license {license}"
+                );
+                assert_eq!(
+                    shown.refused.len(),
+                    done.refused.len(),
+                    "{data}, user data {user_data}, license {license}: {:?} {:?}",
+                    shown.refused,
+                    done.refused
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn nothing_is_set_up_to_run_a_file_put_aside_under_the_install_location() -> Result<()> {
+        let manifest = package_that_runs_something_from_a_data_folder(
+            r"C:\ProgramData\Microsoft\Windows\Acme\evil.exe",
+        );
+        for license in [false, true] {
+            let reviewed = ReviewedPackage::with_folders(
+                &manifest,
+                Path::new(TARGET),
+                false,
+                license,
+                &folders(),
+                &|text| text.to_owned(),
+                &|_| Ok(None),
+            )?;
+            assert!(reviewed.services.is_empty(), "{:?}", reviewed.refused);
+            assert!(reviewed.tasks.is_empty(), "{:?}", reviewed.refused);
+            assert!(
+                reviewed.registry.is_empty(),
+                "{:?}",
+                reviewed
+                    .registry
+                    .iter()
+                    .map(|entry| &entry.value_name)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(reviewed.refused.len(), 3, "{:?}", reviewed.refused);
+            // The file itself still comes, under the install location, where it runs nothing.
+            assert_eq!(reviewed.files.len(), 3);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_setting_that_names_a_file_put_aside_still_follows_it() -> Result<()> {
+        let data = r"C:\ProgramData\Acme\settings.json";
+        let mut manifest = acme_manifest();
+        manifest.file_inventory.push(external_data(data));
+        manifest.registry_keys_exported = vec![value(
+            RegistryHive::LocalMachine,
+            r"Software\Acme",
+            "Settings",
+            data,
+        )];
+        let reviewed = ReviewedPackage::with_folders(
+            &manifest,
+            Path::new(TARGET),
+            false,
+            true,
+            &folders(),
+            &|text| text.to_owned(),
+            &|_| Ok(None),
+        )?;
+        assert_eq!(reviewed.registry.len(), 1, "{:?}", reviewed.refused);
+        assert_eq!(
+            reviewed.map.rewrite(data),
+            format!(r"{TARGET}\_external\x.exe")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_program_of_a_part_outside_the_install_location_can_still_be_run() -> Result<()> {
+        // Not from a data folder, so its place under the install location is simply where it goes.
+        let part = r"C:\Program Files\Common Files\Acme\agent.exe";
+        let mut manifest = acme_manifest();
+        manifest.file_inventory.push(external_data(part));
+        manifest.services_detected = vec![service("AcmeAgent", part)];
+        for user_data in [false, true] {
+            let reviewed = ReviewedPackage::with_folders(
+                &manifest,
+                Path::new(TARGET),
+                user_data,
+                true,
+                &folders(),
+                &|text| text.to_owned(),
+                &|_| Ok(None),
+            )?;
+            assert_eq!(reviewed.services.len(), 1, "{:?}", reviewed.refused);
+        }
         Ok(())
     }
 

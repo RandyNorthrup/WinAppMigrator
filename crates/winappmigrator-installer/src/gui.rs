@@ -32,7 +32,7 @@ use winappmigrator_core::{
     SystemChanges, UndoReport, Warning, WarningSeverity, WinAppMigratorError,
     default_install_location, hidden_command, install_location_problem, install_places, panic_text,
     preview_needs, read_embedded_manifest, refuse_without_room_to_install,
-    restore_package_monitored, system_changes,
+    restore_package_monitored, system_changes_restoring,
 };
 use winappmigrator_ui::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
@@ -140,7 +140,7 @@ enum SignatureState {
 
 /// What the check behind the window found.
 enum Loaded {
-    Ready(Arc<EmbeddedPackage>, Box<PackageManifest>, SystemChanges),
+    Ready(Arc<EmbeddedPackage>, Box<PackageManifest>, ChangesByChoice),
     NoPackage,
     Failed(String),
     Signature(SignatureState),
@@ -183,7 +183,10 @@ struct InstallerApp {
     restore_license: bool,
     prereqs: Vec<PrereqRow>,
     /// What the package sets up beyond files, and what it asked for and will not get.
+    /// What an install with the boxes as they are would set up.
     changes: SystemChanges,
+    /// The same for every way the boxes can be set, worked out ahead so that a click is instant.
+    changes_by_choice: ChangesByChoice,
     signature: SignatureState,
     /// Apps with an install that never finished.
     interrupted: Vec<String>,
@@ -223,6 +226,7 @@ impl InstallerApp {
             restore_license: false,
             prereqs: Vec::new(),
             changes: SystemChanges::default(),
+            changes_by_choice: ChangesByChoice::new(),
             signature: SignatureState::Checking,
             interrupted: Vec::new(),
             phase: Phase::Idle,
@@ -282,11 +286,12 @@ impl InstallerApp {
 
     fn finish_load(&mut self, loaded: Loaded, ctx: &egui::Context) {
         match loaded {
-            Loaded::Ready(package, manifest, changes) => {
+            Loaded::Ready(package, manifest, changes_by_choice) => {
                 self.unpacked_bytes = package.unpacked_bytes().unwrap_or(0);
                 self.package = Some(package);
                 self.apply_manifest(&manifest);
-                self.changes = changes;
+                self.changes_by_choice = changes_by_choice;
+                self.show_changes_for_the_choices();
                 self.screen = Screen::Ready;
                 theme::add_fallback_fonts(
                     ctx,
@@ -336,6 +341,20 @@ impl InstallerApp {
             .iter()
             .map(prereq_row)
             .collect();
+    }
+
+    /// What the boxes say, as an install is given it.
+    fn chosen(&self) -> (bool, bool) {
+        (
+            self.show_user_data && self.restore_user_data,
+            self.show_license && self.restore_license,
+        )
+    }
+
+    fn show_changes_for_the_choices(&mut self) {
+        if let Some(changes) = self.changes_by_choice.get(&self.chosen()) {
+            self.changes = changes.clone();
+        }
     }
 
     /// A full path is required: anything else would resolve against whatever folder
@@ -418,11 +437,12 @@ impl InstallerApp {
             progress_ctx.request_repaint();
         });
         self.monitor = Some(monitor.clone());
+        let (restore_user_data, restore_license) = self.chosen();
         let choices = RestoreChoices {
             target_root: PathBuf::from(self.target_root.trim()),
             apply,
-            restore_user_data: self.show_user_data && self.restore_user_data,
-            restore_license: self.show_license && self.restore_license,
+            restore_user_data,
+            restore_license,
         };
         let ctx = ctx.clone();
         thread::spawn(move || {
@@ -494,6 +514,9 @@ impl InstallerApp {
     }
 }
 
+/// What an install would set up, by what it is asked to do with user data and with a license.
+type ChangesByChoice = std::collections::HashMap<(bool, bool), SystemChanges>;
+
 /// What the person chose in the window.
 struct RestoreChoices {
     target_root: PathBuf,
@@ -515,12 +538,31 @@ fn load_package(exe: &Path) -> Loaded {
         Ok(manifest) => manifest,
         Err(error) => return Loaded::Failed(format!("Could not read the installer: {error}")),
     };
-    match system_changes(&manifest) {
+    match changes_for_every_choice(&manifest) {
         Ok(changes) => Loaded::Ready(Arc::new(package), Box::new(manifest), changes),
         Err(error) => Loaded::Failed(format!(
             "This installer's package cannot be used on this PC: {error}"
         )),
     }
+}
+
+/// What an install would set up, for every way a package's boxes can be set. It comes from the same
+/// review an install goes by, given the same two options.
+fn changes_for_every_choice(
+    manifest: &PackageManifest,
+) -> winappmigrator_core::Result<ChangesByChoice> {
+    let offers_user_data = manifest.included_user_data || manifest.included_program_data;
+    let mut lists = ChangesByChoice::new();
+    for user_data in [false, offers_user_data] {
+        for license in [false, manifest.included_license_data] {
+            if let std::collections::hash_map::Entry::Vacant(place) =
+                lists.entry((user_data, license))
+            {
+                place.insert(system_changes_restoring(manifest, user_data, license)?);
+            }
+        }
+    }
+    Ok(lists)
 }
 
 /// What Windows says about the installer file. Most have no signature, which can be seen
@@ -858,18 +900,21 @@ impl InstallerApp {
         );
         widgets::section_gap(ui);
 
+        let mut changed_a_choice = false;
         if self.show_user_data || self.show_license {
             widgets::card_titled(ui, theme, "Options", None, |ui| {
                 if self.show_user_data {
-                    widgets::option_row(
+                    changed_a_choice |= widgets::option_row(
                         ui,
                         theme,
                         &mut self.restore_user_data,
                         "User data",
                         "On: settings, Documents, and Saved Games go to the usual folders of \
-                         whoever is signed in. Off: all of it goes under the install folder.",
+                         whoever is signed in. Off: all of it goes under the install folder, and \
+                         nothing is set up to run from it.",
                         enabled,
-                    );
+                    )
+                    .changed();
                     if !self.user_data_profile.is_empty() {
                         widgets::hint(
                             ui,
@@ -879,17 +924,21 @@ impl InstallerApp {
                     }
                 }
                 if self.show_license {
-                    widgets::option_row(
+                    changed_a_choice |= widgets::option_row(
                         ui,
                         theme,
                         &mut self.restore_license,
                         "License",
                         "Activation and license files and keys. Some may need reactivation here.",
                         enabled,
-                    );
+                    )
+                    .changed();
                 }
             });
             widgets::section_gap(ui);
+        }
+        if changed_a_choice {
+            self.show_changes_for_the_choices();
         }
 
         widgets::card_titled(
@@ -1396,6 +1445,7 @@ mod tests {
     use eframe::egui;
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
+    use winappmigrator_core::Result;
 
     use super::*;
     use winappmigrator_core::SystemChangeKind;
@@ -1617,6 +1667,87 @@ mod tests {
         let mut app = sample_installer(ThemeMode::Dark);
         app.target_root = r"relative\folder".to_owned();
         assert_eq!(app.room_for_target(), None);
+    }
+
+    /// What the window shows is worked out for each way its boxes can be, and one click away.
+    #[test]
+    fn what_it_says_it_sets_up_goes_with_its_boxes() {
+        let list_saying = |title: &str| SystemChanges {
+            changes: vec![SystemChange {
+                kind: SystemChangeKind::Service,
+                title: title.to_owned(),
+                detail: String::new(),
+                high_rights: false,
+            }],
+            ..SystemChanges::default()
+        };
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.changes_by_choice = ChangesByChoice::from([
+            ((true, true), list_saying("With data and license")),
+            ((false, true), list_saying("With a license alone")),
+            ((true, false), list_saying("With data alone")),
+            ((false, false), list_saying("With neither")),
+        ]);
+        app.show_changes_for_the_choices();
+        let mut harness = harness_sized(app, egui::vec2(760.0, 1600.0));
+        harness.run();
+        assert!(harness.query_by_label("With data and license").is_some());
+
+        harness.get_by_label("User data").click();
+        harness.run();
+        assert!(harness.query_by_label("With a license alone").is_some());
+        assert!(harness.query_by_label("With data and license").is_none());
+        assert_eq!(harness.state().chosen(), (false, true));
+
+        harness.get_by_label("License").click();
+        harness.run();
+        assert!(harness.query_by_label("With neither").is_some());
+        assert_eq!(harness.state().chosen(), (false, false));
+    }
+
+    /// What the boxes cannot offer is not an answer that can be given.
+    #[test]
+    fn the_lists_are_of_what_a_package_can_offer() -> Result<()> {
+        let mut manifest: PackageManifest = serde_json::from_str(
+            r#"{
+                "schema_version": "",
+                "source_computer_name": null,
+                "source_windows_version": null,
+                "scan_timestamp_utc": "",
+                "main_executable_path": "C:\\App\\app.exe",
+                "application_metadata": null,
+                "file_inventory": [],
+                "registry_keys_exported": [],
+                "services_detected": [],
+                "scheduled_tasks_detected": [],
+                "shortcuts_detected": [],
+                "environment_variables_detected": [],
+                "runtime_prerequisites": [],
+                "warnings": [],
+                "items_intentionally_excluded": []
+            }"#,
+        )
+        .map_err(WinAppMigratorError::from)?;
+        manifest.included_user_data = false;
+        manifest.included_program_data = false;
+        manifest.included_license_data = false;
+        let keys = |lists: &ChangesByChoice| {
+            let mut keys: Vec<(bool, bool)> = lists.keys().copied().collect();
+            keys.sort_unstable();
+            keys
+        };
+        assert_eq!(
+            keys(&changes_for_every_choice(&manifest)?),
+            [(false, false)]
+        );
+        manifest.included_license_data = true;
+        assert_eq!(
+            keys(&changes_for_every_choice(&manifest)?),
+            [(false, false), (false, true)]
+        );
+        manifest.included_program_data = true;
+        assert_eq!(keys(&changes_for_every_choice(&manifest)?).len(), 4);
+        Ok(())
     }
 
     fn harness_for(app: InstallerApp) -> Harness<'static, InstallerApp> {

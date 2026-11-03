@@ -223,8 +223,11 @@ impl Footprint {
     /// worker thread. `Err` means a package of it would be refused whole, which is better said now.
     pub fn of(report: &ScanReport, flags: ScanFlags) -> Result<Self> {
         let manifest = manifest_for_review(report, flags, &|_| true);
-        let review =
-            ReviewedPackage::before_a_location_is_chosen(&manifest, flags.include_license_data)?;
+        let review = ReviewedPackage::before_a_location_is_chosen(
+            &manifest,
+            manifest.included_user_data || manifest.included_program_data,
+            flags.include_license_data,
+        )?;
         let mut footprint = Self {
             main_program: report.main_executable.path.clone(),
             folders: folder_rows(report),
@@ -894,6 +897,7 @@ fn decide(
         also.extend(needing);
         let review = ReviewedPackage::before_a_location_is_chosen(
             &manifest,
+            manifest.included_user_data || manifest.included_program_data,
             footprint.flags.include_license_data,
         )?;
         let now = allowed_by(&review);
@@ -2050,7 +2054,7 @@ mod tests {
         let chosen = chosen(&[folder("plugins")])?;
         let footprint = Footprint::of(&chosen.report, FLAGS)?;
         let manifest = manifest_for_review(&chosen.report, FLAGS, &|_| true);
-        let review = ReviewedPackage::before_a_location_is_chosen(&manifest, false)?;
+        let review = ReviewedPackage::before_a_location_is_chosen(&manifest, true, false)?;
         assert!(
             review.refused.is_empty(),
             "the installer has nothing to refuse of it: {:?}",

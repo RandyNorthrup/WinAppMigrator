@@ -720,7 +720,7 @@ pub fn data_location_of(entry: &FileEntry) -> Option<(UserDataAnchor, PathBuf)> 
 
 /// True when a package-relative path was staged under `files\_external\…`
 /// (data captured from outside the install directory, i.e. user/ProgramData).
-fn is_external_package_path(package_relative_path: &Path) -> bool {
+pub(crate) fn is_external_package_path(package_relative_path: &Path) -> bool {
     let relative = safe_relative_path(package_relative_path);
     relative
         .strip_prefix(PACKAGE_FILES_ROOT)

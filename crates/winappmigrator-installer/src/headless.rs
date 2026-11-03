@@ -169,7 +169,8 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
 
     // The same list the window asks about, before any of it, so that a script can see what it
     // agreed to.
-    if let Ok(changes) = system_changes_restoring(&manifest, restore_license) {
+    if let Ok(changes) = system_changes_restoring(&manifest, cli.restore_user_data, restore_license)
+    {
         println!("Sets up: {}", changes.changes.len());
         for change in &changes.changes {
             println!(

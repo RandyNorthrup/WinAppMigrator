@@ -14,7 +14,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
-use crate::file_discovery::{MAX_EMPTY_FOLDERS, data_location_of, restore_destination_for_entry};
+use crate::file_discovery::{
+    MAX_EMPTY_FOLDERS, data_location_of, is_external_package_path, restore_destination_for_entry,
+};
 use crate::models::PackageManifest;
 use crate::path_utils::{is_drive_root, path_is_within};
 use crate::restore_policy::data_location_refusal;
@@ -41,8 +43,13 @@ fn folded_path(path: &Path) -> String {
 pub struct RestoreMap {
     /// Copied files, by their folded source path.
     files: HashMap<String, PathBuf>,
-    /// The folded path of everywhere a file is restored to.
+    /// The folded path of everywhere a file that may be run is restored to. What is in
+    /// [`Self::set_aside`] is not here.
     destinations: HashSet<String>,
+    /// By their folded source path, files from a data folder that are not going back to one, so
+    /// they are under the install location, in a folder named `_external`. They are still put
+    /// there and what names them follows, but nothing is set up to run them.
+    set_aside: HashSet<String>,
     /// Folders, by their folded source path, as text ready to write.
     roots: HashMap<String, String>,
     /// The longest source path of any rule, which bounds the search at each position.
@@ -85,7 +92,15 @@ impl RestoreMap {
             };
             match refusal {
                 Some(reason) => map.refused_files.push((file.original_path.clone(), reason)),
-                None => map.add_file(&file.original_path, destination),
+                None => {
+                    let put_aside = path_is_within(&destination, target_root)
+                        && data_location_of(file).is_some()
+                        && file
+                            .package_relative_path
+                            .as_deref()
+                            .is_some_and(is_external_package_path);
+                    map.add_file(&file.original_path, destination, put_aside);
+                }
             }
         }
         for folder in manifest
@@ -126,15 +141,22 @@ impl RestoreMap {
         Ok(map)
     }
 
-    fn add_file(&mut self, source: &Path, destination: PathBuf) {
+    fn add_file(&mut self, source: &Path, destination: PathBuf, put_aside: bool) {
         let source = folded_path(source);
         self.longest_rule = self.longest_rule.max(source.len());
         let destination_key = folded_path(&destination);
+        if put_aside {
+            self.set_aside.insert(source.clone());
+        } else {
+            self.set_aside.remove(&source);
+        }
         // Listed twice in a manifest, a file is only written to where it is finally mapped.
         if let Some(earlier) = self.files.insert(source, destination) {
             self.destinations.remove(&folded_path(&earlier));
         }
-        self.destinations.insert(destination_key);
+        if !put_aside {
+            self.destinations.insert(destination_key);
+        }
     }
 
     fn add_root(&mut self, source: &Path, destination: &Path) {
@@ -151,6 +173,16 @@ impl RestoreMap {
         self.files.get(&folded_path(source)).map(PathBuf::as_path)
     }
 
+    /// Where a file lands that something may be set up to run. A file from a data folder that was
+    /// put aside under the install location is not one: `None` for it, as for what was not copied.
+    pub fn runnable_destination_of(&self, source: &Path) -> Option<&Path> {
+        let source = folded_path(source);
+        if self.set_aside.contains(&source) {
+            return None;
+        }
+        self.files.get(&source).map(PathBuf::as_path)
+    }
+
     /// Where an empty folder goes on the target. `None` for one that is not going anywhere.
     pub fn folder_destination_of(&self, source: &Path) -> Option<&Path> {
         self.empty_folders
@@ -158,7 +190,7 @@ impl RestoreMap {
             .map(PathBuf::as_path)
     }
 
-    /// True when `path` is exactly where a copied file lands on the target.
+    /// True when `path` is exactly where a copied file lands on the target, and may be run from.
     pub fn is_restored_file(&self, path: &Path) -> bool {
         self.destinations.contains(&folded_path(path))
     }
@@ -192,7 +224,7 @@ impl RestoreMap {
 
     #[cfg(test)]
     pub(crate) fn add_test_file(&mut self, source: &str, destination: &str) {
-        self.add_file(Path::new(source), PathBuf::from(destination));
+        self.add_file(Path::new(source), PathBuf::from(destination), false);
     }
 
     /// Replace every path in `text` that this restore moves, leaving everything else as
@@ -518,6 +550,7 @@ mod tests {
         map.add_file(
             Path::new(r"C:\App\odd name.\x.exe"),
             PathBuf::from(r"D:\Restored\odd name\x.exe"),
+            false,
         );
         assert_eq!(
             map.rewrite(r"C:\App\odd name.\x.exe --flag"),
@@ -532,6 +565,7 @@ mod tests {
         map.add_file(
             Path::new(r"C:\ProgramData\App\a.dat"),
             PathBuf::from(r"D:\T\_external\a.dat"),
+            false,
         );
         assert_eq!(
             map.rewrite(r"C:\ProgramData\App\a.dat,0"),
@@ -550,10 +584,15 @@ mod tests {
     #[test]
     fn a_file_listed_twice_only_counts_where_it_finally_lands() {
         let mut map = RestoreMap::default();
-        map.add_file(Path::new(r"C:\App\a.exe"), PathBuf::from(r"D:\T\first.exe"));
+        map.add_file(
+            Path::new(r"C:\App\a.exe"),
+            PathBuf::from(r"D:\T\first.exe"),
+            false,
+        );
         map.add_file(
             Path::new(r"C:\App\a.exe"),
             PathBuf::from(r"D:\T\second.exe"),
+            false,
         );
         assert!(!map.is_restored_file(Path::new(r"D:\T\first.exe")));
         assert!(map.is_restored_file(Path::new(r"D:\T\second.exe")));
@@ -562,7 +601,11 @@ mod tests {
     #[test]
     fn looking_up_a_file_works_from_either_side() {
         let mut map = RestoreMap::default();
-        map.add_file(Path::new(r"C:\App\A.exe"), PathBuf::from(r"D:\T\A.exe"));
+        map.add_file(
+            Path::new(r"C:\App\A.exe"),
+            PathBuf::from(r"D:\T\A.exe"),
+            false,
+        );
         assert_eq!(
             map.destination_of(Path::new(r"c:\app\a.exe")),
             Some(Path::new(r"D:\T\A.exe"))
