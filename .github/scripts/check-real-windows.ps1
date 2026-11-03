@@ -282,14 +282,15 @@ Write-Host "`n=== The mode Windows is in, as this runner has it: $((Get-ItemProp
 Set-WindowsMode 'light'
 
 Write-Host "`n=== The app, as it is released"
+$logBefore = (Latest-Log 'app').FullName
 $opened = Open-And-Look $App 'The app' 'WinAppMigrator' 32 20 -HasToFit
 if ($opened) {
     Check-Mode 'The app' 'light'
     # It starts its log in the background, which under emulation can take longer than all of this.
-    [void](Wait-Until { Latest-Log 'app' } 120)
+    [void](Wait-Until { (Latest-Log 'app').FullName -notin $null, $logBefore } 120)
     Ask-To-Close $opened 'The app' 0
     $log = Latest-Log 'app'
-    if ($log) {
+    if ($log -and $log.FullName -ne $logBefore) {
         $said = @(Get-Content -LiteralPath $log.FullName | Where-Object { $_ -match 'graphics adapter' })
         $said | ForEach-Object { Write-Host "  its log: $_" }
         Check 'The app: it says which graphics adapter it picked' ($said.Count -gt 0) $log.FullName

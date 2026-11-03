@@ -414,17 +414,25 @@ pub(crate) fn task_for_whoever_installs_it(xml: &str) -> Option<(String, bool)> 
                     .into_iter()
                     .flat_map(|principal| principal.children())
                     .find(|child| child.tag_name().name() == "LogonType");
+                // Written as the document writes its own, or it would be in no namespace of Task
+                // Scheduler's.
+                let start = element.range().start + 1;
+                let written_as = xml[start..]
+                    .split(['>', ' ', '\t', '\r', '\n', '/'])
+                    .next()
+                    .unwrap_or_default();
+                let prefix = written_as
+                    .rsplit_once(':')
+                    .map_or(String::new(), |(prefix, _)| format!("{prefix}:"));
+                let mut written = format!("<{prefix}UserId>{WHOEVER_INSTALLS_IT}</{prefix}UserId>");
                 if let Some(logon_type) = logon_type {
                     edits.set_text(logon_type, SIGNED_IN_LOGON_TYPE);
-                    edits.replace_with(element, &format!("<UserId>{WHOEVER_INSTALLS_IT}</UserId>"));
                 } else {
-                    edits.replace_with(
-                        element,
-                        &format!(
-                            "<UserId>{WHOEVER_INSTALLS_IT}</UserId><LogonType>{SIGNED_IN_LOGON_TYPE}</LogonType>"
-                        ),
-                    );
+                    written.push_str(&format!(
+                        "<{prefix}LogonType>{SIGNED_IN_LOGON_TYPE}</{prefix}LogonType>"
+                    ));
                 }
+                edits.replace_with(element, &written);
                 runs_as_a_person = true;
             }
             _ => {}
@@ -784,6 +792,18 @@ mod tests {
         ] {
             assert!(!names_a_person(its_own), "{its_own}");
         }
+    }
+
+    #[test]
+    fn what_a_group_comes_to_is_in_the_documents_own_namespace() {
+        let xml = r#"<t:Task xmlns:t="http://schemas.microsoft.com/windows/2004/02/mit/task"><t:Principals><t:Principal><t:GroupId>CORP\Finance</t:GroupId></t:Principal></t:Principals></t:Task>"#;
+        let (kept, _) = task_for_whoever_installs_it(xml).unwrap_or_else(|| panic!("it parses"));
+        assert!(kept.contains("<t:UserId>"), "{kept}");
+        assert!(
+            kept.contains("<t:LogonType>InteractiveToken</t:LogonType>"),
+            "{kept}"
+        );
+        assert!(!kept.contains("<UserId>"), "{kept}");
     }
 
     #[test]

@@ -36,8 +36,10 @@ Translate([Security.Principal.SecurityIdentifier]).Value } }; \
 /// What a tool may take from this process's environment, none of which can load code or say where
 /// Windows is. Where Windows and its folders are is set separately, from the registry.
 const TOOL_ENVIRONMENT: &[&str] = &["COMPUTERNAME", "USERDOMAIN", "USERNAME"];
-/// What this is built as, which is what a program it starts runs as, emulated or not. An installer
-/// picks what to install by this.
+/// What a program can be told it runs on. Windows sets this for each program, by how it runs, so what
+/// this was given is passed on, as long as it is one of them. An installer picks what to install by it.
+const PROCESSOR_NAMES: [&str; 3] = ["AMD64", "ARM64", "x86"];
+/// What this is built as, if it was told something else.
 const PROCESSOR_THIS_RUNS_AS: &str = "AMD64";
 /// Where an account's folders are, which a tool can go by. From what the registry says of that
 /// account when this is elevated, and otherwise, as nothing is at stake, as they were given.
@@ -248,7 +250,17 @@ fn set_tool_environment(command: &mut Command) {
         .env("TEMP", &windows_temp)
         .env("TMP", &windows_temp)
         .env("OS", "Windows_NT")
-        .env("PROCESSOR_ARCHITECTURE", PROCESSOR_THIS_RUNS_AS)
+        .env(
+            "PROCESSOR_ARCHITECTURE",
+            std::env::var("PROCESSOR_ARCHITECTURE")
+                .ok()
+                .filter(|name| {
+                    PROCESSOR_NAMES
+                        .iter()
+                        .any(|known| name.eq_ignore_ascii_case(known))
+                })
+                .unwrap_or_else(|| PROCESSOR_THIS_RUNS_AS.to_owned()),
+        )
         .env("PATHEXT", TOOL_EXTENSIONS)
         .env("PSModulePath", powershell_home.join("Modules"));
     if let Ok(processors) = std::thread::available_parallelism() {

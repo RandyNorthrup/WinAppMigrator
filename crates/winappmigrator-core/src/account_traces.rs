@@ -67,6 +67,7 @@ const NAMES_THAT_ARE_WORDS: [&str; 14] = [
 const NETWORK_PATH_START: &str = r"\\";
 const NOT_A_NETWORK_PATH: [&str; 2] = [r"\\?\", r"\\.\"];
 const MENTIONS_CODE: &str = "package_mentions_an_account";
+const ENDS_A_PATH_ON_A_COMMAND_LINE: [char; 7] = ['"', '\'', '<', '>', '|', ';', ','];
 /// The shortest run of hex that can be a value's bytes, rather than a number.
 const SHORTEST_HEX_VALUE: usize = 6;
 
@@ -183,8 +184,15 @@ impl AccountTraces {
             }
         }
         // Where its own settings say its Desktop and Start Menu are, which can be anywhere.
+        let shared: Vec<PathBuf> = system
+            .public_dir()
+            .into_iter()
+            .chain(system.program_data())
+            .collect();
         for folder in folders_of_the_accounts_shortcuts(system) {
-            traces.add_folder(&system.logical_path(&folder));
+            if !shared.iter().any(|base| path_is_within(&folder, base)) {
+                traces.add_folder(&system.logical_path(&folder));
+            }
         }
         if let Some(computer) = system.source_identity().computer_name {
             traces.add_computer(&computer);
@@ -506,7 +514,11 @@ pub(crate) fn what_a_package_still_says(
         for (name, bytes) in written {
             let decoded = text_of_bytes(bytes);
             if text_mentions(&decoded, kind, what) {
-                said.entry(kind).or_default().insert(name.clone(), 1);
+                *said
+                    .entry(kind)
+                    .or_default()
+                    .entry(name.clone())
+                    .or_default() += 1;
             }
         }
     }
@@ -577,12 +589,12 @@ fn names_a_place_of_an_account(
             let goes_on = lower[from..]
                 .chars()
                 .next()
-                .is_some_and(|next| !next.is_whitespace() && !"\\\"<>|;,".contains(next));
+                .is_some_and(|next| !next.is_whitespace() && !"\\\"'<>|;,".contains(next));
             if goes_on {
                 continue;
             }
             let path = lower[at..]
-                .split(['"', '<', '>', '|', ';', ','])
+                .split(ENDS_A_PATH_ON_A_COMMAND_LINE)
                 .next()
                 .unwrap_or_default();
             if !is_the_apps(path) {
@@ -599,10 +611,10 @@ fn names_a_place_of_an_account(
         }
         // From the drive letter, if it has one, to where a command line would end the path.
         let start = lower[..at]
-            .rfind(['"', ' ', '=', ',', ';'])
+            .rfind(['"', '\'', ' ', '=', ',', ';'])
             .map_or(0, |at| at + 1);
         let path = lower[start..]
-            .split(['"', '<', '>', '|', ';', ','])
+            .split(ENDS_A_PATH_ON_A_COMMAND_LINE)
             .next()
             .unwrap_or_default();
         if !is_the_apps(path) {
@@ -612,8 +624,9 @@ fn names_a_place_of_an_account(
     false
 }
 
-/// What a shortcut in an account's own folders is called wherever it goes, with no account in it.
-fn location_with_no_account(path: &Path) -> Option<PathBuf> {
+/// What a shortcut in an account's own folders is called wherever it goes, with no account in it. What
+/// is left past the folder it is in can still say who, as `D:\\Desktop\\Alice` does.
+fn location_with_no_account(path: &Path, traces: &AccountTraces) -> Option<PathBuf> {
     let text = path.to_string_lossy().replace('/', "\\");
     let lower = text.to_ascii_lowercase();
     let (part, place) = match lower.find(START_MENU_PART) {
@@ -623,7 +636,8 @@ fn location_with_no_account(path: &Path) -> Option<PathBuf> {
             ACCOUNTS_DESKTOP,
         ),
     };
-    Some(Path::new(place).join(&text[part..]))
+    let rest = &text[part..];
+    (traces.scrub(rest) == rest).then(|| Path::new(place).join(rest))
 }
 
 /// With none of an account's data going: a shortcut in an account's own folders is what that account
@@ -662,7 +676,7 @@ fn withhold_shortcuts(
         }
         // Somewhere only this account's own settings say is its Desktop, which is nowhere on another
         // PC, and a restore would have nowhere to put it.
-        let Some(location) = location_with_no_account(&shortcut.original_lnk_path) else {
+        let Some(location) = location_with_no_account(&shortcut.original_lnk_path, traces) else {
             withheld += 1;
             return false;
         };
@@ -1154,6 +1168,34 @@ mod tests {
     }
 
     #[test]
+    fn what_is_left_of_where_a_shortcut_is_can_say_who_too() {
+        let folders = [PathBuf::from(APP)];
+        let traces = AccountTraces {
+            account_names: vec!["Alice".to_owned()],
+            profile_folders: vec![r"D:\Desktop\Alice".to_owned()],
+            ..AccountTraces::default()
+        };
+        let mut shortcuts = vec![
+            shortcut(r"D:\Desktop\Alice\Acme.lnk", MAIN, None),
+            shortcut(r"C:\Users\Alice\Desktop\Acme.lnk", MAIN, None),
+        ];
+        let mut left_out = LeftOut::default();
+        withhold_shortcuts(
+            &mut shortcuts,
+            &folders,
+            Path::new(MAIN),
+            false,
+            &traces,
+            &mut left_out,
+        );
+        assert_eq!(shortcuts.len(), 1, "{shortcuts:?}");
+        assert_eq!(
+            shortcuts[0].original_lnk_path,
+            Path::new(r"%USERPROFILE%\Desktop\Acme.lnk")
+        );
+    }
+
+    #[test]
     fn running_again_says_nothing_again() {
         let folders = [PathBuf::from(APP)];
         let mut shortcuts = vec![
@@ -1438,6 +1480,16 @@ mod tests {
             r#""D:\Profiles\Alice" --x"#,
             &folders,
             &elsewhere
+        ));
+        assert!(names_a_place_of_an_account(
+            r"--home 'D:\Profiles\Alice'",
+            &folders,
+            &elsewhere
+        ));
+        assert!(names_a_place_of_an_account(
+            r"--home 'C:\Users\Bob\a.ini'",
+            &folders,
+            &none
         ));
         assert!(names_a_place_of_an_account(
             r"D:\Profiles\Alice\a.ini",
