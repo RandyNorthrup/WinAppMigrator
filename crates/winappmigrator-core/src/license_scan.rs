@@ -18,7 +18,7 @@ use crate::models::{
     FileEntry, LicenseArtifact, LicenseArtifactKind, LicenseFramework, RegistryEntry, RegistryHive,
     RegistryValueKind, TransferableHint, Warning, WarningSeverity,
 };
-use crate::path_utils::{path_is_within, text_mentions_path};
+use crate::path_utils::{DEEPEST_WALK, path_is_within, text_mentions_path, walk_asking};
 use crate::product_match::{MatchScope, ProductNames};
 use crate::registry_scan::registry_value_text;
 use crate::secret_rules::{LeftOut, is_dpapi_hex, is_license_registry_entry, registry_entry_name};
@@ -311,12 +311,24 @@ fn detect_framework_stores(
                 // copied and restored when license backup is enabled.
                 should_copy: context.include_license_data && !machine_bound,
                 package_relative_path: None,
-                size_bytes: None,
+                size_bytes: (context.include_license_data && !machine_bound)
+                    .then(|| size_of_a_store(&path, system)),
                 hash_sha256: None,
                 store_files: Vec::new(),
             });
         }
     }
+}
+
+/// How big a store is, for what a build says it needs. By the walk that copies it, so what that
+/// would not read is not counted.
+fn size_of_a_store(folder: &Path, system: &SystemContext) -> u64 {
+    walk_asking(folder, DEEPEST_WALK, |path, _| system.may_read(path))
+        .flatten()
+        .filter(|entry| entry.file_type.is_file())
+        .filter_map(|entry| entry.metadata)
+        .map(|metadata| metadata.len())
+        .fold(0, u64::saturating_add)
 }
 
 fn app_has_a_file_starting(files: &[&FileEntry], starts: &[&str]) -> bool {

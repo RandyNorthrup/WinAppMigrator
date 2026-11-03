@@ -8,11 +8,15 @@ use time::format_description::well_known::Rfc3339;
 use crate::account_settings::{
     say_no_more_of_licenses_than_the_apps_key, say_no_more_than_the_apps_key, take_account_settings,
 };
+use crate::account_traces::{
+    AccountTraces, Withholding, withhold_settings, withhold_what_is_an_accounts,
+};
 use crate::dll_resolver::{
     DllResolutionContext, VisualCppRuntime, find_app_local_dlls, resolve_imports,
 };
 use crate::env_scan::{EnvironmentScanContext, scan_environment};
 use crate::errors::{Result, WinAppMigratorError};
+use crate::file_discovery::DRIVER_FILE_NOT_COPIED_CODE;
 use crate::file_discovery::{
     DiscoveredFiles, FileDiscoveryContext, discover_files_unless, names_of_app,
     package_relative_path,
@@ -25,6 +29,7 @@ use crate::integration_scan::{IntegrationInputs, OwnedFiles};
 use crate::license_scan::{
     LicenseScanContext, is_license_env_var, is_license_file, scan_license_artifacts,
 };
+use crate::models::DependencySourceCategory;
 use crate::models::{
     AppArchitecture, AppSelection, DependencyEntry, DotNetFlavor, DriverEntry, FileEntry,
     InstallScope, InstalledApp, ProgramNeed, ProgramRole, RuntimePrerequisite,
@@ -32,6 +37,7 @@ use crate::models::{
     ServiceEntry, ShortcutEntry, SourcePlatform, Warning, WarningSeverity,
 };
 use crate::near_match::{AppBeingScanned, NearMatchLook, Picks, look_for_near_matches};
+use crate::path_utils::comparable_path;
 use crate::path_utils::{
     is_drive_root, is_really_within, looks_like_executable, path_is_within, resolved_location,
 };
@@ -538,6 +544,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         system.is_offline(),
     );
     monitor.checkpoint()?;
+    let account_traces = AccountTraces::of_scan(&system);
     let mut left_out = LeftOut::default();
     // First, so that nothing else counts one as a license, or anything else that would be copied.
     take_secret_files(&mut file_inventory, &system, &mut left_out);
@@ -593,6 +600,20 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
             !is_a_license
         });
     }
+    // Before what looks like a credential is named, since what names one goes by these.
+    if !options.include_user_data {
+        withhold_settings(
+            &mut Withholding {
+                shortcuts: &mut shortcuts,
+                tasks: &mut scheduled_tasks,
+                app_folders: &registry_context.folders_of_the_app(),
+                main_program: &logical_executable,
+                installed_for_one_account,
+                traces: &account_traces,
+            },
+            &mut left_out,
+        );
+    }
     let mut settings = ScannedSettings {
         registry: &mut registry_artifacts.entries,
         services: &mut services,
@@ -610,6 +631,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     // And what looks like a credential goes nowhere at all, whatever else was asked for.
     take_secrets_from_settings(&mut settings, &mut left_out);
     take_secrets_from_license_values(&mut license_registry_entries, &mut left_out);
+    let account_traces_of_the_scan = account_traces;
     let mut warnings = system.warnings();
     warnings.append(&mut picks.warnings);
     warnings.extend(pe_scan.warnings);
@@ -626,6 +648,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     warnings.extend(driver_component_warnings(&drivers));
     warnings.extend(license_warnings);
     warnings.extend(left_out_warnings(&left_out));
+    say_which_driver_files_stay(&mut warnings, &drivers);
 
     let artifacts = artifact_paths(&options.output_dir);
 
@@ -733,6 +756,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         certificates: registry_artifacts.certificates,
         fonts_reported: registry_artifacts.fonts_reported,
         near_matches,
+        account_traces: account_traces_of_the_scan,
         warnings,
         items_excluded: vec![
             "Windows directory, System32, and SysWOW64 files are reported but not copied."
@@ -754,6 +778,10 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
             .push(INNO_SETUP_LOG_LEFT_OUT.to_owned());
     }
     use_what_the_source_pc_calls_things(&mut report, &system);
+    // With what it is called where it came from, as what is said of each goes by that.
+    if !options.include_user_data {
+        withhold_what_is_an_accounts(&mut report, options.include_license_data);
+    }
     Ok(report)
 }
 
@@ -1202,16 +1230,53 @@ fn left_out_warnings(left_out: &LeftOut) -> Vec<Warning> {
 fn missing_dependency_warnings(dependencies: &[DependencyEntry]) -> Vec<Warning> {
     dependencies
         .iter()
-        .filter(|dependency| dependency.missing)
-        .map(|dependency| {
-            Warning::new(
-                "missing_dependency",
-                WarningSeverity::Warning,
-                format!("Dependency could not be resolved: {}", dependency.name),
-                None,
+        .filter_map(|dependency| {
+            if dependency.missing {
+                return Some(Warning::new(
+                    "missing_dependency",
+                    WarningSeverity::Warning,
+                    format!("Dependency could not be resolved: {}", dependency.name),
+                    None,
+                ));
+            }
+            // Where this PC happens to find it says nothing of the other PC.
+            matches!(
+                dependency.source_category,
+                DependencySourceCategory::Path | DependencySourceCategory::CurrentDirectory
             )
+            .then(|| {
+                Warning::new(
+                    "dependency_only_found_on_this_pc",
+                    WarningSeverity::Warning,
+                    format!(
+                        "{} was only found through this PC's search path, and is not part of the \
+                         app, so it does not come along. The app may not start on a PC without it.",
+                        dependency.name
+                    ),
+                    None,
+                )
+            })
         })
         .collect()
+}
+
+/// A driver the app registers goes with it. Any other driver file does not, and an app that loads
+/// its own on demand will not work without it, which is something to say and not just to note.
+fn say_which_driver_files_stay(warnings: &mut [Warning], drivers: &[DriverEntry]) {
+    for warning in warnings
+        .iter_mut()
+        .filter(|warning| warning.code == DRIVER_FILE_NOT_COPIED_CODE)
+    {
+        let registered = warning.source.as_deref().is_some_and(|source| {
+            drivers.iter().any(|driver| {
+                driver.app_owned
+                    && comparable_path(&driver.image_path) == comparable_path(Path::new(source))
+            })
+        });
+        if !registered {
+            warning.severity = WarningSeverity::Warning;
+        }
+    }
 }
 
 fn driver_component_warnings(drivers: &[DriverEntry]) -> Vec<Warning> {

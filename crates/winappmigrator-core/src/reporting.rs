@@ -755,6 +755,7 @@ mod tests {
     #[test]
     fn renders_markdown_report_sections() {
         let report = ScanReport {
+            account_traces: Default::default(),
             schema_version: SCAN_SCHEMA_VERSION.to_owned(),
             generated_at_utc: "2026-06-12T00:00:00Z".to_owned(),
             source_volume: None,

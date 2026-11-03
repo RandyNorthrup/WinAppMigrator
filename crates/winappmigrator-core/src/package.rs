@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::account_traces::{
+    say_nothing_of_who_it_was, what_a_package_still_says, withhold_what_is_an_accounts,
+};
 use crate::archive::{
     EmbeddedPackage, HELD_FILES, PendingInstaller, extract_zip_archive, package_folder_items,
     zip_name_of,
@@ -249,6 +252,7 @@ fn what_a_package_says_of(report: &ScanReport, options: &PackageOptions) -> Scan
     // A person can leave all of the data out, of a scan that was asked for it. An app of one account's
     // is in that account's folders, and what is said of its own files still has to be.
     if !options.include_user_data {
+        withhold_what_is_an_accounts(&mut said, options.include_license_data);
         said.user_data_profile = None;
         said.source_computer_name = None;
         let app_folder = report.install_location.as_deref();
@@ -505,12 +509,25 @@ fn build_package(
         .left_out_by_choice
         .clone_from(&what_was_chosen.left_out);
     manifest.added_by_choice.clone_from(&what_was_chosen.added);
+    // Who it was goes from all that is only said, and is looked for in all that was written.
+    let traces = (!options.include_user_data).then(|| report.account_traces.with_this_pc());
+    if let Some(traces) = traces.as_ref() {
+        say_nothing_of_who_it_was(&mut manifest, traces);
+        warnings.clone_from(&manifest.warnings);
+    }
 
     let manifest_path = options.output_dir.join(MANIFEST_FILE);
     write_json(&manifest_path, &manifest)?;
     write_scan_reports(&what_was_built(report, &manifest), &reports_dir)?;
     write_integration_artifacts(&options.output_dir, &manifest)?;
     write_restore_plan(&options.output_dir.join(RESTORE_PLAN_FILE), &manifest)?;
+    if let Some(traces) = traces.as_ref() {
+        warnings.extend(what_a_package_still_says(
+            &manifest,
+            &written_about_the_package(&options.output_dir, &reports_dir),
+            traces,
+        ));
+    }
 
     let mut self_extracting_archive_path = None;
     let mut data_file_path = None;
@@ -555,6 +572,43 @@ fn build_package(
     })
 }
 
+/// All a build writes of its own about a package, by name, for looking through.
+fn written_about_the_package(root: &Path, reports_dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut written = Vec::new();
+    let mut folders: Vec<PathBuf> = [
+        REGISTRY_DIR,
+        SERVICES_DIR,
+        DRIVERS_DIR,
+        SCHEDULED_TASKS_DIR,
+        SHORTCUTS_DIR,
+        ENVIRONMENT_DIR,
+    ]
+    .iter()
+    .map(|folder| root.join(folder))
+    .collect();
+    folders.push(reports_dir.to_path_buf());
+    let mut files: Vec<PathBuf> = folders
+        .iter()
+        .filter_map(|folder| fs::read_dir(folder).ok())
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    files.push(root.join(RESTORE_PLAN_FILE));
+    for file in files {
+        if let Ok(bytes) = fs::read(&file) {
+            let name = file
+                .strip_prefix(root)
+                .unwrap_or(&file)
+                .display()
+                .to_string();
+            written.push((name, bytes));
+        }
+    }
+    written
+}
+
 /// As many empty folders as an installer will make, of what was left once a person had chosen, which
 /// is why this waits for a build. An installer holds to this whatever a package asks of it.
 fn keep_what_an_installer_will_make(folders: &mut Vec<FileEntry>, warnings: &mut Vec<Warning>) {
@@ -590,6 +644,24 @@ fn what_was_built(report: &ScanReport, manifest: &PackageManifest) -> ScanReport
     built
         .runtime_prerequisites
         .clone_from(&manifest.runtime_prerequisites);
+    built
+        .licenses_left_out
+        .clone_from(&manifest.licenses_left_out);
+    built
+        .settings_left_out
+        .clone_from(&manifest.settings_left_out);
+    built
+        .items_excluded
+        .clone_from(&manifest.items_intentionally_excluded);
+    if !manifest.included_user_data {
+        // Where a drive is on the PC building this is no one else's business, nor who else is on it.
+        built.source_volume = None;
+        built.other_accounts = OtherAccountsFolders::default();
+        let traces = report.account_traces.with_this_pc();
+        for evidence in &mut built.install_evidence {
+            *evidence = traces.scrub(evidence);
+        }
+    }
     // The scan worked out how much of each place it hoped to copy. This is how much of it went.
     recount_locations(&mut built);
     built
@@ -1767,6 +1839,10 @@ pub fn read_embedded_manifest(package: &EmbeddedPackage) -> Result<PackageManife
 mod tests {
     use super::*;
     use crate::footprint::ChoiceId;
+    use crate::models::{
+        CertificateEntry, DependencyEntry, DependencySourceCategory, EnvironmentScope,
+        EnvironmentVariableEntry, MatchConfidence, ServiceEntry, ShortcutEntry,
+    };
     use crate::progress::{ScanMonitor, ScanStep};
     use crate::restore_review::ReviewedPackage;
 
@@ -2394,7 +2470,11 @@ mod tests {
         let warnings_file = result.reports_dir.join("warnings.md");
         let warnings = fs::read_to_string(&warnings_file)
             .map_err(|error| WinAppMigratorError::io(&warnings_file, error))?;
-        assert!(warnings.contains(&gone.display().to_string()), "{warnings}");
+        let name = gone
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        assert!(warnings.contains(&name), "{warnings}");
         Ok(())
     }
 
@@ -2745,6 +2825,303 @@ mod tests {
         );
         let report = crate::verify::verify_installer(&installer, &BuildMonitor::default())?;
         assert!(report.package_valid, "{:?}", report.errors);
+        Ok(())
+    }
+
+    const WHO_IT_WAS: [&str; 18] = [
+        "PCNAME-TASK-AUTHOR",
+        "acct-task-author",
+        "acct-trigger",
+        "S-1-5-21-111-222-333-1001",
+        "acct-second-action",
+        "acct-lnk-path",
+        "secret-doc-in-args",
+        "acct-out-of-reach",
+        "fileserver-mark",
+        "acct-refused-share",
+        "acct-hive-note",
+        "acct-classes-note",
+        "acct-path-dll",
+        "acct-env-value",
+        "acct-sys-file",
+        "PCNAME-SERVICE",
+        "acct-service",
+        "acct-cert-subject",
+    ];
+
+    /// All the ways a scan has been found to say who it was, as a real scan would have them.
+    fn plant_who_it_was(report: &mut ScanReport, exe: &Path) {
+        let exe_text = exe.display().to_string();
+        report.account_traces.account_names =
+            ["acct-out-of-reach", "acct-hive-note", "acct-classes-note"]
+                .map(str::to_owned)
+                .to_vec();
+        report.scheduled_tasks.push(ScheduledTaskEntry {
+            task_name: "Probe".to_owned(),
+            task_path: r"\".to_owned(),
+            action_command: exe.to_path_buf(),
+            arguments: None,
+            working_directory: None,
+            trigger_summary: Some("LogonTrigger".to_owned()),
+            run_level: None,
+            account: Some("S-1-5-21-111-222-333-1001".to_owned()),
+            requires_admin: false,
+            restore_instructions: String::new(),
+            definition_xml: Some(format!(
+                "<?xml version=\"1.0\"?><Task xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><RegistrationInfo><Author>PCNAME-TASK-AUTHOR\\acct-task-author</Author></RegistrationInfo><Triggers><LogonTrigger><UserId>PCNAME-TASK-AUTHOR\\acct-trigger</UserId></LogonTrigger></Triggers><Principals><Principal id=\"Author\"><UserId>S-1-5-21-111-222-333-1001</UserId></Principal></Principals><Actions Context=\"Author\"><Exec><Command>{exe_text}</Command></Exec><Exec><Command>C:\\Users\\acct-second-action\\x.cmd</Command></Exec></Actions></Task>"
+            )),
+        });
+        report.shortcuts.push(ShortcutEntry {
+            original_lnk_path: PathBuf::from(r"C:\Users\acct-lnk-path\Desktop\My App.lnk"),
+            target_path: exe.to_path_buf(),
+            arguments: Some(r#""C:\Users\acct\Documents\secret-doc-in-args.txt""#.to_owned()),
+            working_directory: None,
+            icon_path: None,
+            target_is_selected_app: true,
+        });
+        report.shortcuts.push(ShortcutEntry {
+            original_lnk_path: PathBuf::from(r"C:\Users\acct-lnk-path\Desktop\Plain.lnk"),
+            target_path: exe.to_path_buf(),
+            arguments: None,
+            working_directory: Some(PathBuf::from(r"C:\Users\acct-lnk-path\Work")),
+            icon_path: Some(PathBuf::from(r"C:\Users\acct-lnk-path\i.ico")),
+            target_is_selected_app: true,
+        });
+        for (code, message) in [
+            (
+                "user_folder_out_of_reach",
+                r"acct-out-of-reach's Documents folder was at \\fileserver-mark\home$\acct-refused-share\Documents, which is not on a disk of this PC.",
+            ),
+            (
+                "network_paths_not_followed",
+                r"A path recorded on this PC could not be read, so nothing there was included: \\fileserver-mark\home$\acct-refused-share\Documents",
+            ),
+            (
+                "user_hive_unreadable",
+                "The settings of acct-hive-note could not be read, so they were not included: x",
+            ),
+            (
+                "user_classes_unreadable",
+                "The COM classes and file types registered for acct-classes-note could not be read",
+            ),
+        ] {
+            report
+                .warnings
+                .push(Warning::new(code, WarningSeverity::Warning, message, None));
+        }
+        report.dependencies.push(DependencyEntry {
+            name: "zlib1.dll".to_owned(),
+            resolved_path: Some(PathBuf::from(r"C:\Users\acct-path-dll\tools\bin\zlib1.dll")),
+            architecture: AppArchitecture::X64,
+            hash_sha256: None,
+            version_info: None,
+            publisher: None,
+            source_category: DependencySourceCategory::Path,
+            should_copy: false,
+            system_provided: false,
+            runtime_prerequisite: false,
+            missing: false,
+            delay_loaded: false,
+        });
+        report.environment_variables.push(EnvironmentVariableEntry {
+            scope: EnvironmentScope::Machine,
+            name: "PYTHONPATH".to_owned(),
+            value: format!(
+                r"{};C:\Users\acct-env-value\work",
+                exe.parent().unwrap_or(exe).display()
+            ),
+            value_kind: RegistryValueKind::String,
+            requires_admin: false,
+            confidence: MatchConfidence::High,
+        });
+        report.file_inventory.push(FileEntry {
+            path: PathBuf::from(r"C:\Users\acct-sys-file\AppData\Roaming\App\x.sys"),
+            original_path: PathBuf::from(r"C:\Users\acct-sys-file\AppData\Roaming\App\x.sys"),
+            package_relative_path: None,
+            size_bytes: Some(1),
+            hash_sha256: None,
+            classification: FileClassification::ManualRuntimeInstall,
+            should_copy: false,
+            reason: "Driver/kernel file".to_owned(),
+            user_folder: None,
+        });
+        report.services.push(ServiceEntry {
+            service_name: "ProbeSvc".to_owned(),
+            display_name: None,
+            binary_path: exe.to_path_buf(),
+            arguments: None,
+            parameters: Vec::new(),
+            start_type: None,
+            account_name: Some(r"PCNAME-SERVICE\acct-service".to_owned()),
+            dependencies: Vec::new(),
+            description: None,
+            requires_admin: true,
+            restore_command_suggestion: String::new(),
+        });
+        report.certificates.push(CertificateEntry {
+            store: "TrustedPeople".to_owned(),
+            hive: RegistryHive::CurrentUser,
+            thumbprint: "AA".to_owned(),
+            subject: "CN=acct-cert-subject, O=Acme".to_owned(),
+            why: "named".to_owned(),
+        });
+    }
+
+    fn what_says_who_it_was(root: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut folders = vec![root.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            let Ok(entries) = fs::read_dir(&folder) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // What is in the app's own files is the app's, and here it is this test's program.
+                    if entry.file_name() != FILES_DIR {
+                        folders.push(path);
+                    }
+                    continue;
+                }
+                let text = fs::read(&path)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+                    .unwrap_or_default();
+                for mark in WHO_IT_WAS {
+                    if text.contains(mark) {
+                        found.push(format!("{mark} in {}", path.display()));
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_package_with_none_of_an_accounts_data_says_nothing_of_who_it_was() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = PackageOptions {
+            create_self_extracting_archive: false,
+            ..installer_options(root.path(), &exe, &stub)
+        };
+        let mut report = scan_of(&options)?;
+        plant_who_it_was(&mut report, &exe);
+        let result = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+        assert_eq!(
+            what_says_who_it_was(&result.package_root),
+            Vec::<String>::new()
+        );
+        let manifest: PackageManifest = serde_json::from_slice(
+            &fs::read(&result.manifest_path)
+                .map_err(|error| WinAppMigratorError::io(&result.manifest_path, error))?,
+        )
+        .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
+        assert_eq!(manifest.shortcuts_detected.len(), 1);
+        assert_eq!(
+            manifest.shortcuts_detected[0].original_lnk_path,
+            Path::new(r"%USERPROFILE%\Desktop\Plain.lnk")
+        );
+        assert_eq!(manifest.scheduled_tasks_detected.len(), 1);
+        assert_eq!(
+            manifest.scheduled_tasks_detected[0].account.as_deref(),
+            Some(crate::restore_policy::WHOEVER_INSTALLS_IT)
+        );
+        let said = |name: &str| {
+            manifest
+                .settings_left_out
+                .iter()
+                .any(|item| item.name.contains(name))
+        };
+        assert!(said("Shortcuts"), "{:?}", manifest.settings_left_out);
+        assert!(said("Probe"), "{:?}", manifest.settings_left_out);
+        Ok(())
+    }
+
+    #[test]
+    fn a_package_with_an_accounts_data_can_still_say_whose_it_is() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = PackageOptions {
+            create_self_extracting_archive: false,
+            include_user_data: true,
+            ..installer_options(root.path(), &exe, &stub)
+        };
+        let mut report = scan_of(&options)?;
+        plant_who_it_was(&mut report, &exe);
+        let result = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+        let found = what_says_who_it_was(&result.package_root);
+        for mark in ["acct-lnk-path", "secret-doc-in-args", "acct-env-value"] {
+            assert!(
+                found.iter().any(|said| said.contains(mark)),
+                "{mark}: {found:?}"
+            );
+        }
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "package_mentions_an_account"),
+            "{:?}",
+            result.warnings
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn what_a_build_cannot_change_it_points_out_and_goes_on() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = PackageOptions {
+            create_self_extracting_archive: false,
+            ..installer_options(root.path(), &exe, &stub)
+        };
+        let mut report = scan_of(&options)?;
+        report.account_traces.account_names = vec!["acct-in-a-value".to_owned()];
+        report.registry_entries.push(RegistryEntry {
+            hive: RegistryHive::LocalMachine,
+            key_path: r"Software\Acme".to_owned(),
+            value_name: Some("Owner".to_owned()),
+            value_kind: Some(RegistryValueKind::String),
+            value_data: Some("acct-in-a-value".to_owned()),
+            value_bytes_hex: None,
+            requires_admin: true,
+            confidence: MatchConfidence::High,
+        });
+        let result = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+        let mention = result
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "package_mentions_an_account")
+            .ok_or_else(|| WinAppMigratorError::Archive("it says nothing".to_owned()))?;
+        assert!(
+            mention.message.contains("registry values (1)"),
+            "{mention:?}"
+        );
+        assert!(!mention.message.contains("acct-in-a-value"), "{mention:?}");
+        assert!(
+            fs::read_to_string(&result.manifest_path)
+                .map_err(|error| WinAppMigratorError::io(&result.manifest_path, error))?
+                .contains("acct-in-a-value"),
+            "a value goes as it is"
+        );
         Ok(())
     }
 

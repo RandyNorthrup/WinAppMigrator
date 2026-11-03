@@ -204,6 +204,7 @@ pub(crate) fn sample_report(app: &InstalledApp) -> ScanReport {
     }
     files.extend(not_copied);
     ScanReport {
+        account_traces: Default::default(),
         schema_version: SCAN_SCHEMA_VERSION.to_owned(),
         generated_at_utc: String::new(),
         source_volume: None,

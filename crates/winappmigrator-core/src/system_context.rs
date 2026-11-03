@@ -297,6 +297,13 @@ fn is_ordinary_name(name: &OsStr) -> bool {
         && !opens_as_device_on(name, windows_build())
 }
 
+/// Whether this is the name of an account every Windows has, rather than a person's.
+pub(crate) fn is_windows_own_account_name(name: &str) -> bool {
+    WINDOWS_OWN_ACCOUNTS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(name))
+}
+
 /// What the PC an app was on called itself, and which Windows it ran.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceIdentity {
@@ -1448,9 +1455,7 @@ impl SystemContext {
         {
             return is_person_sid(account);
         }
-        !WINDOWS_OWN_ACCOUNTS
-            .iter()
-            .any(|known| known.eq_ignore_ascii_case(name))
+        !is_windows_own_account_name(name)
     }
 
     // ---- Path re-rooting ----------------------------------------------------

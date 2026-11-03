@@ -37,9 +37,9 @@ use crate::path_utils::{
 use crate::registry_target::{app_path_entries, is_path_variable, service_image_path};
 use crate::restore_policy::{
     KnownFolders, PackageRegistrations, PlatformFit, Registration, SERVICES_PREFIX, ServiceAccount,
-    ShortcutPlacement, WindowsHere, architecture_from_name, data_location_refusal,
-    driver_destination, environment_refusal, existing_service_refusal, firewall_refusal,
-    install_location_refusal, install_placement_refusal, is_autostart_entry,
+    ShortcutPlacement, WHOEVER_INSTALLS_IT, WindowsHere, architecture_from_name,
+    data_location_refusal, driver_destination, environment_refusal, existing_service_refusal,
+    firewall_refusal, install_location_refusal, install_placement_refusal, is_autostart_entry,
     is_source_uninstall_value, is_uninstall_entry_key, is_valid_service_name, license_destination,
     normalized_key, platform_fit, read_task_definition, registered_value_refusal, registration_of,
     registration_refusal, registration_unit_of, registry_refusal, shortcut_placement, task_refusal,
@@ -49,6 +49,8 @@ use crate::space::{
 };
 use crate::system_context::SystemContext;
 
+/// What a task that ran as a person is said to run as here.
+const THE_PERSON_INSTALLING: &str = "you, whoever is signed in";
 const DESKTOP_FOLDER: &str = "Desktop";
 const START_MENU_SUBFOLDER: &str = r"Microsoft\Windows\Start Menu";
 const NO_USER_ACCOUNT_REFUSAL: &str =
@@ -740,12 +742,27 @@ impl<'a> ReviewedPackage<'a> {
             let rewritten = self.map.rewrite_xml(xml).and_then(|rewritten| {
                 read_task_definition(&rewritten).map(|definition| (rewritten, definition))
             });
-            let (xml, definition) = match rewritten {
+            let (xml, mut definition) = match rewritten {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     self.refuse(item, format!("its definition could not be read: {error}"));
                     continue;
                 }
+            };
+            let xml = if xml.contains(WHOEVER_INSTALLS_IT) {
+                let Some(account) = signed_in_user().account() else {
+                    self.refuse(
+                        item,
+                        "it runs as whoever installs it, and who is signed in here could not be told",
+                    );
+                    continue;
+                };
+                if definition.account.as_deref() == Some(WHOEVER_INSTALLS_IT) {
+                    definition.account = Some(THE_PERSON_INSTALLING.to_owned());
+                }
+                xml.replace(WHOEVER_INSTALLS_IT, &account.sid)
+            } else {
+                xml
             };
             if let Some(reason) = task_refusal(
                 &task.task_path,
@@ -2910,6 +2927,40 @@ mod tests {
         assert!(!row.detail.contains("guest"), "{}", row.detail);
         assert!(row.detail.contains("highest rights"), "{}", row.detail);
         assert!(row.high_rights);
+        Ok(())
+    }
+
+    /// A person on another PC is nobody here, and registering a task for them fails.
+    #[test]
+    fn a_task_that_ran_as_a_person_runs_as_whoever_installs_it() -> Result<()> {
+        let xml = format!(
+            r#"<?xml version="1.0"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><UserId>{WHOEVER_INSTALLS_IT}</UserId></LogonTrigger></Triggers><Principals><Principal id="Author"><UserId>{WHOEVER_INSTALLS_IT}</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals><Actions Context="Author"><Exec><Command>{SOURCE}\acme.exe</Command></Exec></Actions></Task>"#
+        );
+        let mut manifest = acme_manifest();
+        manifest.scheduled_tasks_detected = vec![task(r"\Acme\", "Updater", Some(xml))];
+        let reviewed = review(&manifest)?;
+        let Some(account) = signed_in_user().account() else {
+            assert_eq!(
+                reviewed.tasks.len(),
+                0,
+                "with no one to run as, it does not go"
+            );
+            assert_eq!(reviewed.refused.len(), 1);
+            return Ok(());
+        };
+        assert_eq!(reviewed.tasks.len(), 1, "{:?}", reviewed.refused);
+        assert!(!reviewed.tasks[0].xml.contains(WHOEVER_INSTALLS_IT));
+        assert_eq!(
+            reviewed.tasks[0].xml.matches(account.sid.as_str()).count(),
+            2
+        );
+        let changes = describe(&reviewed, Path::new(TARGET));
+        assert!(
+            changes.changes[0].detail.contains(THE_PERSON_INSTALLING),
+            "{:?}",
+            changes.changes
+        );
+        assert!(!changes.changes[0].high_rights);
         Ok(())
     }
 

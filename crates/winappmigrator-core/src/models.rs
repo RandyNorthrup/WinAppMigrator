@@ -247,6 +247,9 @@ pub struct ScanReport {
     /// goes in a package, since most of it is no part of the app.
     #[serde(default, skip_serializing)]
     pub near_matches: Vec<NearMatch>,
+    /// Who this was of, for what a package with none of their data has no reason to say. Not saved.
+    #[serde(skip)]
+    pub account_traces: crate::account_traces::AccountTraces,
     pub warnings: Vec<Warning>,
     pub items_excluded: Vec<String>,
     pub confidence_score: u8,

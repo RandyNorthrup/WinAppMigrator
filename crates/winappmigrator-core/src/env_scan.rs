@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use winreg::enums::{KEY_READ, REG_EXPAND_SZ, REG_MULTI_SZ};
 use winreg::{RegKey, RegValue};
@@ -30,9 +30,16 @@ pub fn scan_environment(
 ) -> (Vec<EnvironmentVariableEntry>, Vec<Warning>) {
     let mut entries = Vec::new();
     let mut warnings = Vec::new();
+    let expand = |text: &str| system.expand_source_variables(text);
 
     match system.open_hklm(HKLM_ENVIRONMENT, KEY_READ) {
-        Ok(key) => collect_env_values(context, EnvironmentScope::Machine, &key, &mut entries),
+        Ok(key) => collect_env_values(
+            context,
+            EnvironmentScope::Machine,
+            &key,
+            &expand,
+            &mut entries,
+        ),
         Err(error) => warnings.push(Warning::new(
             "environment_registry_unreadable",
             WarningSeverity::Info,
@@ -44,7 +51,7 @@ pub fn scan_environment(
     // Per-user environment: only ever the account this scan is about.
     for user in system.user_hives() {
         if let Ok(key) = user.open(HKCU_ENVIRONMENT, KEY_READ) {
-            collect_env_values(context, EnvironmentScope::User, &key, &mut entries);
+            collect_env_values(context, EnvironmentScope::User, &key, &expand, &mut entries);
         }
     }
 
@@ -63,15 +70,16 @@ fn collect_env_values(
     context: &EnvironmentScanContext,
     scope: EnvironmentScope,
     key: &RegKey,
+    expand: &dyn Fn(&str) -> String,
     entries: &mut Vec<EnvironmentVariableEntry>,
 ) {
     for value in key.enum_values().flatten() {
         let name = value.0;
         let raw = value.1;
         let value_text = registry_value_text(&raw);
-        if value_matches_context(context, &value_text) {
-            let value = if is_path_variable(&name) {
-                only_the_apps_entries(context, &value_text)
+        if value_matches_context(context, &expand(&value_text)) {
+            let value = if is_path_variable(&name) || is_a_list_of_folders(&value_text, expand) {
+                only_the_apps_entries(context, &value_text, expand)
             } else {
                 value_text
             };
@@ -87,14 +95,32 @@ fn collect_env_values(
     }
 }
 
-/// Of a `Path`, what is the app's. The rest is what else is on this PC, and in a user's `Path` it is
-/// where in that account's folders, which a package has no reason to carry.
-fn only_the_apps_entries(context: &EnvironmentScanContext, value: &str) -> String {
+/// Of a `Path`, or any list of folders such as `PYTHONPATH`, what is the app's. The rest is what else
+/// is on this PC, and in a user's it is where in that account's folders, which a package has no reason
+/// to carry. What an entry says is compared as it reads, and goes as it was written.
+fn only_the_apps_entries(
+    context: &EnvironmentScanContext,
+    value: &str,
+    expand: &dyn Fn(&str) -> String,
+) -> String {
     value
         .split(';')
-        .filter(|entry| value_matches_context(context, entry))
+        .filter(|entry| value_matches_context(context, &expand(entry)))
         .collect::<Vec<_>>()
         .join(";")
+}
+
+/// More than one thing, with `;` between them, and each that says anything a folder.
+fn is_a_list_of_folders(value: &str, expand: &dyn Fn(&str) -> String) -> bool {
+    let entries: Vec<&str> = value
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    entries.len() > 1
+        && entries
+            .iter()
+            .all(|entry| Path::new(&expand(entry)).is_absolute())
 }
 
 fn value_matches_context(context: &EnvironmentScanContext, value: &str) -> bool {
@@ -120,6 +146,10 @@ fn environment_value_kind(value: &RegValue<'_>) -> RegistryValueKind {
 mod tests {
     use super::*;
 
+    fn same(text: &str) -> String {
+        text.to_owned()
+    }
+
     #[test]
     fn detects_install_path_inside_environment_value() {
         let context = EnvironmentScanContext {
@@ -143,14 +173,42 @@ mod tests {
         assert_eq!(
             only_the_apps_entries(
                 &context,
-                r"C:\Windows;C:\Users\someone\Tools;C:\Program Files\App\bin;;C:\Program Files\Apple;D:\AppData"
+                r"C:\Windows;C:\Users\someone\Tools;C:\Program Files\App\bin;;C:\Program Files\Apple;D:\AppData",
+                &same,
             ),
             r"C:\Program Files\App\bin;D:\AppData"
         );
         assert_eq!(
-            only_the_apps_entries(&context, r"C:\Program Files\App"),
+            only_the_apps_entries(&context, r"C:\Program Files\App", &same),
             r"C:\Program Files\App"
         );
-        assert_eq!(only_the_apps_entries(&context, r"C:\Windows"), "");
+        assert_eq!(only_the_apps_entries(&context, r"C:\Windows", &same), "");
+    }
+
+    #[test]
+    fn a_folder_written_with_a_variable_is_the_folder_it_reads_as() {
+        let context = EnvironmentScanContext {
+            executable_path: PathBuf::from(r"C:\Program Files\App\App.exe"),
+            install_location: Some(PathBuf::from(r"C:\Program Files\App")),
+            also_the_apps: Vec::new(),
+        };
+        let expand = |text: &str| text.replace("%ProgramFiles%", r"C:\Program Files");
+        assert!(value_matches_context(
+            &context,
+            &expand(r"%ProgramFiles%\App\bin")
+        ));
+        assert_eq!(
+            only_the_apps_entries(&context, r"C:\Windows;%ProgramFiles%\App\bin", &expand),
+            r"%ProgramFiles%\App\bin",
+            "as it was written"
+        );
+    }
+
+    #[test]
+    fn a_list_of_folders_is_told_from_a_setting_with_a_semicolon() {
+        assert!(is_a_list_of_folders(r"C:\A;D:\B;", &same));
+        assert!(!is_a_list_of_folders(r"C:\A", &same));
+        assert!(!is_a_list_of_folders("a=1;b=2", &same));
+        assert!(!is_a_list_of_folders(r"C:\A;--fast", &same));
     }
 }

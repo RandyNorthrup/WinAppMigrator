@@ -1704,7 +1704,7 @@ fn add_file(
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_default();
                 warnings.push(Warning::new(
-                    "driver_file_not_copied",
+                    DRIVER_FILE_NOT_COPIED_CODE,
                     WarningSeverity::Info,
                     format!(
                         "Driver/kernel file '{file_name}' is not copied as a plain file. If it backs a registered driver service for this app, the installer bundles it and re-registers the driver automatically; otherwise reinstall it with the vendor's signed driver package."
@@ -1842,6 +1842,9 @@ fn is_program_data_path(path: &Path) -> bool {
         .to_ascii_lowercase()
         .contains(r"\programdata")
 }
+
+/// What is said of a driver's file that stays behind.
+pub(crate) const DRIVER_FILE_NOT_COPIED_CODE: &str = "driver_file_not_copied";
 
 pub(crate) fn is_user_profile_path(path: &Path) -> bool {
     path.to_string_lossy()

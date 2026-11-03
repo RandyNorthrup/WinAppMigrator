@@ -2,13 +2,14 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::models::{ScheduledTaskEntry, Warning, WarningSeverity};
+use crate::path_rewrite::escape_xml_text;
 use crate::path_utils::{
     DEEPEST_WALK, POWERSHELL_IMPORT_TASKS, POWERSHELL_UTF8_OUTPUT, escape_powershell_single,
-    path_is_strictly_inside, powershell_command, walk_asking,
+    is_person_sid, path_is_strictly_inside, powershell_command, walk_asking,
 };
 use crate::privilege::only_administrators_can_change;
-use crate::restore_policy::{is_system_account, node_text};
-use crate::system_context::SystemContext;
+use crate::restore_policy::{WHOEVER_INSTALLS_IT, is_system_account, node_text};
+use crate::system_context::{SystemContext, is_windows_own_account_name};
 
 /// Where the Task Scheduler keeps each task, as a file named for it, under the Windows folder.
 const TASKS_SUBDIR: &str = r"System32\Tasks";
@@ -25,6 +26,23 @@ const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 /// Where a definition names a variable-less Windows folder, as a driver's path can.
 const SYSTEM_ROOT_MARKER: &str = r"\SystemRoot\";
 const SYSTEM_ROOT_VARIABLE: &str = r"%SystemRoot%\";
+/// A person's SID as a security descriptor names one.
+const PERSON_IN_A_DESCRIPTOR: &str = "S-1-5-21-";
+const ONLINE_PERSON_IN_A_DESCRIPTOR: &str = "S-1-12-1-";
+/// What says an account is one of Windows' own, whatever comes after it.
+const WINDOWS_OWN_AUTHORITIES: [&str; 5] = [
+    "NT AUTHORITY",
+    "BUILTIN",
+    "NT SERVICE",
+    "Window Manager",
+    "Font Driver Host",
+];
+const USERS_GROUP_SID: &str = "S-1-5-32-545";
+/// How a task runs whoever is signed in. With a password it would run without them, and a package has
+/// no one's password.
+const SIGNED_IN_LOGON_TYPE: &str = "InteractiveToken";
+const LOGON_TYPES_WITH_A_PASSWORD: [&str; 2] = ["Password", "InteractiveTokenOrPassword"];
+const SID_PREFIX: &str = "S-1-";
 
 /// The XML of a scheduled task on this PC, or `None` if there is no such task.
 pub(crate) fn live_task_xml(task_path: &str, task_name: &str) -> std::io::Result<Option<String>> {
@@ -144,6 +162,18 @@ pub fn scan_scheduled_tasks(
         (left.task_path.as_str(), left.task_name.as_str())
             .cmp(&(right.task_path.as_str(), right.task_name.as_str()))
     });
+    for task in &mut tasks {
+        let generalised = task
+            .definition_xml
+            .as_deref()
+            .and_then(task_for_whoever_installs_it);
+        if let Some((xml, runs_as_a_person)) = generalised {
+            task.definition_xml = Some(xml);
+            if runs_as_a_person {
+                task.account = Some(WHOEVER_INSTALLS_IT.to_owned());
+            }
+        }
+    }
     (one_entry_per_task(tasks), warnings)
 }
 
@@ -261,6 +291,191 @@ fn one_entry_per_task(mut tasks: Vec<ScheduledTaskEntry>) -> Vec<ScheduledTaskEn
         seen.insert(format!("{}{}", task.task_path, task.task_name).to_ascii_lowercase())
     });
     tasks
+}
+
+/// Whether a task's definition names a person, rather than one of the accounts every Windows has.
+fn names_a_person(account: &str) -> bool {
+    let account = account.trim();
+    if account.is_empty() || account == WHOEVER_INSTALLS_IT {
+        return false;
+    }
+    if account
+        .get(..SID_PREFIX.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(SID_PREFIX))
+    {
+        return is_person_sid(&account.to_ascii_uppercase());
+    }
+    let (authority, name) = account.rsplit_once('\\').unwrap_or(("", account));
+    !WINDOWS_OWN_AUTHORITIES
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(authority))
+        && !is_windows_own_account_name(name)
+}
+
+/// Changes to a document, each by where it is, which leave the rest as it was read.
+#[derive(Default)]
+struct DocumentEdits {
+    edits: Vec<(std::ops::Range<usize>, String)>,
+}
+
+impl DocumentEdits {
+    /// All of what an element holds, however a comment has split it. One written with nothing in it
+    /// has nothing in it to replace.
+    fn set_text(&mut self, element: roxmltree::Node<'_, '_>, text: &str) {
+        if let (Some(first), Some(last)) = (element.first_child(), element.last_child()) {
+            self.edits
+                .push((first.range().start..last.range().end, escape_xml_text(text)));
+        }
+    }
+
+    fn remove(&mut self, element: roxmltree::Node<'_, '_>) {
+        self.edits.push((element.range(), String::new()));
+    }
+
+    fn apply_to(mut self, xml: &str) -> String {
+        self.edits.sort_by_key(|(range, _)| range.start);
+        let mut output = String::with_capacity(xml.len());
+        let mut written = 0;
+        for (range, text) in self.edits {
+            // Inside something already gone.
+            if range.start < written {
+                continue;
+            }
+            output.push_str(&xml[written..range.start]);
+            output.push_str(&text);
+            written = range.end;
+        }
+        output.push_str(&xml[written..]);
+        output
+    }
+}
+
+/// A task's definition as any PC could take it. Who wrote it, who a trigger waits for, and who it runs
+/// as were someone on the PC it came from: there they are that person, on another they are nobody, and
+/// registering the task fails. So it runs as whoever installs it. A group of theirs comes to all of
+/// the PC's users, and a password nobody has comes to running when they are signed in. Anything that
+/// will not parse stays as it is, and a restore refuses it. Says whether it came to running as anyone.
+pub(crate) fn task_for_whoever_installs_it(xml: &str) -> Option<(String, bool)> {
+    let document = roxmltree::Document::parse(xml).ok()?;
+    let mut edits = DocumentEdits::default();
+    let mut runs_as_a_person = false;
+    for element in document.descendants().filter(roxmltree::Node::is_element) {
+        let is_under = |name: &str| {
+            element
+                .parent_element()
+                .is_some_and(|parent| parent.tag_name().name() == name)
+        };
+        match element.tag_name().name() {
+            "Author" if is_under("RegistrationInfo") => edits.remove(element),
+            "SecurityDescriptor" if is_under("RegistrationInfo") => {
+                // Who may see and change it, by SID. Its default is what is left.
+                let descriptor = node_text(element);
+                if descriptor.contains(PERSON_IN_A_DESCRIPTOR)
+                    || descriptor.contains(ONLINE_PERSON_IN_A_DESCRIPTOR)
+                {
+                    edits.remove(element);
+                }
+            }
+            "DisplayName" if is_under("Principal") => edits.remove(element),
+            "UserId" if names_a_person(&node_text(element)) => {
+                edits.set_text(element, WHOEVER_INSTALLS_IT);
+                if is_under("Principal") {
+                    runs_as_a_person = true;
+                    let logon_type = element
+                        .parent_element()
+                        .into_iter()
+                        .flat_map(|principal| principal.children())
+                        .find(|child| child.tag_name().name() == "LogonType");
+                    if let Some(logon_type) = logon_type
+                        && LOGON_TYPES_WITH_A_PASSWORD
+                            .iter()
+                            .any(|kind| node_text(logon_type).eq_ignore_ascii_case(kind))
+                    {
+                        edits.set_text(logon_type, SIGNED_IN_LOGON_TYPE);
+                    }
+                }
+            }
+            "GroupId" if names_a_person(&node_text(element)) => {
+                edits.set_text(element, USERS_GROUP_SID);
+            }
+            _ => {}
+        }
+    }
+    let kept = edits.apply_to(xml);
+    roxmltree::Document::parse(&kept)
+        .is_ok()
+        .then_some((kept, runs_as_a_person))
+}
+
+/// What came of looking for what a task says of an account's folders.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TaskThatNames {
+    NothingOfTheirs,
+    /// Only with the User data option does it go at all.
+    GoesWhole,
+    /// `actions` is how many of what it runs went.
+    LostSome {
+        xml: String,
+        actions: usize,
+    },
+}
+
+fn part_of<'a, 'input>(
+    action: roxmltree::Node<'a, 'input>,
+    name: &str,
+) -> Option<roxmltree::Node<'a, 'input>> {
+    action
+        .children()
+        .find(|child| child.tag_name().name() == name)
+}
+
+/// A task's definition without what it says of someone's folders. A program run from there, or told
+/// to work on something there, goes, unless that is all it runs: then what it does is theirs. A folder
+/// to work in only loses the folder.
+pub(crate) fn without_what_names_an_account(
+    xml: &str,
+    names_them: &dyn Fn(&str) -> bool,
+) -> TaskThatNames {
+    let Ok(document) = roxmltree::Document::parse(xml) else {
+        return TaskThatNames::NothingOfTheirs;
+    };
+    let names = |action: roxmltree::Node<'_, '_>, name: &str| {
+        part_of(action, name).is_some_and(|part| names_them(&node_text(part)))
+    };
+    let actions: Vec<_> = document
+        .descendants()
+        .filter(|node| node.tag_name().name() == "Exec")
+        .collect();
+    let (theirs, others): (Vec<_>, Vec<_>) = actions
+        .into_iter()
+        .partition(|action| names(*action, "Command") || names(*action, "Arguments"));
+    if !theirs.is_empty() && others.is_empty() {
+        return TaskThatNames::GoesWhole;
+    }
+    let mut edits = DocumentEdits::default();
+    for action in &theirs {
+        edits.remove(*action);
+    }
+    let mut changed = !theirs.is_empty();
+    for action in &others {
+        if names(*action, "WorkingDirectory")
+            && let Some(folder) = part_of(*action, "WorkingDirectory")
+        {
+            edits.remove(folder);
+            changed = true;
+        }
+    }
+    if !changed {
+        return TaskThatNames::NothingOfTheirs;
+    }
+    let kept = edits.apply_to(xml);
+    if roxmltree::Document::parse(&kept).is_err() {
+        return TaskThatNames::GoesWhole;
+    }
+    TaskThatNames::LostSome {
+        xml: kept,
+        actions: theirs.len(),
+    }
 }
 
 #[derive(Default)]
@@ -451,6 +666,125 @@ mod tests {
             definition_xml: String::new(),
             file: PathBuf::new(),
         }
+    }
+
+    const PERSONAL_TASK: &str = r#"<?xml version="1.0"?>
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>OLD-PC\randy</Author>
+    <URI>\Acme\Daily</URI>
+    <SecurityDescriptor>D:(A;;FA;;;S-1-5-21-1-2-3-1001)</SecurityDescriptor>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled><UserId>OLD-PC\ran<!-- split -->dy</UserId></LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-21-1-2-3-1001</UserId>
+      <DisplayName>Randy N</DisplayName>
+      <LogonType>Password</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Actions Context="Author">
+    <Exec><Command>C:\Program Files\Acme\acme.exe</Command></Exec>
+    <Exec><Command>C:\Users\randy\tools\mine.exe</Command><Arguments>--x</Arguments></Exec>
+  </Actions>
+</Task>"#;
+
+    #[test]
+    fn a_task_says_nothing_of_who_it_ran_as_and_runs_as_whoever_installs_it() {
+        let (kept, runs_as_a_person) =
+            task_for_whoever_installs_it(PERSONAL_TASK).expect("it parses");
+        assert!(runs_as_a_person);
+        for gone in [
+            "OLD-PC", "randy N", "Randy N", "S-1-5-21", "<Author>", "Password",
+        ] {
+            assert!(!kept.contains(gone), "{gone}: {kept}");
+        }
+        assert_eq!(kept.matches(WHOEVER_INSTALLS_IT).count(), 2, "{kept}");
+        assert!(
+            kept.contains("<LogonType>InteractiveToken</LogonType>"),
+            "{kept}"
+        );
+        let parsed = parse_task_xml(&kept).expect("it still parses");
+        assert_eq!(parsed.account.as_deref(), Some(WHOEVER_INSTALLS_IT));
+        assert_eq!(
+            parsed.actions.len(),
+            2,
+            "what it runs is not this one's to say"
+        );
+        let (again, _) = task_for_whoever_installs_it(&kept).expect("it parses");
+        assert_eq!(again, kept, "running again changes nothing");
+    }
+
+    #[test]
+    fn a_task_of_windows_own_accounts_stays_as_it_was() {
+        for account in [
+            "S-1-5-18",
+            "SYSTEM",
+            r"NT AUTHORITY\SYSTEM",
+            "S-1-5-19",
+            r"NT SERVICE\Acme",
+            r"BUILTIN\Users",
+            "Users",
+        ] {
+            let xml = format!(
+                "<Task><Principals><Principal><UserId>{account}</UserId></Principal></Principals>\
+                 <Actions><Exec><Command>a.exe</Command></Exec></Actions></Task>"
+            );
+            assert_eq!(
+                task_for_whoever_installs_it(&xml),
+                Some((xml.clone(), false)),
+                "{account}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_group_of_theirs_comes_to_the_pcs_users() {
+        let xml = r"<Task><Principals><Principal><GroupId>CORP\Domain Users</GroupId></Principal></Principals></Task>";
+        let (kept, runs_as_a_person) = task_for_whoever_installs_it(xml).expect("it parses");
+        assert!(!runs_as_a_person);
+        assert!(kept.contains(USERS_GROUP_SID), "{kept}");
+        assert!(!kept.contains("CORP"), "{kept}");
+    }
+
+    #[test]
+    fn a_task_loses_what_it_runs_from_someones_folders_unless_that_is_all_it_runs() {
+        let names_them = |text: &str| text.contains(r"\Users\");
+        let TaskThatNames::LostSome { xml, actions } =
+            without_what_names_an_account(PERSONAL_TASK, &names_them)
+        else {
+            panic!("it had one of each");
+        };
+        assert_eq!(actions, 1);
+        assert!(!xml.contains("mine.exe"), "{xml}");
+        assert!(xml.contains("acme.exe"), "{xml}");
+        assert!(roxmltree::Document::parse(&xml).is_ok());
+
+        let only = r"<Task><Actions><Exec><Command>C:\Users\randy\mine.exe</Command></Exec></Actions></Task>";
+        assert_eq!(
+            without_what_names_an_account(only, &names_them),
+            TaskThatNames::GoesWhole
+        );
+        let told = r"<Task><Actions><Exec><Command>C:\A\a.exe</Command><Arguments>C:\Users\randy\b.txt</Arguments></Exec></Actions></Task>";
+        assert_eq!(
+            without_what_names_an_account(told, &names_them),
+            TaskThatNames::GoesWhole
+        );
+        let folder = r"<Task><Actions><Exec><Command>C:\A\a.exe</Command><WorkingDirectory>C:\Users\randy\work</WorkingDirectory></Exec></Actions></Task>";
+        let TaskThatNames::LostSome { xml, actions } =
+            without_what_names_an_account(folder, &names_them)
+        else {
+            panic!("the folder goes");
+        };
+        assert_eq!(actions, 0);
+        assert!(!xml.contains("WorkingDirectory"), "{xml}");
+        assert_eq!(
+            without_what_names_an_account("<Task><Actions/></Task>", &names_them),
+            TaskThatNames::NothingOfTheirs
+        );
     }
 
     #[test]

@@ -2572,6 +2572,11 @@ pub fn environment_refusal(name: &str) -> Option<String> {
     .then(|| "Windows and other programs rely on this variable".to_owned())
 }
 
+/// What a package says a task runs as when it ran as a person. They are nobody on another PC, and
+/// registering a task for an account that is not there fails. It runs as whoever is installing it,
+/// and no one else: this is only ever swapped for the account signed in where it is restored.
+pub const WHOEVER_INSTALLS_IT: &str = "WinAppMigrator-whoever-installs-it";
+
 /// What a scheduled task's definition says it does.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskDefinition {

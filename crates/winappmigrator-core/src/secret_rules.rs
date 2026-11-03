@@ -163,6 +163,7 @@ const SECRET_FILE_NAMES: &[&str] = &[
     "tokens.json",
     "wallet.dat",
     "web data",
+    "login data for account",
 ];
 /// What SQLite keeps beside a database as it writes, which holds what the database does. So
 /// `Login Data-journal` is as much a store of passwords as `Login Data` is.
@@ -669,6 +670,14 @@ impl LeftOut {
         });
     }
 
+    /// Something of an account's that only goes with the User data option, by what it is.
+    pub(crate) fn setting_of(&mut self, name: String, why: &str) {
+        self.settings.push(LeftOutItem {
+            name,
+            why: why.to_owned(),
+        });
+    }
+
     /// How much of what an account keeps for an app went from a key, and never what it was.
     pub(crate) fn setting(&mut self, key: String, values: usize) {
         let why = if values == 1 {
@@ -702,15 +711,25 @@ const WHO_RAN_THE_SETUP_VALUES: [&str; 3] = [
     "Inno Setup: User Info: Name",
     "Inno Setup: User Info: Organization",
 ];
+/// What an app's entry in Settings keeps of who it was registered to and the serial they were given.
+/// Elsewhere these names can mean anything, so only there do they say that.
+const WHO_IT_WAS_REGISTERED_TO_VALUES: [&str; 3] = ["RegOwner", "RegCompany", "ProductID"];
 
 /// Whether a value says who installed an app. Nothing on another PC goes by these, whoever is
 /// installing it there, so they stay behind whatever else was asked for.
 pub(crate) fn names_who_ran_the_setup(entry: &RegistryEntry) -> bool {
-    entry.value_name.as_deref().is_some_and(|name| {
-        WHO_RAN_THE_SETUP_VALUES
-            .iter()
-            .any(|value| name.eq_ignore_ascii_case(value))
-    })
+    let is_one_of = |values: &[&str]| {
+        entry
+            .value_name
+            .as_deref()
+            .is_some_and(|name| values.iter().any(|value| name.eq_ignore_ascii_case(value)))
+    };
+    is_one_of(&WHO_RAN_THE_SETUP_VALUES)
+        || (entry
+            .key_path
+            .to_ascii_lowercase()
+            .contains(UNINSTALL_KEY_PART)
+            && is_one_of(&WHO_IT_WAS_REGISTERED_TO_VALUES))
 }
 
 /// Whether this is the log Inno Setup keeps of a setup: `unins000.dat`, or the next number, beside

@@ -1602,6 +1602,7 @@ mod tests {
         ScanReport {
             schema_version: SCAN_SCHEMA_VERSION.to_owned(),
             generated_at_utc: String::new(),
+            account_traces: Default::default(),
             source_volume: None,
             other_accounts: Default::default(),
             source_computer_name: None,
