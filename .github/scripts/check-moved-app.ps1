@@ -117,6 +117,7 @@ $setting = (Get-ItemProperty -LiteralPath $expected.app.registry_key -Name Setti
 Check 'Get-ItemProperty: the setting came along' ($setting -eq 'hello') "$setting"
 $service = Get-CimInstance Win32_Service -Filter "Name='$($expected.app.service)'"
 Check 'Win32_Service: the service runs the installed program' ($service.PathName -like "*$target*") "$($service.PathName)"
+Check 'Win32_Service: one that starts only when asked was not started' ($service.StartMode -eq 'Manual' -and $service.State -eq 'Stopped') "$($service.StartMode), $($service.State)"
 $task = Get-ScheduledTask -TaskPath $expected.app.task_folder -TaskName $expected.app.task
 Check 'Get-ScheduledTask: the task runs the installed program' (($task.Actions[0].Execute -replace '"', '') -like "$target*") "$($task.Actions[0].Execute)"
 $id = Install-Id $run.Output

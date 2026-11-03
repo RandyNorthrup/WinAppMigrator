@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
@@ -7,6 +7,7 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use filetime::{FileTime, set_file_times};
 use sha2::{Digest, Sha256};
@@ -64,7 +65,8 @@ use crate::restore_review::{
     store_file_destination,
 };
 use crate::rollback::{
-    interrupted_installs, put_back_backup, recover_interrupted_installs, roll_back,
+    interrupted_installs, put_back_backup, query_shows_running, query_shows_stopped,
+    recover_interrupted_installs, roll_back,
 };
 use crate::service_scan::DELAYED_AUTOMATIC_START_LABEL;
 use crate::task_scan::live_task_xml;
@@ -72,6 +74,12 @@ use crate::verify::{PackageFiles, verify_prepared_package, without_what_was_refu
 
 /// Opens whatever has the name, rather than what a link with that name points at.
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+/// What `sc start` exits with for a service that is already running.
+const ERROR_SERVICE_ALREADY_RUNNING: i32 = 1056;
+const SERVICE_NOT_STARTED_CODE: &str = "service_did_not_start";
+/// How long a service gets to say it is running, which Windows gives it about this long to do anyway.
+const SERVICE_START_WAIT: Duration = Duration::from_secs(30);
+const SERVICE_START_POLL: Duration = Duration::from_millis(250);
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 pub(crate) const SC_EXE: &str = "sc.exe";
 /// Buffer for copying a file out of the package. Large files are the slow ones.
@@ -465,6 +473,11 @@ pub fn restore_package_monitored(
         if errors.is_empty() {
             info!(id = journal.id(), "install finished");
             install_id = Some(journal.id().to_owned());
+            // Only now, with everything checked and the record finished, and if one will not start
+            // that is for a person to know about and not a reason to take all of it back out.
+            let started = start_what_starts_by_itself(&review.services, monitor, &run_sc_start);
+            changes_logged.extend(started.started);
+            warnings.extend(started.warnings);
         } else {
             warn!(
                 id = journal.id(),
@@ -487,6 +500,145 @@ pub fn restore_package_monitored(
     log_result(&result);
     drop(busy_lock);
     Ok(result)
+}
+
+/// What came of starting what was installed to start by itself.
+#[derive(Debug, Default)]
+struct Started {
+    started: Vec<String>,
+    warnings: Vec<Warning>,
+}
+
+/// Whether Windows would start this service by itself at each boot. An app that relies on one
+/// would otherwise not work until the next restart, and look broken until then.
+fn starts_by_itself(service: &ReviewedService<'_>) -> bool {
+    !matches!(service.account, ServiceAccount::Custom(_))
+        && matches!(
+            service.entry.start_type.as_deref().and_then(sc_start_type),
+            Some("auto" | "delayed-auto")
+        )
+}
+
+/// Those that start by themselves, each after what it depends on among them. A list that goes round in
+/// a circle is not one any order would help, and Windows will say what it makes of it.
+fn in_order_to_start<'a>(services: &'a [ReviewedService<'a>]) -> Vec<&'a ReviewedService<'a>> {
+    fn visit<'a>(
+        service: &'a ReviewedService<'a>,
+        chosen: &[&'a ReviewedService<'a>],
+        seen: &mut HashSet<String>,
+        order: &mut Vec<&'a ReviewedService<'a>>,
+    ) {
+        if !seen.insert(service.entry.service_name.to_ascii_lowercase()) {
+            return;
+        }
+        for dependency in &service.entry.dependencies {
+            if let Some(needed) = chosen
+                .iter()
+                .find(|other| other.entry.service_name.eq_ignore_ascii_case(dependency))
+            {
+                visit(needed, chosen, seen, order);
+            }
+        }
+        order.push(service);
+    }
+    let chosen: Vec<&ReviewedService<'_>> = services
+        .iter()
+        .filter(|service| starts_by_itself(service))
+        .collect();
+    let mut seen = HashSet::new();
+    let mut order = Vec::with_capacity(chosen.len());
+    for service in &chosen {
+        visit(service, &chosen, &mut seen, &mut order);
+    }
+    order
+}
+
+/// How one service answered being asked to start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StartAnswer {
+    Running,
+    StillStarting,
+    Failed(String),
+}
+
+fn start_what_starts_by_itself(
+    services: &[ReviewedService<'_>],
+    monitor: &InstallMonitor,
+    start: &dyn Fn(&str) -> StartAnswer,
+) -> Started {
+    let mut result = Started::default();
+    let order = in_order_to_start(services);
+    for (done, service) in order.iter().enumerate() {
+        monitor.report(InstallStep::new(InstallPhase::Services, done, order.len()));
+        let name = &service.entry.service_name;
+        match start(name) {
+            StartAnswer::Running => result.started.push(format!("started service {name}")),
+            StartAnswer::StillStarting => result.warnings.push(Warning::new(
+                SERVICE_NOT_STARTED_CODE,
+                WarningSeverity::Warning,
+                format!(
+                    "The service {name} was asked to start and has not finished starting. It may \
+                     yet. It also starts by itself when this PC next starts."
+                ),
+                Some(name.clone()),
+            )),
+            StartAnswer::Failed(reason) => result.warnings.push(Warning::new(
+                SERVICE_NOT_STARTED_CODE,
+                WarningSeverity::Warning,
+                format!(
+                    "The service {name} is installed and did not start: {reason}. The app may not \
+                     work until it does. Windows tries again when this PC next starts."
+                ),
+                Some(name.clone()),
+            )),
+        }
+    }
+    result
+}
+
+/// Ask Windows to start a service, and wait for it to say how that went.
+fn run_sc_start(name: &str) -> StartAnswer {
+    let asked = hidden_command(SC_EXE).args(["start", name]).output();
+    let said = match asked {
+        Ok(output) if output.status.success() => None,
+        // Already running, which is what was wanted.
+        Ok(output) if output.status.code() == Some(ERROR_SERVICE_ALREADY_RUNNING) => None,
+        Ok(output) => Some(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        Err(error) => Some(error.to_string()),
+    };
+    if let Some(said) = said {
+        return StartAnswer::Failed(said);
+    }
+    let asked_at = Instant::now();
+    while asked_at.elapsed() < SERVICE_START_WAIT {
+        let state = hidden_command(SC_EXE).args(["query", name]).output();
+        match state {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                if query_shows_running(&text) {
+                    return StartAnswer::Running;
+                }
+                if query_shows_stopped(&text) {
+                    return StartAnswer::Failed("it stopped again by itself".to_owned());
+                }
+            }
+            Ok(output) => {
+                return StartAnswer::Failed(
+                    String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+                );
+            }
+            Err(error) => return StartAnswer::Failed(error.to_string()),
+        }
+        std::thread::sleep(SERVICE_START_POLL);
+    }
+    StartAnswer::StillStarting
 }
 
 fn nowhere_to_keep_a_record(error: WinAppMigratorError) -> WinAppMigratorError {
@@ -4951,6 +5103,93 @@ mod tests {
         assert_eq!(install_folders(&next.state_root)?.len(), 2);
         drop(running);
         Ok(())
+    }
+
+    fn service_starting(name: &str, start: &str, dependencies: &[&str]) -> ServiceEntry {
+        ServiceEntry {
+            service_name: name.to_owned(),
+            display_name: None,
+            binary_path: PathBuf::from(r"C:\App\a.exe"),
+            arguments: None,
+            parameters: Vec::new(),
+            start_type: Some(start.to_owned()),
+            account_name: None,
+            dependencies: dependencies.iter().map(|&name| name.to_owned()).collect(),
+            description: None,
+            requires_admin: true,
+            restore_command_suggestion: String::new(),
+        }
+    }
+
+    fn reviewed<'a>(entry: &'a ServiceEntry, account: Option<&str>) -> ReviewedService<'a> {
+        ReviewedService {
+            entry,
+            binary: PathBuf::from(r"C:\App\a.exe"),
+            arguments: None,
+            account: ServiceAccount::from_recorded(account, &entry.service_name),
+        }
+    }
+
+    #[test]
+    fn only_what_starts_by_itself_is_started_each_after_what_it_needs() {
+        let entries = [
+            service_starting("Front", "automatic", &["Middle", "Elsewhere"]),
+            service_starting("Asked", "manual", &[]),
+            service_starting("Off", "disabled", &[]),
+            service_starting("Middle", DELAYED_AUTOMATIC_START_LABEL, &["back"]),
+            service_starting("Back", "automatic", &[]),
+            service_starting("Other", "automatic", &[]),
+        ];
+        let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
+        let order: Vec<&str> = in_order_to_start(&services)
+            .iter()
+            .map(|service| service.entry.service_name.as_str())
+            .collect();
+        assert_eq!(order, ["Back", "Middle", "Front", "Other"]);
+    }
+
+    #[test]
+    fn a_circle_of_services_still_starts_each_once() {
+        let entries = [
+            service_starting("A", "automatic", &["B"]),
+            service_starting("B", "automatic", &["A"]),
+        ];
+        let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
+        assert_eq!(in_order_to_start(&services).len(), 2);
+    }
+
+    /// Windows has no password for it, and what was said about that has been said already.
+    #[test]
+    fn one_that_runs_as_someone_of_its_own_is_not_asked() {
+        let entries = [service_starting("Custom", "automatic", &[])];
+        let services = [reviewed(&entries[0], Some(r".\someone"))];
+        assert!(in_order_to_start(&services).is_empty());
+    }
+
+    #[test]
+    fn one_that_will_not_start_is_said_and_stops_nothing_else() {
+        let entries = [
+            service_starting("Bad", "automatic", &[]),
+            service_starting("Slow", "automatic", &[]),
+            service_starting("Good", "automatic", &[]),
+        ];
+        let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
+        let result =
+            start_what_starts_by_itself(
+                &services,
+                &InstallMonitor::default(),
+                &|name| match name {
+                    "Bad" => StartAnswer::Failed("it would not".to_owned()),
+                    "Slow" => StartAnswer::StillStarting,
+                    _ => StartAnswer::Running,
+                },
+            );
+        assert_eq!(result.started, ["started service Good"]);
+        assert_eq!(result.warnings.len(), 2);
+        assert!(result.warnings[0].message.contains("Bad"));
+        assert!(result.warnings[0].message.contains("it would not"));
+        assert_eq!(result.warnings[0].code, SERVICE_NOT_STARTED_CODE);
+        assert!(result.warnings[1].message.contains("Slow"));
     }
 
     #[test]

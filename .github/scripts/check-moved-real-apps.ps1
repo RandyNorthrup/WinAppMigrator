@@ -129,6 +129,13 @@ foreach ($round in $rounds) {
         Write-Host "services now: $($status -join ', ')"
     }
 
+    Section "$($round.Name): what starts by itself is running, with nothing having asked but the install"
+    foreach ($name in 'mosquitto', 'windows_exporter') {
+        $service = Get-Service -Name $name -ErrorAction SilentlyContinue
+        Check "${name}: it is set to start by itself" ($service -and "$($service.StartType)" -eq 'Automatic') "$($service.StartType)"
+        Check "${name}: it is running" ($service -and "$($service.Status)" -eq 'Running') "$($service.Status)"
+    }
+
     Section "$($round.Name): with them installed, every check works"
     Ask-Every-App $apps $roots $true "$($round.Name), installed"
     foreach ($app in $apps) { Stop-ProcessesFrom $roots[$app.id] }

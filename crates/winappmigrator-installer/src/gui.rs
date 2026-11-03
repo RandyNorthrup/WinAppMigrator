@@ -1516,7 +1516,7 @@ mod tests {
                 SystemChange {
                     kind: SystemChangeKind::Service,
                     title: "Fabrikam Sync Service".to_owned(),
-                    detail: r"Runs FabrikamSync.exe as NT AUTHORITY\LocalService, starts automatic"
+                    detail: r"Runs FabrikamSync.exe as NT AUTHORITY\LocalService, starts now and each time this PC starts"
                         .to_owned(),
                     high_rights: false,
                 },

@@ -71,6 +71,8 @@ use crate::task_scan::live_task_xml;
 const STOP_SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_SERVICE_POLL: Duration = Duration::from_millis(250);
 const STOPPED_STATE: &str = "STOPPED";
+const RUNNING_STATE_NUMBER: &str = "4";
+const RUNNING_STATE: &str = "RUNNING";
 const STOPPED_STATE_NUMBER: &str = "1";
 /// What `sc.exe delete` says of one that has already been asked for and is waiting for a restart.
 const SC_ALREADY_MARKED_FOR_DELETE: &str = "1072";
@@ -1427,9 +1429,19 @@ fn remove_regular_file(path: &Path) -> Result<()> {
     }
 }
 
-/// Whether `sc.exe query` says a service has stopped. The state's name and number are not
+/// Whether `sc.exe query` says a service has stopped.
+pub(crate) fn query_shows_stopped(output: &str) -> bool {
+    query_shows_state(output, STOPPED_STATE_NUMBER, STOPPED_STATE)
+}
+
+/// Whether `sc.exe query` says a service is running.
+pub(crate) fn query_shows_running(output: &str) -> bool {
+    query_shows_state(output, RUNNING_STATE_NUMBER, RUNNING_STATE)
+}
+
+/// Whether `sc.exe query` says a service is in a state. The state's name and number are not
 /// translated, though what labels them is, and what comes before them can be its name.
-fn query_shows_stopped(output: &str) -> bool {
+fn query_shows_state(output: &str, number: &str, state: &str) -> bool {
     let after_the_name = output
         .lines()
         .skip_while(|line| line.trim().is_empty())
@@ -1439,7 +1451,7 @@ fn query_shows_stopped(output: &str) -> bool {
             .split_once(':')
             .map_or("", |(_, value)| value)
             .split_whitespace();
-        words.next() == Some(STOPPED_STATE_NUMBER) && words.next() == Some(STOPPED_STATE)
+        words.next() == Some(number) && words.next() == Some(state)
     })
 }
 

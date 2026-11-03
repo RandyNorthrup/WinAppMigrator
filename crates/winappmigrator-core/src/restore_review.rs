@@ -1325,7 +1325,7 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>, target_root: &Path) -
             .entry
             .start_type
             .as_deref()
-            .map(|start| format!(", starts {start}"))
+            .map(service_start_text)
             .unwrap_or_default();
         let runs_as = service.account.label();
         changes.push(ChangeRow {
@@ -1614,6 +1614,20 @@ pub(crate) fn is_other_setting(entry: &RegistryEntry, app: &AppKeys) -> bool {
         && !is_uninstall_entry_key(&entry.key_path)
         && !key.starts_with(r"system\")
         && !app.holds(&key)
+}
+
+/// What a service's row says of when it runs. One that starts by itself is started as soon as the
+/// install has checked what it installed, as well as at each boot.
+fn service_start_text(start: &str) -> String {
+    match start {
+        "automatic" => ", starts now and each time this PC starts".to_owned(),
+        crate::service_scan::DELAYED_AUTOMATIC_START_LABEL => {
+            ", starts now and soon after each time this PC starts".to_owned()
+        }
+        "manual" => ", starts only when something asks it to".to_owned(),
+        "disabled" => ", is disabled".to_owned(),
+        other => format!(", starts {other}"),
+    }
 }
 
 /// Which of the kinds on the list of what is set up a value is part of, if it is part of one. All of
