@@ -142,7 +142,14 @@ Check 'with the runtime gone, the broker cannot start' $true
 
 Write-Host "`n=== Take the publisher's copy away"
 Remove-Preinstalled $app
+# Its uninstaller leaves some of what it put in its dashboard folder. A clean PC has none of that.
+if (Test-Path -LiteralPath $root) {
+    $left = @(Get-ChildItem -LiteralPath $root -Recurse -Force -File)
+    Write-Host "  its uninstaller left $($left.Count) files, which go now: $(($left | Select-Object -First 5 | ForEach-Object Name) -join ', ')"
+    Remove-Item -LiteralPath $root -Recurse -Force
+}
 Check 'its folder is gone' (-not (Test-Path -LiteralPath $root)) $root
+Check 'its service is gone' ($null -eq (Get-Service -Name mosquitto -ErrorAction SilentlyContinue)) 'it is still there'
 
 Write-Host "`n=== Install what was built"
 $log = Join-Path $Folder 'install.log'
@@ -150,6 +157,11 @@ $run = Run-Program (Join-Path $Folder $expected.installer) @('--apply', '--log',
 Write-Host "exit $($run.Code)"
 Write-Host $run.Output
 Check 'the installer exits with 0' ($run.Code -eq 0) $run.Output
+if ($run.Code -ne 0) {
+    # Nothing after this could be anything but a consequence of it.
+    Write-Host "`nSummary: $($script:failures.Count) failures."
+    exit 1
+}
 Check 'no errors' ($run.Output -match '(?m)^Errors: 0\s*$') ''
 Check 'it read back what it installed' ($run.Output -match 'Reinstall hashes valid: true') ''
 $said = @(Get-Content -LiteralPath $log | Where-Object { $_ -match '(?i)prerequisite' })
