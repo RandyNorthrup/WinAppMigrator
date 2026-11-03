@@ -290,6 +290,9 @@ pub struct WinAppMigratorApp {
     /// Until a person chooses a theme, it is whichever mode Windows is in, which egui only knows
     /// once there is a window.
     follows_windows_theme: bool,
+    /// What a test builds with, where there may be no stub to find yet.
+    #[cfg(test)]
+    stub_for_tests: Option<InstallerStub>,
     inventory_state: InventoryState,
     inventory_receiver: Option<Receiver<InventoryMessage>>,
     apps: Vec<InstalledApp>,
@@ -394,6 +397,8 @@ impl WinAppMigratorApp {
             ctx,
             theme: Theme::new(mode),
             follows_windows_theme: false,
+            #[cfg(test)]
+            stub_for_tests: None,
             inventory_state: InventoryState::Loading,
             inventory_receiver: None,
             apps: Vec::new(),
@@ -869,7 +874,11 @@ impl WinAppMigratorApp {
 
         // The product is a self-extracting installer, so the stub that becomes
         // that installer must be present. Without it we cannot build anything.
-        let Some(stub) = installer_stub() else {
+        #[cfg(test)]
+        let stub = self.stub_for_tests.clone().or_else(installer_stub);
+        #[cfg(not(test))]
+        let stub = installer_stub();
+        let Some(stub) = stub else {
             self.migrate_state = OperationState::Failed;
             self.last_error = Some(
                 "Installer stub (winappmigrator-installer.exe) was not found beside this app, so a \

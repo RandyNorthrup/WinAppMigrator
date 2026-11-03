@@ -125,6 +125,22 @@ pub fn create_package_from_scan(
             "this scan is of another app than the one being built, so nothing was built".to_owned(),
         ));
     }
+    let is_off = |classification: &FileClassification| match classification {
+        FileClassification::UserData => !options.include_user_data,
+        FileClassification::MachineAppData => !options.include_program_data,
+        _ => false,
+    };
+    if report
+        .file_inventory
+        .iter()
+        .chain(&report.empty_folders)
+        .any(|file| file.should_copy && is_off(&file.classification))
+    {
+        return Err(WinAppMigratorError::InvalidInput(
+            "this scan brought in data that this build was not asked to, so nothing was built"
+                .to_owned(),
+        ));
+    }
     refuse_a_scan_whose_program_is_gone(report)?;
     let adds_something = report.near_matches.iter().any(|near| near.picked);
     if choices.is_empty() && !adds_something {
@@ -219,6 +235,17 @@ fn is_data(classification: &FileClassification) -> bool {
 fn what_a_package_says_of(report: &ScanReport, options: &PackageOptions) -> ScanReport {
     let mut said = report.clone();
     said.generated_artifacts = None;
+    // A person can leave all of the data out, of a scan that was asked for it. An app of one account's
+    // is in that account's folders, and what is said of its own files still has to be.
+    if !options.include_user_data {
+        said.user_data_profile = None;
+        let app_folder = report.install_location.as_deref();
+        said.secrets_left_out.retain(|item| {
+            let path = Path::new(&item.name);
+            !is_user_profile_path(path)
+                || app_folder.is_some_and(|folder| path_is_within(path, folder))
+        });
+    }
     let off = |classification: &FileClassification| match classification {
         FileClassification::UserData => !options.include_user_data,
         FileClassification::MachineAppData => !options.include_program_data,
@@ -2103,6 +2130,69 @@ mod tests {
         let said = what_a_package_says_of(&report, &not_asked_for);
         assert_eq!(said.file_inventory.len(), files_before);
         assert!(said.warnings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_scan_that_brought_in_data_cannot_be_built_without_asking_for_it() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let mut report = scan_of(&options)?;
+        let data = PathBuf::from(r"C:\Users\alice\AppData\Roaming\Acme\saved.dat");
+        report.file_inventory.push(FileEntry {
+            path: data.clone(),
+            original_path: data,
+            package_relative_path: Some(PathBuf::from(r"files\_external\saved.dat")),
+            suggested_destination_path: None,
+            size_bytes: Some(1),
+            hash_sha256: None,
+            classification: FileClassification::UserData,
+            should_copy: true,
+            reason: String::new(),
+            user_folder: None,
+        });
+        let refused = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        );
+        assert!(matches!(refused, Err(WinAppMigratorError::InvalidInput(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn with_all_of_the_data_left_out_a_package_does_not_say_whose_it_was() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let mut report = scan_of(&options)?;
+        report.user_data_profile = Some("the-secret-account".to_owned());
+        report.install_location = Some(PathBuf::from(
+            r"C:\Users\the-secret-account\AppData\Local\Programs\Acme",
+        ));
+        report.secrets_left_out = vec![
+            LeftOutItem {
+                name: r"C:\Users\the-secret-account\AppData\Roaming\Acme\credentials.json"
+                    .to_owned(),
+                why: "its name says it holds credentials".to_owned(),
+            },
+            LeftOutItem {
+                name: r"C:\Users\the-secret-account\AppData\Local\Programs\Acme\.env".to_owned(),
+                why: "its name says it holds credentials".to_owned(),
+            },
+        ];
+        let said = what_a_package_says_of(&report, &options);
+        assert_eq!(said.user_data_profile, None);
+        assert_eq!(
+            said.secrets_left_out.len(),
+            1,
+            "the app's own is still said"
+        );
+        assert!(said.secrets_left_out[0].name.ends_with(".env"));
         Ok(())
     }
 

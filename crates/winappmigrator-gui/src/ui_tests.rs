@@ -409,11 +409,15 @@ fn a_build_needs_a_full_output_path() {
     assert!(button.accesskit_node().is_disabled());
 }
 
-/// What the window does when a person picks an app and clicks Create installer, without the window.
-/// Every other test here gives it a scan or a build of its own, which is how the app came to fail
-/// every build it was asked for, for a while, with all of its tests passing.
+/// A person picking an app and clicking Create installer, with nothing of the window's work done for it:
+/// the scan and the build are the real ones, on their own threads, as far as an installer on disk. Every
+/// other test here gives it a scan or a build of its own, which is how the app came to fail every build
+/// it was asked for, for a while, with all of its tests passing.
 #[test]
-fn what_the_app_looks_at_it_can_build() -> Result<(), Box<dyn std::error::Error>> {
+fn a_person_who_picks_an_app_and_clicks_create_gets_an_installer()
+-> Result<(), Box<dyn std::error::Error>> {
+    const STEP: std::time::Duration = std::time::Duration::from_millis(25);
+    const LONGEST: std::time::Duration = std::time::Duration::from_secs(180);
     let work = tempfile::tempdir()?;
     let app_folder = work.path().join("WAM Real Build");
     std::fs::create_dir_all(&app_folder)?;
@@ -429,55 +433,49 @@ fn what_the_app_looks_at_it_can_build() -> Result<(), Box<dyn std::error::Error>
     );
     app.install_location = Some(app_folder);
     app.main_executable = Some(program);
-    let key = crate::ScanKey {
-        registry_source_path: String::new(),
-        display_name: app.display_name.clone(),
-        owner_profile: None,
-        source: winappmigrator_core::ScanSource::Live,
-        include_user_data: false,
-        include_license_data: false,
-        user_profile: ProfileChoice::Default,
-        near_matches: Vec::new(),
-    };
-
-    let report = winappmigrator_core::scan_app(
-        &crate::scan_options_of(app.clone(), &key),
-        &winappmigrator_core::ScanMonitor::default(),
-    )?;
     let installers = work.path().join("installers");
-    let (sender, _receiver) = std::sync::mpsc::channel();
-    let message = crate::run_build(
-        crate::BuildJob {
-            app,
-            report: std::sync::Arc::new(report),
-            choices: winappmigrator_core::FootprintChoices::default(),
-            app_name: "WAM Real Build".to_owned(),
-            base_name: "WAM Real Build".to_owned(),
-            installer_dir: installers.clone(),
-            stub: winappmigrator_core::InstallerStub::File(stub),
-            include_user_data: false,
-            include_license_data: false,
-            source: winappmigrator_core::ScanSource::Live,
-            user_profile: ProfileChoice::Default,
-            ui_theme: "dark".to_owned(),
-        },
-        &winappmigrator_core::BuildMonitor::default(),
-        &sender,
-    );
+    let output = installers.display().to_string();
+    let stub_file = stub.clone();
+    let mut harness = harness_with(ThemeMode::Dark, move |window| {
+        window.apps = vec![app];
+        window.selected_app_index = Some(0);
+        window.output_dir = output;
+        window.set_scan_runner(std::sync::Arc::new(winappmigrator_core::scan_app));
+        window.stub_for_tests = Some(winappmigrator_core::InstallerStub::File(stub_file));
+    });
 
-    match message {
-        crate::MigrateMessage::Completed(outcome) => {
-            let installer = outcome
-                .package
-                .self_extracting_archive_path
-                .ok_or("the build finished with no installer")?;
-            assert!(installer.starts_with(&installers));
-            assert!(installer.is_file());
-            assert!(outcome.installer_bytes > 0);
-        }
-        crate::MigrateMessage::Failed(why) => panic!("the build failed: {why}"),
-        _ => panic!("the build did not finish"),
+    let started = std::time::Instant::now();
+    while harness.state().ready_scan().is_none() {
+        assert!(started.elapsed() < LONGEST, "the scan never finished");
+        std::thread::sleep(STEP);
+        harness.run_steps(1);
     }
+    harness.run_steps(2);
+    harness.get_by_label("Create installer").click();
+    harness.run_steps(1);
+    assert!(
+        harness.state().is_building(),
+        "{:?}",
+        harness.state().last_error
+    );
+    while harness.state().is_building() {
+        assert!(started.elapsed() < LONGEST, "the build never finished");
+        std::thread::sleep(STEP);
+        harness.run_steps(1);
+    }
+
+    let window = harness.state();
+    assert_eq!(window.last_error, None);
+    let installer = window
+        .last_outcome
+        .as_ref()
+        .and_then(|outcome| outcome.package.self_extracting_archive_path.clone())
+        .ok_or("the build finished with no installer")?;
+    assert!(installer.starts_with(&installers));
+    let package = winappmigrator_core::EmbeddedPackage::open(&installer)?
+        .ok_or("the installer has no package")?;
+    assert!(!package.read_file("manifest.json")?.is_empty());
+    assert!(!package.read_file("reports/scan_report.json")?.is_empty());
     assert!(!std::path::Path::new("reports").exists());
     Ok(())
 }

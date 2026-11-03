@@ -21,7 +21,19 @@ foreach ($app in $apps) {
     Remove-Preinstalled $app
 
     $file = Join-Path $downloads ([IO.Path]::GetFileName(([Uri]$app.url).AbsolutePath))
-    Invoke-WebRequest -Uri $app.url -OutFile $file -MaximumRetryCount 5 -RetryIntervalSec 10
+    # What Invoke-WebRequest retries by itself is what a server answers, not a connection that drops,
+    # which is what a small project's own server does to a runner now and then. The hash below is what
+    # says this got the right file, however many tries it took.
+    for ($try = 1; ; $try++) {
+        try {
+            Invoke-WebRequest -Uri $app.url -OutFile $file
+            break
+        } catch {
+            if ($try -ge 6) { throw }
+            Write-Host "  try $try of the download failed: $($_.Exception.Message)"
+            Start-Sleep -Seconds (20 * $try)
+        }
+    }
     $hash = Sha256-Of $file
     if ($hash -ne $app.sha256) { throw "$($app.url) is $hash, and $($app.sha256) was expected" }
     Write-Host "  $file has the SHA-256 it should: $hash"
