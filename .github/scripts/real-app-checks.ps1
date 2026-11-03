@@ -382,6 +382,9 @@ $script:Checks = @{
         },
         @{ Name = 'File type: opening a .ppk starts Pageant with it'; Test = {
                 param($Root)
+                # With nothing to open it, Windows would ask a person, and this would wait for ever.
+                $open = [WamAssociation]::ProgramFor('.ppk', 'open')
+                if (-not (Is-Inside $open $Root)) { return "nothing of the app's would open it: [$open]" }
                 $work = New-WorkFolder
                 $file = Join-Path $work 'wamcheck.ppk'
                 Set-Content -LiteralPath $file -Value 'not a real key'
@@ -458,6 +461,20 @@ $script:Checks = @{
         }
     )
     'windows_exporter' = @(
+        @{ Name = 'Firewall: Windows has the rule, for the program in the app''s folder and its port'; Test = {
+                param($Root)
+                $rules = @(Get-NetFirewallRule -DisplayName 'windows_exporter' -ErrorAction SilentlyContinue)
+                if ($rules.Count -ne 1) { return "$($rules.Count) rules have that name" }
+                if ($rules[0].Enabled -ne 'True' -or $rules[0].Direction -ne 'Inbound' -or $rules[0].Action -ne 'Allow') {
+                    return "it is $($rules[0].Enabled), $($rules[0].Direction), $($rules[0].Action)"
+                }
+                $program = ($rules[0] | Get-NetFirewallApplicationFilter).Program
+                if (-not (Is-Inside $program $Root)) { return "it is for [$program]" }
+                $port = ($rules[0] | Get-NetFirewallPortFilter).LocalPort
+                if ($port -ne '9182') { return "it is for port [$port]" }
+                return ''
+            }
+        },
         @{ Name = 'Service: it starts, stays up, answers a real HTTP client, and stops'; Test = {
                 param($Root)
                 return (Service-Problem 'windows_exporter' $Root {
@@ -470,6 +487,8 @@ $script:Checks = @{
                         $http.Dispose()
                         if (-not $answered) { return 'it never answered on port 9182' }
                         if ($answer.Page -notmatch 'windows_exporter_build_info\{.*version="0\.32\.1"') { return "its answer was not its metrics: $($answer.Page.Length) characters" }
+                        $collectors = @($answer.Page -split "`n" | Where-Object { $_ -match '^windows_exporter_collector_success' })
+                        Write-Host "      what it says of its own collectors: $($collectors -join '; ')"
                     })
             }
         },
@@ -521,10 +540,10 @@ function Check-Result($Check, [string]$Root) {
 
 # --- What is on the machine, to see that an uninstall left nothing.
 
-function Key-Names([string]$Path) {
-    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($Path)
+function Key-Names([string]$Path, $Hive = [Microsoft.Win32.Registry]::LocalMachine) {
+    $key = $Hive.OpenSubKey($Path)
     if (-not $key) { return @() }
-    return @($key.GetSubKeyNames() | ForEach-Object { "$Path\$_" })
+    return @($key.GetSubKeyNames() | ForEach-Object { "$($Hive.Name)\$Path\$_" })
 }
 
 function Value-Names([string]$Path) {
@@ -536,7 +555,16 @@ function Value-Names([string]$Path) {
 function Get-MachineState {
     $environmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
     $environment = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($environmentKey)
+    $mine = [Microsoft.Win32.Registry]::CurrentUser
+    $myEnvironment = $mine.OpenSubKey('Environment')
     $names = @{
+        'This account''s' = @(
+            Key-Names 'Software' $mine
+            Key-Names 'Software\Microsoft\Windows\CurrentVersion\Uninstall' $mine
+            Key-Names 'Software\Classes' $mine
+            $myEnvironment.GetValueNames() | ForEach-Object { "Environment $_=$($myEnvironment.GetValue($_, '', 'DoNotExpandEnvironmentNames'))" }
+            Get-ChildItem -LiteralPath ([Environment]::GetFolderPath('Programs')) -Recurse -Force | ForEach-Object FullName
+        )
         'Folders'         = @(
             Get-ChildItem -LiteralPath 'C:\Program Files', 'C:\Program Files (x86)' -Force -ErrorAction SilentlyContinue | ForEach-Object FullName
             Get-ChildItem -LiteralPath 'C:\ProgramData' -Force | Where-Object Name -ne 'WinAppMigrator' | ForEach-Object FullName
@@ -564,7 +592,14 @@ function State-Differences($Before, $After) {
     foreach ($kind in ($Before.Keys | Sort-Object)) {
         $set = [Collections.Generic.HashSet[string]]::new([string[]]$Before[$kind], [StringComparer]::OrdinalIgnoreCase)
         $now = [Collections.Generic.HashSet[string]]::new([string[]]$After[$kind], [StringComparer]::OrdinalIgnoreCase)
-        foreach ($item in $After[$kind]) { if (-not $set.Contains($item)) { "$kind, new: $item" } }
+        foreach ($item in $After[$kind]) {
+            # Windows adds these itself for its own packages, whenever it first starts one.
+            if ($kind -eq 'Firewall' -and $item -match '_8wekyb3d8bbwe') {
+                Write-Host "  (Windows' own, and not counted: $item)"
+                continue
+            }
+            if (-not $set.Contains($item)) { "$kind, new: $item" }
+        }
         foreach ($item in $Before[$kind]) { if (-not $now.Contains($item)) { "$kind, gone: $item" } }
     }
 }

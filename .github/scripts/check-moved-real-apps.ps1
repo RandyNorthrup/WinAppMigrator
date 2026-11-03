@@ -94,6 +94,20 @@ foreach ($round in $rounds) {
             Check "$($app.id): it has nothing to say about an emulator" ($run.Output -notmatch 'emulator') ''
         }
         if ($run.Output -match '(?m)^Install id: (.+?)\s*$') { $installs[$app.id] = $Matches[1] }
+        # What the publisher's own installer left in its folder, whatever the scan made of it.
+        foreach ($file in @($app.files)) {
+            $path = Join-Path $roots[$app.id] $file.relative
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Check "$($app.id): $($file.relative) is here" $false 'it is not'
+            } elseif ((Sha256-Of $path) -ne $file.sha256) {
+                Check "$($app.id): $($file.relative) is as it was" $false "$(Sha256-Of $path), expected $($file.sha256)"
+            }
+        }
+        Check "$($app.id): all $(@($app.files).Count) files of its folder were looked at, by .NET" (@($app.files).Count -gt 0) ''
+        foreach ($folder in @($app.empty_folders)) {
+            $there = Test-Path -LiteralPath (Join-Path $roots[$app.id] $folder) -PathType Container
+            Write-Host "  note: the empty folder $folder is $(if ($there) { 'here' } else { 'NOT here' })"
+        }
         $status = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -in 'mosquitto', 'windows_exporter' } | ForEach-Object { "$($_.Name)=$($_.Status)/$($_.StartType)" }
         Write-Host "services now: $($status -join ', ')"
     }

@@ -124,6 +124,42 @@ fn powershell(script: &str) -> TestResult<String> {
     .into())
 }
 
+/// Each file below a folder with its hash, and each folder with nothing in it, by .NET, and nothing
+/// of this project's. A file a running service holds open can still be read like this.
+fn what_is_in_the_folder(root: &Path) -> TestResult<(Vec<Value>, Vec<String>)> {
+    let shown = powershell(&format!(
+        r"$root = (Get-Item -LiteralPath '{}').FullName
+        $sha = [Security.Cryptography.SHA256]::Create()
+        Get-ChildItem -LiteralPath $root -Recurse -Force | ForEach-Object {{
+            $relative = $_.FullName.Substring($root.Length).TrimStart('\')
+            if ($_.PSIsContainer) {{
+                if (@(Get-ChildItem -LiteralPath $_.FullName -Force).Count -eq 0) {{ 'folder|' + $relative }}
+            }} else {{
+                $stream = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite')
+                $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '')
+                $stream.Dispose()
+                'file|' + $relative + '|' + $hash.ToLowerInvariant()
+            }}
+        }}",
+        root.display()
+    ))?;
+    let mut files = Vec::new();
+    let mut empty_folders = Vec::new();
+    for line in shown.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some(relative) = line.strip_prefix("folder|") {
+            empty_folders.push(relative.to_owned());
+        } else if let Some((relative, hash)) = line
+            .strip_prefix("file|")
+            .and_then(|rest| rest.rsplit_once('|'))
+        {
+            files.push(json!({ "relative": relative, "sha256": hash }));
+        } else {
+            return Err(format!("could not read: {line}").into());
+        }
+    }
+    Ok((files, empty_folders))
+}
+
 fn is_token_letter(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
 }
@@ -545,8 +581,15 @@ fn build_what_goes_to_the_other_pcs() -> TestResult {
             holding_the_runners.push(format!("{name}: {problem}"));
         }
 
+        let (files, empty_folders) = what_is_in_the_folder(&root)?;
+        println!(
+            "  its folder has {} files, by .NET, and these empty folders: {empty_folders:?}",
+            files.len()
+        );
         built.push(json!({
             "id": id,
+            "files": files,
+            "empty_folders": empty_folders,
             "name": name,
             "installer": installer
                 .file_name()
