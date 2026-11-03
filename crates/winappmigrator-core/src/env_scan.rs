@@ -9,6 +9,7 @@ use crate::models::{
 };
 use crate::path_utils::text_mentions_path;
 use crate::registry_scan::registry_value_text;
+use crate::registry_target::is_path_variable;
 use crate::system_context::SystemContext;
 
 const HKCU_ENVIRONMENT: &str = r"Environment";
@@ -69,16 +70,31 @@ fn collect_env_values(
         let raw = value.1;
         let value_text = registry_value_text(&raw);
         if value_matches_context(context, &value_text) {
+            let value = if is_path_variable(&name) {
+                only_the_apps_entries(context, &value_text)
+            } else {
+                value_text
+            };
             entries.push(EnvironmentVariableEntry {
                 scope: scope.clone(),
                 name,
-                value: value_text,
+                value,
                 value_kind: environment_value_kind(&raw),
                 requires_admin: scope == EnvironmentScope::Machine,
                 confidence: MatchConfidence::High,
             });
         }
     }
+}
+
+/// Of a `Path`, what is the app's. The rest is what else is on this PC, and in a user's `Path` it is
+/// where in that account's folders, which a package has no reason to carry.
+fn only_the_apps_entries(context: &EnvironmentScanContext, value: &str) -> String {
+    value
+        .split(';')
+        .filter(|entry| value_matches_context(context, entry))
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 fn value_matches_context(context: &EnvironmentScanContext, value: &str) -> bool {
@@ -114,5 +130,27 @@ mod tests {
 
         assert!(value_matches_context(&context, r"C:\Tools;C:\App\bin"));
         assert!(!value_matches_context(&context, r"C:\Tools;C:\Other"));
+    }
+
+    #[test]
+    fn of_a_path_only_what_is_the_apps_goes() {
+        let context = EnvironmentScanContext {
+            executable_path: PathBuf::from(r"C:\Program Files\App\App.exe"),
+            install_location: Some(PathBuf::from(r"C:\Program Files\App")),
+            also_the_apps: vec![PathBuf::from(r"D:\AppData")],
+        };
+
+        assert_eq!(
+            only_the_apps_entries(
+                &context,
+                r"C:\Windows;C:\Users\someone\Tools;C:\Program Files\App\bin;;C:\Program Files\Apple;D:\AppData"
+            ),
+            r"C:\Program Files\App\bin;D:\AppData"
+        );
+        assert_eq!(
+            only_the_apps_entries(&context, r"C:\Program Files\App"),
+            r"C:\Program Files\App"
+        );
+        assert_eq!(only_the_apps_entries(&context, r"C:\Windows"), "");
     }
 }
