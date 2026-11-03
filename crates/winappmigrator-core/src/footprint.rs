@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::account_settings::is_account_setting;
 use crate::errors::Result;
+use crate::file_discovery::is_user_profile_path;
 use crate::models::{
     FileClassification, FileEntry, FootprintKind, FootprintLocation, LeftOutItem, NearMatch,
     PackageManifest, ProgramRole, RegistryEntry, RegistryHive, ScanReport, Warning,
@@ -1465,7 +1466,12 @@ fn what_was_left_out(
         .folders_left_out(choices)
         .iter()
         .map(|row| LeftOutItem {
-            name: row.path.display().to_string(),
+            // A package with none of an account's data has no reason to carry its name.
+            name: if is_user_profile_path(&row.path) {
+                row.name.clone()
+            } else {
+                row.path.display().to_string()
+            },
             why: WHY.to_owned(),
         })
         .collect();

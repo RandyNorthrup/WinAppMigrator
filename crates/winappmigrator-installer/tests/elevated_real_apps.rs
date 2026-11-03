@@ -621,9 +621,15 @@ fn options_for(app: InstalledApp, output: &Path, id: &str, work: &Path) -> Packa
     }
 }
 
-/// Build as the app does: a look at it first, and then by what that found.
+/// Build as the app does: a look at it first, told of nowhere to write, and then by what that found.
 fn build(options: &PackageOptions) -> TestResult<(PathBuf, PackageManifest)> {
-    let report = scan_app(&scan_options_for(options), &ScanMonitor::default())?;
+    let report = scan_app(
+        &scan_options_for(&PackageOptions {
+            output_dir: PathBuf::new(),
+            ..options.clone()
+        }),
+        &ScanMonitor::default(),
+    )?;
     let result = create_package_from_scan(
         options,
         &report,
@@ -893,8 +899,15 @@ fn build_what_goes_to_the_other_pcs() -> TestResult {
 
         let work = tempfile::tempdir()?;
         let options = options_for(app, &output, id, work.path());
-        // The way the app does: a look at it first, and the build by what that found.
-        let report = scan_app(&scan_options_for(&options), &ScanMonitor::default())?;
+        // The way the app does: a look at it first, told of nowhere to write, and the build by what
+        // that found.
+        let report = scan_app(
+            &scan_options_for(&PackageOptions {
+                output_dir: PathBuf::new(),
+                ..options.clone()
+            }),
+            &ScanMonitor::default(),
+        )?;
         let near: Vec<String> = report
             .near_matches
             .iter()

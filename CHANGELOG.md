@@ -57,6 +57,10 @@ All notable project changes are tracked here.
   usually someone's Downloads, and said Windows Installer has it, which on another PC it does not. A captured `Path` held the
   whole of the variable, which is all of what else is on the PC, when only the app's entries are ever used. An app with a
   32-bit setup and 64-bit programs was listed as x86.
+- **A build from the app itself failed, every time, and now does not.** Only for a while, and never in a release: a build goes by a
+  scan made earlier, which is told of nowhere to write, and it wrote its reports by what the scan had been told. So it looked for a
+  `reports` folder wherever the app happened to be running, and stopped there. Every test of this gave a scan or a build of its
+  own, and so did every job on CI. One now goes the way the window does, and so do the real apps.
 - **You see what goes in an installer before you build it.** Selecting an app looks at it in the background, and the
   screen says how big the installer can be and whether it fits, what it holds, in plain groups and in the words the
   installer's own list uses, and what is left out and why, with credentials, licenses, and certificates by name. Picking

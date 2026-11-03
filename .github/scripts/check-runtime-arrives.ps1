@@ -42,16 +42,20 @@ public static class WamErrorMode {
 '@
 [WamErrorMode]::SetErrorMode(0x8001) | Out-Null
 
-# What a program does when it is asked only to say how it is used. A clean PC has none of the tools
-# this runner has on its PATH, several of which carry a copy of this runtime, so it starts as it would
-# there: with Windows' own folders to look in, and in one of those.
-function Exit-Code-Of([string]$Program, [string]$Arguments) {
+# A clean PC has none of the tools this runner has on its PATH, several of which carry a copy of this
+# runtime, so a program starts as it would there: with Windows' own folders to look in, and in one of those.
+function Start-As-On-A-Clean-PC([string]$Program, [string]$Arguments) {
     $info = [Diagnostics.ProcessStartInfo]::new($Program, $Arguments)
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.WorkingDirectory = $env:SystemRoot
     $info.Environment['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot"
-    $process = [Diagnostics.Process]::Start($info)
+    return [Diagnostics.Process]::Start($info)
+}
+
+# What a program does when it is asked only to say how it is used.
+function Exit-Code-Of([string]$Program, [string]$Arguments) {
+    $process = Start-As-On-A-Clean-PC $Program $Arguments
     if (-not $process.WaitForExit(30000)) {
         $process.Kill()
         return 'it was still running after 30 seconds'
@@ -170,7 +174,17 @@ Check 'its record says it is there' ($key -and $key.GetValue('Installed') -eq 1)
 Write-Host "`n=== The broker runs on it"
 $after = Exit-Code-Of $broker '--help'
 Write-Host "  the broker, asked how it is used, exits with $after"
-Check 'the installed broker can start' ($after -ne $DllNotFound) "$after"
+Check 'the installed broker starts, and says what it said before' ($after -eq $before) "$after, and it was $before"
+$port = Free-Port
+$broker_process = Start-As-On-A-Clean-PC $broker "-p $port"
+try {
+    Start-Sleep -Seconds 3
+    Check 'as on a clean PC, it stays up' (-not $broker_process.HasExited) "exit $(if ($broker_process.HasExited) { $broker_process.ExitCode })"
+    $problem = Mqtt-Problem $port
+    Check 'as on a clean PC, it answers a real MQTT client' (-not $problem) $problem
+} finally {
+    if (-not $broker_process.HasExited) { $broker_process.Kill() }
+}
 $problem = Service-Problem 'mosquitto' $root { Mqtt-Problem 1883 }
 Check 'its service starts, stays up, answers a real MQTT client, and stops' (-not $problem) $problem
 

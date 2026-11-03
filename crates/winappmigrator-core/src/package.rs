@@ -15,14 +15,14 @@ use crate::archive::{
 use crate::authenticode::check_microsoft_signature;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
-    has_reserved_device_name, package_destination_path, safe_relative_path,
+    has_reserved_device_name, is_user_profile_path, package_destination_path, safe_relative_path,
 };
 use crate::footprint::{Footprint, FootprintChoices, ScanFlags, apply_choices};
 use crate::hashing::{hex_lower, sha256_file};
 use crate::models::{
-    AppArchitecture, AppSelection, DriverEntry, FileClassification, FileEntry, InstallerStub,
-    LeftOutItem, LicenseArtifact, LicenseStoreFile, PACKAGE_SCHEMA_VERSION, PackageManifest,
-    PackageOptions, PackageResult, RegistryEntry, RegistryHive, RegistryValueKind,
+    AppArchitecture, AppSelection, DriverEntry, FileClassification, FileEntry, FootprintKind,
+    InstallerStub, LeftOutItem, LicenseArtifact, LicenseStoreFile, PACKAGE_SCHEMA_VERSION,
+    PackageManifest, PackageOptions, PackageResult, RegistryEntry, RegistryHive, RegistryValueKind,
     RuntimePrerequisite, ScanOptions, ScanReport, ScheduledTaskEntry, Warning, WarningSeverity,
 };
 use crate::packer::{PackItem, PackOutcome, PackedFile, Packer, SourceRules};
@@ -214,29 +214,74 @@ fn is_data(classification: &FileClassification) -> bool {
 
 /// What a package says of a scan. A scan looks at an app's data whichever way the options are, so that
 /// the screen can say what there is to bring. What that data is called, and whose folders it is in, is
-/// no business of another PC's when none of it is going there.
-fn without_data_that_is_not_going(report: &ScanReport) -> ScanReport {
+/// no business of another PC's when the option for it is off. And a scan writes nowhere: where it would
+/// have is nothing to go by when a build writes, or to pass on.
+fn what_a_package_says_of(report: &ScanReport, options: &PackageOptions) -> ScanReport {
     let mut said = report.clone();
-    let is_staying = |file: &FileEntry| !file.should_copy && is_data(&file.classification);
+    said.generated_artifacts = None;
+    let off = |classification: &FileClassification| match classification {
+        FileClassification::UserData => !options.include_user_data,
+        FileClassification::MachineAppData => !options.include_program_data,
+        _ => false,
+    };
+    let is_staying = |file: &FileEntry| !file.should_copy && off(&file.classification);
     let files_staying: HashSet<String> = said
         .file_inventory
         .iter()
         .filter(|file| is_staying(file))
-        .map(|file| comparable_path(&file.original_path))
+        .flat_map(|file| [&file.path, &file.original_path])
+        .map(|path| comparable_path(path))
         .collect();
     said.file_inventory.retain(|file| !is_staying(file));
+    let is_going = |path: &Path| {
+        said.file_inventory
+            .iter()
+            .any(|file| file.should_copy && path_is_within(&file.original_path, path))
+    };
     let folders_staying: Vec<PathBuf> = said
         .footprint_locations
         .iter()
-        .filter(|location| !location.included)
+        .filter(|location| {
+            let is_off = match location.kind {
+                FootprintKind::RoamingAppData
+                | FootprintKind::LocalAppData
+                | FootprintKind::LocalLowAppData
+                | FootprintKind::Documents
+                | FootprintKind::SavedGames => !options.include_user_data,
+                FootprintKind::ProgramData | FootprintKind::PublicDocuments => {
+                    !options.include_program_data
+                }
+                FootprintKind::InstallDirectory
+                | FootprintKind::RegistryReference
+                | FootprintKind::Other => {
+                    !options.include_user_data && is_user_profile_path(&location.path)
+                }
+            };
+            is_off && !location.included && !is_going(&location.path)
+        })
         .map(|location| location.path.clone())
         .collect();
     said.footprint_locations
-        .retain(|location| location.included);
+        .retain(|location| !folders_staying.contains(&location.path));
+    let is_going_file: HashSet<String> = said
+        .file_inventory
+        .iter()
+        .filter(|file| file.should_copy)
+        .flat_map(|file| [&file.path, &file.original_path])
+        .map(|path| comparable_path(path))
+        .collect();
     said.warnings.retain(|warning| {
         warning.source.as_deref().is_none_or(|source| {
             let source = Path::new(source);
-            !files_staying.contains(&comparable_path(source))
+            let comparable = comparable_path(source);
+            // A warning can be about a place on a connected drive, by where the drive is now, and about
+            // what was never going to be listed. Anything in an account's folders that is not going in
+            // is that account's to know about, and not whoever runs this.
+            let in_an_account = !options.include_user_data
+                && is_user_profile_path(source)
+                && !is_going_file.contains(&comparable);
+            !in_an_account
+                && !files_staying.contains(&comparable)
                 && !folders_staying
                     .iter()
                     .any(|folder| path_is_within(source, folder))
@@ -256,7 +301,7 @@ fn build_package(
     what_was_chosen: &WhatWasChosen,
     monitor: &BuildMonitor,
 ) -> Result<PackageResult> {
-    let what_it_says = without_data_that_is_not_going(report);
+    let what_it_says = what_a_package_says_of(report, options);
     let report = &what_it_says;
     let reports_dir = options.output_dir.join(REPORTS_DIR);
     write_scan_reports(report, &reports_dir)?;
@@ -2013,6 +2058,98 @@ mod tests {
     };
 
     #[test]
+    fn what_a_package_says_of_data_it_was_asked_for_stays_even_if_some_could_not_come() -> Result<()>
+    {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let mut report = scan_of(&installer_options(root.path(), &exe, &stub))?;
+        report.warnings.clear();
+        let placeholder = PathBuf::from(r"C:\Users\alice\AppData\Roaming\Acme\online-only.dat");
+        let files_before = report.file_inventory.len();
+        report.file_inventory.push(FileEntry {
+            path: placeholder.clone(),
+            original_path: placeholder.clone(),
+            package_relative_path: None,
+            suggested_destination_path: None,
+            size_bytes: Some(1),
+            hash_sha256: None,
+            classification: FileClassification::UserData,
+            should_copy: false,
+            reason: String::new(),
+            user_folder: None,
+        });
+        report.warnings.push(Warning::new(
+            "cloud_placeholder_skipped",
+            WarningSeverity::Info,
+            "Online-only",
+            Some(placeholder.display().to_string()),
+        ));
+        let asked_for = PackageOptions {
+            include_user_data: true,
+            ..installer_options(root.path(), &exe, &stub)
+        };
+        let said = what_a_package_says_of(&report, &asked_for);
+        assert_eq!(said.file_inventory.len(), files_before + 1);
+        assert_eq!(
+            said.warnings.len(),
+            1,
+            "it was asked for, and it is not coming"
+        );
+        let not_asked_for = PackageOptions {
+            include_user_data: false,
+            ..asked_for
+        };
+        let said = what_a_package_says_of(&report, &not_asked_for);
+        assert_eq!(said.file_inventory.len(), files_before);
+        assert!(said.warnings.is_empty());
+        Ok(())
+    }
+
+    /// As the app does: a scan writes nothing, so it is told of no folder, and a build comes later.
+    #[test]
+    fn a_build_writes_its_reports_where_it_is_building_whatever_a_scan_was_told() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let report = scan_of(&PackageOptions {
+            output_dir: PathBuf::new(),
+            ..options.clone()
+        })?;
+        assert_eq!(
+            report
+                .generated_artifacts
+                .as_ref()
+                .map(|artifacts| artifacts.scan_report_json.clone()),
+            Some(PathBuf::from(REPORTS_DIR).join("scan_report.json")),
+            "it is told of no folder"
+        );
+
+        let result = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+
+        assert!(
+            !Path::new(REPORTS_DIR).exists(),
+            "nothing is written where this happens to be running"
+        );
+        let installer = result
+            .self_extracting_archive_path
+            .ok_or_else(|| WinAppMigratorError::Archive("no installer".to_owned()))?;
+        let package = EmbeddedPackage::open(&installer)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        assert!(
+            !package.read_file("reports/scan_report.json")?.is_empty(),
+            "and they are in the package"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn what_a_package_says_holds_nothing_of_data_that_is_not_going() -> Result<()> {
         const THEIRS: &str = r"C:\Users\the-secret-account\AppData\Roaming\Acme";
         let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
@@ -2058,6 +2195,13 @@ mod tests {
             WarningSeverity::Info,
             "this one stays",
             Some(r"Software\Acme".to_owned()),
+        ));
+        // One that was never going to be listed, as a file of another account's is not.
+        report.warnings.push(Warning::new(
+            "file_discovery_left_out",
+            WarningSeverity::Warning,
+            r"C:\Users\the-secret-account\Documents\the-secret-host.txt was left out",
+            Some(r"C:\Users\the-secret-account\Documents\the-secret-host.txt".to_owned()),
         ));
 
         let result = create_package_from_scan(

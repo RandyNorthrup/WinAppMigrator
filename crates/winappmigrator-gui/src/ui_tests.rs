@@ -409,6 +409,79 @@ fn a_build_needs_a_full_output_path() {
     assert!(button.accesskit_node().is_disabled());
 }
 
+/// What the window does when a person picks an app and clicks Create installer, without the window.
+/// Every other test here gives it a scan or a build of its own, which is how the app came to fail
+/// every build it was asked for, for a while, with all of its tests passing.
+#[test]
+fn what_the_app_looks_at_it_can_build() -> Result<(), Box<dyn std::error::Error>> {
+    let work = tempfile::tempdir()?;
+    let app_folder = work.path().join("WAM Real Build");
+    std::fs::create_dir_all(&app_folder)?;
+    let program = app_folder.join("wam-real-build.exe");
+    std::fs::copy(std::env::current_exe()?, &program)?;
+    let stub = work.path().join("stub.bin");
+    std::fs::write(&stub, b"a stub")?;
+    let mut app = sample_app(
+        "WAM Real Build",
+        "WAM Test",
+        "1.0.0",
+        InstallScope::PerMachine,
+    );
+    app.install_location = Some(app_folder);
+    app.main_executable = Some(program);
+    let key = crate::ScanKey {
+        registry_source_path: String::new(),
+        display_name: app.display_name.clone(),
+        owner_profile: None,
+        source: winappmigrator_core::ScanSource::Live,
+        include_user_data: false,
+        include_license_data: false,
+        user_profile: ProfileChoice::Default,
+        near_matches: Vec::new(),
+    };
+
+    let report = winappmigrator_core::scan_app(
+        &crate::scan_options_of(app.clone(), &key),
+        &winappmigrator_core::ScanMonitor::default(),
+    )?;
+    let installers = work.path().join("installers");
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    let message = crate::run_build(
+        crate::BuildJob {
+            app,
+            report: std::sync::Arc::new(report),
+            choices: winappmigrator_core::FootprintChoices::default(),
+            app_name: "WAM Real Build".to_owned(),
+            base_name: "WAM Real Build".to_owned(),
+            installer_dir: installers.clone(),
+            stub: winappmigrator_core::InstallerStub::File(stub),
+            include_user_data: false,
+            include_license_data: false,
+            source: winappmigrator_core::ScanSource::Live,
+            user_profile: ProfileChoice::Default,
+            ui_theme: "dark".to_owned(),
+        },
+        &winappmigrator_core::BuildMonitor::default(),
+        &sender,
+    );
+
+    match message {
+        crate::MigrateMessage::Completed(outcome) => {
+            let installer = outcome
+                .package
+                .self_extracting_archive_path
+                .ok_or("the build finished with no installer")?;
+            assert!(installer.starts_with(&installers));
+            assert!(installer.is_file());
+            assert!(outcome.installer_bytes > 0);
+        }
+        crate::MigrateMessage::Failed(why) => panic!("the build failed: {why}"),
+        _ => panic!("the build did not finish"),
+    }
+    assert!(!std::path::Path::new("reports").exists());
+    Ok(())
+}
+
 #[test]
 fn the_first_time_it_takes_the_theme_windows_is_in_and_a_choice_stays() {
     let mut first = harness_with(ThemeMode::Dark, |app| app.follows_windows_theme = true);

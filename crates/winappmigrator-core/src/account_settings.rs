@@ -206,6 +206,7 @@ pub(crate) fn say_no_more_than_the_apps_key(warnings: &mut [Warning]) {
 pub(crate) fn say_no_more_of_licenses_than_the_apps_key(
     artifacts: &mut [LicenseArtifact],
     left_out: &mut LeftOut,
+    is_in_the_accounts_folders: &dyn Fn(&Path) -> bool,
 ) {
     let of_an_account = |location: &str| -> Option<String> {
         location
@@ -213,7 +214,7 @@ pub(crate) fn say_no_more_of_licenses_than_the_apps_key(
             .map(|key| format!("{REGISTRY_HIVE_PREFIX}{}", key_of_the_app(key)))
     };
     let name_in_an_account = |path: &Path| -> Option<PathBuf> {
-        is_user_profile_path(path)
+        (is_user_profile_path(path) || is_in_the_accounts_folders(path))
             .then(|| path.file_name().map(PathBuf::from))
             .flatten()
     };
@@ -576,6 +577,10 @@ mod tests {
                     name: r"C:\Users\alice\AppData\Roaming\Acme\license.lic".to_owned(),
                     why: "the License option is off".to_owned(),
                 },
+                LeftOutItem {
+                    name: r"D:\Profiles\alice\AppData\Roaming\Acme\license.lic".to_owned(),
+                    why: "the License option is off".to_owned(),
+                },
             ],
             ..LeftOut::default()
         };
@@ -588,12 +593,15 @@ mod tests {
             detail: "License file detected: license.lic".to_owned(),
             ..artifacts[0].clone()
         });
-        say_no_more_of_licenses_than_the_apps_key(&mut artifacts, &mut left_out);
+        say_no_more_of_licenses_than_the_apps_key(&mut artifacts, &mut left_out, &|path| {
+            path.starts_with(r"D:\Profiles")
+        });
         let said = format!("{artifacts:?} {:?}", left_out.licenses);
         assert!(!said.contains("the-secret-host"), "{said}");
         assert!(!said.contains("alice"), "{said}");
         assert_eq!(artifacts[1].path.as_deref(), Some(Path::new("license.lic")));
         assert_eq!(left_out.licenses[2].name, "license.lic");
+        assert_eq!(left_out.licenses[3].name, "license.lic");
         assert_eq!(
             artifacts[0].registry_location.as_deref(),
             Some(r"HKCU\Software\Acme")

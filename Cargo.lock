@@ -4230,6 +4230,7 @@ dependencies = [
  "egui_kittest",
  "embed-manifest",
  "rfd",
+ "tempfile",
  "tracing",
  "winappmigrator-core",
  "winappmigrator-ui",

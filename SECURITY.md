@@ -308,7 +308,7 @@ file types, COM classes, App Paths, Run values, its entry in Settings, and what 
 plainly named value in the app's own key, no more than two below `Software`, whose whole data is a path in the app's own
 folder. This goes by where a value is, so nothing that finds one can get round it, and it says how many went from
 which app's key and nothing below that, since a host can be what a key is called. So does what a scan finds of an app's data with the option off, which only the screen is told of: a package says nothing of those
-files, what they are called, or a credential among them. What stays can still say something: an
+files, what they are called, or a credential among them, and a folder of an account's that you left out is named without its path. What stays can still say something: an
 ODBC source can name a server and a user, and a plainly named value in an app's own key that points in its folder could be called
 anything. With the License option on as well, a license value in an account's key goes where it was,
 so its key's name goes with it.

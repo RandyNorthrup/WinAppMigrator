@@ -583,7 +583,11 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         );
         say_no_more_than_the_apps_key(&mut registry_artifacts.warnings);
         if !options.include_license_data {
-            say_no_more_of_licenses_than_the_apps_key(&mut license_artifacts, &mut left_out);
+            say_no_more_of_licenses_than_the_apps_key(
+                &mut license_artifacts,
+                &mut left_out,
+                &|path| system.is_in_the_accounts_profile(path),
+            );
         }
     }
     if !options.include_license_data {

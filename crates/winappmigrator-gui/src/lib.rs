@@ -589,23 +589,7 @@ impl WinAppMigratorApp {
             let _send_result = sender.send(ScanMessage::Step(id, step));
             ctx.request_repaint();
         });
-        let mut options = scan_options_for(&PackageOptions {
-            selection: AppSelection::InstalledApp(Box::new(app)),
-            // Only ever a name, as in the package it goes in. A scan writes nothing.
-            output_dir: PathBuf::new(),
-            current_directory: std::env::current_dir().ok(),
-            create_self_extracting_archive: true,
-            self_extracting_stub: None,
-            installer_dir: None,
-            include_user_data: key.include_user_data,
-            include_program_data: key.include_user_data,
-            include_license_data: key.include_license_data,
-            bundle_prerequisites: true,
-            source: key.source.clone(),
-            user_profile: key.user_profile.clone(),
-            ui_theme: None,
-        });
-        options.near_matches.clone_from(&key.near_matches);
+        let options = scan_options_of(app, &key);
         self.scan_worker.send(ScanJob {
             id,
             options,
@@ -1190,6 +1174,28 @@ impl eframe::App for WinAppMigratorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
     }
+}
+
+/// What looking at an app asks for.
+fn scan_options_of(app: InstalledApp, key: &ScanKey) -> ScanOptions {
+    let mut options = scan_options_for(&PackageOptions {
+        selection: AppSelection::InstalledApp(Box::new(app)),
+        // A scan writes nothing, so it has nowhere to be told of.
+        output_dir: PathBuf::new(),
+        current_directory: std::env::current_dir().ok(),
+        create_self_extracting_archive: true,
+        self_extracting_stub: None,
+        installer_dir: None,
+        include_user_data: key.include_user_data,
+        include_program_data: key.include_user_data,
+        include_license_data: key.include_license_data,
+        bundle_prerequisites: true,
+        source: key.source.clone(),
+        user_profile: key.user_profile.clone(),
+        ui_theme: None,
+    });
+    options.near_matches.clone_from(&key.near_matches);
+    options
 }
 
 /// Everything a build needs, moved onto its worker thread.
