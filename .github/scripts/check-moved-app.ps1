@@ -167,3 +167,6 @@ if ($script:failures.Count -gt 0) {
     $script:failures | ForEach-Object { Write-Host "  $_" }
     exit 1
 }
+# Or the job goes by the last program's exit code, and where the last installer here is refused, that
+# is what was hoped for.
+exit 0

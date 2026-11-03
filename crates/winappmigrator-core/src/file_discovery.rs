@@ -537,8 +537,9 @@ pub fn has_reserved_device_name(path: &Path) -> bool {
 
 /// True when this build of Windows would open a file or folder with this name as a device.
 /// Before Windows 11, `aux.h` reaches `AUX` and `nul.txt` reaches `NUL`. Unpacking one there
-/// would throw its data away, or hang writing to a real serial port. This cannot be run on
-/// anything older than the Windows 11 it was written on, so it goes by the documented rule.
+/// would throw its data away, or hang writing to a real serial port. CI's move between PCs
+/// runs this where it matters: on build 20348 `aux.h` opens as `\\.\aux`, and on 26100 and
+/// 26200 it is a file. Where the line falls between them is Microsoft's documented rule.
 pub(crate) fn opens_as_device_on(component: &str, windows_build: u32) -> bool {
     is_reserved_device_name(component)
         || (windows_build < FIRST_BUILD_WITH_ORDINARY_DEVICE_EXTENSIONS
