@@ -37,7 +37,9 @@ use crate::space::BuildInputs;
 pub const LICENSES_LEFT_OUT_TEXT: &str = "Not in this installer, because the License option is off";
 /// Where what goes with a service is kept.
 const SERVICES_KEY_PREFIX: &str = r"system\currentcontrolset\services\";
-const FONTS_FOLDER_END: &str = r"\windows\fonts";
+/// Where Windows keeps fonts, below the drive it is on. A package holds one of those only if a
+/// machine-wide install record names it. A folder of the app's own called this is only a folder.
+const WINDOWS_FONTS_BELOW_THE_DRIVE: &str = r"\windows\fonts";
 /// How many times to go back over what is left, since what goes with something can take more with
 /// it. Each pass only takes things out, so this is far more than any package needs.
 const MOST_PASSES: usize = 8;
@@ -157,6 +159,15 @@ pub struct AlsoLeftOut {
     pub because: String,
 }
 
+/// What comes of a person's choices, beyond what they chose.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WhatGoes {
+    pub also: Vec<AlsoLeftOut>,
+    /// What ties the app into Windows as it now stands, by kind. A kind can have nothing left of it
+    /// without having been left out, which is why this is said apart from the rows as they were.
+    pub integrations: Vec<IntegrationRow>,
+}
+
 /// What a package is allowed, by what each thing goes by.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Allowed {
@@ -192,6 +203,8 @@ pub struct Footprint {
     pub data_not_included_bytes: u64,
     pub near_matches: Vec<NearMatch>,
     pub license_bytes: u64,
+    /// Where license data that goes in is from. A license goes by the License option, wherever it is.
+    pub license_paths: Vec<PathBuf>,
     pub prerequisite_count: usize,
     pub connected_drive: bool,
     pub flags: ScanFlags,
@@ -214,6 +227,12 @@ impl Footprint {
                 .filter(|artifact| artifact.should_copy)
                 .filter_map(|artifact| artifact.size_bytes)
                 .fold(0, u64::saturating_add),
+            license_paths: report
+                .license_artifacts
+                .iter()
+                .filter(|artifact| artifact.should_copy)
+                .filter_map(|artifact| artifact.path.clone())
+                .collect(),
             prerequisite_count: report.runtime_prerequisites.len(),
             connected_drive: report.source_volume.is_some(),
             flags,
@@ -266,7 +285,7 @@ impl Footprint {
     }
 
     fn add_changes(&mut self, rows: Vec<ChangeRow>, report: &ScanReport) {
-        let mut integrations: BTreeMap<SystemChangeKind, Vec<SystemChange>> = BTreeMap::new();
+        self.integrations = integration_rows(&rows);
         for ChangeRow { id, change } in rows {
             let bytes = match &id {
                 ChoiceId::Driver(name) => report
@@ -282,17 +301,9 @@ impl Footprint {
                 SystemChangeKind::ScheduledTask => self.tasks.push(row),
                 SystemChangeKind::Autostart => self.startup.push(row),
                 SystemChangeKind::Shortcut => self.shortcuts.push(row),
-                kind => integrations.entry(kind).or_default().push(row.change),
+                _ => {}
             }
         }
-        self.integrations = integrations
-            .into_iter()
-            .map(|(kind, changes)| IntegrationRow {
-                kind,
-                id: ChoiceId::Integration(kind),
-                changes,
-            })
-            .collect();
     }
 
     fn add_what_is_left_out(&mut self, report: &ScanReport, manifest: &PackageManifest) {
@@ -343,6 +354,17 @@ impl Footprint {
                 items,
             })
             .collect();
+    }
+
+    /// License data in what a person left out. It still goes in, since a license goes by the License
+    /// option and nothing else, which a person ought to be told.
+    pub fn licenses_in_what_is_left_out(&self, choices: &FootprintChoices) -> Vec<&Path> {
+        let folders = LeftOutFolders::of(self, choices);
+        self.license_paths
+            .iter()
+            .map(PathBuf::as_path)
+            .filter(|path| folders.holds(&comparable_path(path)))
+            .collect()
     }
 
     /// The rows a choice can leave out, of every kind but folders.
@@ -412,6 +434,41 @@ impl Footprint {
     }
 }
 
+/// What ties an app into Windows, by kind, from a list of what is set up.
+fn integration_rows(rows: &[ChangeRow]) -> Vec<IntegrationRow> {
+    let mut integrations: BTreeMap<SystemChangeKind, Vec<SystemChange>> = BTreeMap::new();
+    for ChangeRow { change, .. } in rows {
+        if !matches!(
+            change.kind,
+            SystemChangeKind::Service
+                | SystemChangeKind::Driver
+                | SystemChangeKind::ScheduledTask
+                | SystemChangeKind::Autostart
+                | SystemChangeKind::Shortcut
+        ) {
+            integrations
+                .entry(change.kind)
+                .or_default()
+                .push(change.clone());
+        }
+    }
+    integrations
+        .into_iter()
+        .map(|(kind, changes)| IntegrationRow {
+            kind,
+            id: ChoiceId::Integration(kind),
+            changes,
+        })
+        .collect()
+}
+
+/// Whether a folder, as [`comparable_path`] writes it, is where Windows keeps fonts.
+fn is_the_windows_fonts_folder(folder: &str) -> bool {
+    folder
+        .split_once(':')
+        .is_some_and(|(_, below)| below == WINDOWS_FONTS_BELOW_THE_DRIVE)
+}
+
 fn is_data(classification: &FileClassification) -> bool {
     matches!(
         classification,
@@ -468,8 +525,7 @@ fn folder_rows(report: &ScanReport) -> Vec<FolderRow> {
             bytes: 0,
             largest_file_bytes: 0,
             locked: None,
-            goes_with: key
-                .ends_with(FONTS_FOLDER_END)
+            goes_with: is_the_windows_fonts_folder(&key)
                 .then_some(ChoiceId::Integration(SystemChangeKind::Font)),
             path,
         });
@@ -636,7 +692,8 @@ fn reasons_of(review: &ReviewedPackage<'_>) -> HashMap<String, String> {
 struct Decision {
     manifest: PackageManifest,
     also: Vec<AlsoLeftOut>,
-    folders: Vec<String>,
+    integrations: Vec<IntegrationRow>,
+    folders: LeftOutFolders,
 }
 
 /// Whether a path, as [`comparable_path`] writes it, is in a folder written that way.
@@ -645,11 +702,64 @@ fn is_in_folder(path: &str, folder: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\'))
 }
 
-/// Whether text names a file or folder in one of these, as a whole path.
-fn mentions_any(text: &str, folders: &[String]) -> bool {
-    folders
-        .iter()
-        .any(|folder| text_mentions_path(text, Path::new(folder), false))
+/// The folders a person left out. One of those can have a row of its own inside it, as a service's
+/// folder inside a data folder can, which still says it goes in. So a file goes by the nearest row
+/// around it, as it was added up on the screen.
+struct LeftOutFolders {
+    /// By how long each is, longest first, with whether it is left out.
+    rows: Vec<(String, bool)>,
+    /// Those that are, for looking for in text.
+    left_out: Vec<String>,
+}
+
+impl LeftOutFolders {
+    fn of(footprint: &Footprint, choices: &FootprintChoices) -> Self {
+        let left_out: Vec<String> = footprint
+            .folders_left_out(choices)
+            .iter()
+            .map(|row| comparable_path(&row.path))
+            .collect();
+        let mut rows: Vec<(String, bool)> = footprint
+            .folders
+            .iter()
+            .map(|row| comparable_path(&row.path))
+            .filter(|path| left_out.iter().any(|folder| is_in_folder(path, folder)))
+            .map(|path| {
+                let is_left_out = left_out.contains(&path);
+                (path, is_left_out)
+            })
+            .collect();
+        rows.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
+        Self { rows, left_out }
+    }
+
+    /// Whether a path, as [`comparable_path`] writes it, goes with one of these.
+    fn holds(&self, path: &str) -> bool {
+        self.rows
+            .iter()
+            .find(|(folder, _)| is_in_folder(path, folder))
+            .is_some_and(|(_, is_left_out)| *is_left_out)
+    }
+
+    /// Whether a value naming a path names something in one of these. Only as a whole path, so
+    /// `C:\\App Extras` is not `C:\\App`.
+    fn are_named_by(&self, text: &str) -> bool {
+        self.left_out
+            .iter()
+            .any(|folder| text_mentions_path(text, Path::new(folder), false))
+    }
+
+    /// The same of a command line, where a space ends a path as well.
+    fn are_named_in_a_command(&self, text: &str) -> bool {
+        self.left_out
+            .iter()
+            .any(|folder| text_mentions_path(text, Path::new(folder), true))
+    }
+
+    /// The same of a task's definition, where a tag can end a path as well.
+    fn are_named_in_xml(&self, xml: &str) -> bool {
+        self.are_named_in_a_command(&xml.replace('<', "\n"))
+    }
 }
 
 fn decide(
@@ -657,25 +767,16 @@ fn decide(
     footprint: &Footprint,
     choices: &FootprintChoices,
 ) -> Result<Decision> {
-    let folders: Vec<String> = footprint
-        .folders_left_out(choices)
-        .iter()
-        .map(|row| comparable_path(&row.path))
-        .collect();
+    let folders = LeftOutFolders::of(footprint, choices);
     let fonts_out = choices.is_left_out(&ChoiceId::Integration(SystemChangeKind::Font));
-    let keep_file = |file: &FileEntry| {
-        let path = comparable_path(&file.original_path);
-        !folders.iter().any(|folder| is_in_folder(&path, folder))
-            && !(fonts_out
-                && path
-                    .rsplit_once('\\')
-                    .is_some_and(|(folder, _)| folder.ends_with(FONTS_FOLDER_END)))
-    };
+    let keep_file =
+        |file: &FileEntry| keeps_path(&comparable_path(&file.original_path), &folders, fonts_out);
     let mut manifest = manifest_for_review(report, footprint.flags, &keep_file);
     let mut also = Vec::new();
     take_out_what_was_chosen(&mut manifest, choices);
     take_out_what_names_a_folder_left_out(&mut manifest, &folders, &mut also);
     // Only what this choice made it refuse. What it refuses anyway is for an installer to say.
+    let mut integrations = Vec::new();
     for _ in 0..MOST_PASSES {
         let review = ReviewedPackage::before_a_location_is_chosen(
             &manifest,
@@ -683,6 +784,7 @@ fn decide(
         )?;
         let now = allowed_by(&review);
         let reasons = reasons_of(&review);
+        integrations = integration_rows(&described_rows(&review, Path::new(NO_TARGET_YET)));
         drop(review);
         let taken = take_out_what_is_now_refused(&mut manifest, &footprint.allowed, &now, &reasons);
         if taken.is_empty() {
@@ -693,8 +795,18 @@ fn decide(
     Ok(Decision {
         manifest,
         also,
+        integrations,
         folders,
     })
+}
+
+/// Whether a file at this path, as [`comparable_path`] writes it, goes in.
+fn keeps_path(path: &str, folders: &LeftOutFolders, fonts_out: bool) -> bool {
+    !folders.holds(path)
+        && !(fonts_out
+            && path
+                .rsplit_once('\\')
+                .is_some_and(|(folder, _)| is_the_windows_fonts_folder(folder)))
 }
 
 fn take_out_what_was_chosen(manifest: &mut PackageManifest, choices: &FootprintChoices) {
@@ -758,10 +870,10 @@ fn take_out_what_was_chosen(manifest: &mut PackageManifest, choices: &FootprintC
 /// it is only what the app reads, and there is no telling what it does about that.
 fn take_out_what_names_a_folder_left_out(
     manifest: &mut PackageManifest,
-    folders: &[String],
+    folders: &LeftOutFolders,
     also: &mut Vec<AlsoLeftOut>,
 ) {
-    if folders.is_empty() {
+    if folders.left_out.is_empty() {
         return;
     }
     const WHY: &str = "it is told to use something in a folder you left out";
@@ -769,7 +881,7 @@ fn take_out_what_names_a_folder_left_out(
         let names_one = service
             .arguments
             .as_deref()
-            .is_some_and(|arguments| mentions_any(arguments, folders));
+            .is_some_and(|arguments| folders.are_named_in_a_command(arguments));
         if names_one {
             also.push(AlsoLeftOut {
                 id: service_choice(&service.service_name),
@@ -783,8 +895,7 @@ fn take_out_what_names_a_folder_left_out(
         !names_one
     });
     manifest.drivers_detected.retain(|driver| {
-        let image = comparable_path(&driver.image_path);
-        let is_in_one = folders.iter().any(|folder| is_in_folder(&image, folder));
+        let is_in_one = folders.holds(&comparable_path(&driver.image_path));
         if is_in_one {
             also.push(AlsoLeftOut {
                 id: driver_choice(&driver.service_name),
@@ -798,11 +909,11 @@ fn take_out_what_names_a_folder_left_out(
         let names_one = task
             .arguments
             .as_deref()
-            .is_some_and(|arguments| mentions_any(arguments, folders))
+            .is_some_and(|arguments| folders.are_named_in_a_command(arguments))
             || task
                 .definition_xml
                 .as_deref()
-                .is_some_and(|xml| mentions_any(xml, folders));
+                .is_some_and(|xml| folders.are_named_in_xml(xml));
         if names_one {
             also.push(AlsoLeftOut {
                 id: task_choice(&task.task_path, &task.task_name),
@@ -812,11 +923,23 @@ fn take_out_what_names_a_folder_left_out(
         }
         !names_one
     });
-    manifest.shortcuts_detected.retain(|shortcut| {
+    manifest.shortcuts_detected.retain_mut(|shortcut| {
         let names_one = shortcut
             .arguments
             .as_deref()
-            .is_some_and(|arguments| mentions_any(arguments, folders));
+            .is_some_and(|arguments| folders.are_named_in_a_command(arguments))
+            || shortcut
+                .working_directory
+                .as_deref()
+                .is_some_and(|folder| folders.are_named_by(&folder.to_string_lossy()));
+        // Without its icon it is still a shortcut.
+        if shortcut
+            .icon_path
+            .as_deref()
+            .is_some_and(|icon| folders.are_named_in_a_command(&icon.to_string_lossy()))
+        {
+            shortcut.icon_path = None;
+        }
         if names_one {
             also.push(AlsoLeftOut {
                 id: shortcut_choice(&shortcut.original_lnk_path),
@@ -831,27 +954,33 @@ fn take_out_what_names_a_folder_left_out(
             && entry
                 .value_data
                 .as_deref()
-                .is_some_and(|data| mentions_any(data, folders));
+                .is_some_and(|data| folders.are_named_in_a_command(data));
         if names_one {
             also.push(left_out_value(entry, WHY));
         }
         !names_one
     });
     manifest.firewall_rules_detected.retain(|rule| {
-        let program = comparable_path(&rule.program);
-        !folders.iter().any(|folder| is_in_folder(&program, folder))
+        let is_in_one = folders.holds(&comparable_path(&rule.program));
+        if is_in_one {
+            also.push(firewall_rule_left_out(
+                rule,
+                "the program it is for is in a folder you left out",
+            ));
+        }
+        !is_in_one
     });
     manifest
         .environment_variables_detected
         .retain_mut(|variable| {
-            if !mentions_any(&variable.value, folders) {
+            if !folders.are_named_by(&variable.value) {
                 return true;
             }
             if is_path_variable(&variable.name) {
                 let kept: Vec<&str> = variable
                     .value
                     .split(';')
-                    .filter(|entry| !mentions_any(entry, folders))
+                    .filter(|entry| !folders.are_named_by(entry))
                     .collect();
                 variable.value = kept.join(";");
                 return true;
@@ -863,6 +992,14 @@ fn take_out_what_names_a_folder_left_out(
             });
             false
         });
+}
+
+fn firewall_rule_left_out(rule: &crate::models::FirewallRuleEntry, because: &str) -> AlsoLeftOut {
+    AlsoLeftOut {
+        id: ChoiceId::Integration(SystemChangeKind::FirewallRule),
+        title: rule.name.clone(),
+        because: because.to_owned(),
+    }
 }
 
 /// One value of something set up, by what can leave it out.
@@ -955,8 +1092,13 @@ fn take_out_what_is_now_refused(
         !is_gone
     });
     manifest.firewall_rules_detected.retain(|rule| {
-        let key = firewall_key(rule);
-        !gone(&key, &before.firewall, &now.firewall)
+        let is_gone = gone(&firewall_key(rule), &before.firewall, &now.firewall);
+        if is_gone {
+            let item = format!("The firewall rule {}", rule.name);
+            let because = reasons.get(&item).cloned().unwrap_or_default();
+            also.push(firewall_rule_left_out(rule, &because));
+        }
+        !is_gone
     });
     manifest.environment_variables_detected.retain(|variable| {
         let key = environment_key(variable);
@@ -970,11 +1112,18 @@ pub fn what_goes_with(
     report: &ScanReport,
     footprint: &Footprint,
     choices: &FootprintChoices,
-) -> Result<Vec<AlsoLeftOut>> {
+) -> Result<WhatGoes> {
     if choices.is_empty() {
-        return Ok(Vec::new());
+        return Ok(WhatGoes {
+            also: Vec::new(),
+            integrations: footprint.integrations.clone(),
+        });
     }
-    Ok(decide(report, footprint, choices)?.also)
+    let decision = decide(report, footprint, choices)?;
+    Ok(WhatGoes {
+        also: decision.also,
+        integrations: decision.integrations,
+    })
 }
 
 /// A scan with what a person chose applied, as what a package is built from.
@@ -1000,16 +1149,11 @@ pub fn apply_choices(
         manifest,
         also,
         folders,
+        ..
     } = decide(report, footprint, choices)?;
     let mut chosen = report.clone();
     let fonts_out = choices.is_left_out(&ChoiceId::Integration(SystemChangeKind::Font));
-    let keep_path = |path: &str| {
-        !folders.iter().any(|folder| is_in_folder(path, folder))
-            && !(fonts_out
-                && path
-                    .rsplit_once('\\')
-                    .is_some_and(|(folder, _)| folder.ends_with(FONTS_FOLDER_END)))
-    };
+    let keep_path = |path: &str| keeps_path(path, &folders, fonts_out);
     chosen
         .file_inventory
         .retain(|file| keep_path(&comparable_path(&file.original_path)));
@@ -1042,7 +1186,7 @@ pub fn apply_choices(
         association
             .command
             .as_deref()
-            .is_none_or(|command| !mentions_any(command, &folders))
+            .is_none_or(|command| !folders.are_named_in_a_command(command))
     });
     // What a program needs of a PC only matters for a program that is going there.
     let programs: HashSet<String> = chosen
@@ -1061,11 +1205,10 @@ pub fn apply_choices(
         need.role == ProgramRole::Main || programs.contains(&comparable_path(&need.path))
     });
     chosen.warnings.retain(|warning| {
-        warning.source.as_deref().is_none_or(|source| {
-            !folders
-                .iter()
-                .any(|folder| is_in_folder(&comparable_path(Path::new(source)), folder))
-        })
+        warning
+            .source
+            .as_deref()
+            .is_none_or(|source| !folders.holds(&comparable_path(Path::new(source))))
     });
     recount_locations(&mut chosen);
     let added = report
@@ -1797,11 +1940,212 @@ mod tests {
     fn nothing_chosen_has_nothing_to_go_with_it() -> Result<()> {
         let report = report();
         let footprint = Footprint::of(&report, FLAGS)?;
+        let goes = what_goes_with(&report, &footprint, &FootprintChoices::default())?;
+        assert_eq!(goes.also, []);
+        assert_eq!(goes.integrations, footprint.integrations);
+        Ok(())
+    }
+
+    #[test]
+    fn what_ties_it_into_windows_is_said_as_it_now_stands() -> Result<()> {
+        let report = report();
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let firewall = |rows: &[IntegrationRow]| -> Vec<String> {
+            rows.iter()
+                .filter(|row| row.kind == SystemChangeKind::FirewallRule)
+                .flat_map(|row| row.changes.iter().map(|change| change.title.clone()))
+                .collect()
+        };
         assert_eq!(
-            what_goes_with(&report, &footprint, &FootprintChoices::default())?,
-            []
+            firewall(&footprint.integrations),
+            ["Acme Main", "Acme Plugins"]
+        );
+        let goes = what_goes_with(&report, &footprint, &leaving_out(&[folder("plugins")]))?;
+        assert_eq!(firewall(&goes.integrations), ["Acme Main"]);
+        assert!(
+            goes.also
+                .iter()
+                .any(|item| item.title == "Acme Plugins" && !item.because.is_empty()),
+            "{:?}",
+            goes.also
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_row_inside_one_left_out_still_goes_in_as_it_says() -> Result<()> {
+        let mut report = report();
+        let data = r"C:\ProgramData\Acme";
+        let inner = r"C:\ProgramData\Acme\Agent";
+        for (location, name) in [(inner, "agent.exe"), (data, "data.dat")] {
+            let original = PathBuf::from(location).join(name);
+            report.file_inventory.push(FileEntry {
+                path: original.clone(),
+                original_path: original,
+                package_relative_path: Some(PathBuf::from(r"files\_external").join(name)),
+                suggested_destination_path: None,
+                size_bytes: Some(10),
+                hash_sha256: None,
+                classification: FileClassification::AppOwned,
+                should_copy: true,
+                reason: String::new(),
+                user_folder: None,
+            });
+            report.footprint_locations.push(FootprintLocation {
+                path: PathBuf::from(location),
+                kind: FootprintKind::Other,
+                scope: InstallScope::PerMachine,
+                file_count: 1,
+                total_bytes: 10,
+                copyable_bytes: 10,
+                included: true,
+            });
+        }
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let choices = leaving_out(&[ChoiceId::Folder(comparable_path(Path::new(data)))]);
+        let chosen = apply_choices(&report, &footprint, &choices)?;
+        let names: Vec<String> = chosen
+            .report
+            .file_inventory
+            .iter()
+            .map(|file| file.original_path.display().to_string())
+            .collect();
+        assert!(
+            names.iter().any(|name| name.ends_with("agent.exe")),
+            "{names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name.ends_with("data.dat")),
+            "{names:?}"
+        );
+        let inputs = footprint.build_inputs(&choices, &chosen.also, 0, false);
+        assert_eq!(inputs.payload_files, chosen.report.file_inventory.len());
+        Ok(())
+    }
+
+    #[test]
+    fn a_license_in_a_folder_left_out_still_goes_and_that_can_be_said() -> Result<()> {
+        let mut report = report();
+        let license = PathBuf::from(INSTALL).join(r"plugins\acme.lic");
+        report
+            .license_artifacts
+            .push(crate::models::LicenseArtifact {
+                kind: crate::models::LicenseArtifactKind::File,
+                framework: crate::models::LicenseFramework::FileBased,
+                path: Some(license.clone()),
+                registry_location: None,
+                detail: String::new(),
+                machine_bound: false,
+                requires_admin: false,
+                transferable: crate::models::TransferableHint::Likely,
+                should_copy: true,
+                package_relative_path: None,
+                size_bytes: Some(5),
+                hash_sha256: None,
+                store_files: Vec::new(),
+            });
+        let flags = ScanFlags {
+            include_license_data: true,
+            ..FLAGS
+        };
+        let footprint = Footprint::of(&report, flags)?;
+        let choices = leaving_out(&[folder("plugins")]);
+        assert_eq!(
+            footprint.licenses_in_what_is_left_out(&choices),
+            [license.as_path()]
+        );
+        assert_eq!(
+            footprint.licenses_in_what_is_left_out(&FootprintChoices::default()),
+            Vec::<&Path>::new()
+        );
+        let chosen = apply_choices(&report, &footprint, &choices)?;
+        assert_eq!(
+            chosen.report.license_artifacts.len(),
+            1,
+            "it goes by the License option"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn what_a_shortcut_or_task_is_told_to_work_in_counts() -> Result<()> {
+        let mut report = report();
+        let plugins = PathBuf::from(INSTALL).join("plugins");
+        report.shortcuts[0].working_directory = Some(plugins.clone());
+        report.shortcuts[1].icon_path = None;
+        report.scheduled_tasks[0].definition_xml = Some(format!(
+            "<?xml version=\"1.0\"?><Task><Principals><Principal><UserId>S-1-5-18</UserId>\
+             </Principal></Principals><Actions><Exec><Command>{}\\bin\\acme.exe</Command>\
+             <WorkingDirectory>{}</WorkingDirectory></Exec></Actions></Task>",
+            INSTALL,
+            plugins.display()
+        ));
+        report.services[0].arguments = Some(format!("--root {} --port 1", plugins.display()));
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let chosen = apply_choices(&report, &footprint, &leaving_out(&[folder("plugins")]))?;
+        assert!(
+            chosen.report.shortcuts.is_empty(),
+            "{:?}",
+            chosen.report.shortcuts
+        );
+        assert!(chosen.report.scheduled_tasks.is_empty());
+        assert!(
+            !chosen
+                .report
+                .services
+                .iter()
+                .any(|service| service.service_name == "AcmeMain"),
+            "a space ends a path in a command"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_icon_in_a_folder_left_out_only_loses_the_icon() -> Result<()> {
+        let mut report = report();
+        report.shortcuts[0].icon_path = Some(PathBuf::from(INSTALL).join(r"plugins\icon.ico"));
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let chosen = apply_choices(&report, &footprint, &leaving_out(&[folder("plugins")]))?;
+        assert_eq!(chosen.report.shortcuts.len(), 1);
+        assert_eq!(chosen.report.shortcuts[0].icon_path, None);
+        Ok(())
+    }
+
+    #[test]
+    fn only_where_windows_keeps_fonts_counts_as_that() {
+        assert!(is_the_windows_fonts_folder(r"c:\windows\fonts"));
+        assert!(!is_the_windows_fonts_folder(
+            r"c:\program files\acme\windows\fonts"
+        ));
+        let mut report = report();
+        let own = PathBuf::from(INSTALL).join(r"windows\fonts\a.ttf");
+        report.file_inventory.push(FileEntry {
+            path: own.clone(),
+            original_path: own.clone(),
+            package_relative_path: Some(PathBuf::from(r"files\windows\fonts\a.ttf")),
+            suggested_destination_path: None,
+            size_bytes: Some(1),
+            hash_sha256: None,
+            classification: FileClassification::AppOwned,
+            should_copy: true,
+            reason: String::new(),
+            user_folder: None,
+        });
+        let footprint = Footprint::of(&report, FLAGS).unwrap_or_else(|error| panic!("{error}"));
+        let chosen = apply_choices(
+            &report,
+            &footprint,
+            &leaving_out(&[ChoiceId::Integration(SystemChangeKind::Font)]),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            chosen
+                .report
+                .file_inventory
+                .iter()
+                .any(|file| file.original_path == own),
+            "that is only a folder of the app's"
+        );
     }
 
     #[test]

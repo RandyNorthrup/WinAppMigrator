@@ -45,6 +45,7 @@ const OTHER_APP_NAME: &str = "WAM Footprint App Other";
 const OTHER_APP_ROOT: &str = r"C:\Program Files\WAM Footprint App Other";
 const WINDOWS_NAMED_ROOT: &str = r"C:\Program Files\Windows WAM Footprint App";
 const LINK_ROOT: &str = r"C:\Program Files\WAM Footprint App Link";
+const IMPOSTOR_ROOT: &str = r"C:\Program Files\WAM Footprint Vendor Impostor";
 const BELOW_MICROSOFT_ROOT: &str = r"C:\ProgramData\Microsoft\WAM Footprint App Below";
 const UNINSTALL: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const USER_UNINSTALL: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall";
@@ -231,7 +232,12 @@ fn uninstall_entry(key: &str, values: &[(&str, &str)]) -> TestResult {
 }
 
 fn hidden_entry(name: &str, location: &str) -> TestResult {
-    let key = format!(r"{UNINSTALL}\{name}");
+    hidden_entry_at(name, name, location)
+}
+
+/// One whose key has one name, and which calls itself something else.
+fn hidden_entry_at(key_name: &str, name: &str, location: &str) -> TestResult {
+    let key = format!(r"{UNINSTALL}\{key_name}");
     uninstall_entry(
         &key,
         &[
@@ -323,6 +329,20 @@ fn set_up_the_app() -> TestResult {
     Ok(())
 }
 
+/// What Windows also calls a folder, which none of the rules would know it by if they went by it.
+fn short_name_of(folder: &str) -> TestResult<String> {
+    let short = powershell(&format!(
+        "(New-Object -ComObject Scripting.FileSystemObject).GetFolder({}).ShortPath",
+        quoted(folder)
+    ))?;
+    let short = short.trim().to_owned();
+    if short.contains('~') {
+        Ok(short)
+    } else {
+        Err(format!("{folder} has no short name on this runner: {short}").into())
+    }
+}
+
 /// Everything that has a name close to the app's and must never be offered, each for its own reason.
 fn set_up_what_must_not_be_offered() -> TestResult {
     write(&format!(r"{OTHER_APP_ROOT}\other.txt"), "another app's")?;
@@ -374,6 +394,17 @@ fn set_up_what_must_not_be_offered() -> TestResult {
     for (name, location) in locations {
         hidden_entry(name, location)?;
     }
+    // The same by what else Windows calls them, which no rule goes by.
+    let common_files = short_name_of(r"C:\Program Files\Common Files")?;
+    println!("{common_files} is a short name for Common Files");
+    hidden_entry("WAM Hostile Short Common Files", &common_files)?;
+    let program_files = short_name_of(r"C:\Program Files")?;
+    hidden_entry("WAM Hostile Short Program Files", &program_files)?;
+    let windows = short_name_of(r"C:\Program Files\Windows NT")?;
+    hidden_entry("WAM Hostile Short Windows NT", &windows)?;
+    // A hidden entry of the same publisher, in a folder of its own, calling itself another app.
+    write(&format!(r"{IMPOSTOR_ROOT}\impostor.txt"), "an impostor")?;
+    hidden_entry_at("WAM Footprint Impostor Key", OTHER_APP_NAME, IMPOSTOR_ROOT)?;
     // In an account's own registry, which takes no rights to write, and says nothing of this app.
     let planted = r"C:\Program Files\WAM Footprint Planted";
     write(&format!(r"{planted}\a.txt"), "planted")?;
@@ -709,6 +740,7 @@ fn check_what_is_offered(
         r"C:\Users",
         r"C:\",
         r"C:\Program Files\WAM Footprint Planted",
+        IMPOSTOR_ROOT,
     ] {
         checks.that(
             &format!("{hostile} is not offered"),
@@ -722,7 +754,7 @@ fn check_what_is_offered(
     for planted in report
         .near_matches
         .iter()
-        .filter(|near| near.name.starts_with("WAM Hostile"))
+        .filter(|near| near.name.starts_with("WAM Hostile") || near.name == OTHER_APP_NAME)
     {
         checks.that("nothing hostile by name", false, &planted.name);
     }
@@ -1037,7 +1069,7 @@ fn what_is_chosen_is_what_is_in_the_package_and_on_the_machine() -> TestResult {
         format!("{:?}", report.licenses_left_out),
     );
     let choices = the_choices();
-    let also = what_goes_with(&report, &footprint, &choices)?;
+    let also = what_goes_with(&report, &footprint, &choices)?.also;
     let also_names: Vec<&str> = also.iter().map(|item| item.title.as_str()).collect();
     println!("goes with it: {also:?}");
     checks.that(

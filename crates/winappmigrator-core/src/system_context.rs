@@ -1469,6 +1469,17 @@ impl SystemContext {
     /// drive, where that is now, if it can be read at all. See [`VolumeMap::to_volume`] and
     /// [`Self::may_read`]. What it will not follow is listed in [`Self::warnings`].
     pub fn resolve_source_path(&self, recorded: &Path) -> Option<PathBuf> {
+        let resolved = self.resolve_source_path_quietly(recorded);
+        if resolved.is_none() {
+            self.note_refused(recorded);
+        }
+        resolved
+    }
+
+    /// [`Self::resolve_source_path`], for going through what says it is elsewhere and is nothing to
+    /// do with this scan, such as the rest of the Uninstall key, so that it is not listed as something
+    /// of this app's that was not followed.
+    pub fn resolve_source_path_quietly(&self, recorded: &Path) -> Option<PathBuf> {
         let read = as_windows_reads_it(recorded);
         let resolved = match &self.offline {
             None => read.filter(|read| self.may_read(read)),
@@ -1476,9 +1487,6 @@ impl SystemContext {
                 .and_then(|read| hives.map.to_volume(&read))
                 .filter(|on_volume| self.may_read(on_volume)),
         };
-        if resolved.is_none() {
-            self.note_refused(recorded);
-        }
         // An MSI component that keys on a folder says so by ending in a separator.
         let names_a_folder = recorded.to_string_lossy().ends_with(['\\', '/']);
         resolved.map(|path| if names_a_folder { path.join("") } else { path })

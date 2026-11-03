@@ -379,7 +379,7 @@ impl ProductNames {
         let publisher = &self.publisher_words;
         let first = publisher.first()?;
         (parent.is_none()
-            && first.len() >= MIN_VENDOR_PREFIX_LEN
+            && publisher.concat().len() >= MIN_VENDOR_PREFIX_LEN
             && !is_publisher_of_everything(first)
             && plain.len() > publisher.len()
             && plain.starts_with(publisher))
@@ -421,9 +421,7 @@ impl ProductNames {
         let Some(first) = self.publisher_words.first() else {
             return false;
         };
-        first.len() >= MIN_VENDOR_PREFIX_LEN
-            && !is_publisher_of_everything(first)
-            && vendor_words(publisher) == self.publisher_words
+        !is_publisher_of_everything(first) && vendor_words(publisher) == self.publisher_words
     }
 
     fn is_vendor_name(&self, folder: &str) -> bool {
@@ -964,6 +962,18 @@ mod tests {
         assert!(!instruments.is_named_only_for_publisher("Native Instruments Extras"));
         assert!(instruments.has_publisher_like("Native Instruments GmbH"));
         assert!(!instruments.has_publisher_like("Native Sounds"));
+
+        let short = ProductNames::new(Some("Vive"), Some("HTC Corp."), &[], &[]);
+        assert!(
+            short.has_publisher_like("HTC Corporation"),
+            "all of it is the same"
+        );
+        assert!(!short.has_publisher_like("Other Corp."));
+        assert_eq!(
+            short.near_match(None, "HTC Stuff"),
+            None,
+            "three letters at the start of a folder's name says little"
+        );
 
         let firefox = firefox();
         assert!(!firefox.is_named_only_for_publisher("Mozilla-1de4eec8-1241"));

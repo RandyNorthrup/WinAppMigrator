@@ -138,18 +138,18 @@ pub fn create_package_from_scan(
     let footprint = Footprint::of(report, flags)?;
     let chosen = apply_choices(report, &footprint, choices)?;
     monitor.checkpoint()?;
-    let had = |classification: FileClassification| {
-        report
-            .file_inventory
-            .iter()
-            .any(|file| file.should_copy && file.classification == classification)
-    };
-    // A package with nothing of the kind left has nothing to ask about it, or to be named for.
+    let had_data = report.file_inventory.iter().any(|file| {
+        file.should_copy
+            && matches!(
+                file.classification,
+                FileClassification::UserData | FileClassification::MachineAppData
+            )
+    });
+    // A package with no data left has nothing to ask about it, or to be named for.
+    let keeps_data = chosen.has_user_data || chosen.has_program_data || !had_data;
     let adjusted = PackageOptions {
-        include_user_data: options.include_user_data
-            && (chosen.has_user_data || !had(FileClassification::UserData)),
-        include_program_data: options.include_program_data
-            && (chosen.has_program_data || !had(FileClassification::MachineAppData)),
+        include_user_data: options.include_user_data && keeps_data,
+        include_program_data: options.include_program_data && keeps_data,
         ..options.clone()
     };
     create_package_dirs(&adjusted.output_dir)?;
@@ -273,7 +273,8 @@ fn build_package(
         package_drivers(&options.output_dir, &report.drivers, &reader, &mut warnings);
     monitor.checkpoint()?;
 
-    let (items, not_packable) = files_to_pack(options, report, &mut warnings)?;
+    let (items, not_packable, secrets_since) =
+        files_to_pack(options, report, &reader, &mut warnings)?;
     let spool = options.output_dir.join(SPOOL_DIR);
     let mut building = None;
     let outcomes = match (stub, installer_path.as_deref()) {
@@ -304,7 +305,11 @@ fn build_package(
     let copyable: Vec<&FileEntry> = report
         .file_inventory
         .iter()
-        .filter(|entry| entry.should_copy && entry.package_relative_path.is_some())
+        .filter(|entry| {
+            entry.should_copy
+                && entry.package_relative_path.is_some()
+                && !failed_copies.contains(&entry.original_path)
+        })
         .collect();
     for (file, outcome) in copyable.iter().zip(&outcomes) {
         match outcome {
@@ -371,6 +376,7 @@ fn build_package(
     manifest.scan_timestamp_utc = OffsetDateTime::now_utc().format(&Rfc3339)?;
     manifest.warnings.clone_from(&warnings);
     manifest.ui_theme.clone_from(&options.ui_theme);
+    manifest.secrets_left_out.extend(secrets_since);
     manifest
         .left_out_by_choice
         .clone_from(&what_was_chosen.left_out);
@@ -631,15 +637,40 @@ fn refuse_without_room(room: &RoomCheck) -> Result<()> {
     )))
 }
 
-/// What is to go in the package from where the app is, and the files that have nowhere to go.
+/// What is to go in the package from where the app is, the files that have nowhere to go, and those
+/// that look like a credential by now. A scan can be some time ago, and a certificate file is only
+/// taken for a key by what is in it, which renewing it can change.
 fn files_to_pack(
     options: &PackageOptions,
     report: &ScanReport,
+    reader: &SourceReader,
     warnings: &mut Vec<Warning>,
-) -> Result<(Vec<PackItem>, HashSet<PathBuf>)> {
+) -> Result<(Vec<PackItem>, HashSet<PathBuf>, Vec<LeftOutItem>)> {
     let mut items = Vec::new();
     let mut not_packable = HashSet::new();
+    let mut secrets_since = Vec::new();
     for file in report.file_inventory.iter().filter(|file| file.should_copy) {
+        let is_a_secret_by_now = crate::secret_rules::is_secret_file(&file.original_path, || {
+            reader
+                .check(&file.path)
+                .ok()
+                .and_then(|()| read_small_file(&file.path))
+        });
+        if is_a_secret_by_now {
+            let name = file.original_path.display().to_string();
+            warnings.push(Warning::new(
+                "secret_left_out",
+                WarningSeverity::Info,
+                "Left out of the package: it looks like a credential by now.",
+                Some(name.clone()),
+            ));
+            secrets_since.push(LeftOutItem {
+                name,
+                why: "it holds a private key".to_owned(),
+            });
+            not_packable.insert(file.original_path.clone());
+            continue;
+        }
         let Some(relative) = file.package_relative_path.as_ref() else {
             warnings.push(Warning::new(
                 "package_relative_path_missing",
@@ -659,7 +690,7 @@ fn files_to_pack(
             expected_sha256: None,
         });
     }
-    Ok((items, not_packable))
+    Ok((items, not_packable, secrets_since))
 }
 
 /// A package that stays a folder: each file copied there, hashed as it goes. A single locked or
@@ -2091,6 +2122,66 @@ mod tests {
         );
         let report = crate::verify::verify_installer(&installer, &BuildMonitor::default())?;
         assert!(report.package_valid, "{:?}", report.errors);
+        Ok(())
+    }
+
+    #[test]
+    fn a_key_put_in_a_file_since_the_scan_stays_out() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let folder = exe
+            .parent()
+            .ok_or_else(|| WinAppMigratorError::Archive("no folder".to_owned()))?
+            .to_path_buf();
+        let pem = folder.join(r"data\tls.pem");
+        fs::write(&pem, "-----BEGIN CERTIFICATE-----\n")
+            .map_err(|error| WinAppMigratorError::io(&pem, error))?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let report = scan_of(&options)?;
+        assert!(
+            report
+                .file_inventory
+                .iter()
+                .any(|file| file.original_path == pem && file.should_copy),
+            "a certificate alone is an ordinary file"
+        );
+        fs::write(&pem, "-----BEGIN PRIVATE KEY-----\nCANARY\n")
+            .map_err(|error| WinAppMigratorError::io(&pem, error))?;
+
+        let result = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+        let installer = result
+            .self_extracting_archive_path
+            .ok_or_else(|| WinAppMigratorError::Archive("no installer".to_owned()))?;
+        let package = EmbeddedPackage::open(&installer)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        let manifest = read_embedded_manifest(&package)?;
+        let digests = package.digests(&|| false)?;
+        assert!(digests.get(Path::new(r"files\data\tls.pem")).is_none());
+        assert!(
+            digests.get(Path::new(r"files\data\a.txt")).is_some(),
+            "the rest goes in"
+        );
+        assert!(
+            manifest
+                .secrets_left_out
+                .iter()
+                .any(|item| item.name.ends_with("tls.pem")),
+            "{:?}",
+            manifest.secrets_left_out
+        );
+        assert!(
+            manifest
+                .file_inventory
+                .iter()
+                .any(|file| file.original_path == pem && !file.should_copy),
+            "the manifest does not say it is there"
+        );
         Ok(())
     }
 

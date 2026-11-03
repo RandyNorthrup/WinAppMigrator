@@ -154,7 +154,7 @@ fn main() {
                             "  Leaving out {:?} took {:?}: {:?} also",
                             free.map(|row| row.name.as_str()),
                             timing.elapsed(),
-                            also.map(|also| also.len())
+                            also.map(|goes| goes.also.len())
                         );
                     }
                 }

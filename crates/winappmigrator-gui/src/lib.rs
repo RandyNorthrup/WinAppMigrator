@@ -25,12 +25,13 @@ use winappmigrator_core::path_utils::{is_on_a_local_disk, signed_in_user, system
 use winappmigrator_core::privilege::ProtectedFolder;
 use winappmigrator_core::{
     AlsoLeftOut, AppSelection, BuildInputs, BuildMonitor, BuildStep, ChoiceId, Footprint,
-    FootprintChoices, InstalledApp, InstallerStub, PackageOptions, PackageResult, ProfileChoice,
-    ProfilePicker, ProfileSurvey, RoomCheck, ScanFlags, ScanMonitor, ScanOptions, ScanReport,
-    ScanSource, ScanStep, SystemContext, VerificationReport, VolumeStats, WinAppMigratorError,
-    create_package_from_scan, hidden_command, list_installed_apps_from, looks_like_a_windows_drive,
-    panic_text, room_before_a_build, scan_app, scan_options_for, survey_of, survey_profiles,
-    sweep_leaked_hive_mounts, verify_installer, volume_stats_at, what_goes_with,
+    FootprintChoices, InstalledApp, InstallerStub, IntegrationRow, PackageOptions, PackageResult,
+    ProfileChoice, ProfilePicker, ProfileSurvey, RoomCheck, ScanFlags, ScanMonitor, ScanOptions,
+    ScanReport, ScanSource, ScanStep, SystemContext, VerificationReport, VolumeStats, WhatGoes,
+    WinAppMigratorError, create_package_from_scan, hidden_command, list_installed_apps_from,
+    looks_like_a_windows_drive, panic_text, room_before_a_build, scan_app, scan_options_for,
+    survey_of, survey_profiles, sweep_leaked_hive_mounts, verify_installer, volume_stats_at,
+    what_goes_with,
 };
 use winappmigrator_ui::theme::{self, Theme, ThemeMode};
 use winappmigrator_ui::widgets;
@@ -246,7 +247,7 @@ struct AlsoJob {
 
 struct AlsoMessage {
     version: u64,
-    outcome: Result<Vec<AlsoLeftOut>, String>,
+    outcome: Result<WhatGoes, String>,
 }
 
 /// What went with a person's choices, and which choices that is the answer for.
@@ -254,6 +255,8 @@ struct AlsoMessage {
 pub(crate) struct AlsoState {
     pub version: u64,
     pub items: Vec<AlsoLeftOut>,
+    /// What ties the app into Windows as that leaves it, once there is anything to say about that.
+    pub integrations: Option<Vec<IntegrationRow>>,
     pub error: Option<String>,
 }
 
@@ -956,12 +959,14 @@ impl WinAppMigratorApp {
             if message.version == self.choices_version {
                 self.also.version = message.version;
                 match message.outcome {
-                    Ok(items) => {
-                        self.also.items = items;
+                    Ok(goes) => {
+                        self.also.items = goes.also;
+                        self.also.integrations = Some(goes.integrations);
                         self.also.error = None;
                     }
                     Err(error) => {
                         self.also.items = Vec::new();
+                        self.also.integrations = None;
                         self.also.error = Some(error);
                     }
                 }

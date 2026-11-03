@@ -532,9 +532,11 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         &pe_scan.architecture,
         system.is_offline(),
     );
+    monitor.checkpoint()?;
     let mut left_out = LeftOut::default();
     // First, so that nothing else counts one as a license, or anything else that would be copied.
     take_secret_files(&mut file_inventory, &system, &mut left_out);
+    monitor.checkpoint()?;
     let (license_artifacts, mut license_registry_entries, license_warnings) =
         scan_license_artifacts(
             &LicenseScanContext {

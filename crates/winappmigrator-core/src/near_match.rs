@@ -27,12 +27,15 @@ use crate::models::{
     Warning, WarningSeverity,
 };
 use crate::path_utils::{
-    DEEPEST_WALK, comparable_path, file_name_string, has_parent_step, path_is_within, walk_asking,
+    DEEPEST_WALK, comparable_path, file_name_string, has_parent_step, path_is_within,
+    resolved_location, walk_asking,
 };
 use crate::product_match::{MatchScope, NearName, ProductNames, is_generic_name};
 use crate::registry_scan::RecordedRegistryKey;
 use crate::system_context::SystemContext;
 
+/// A key's name in the registry's 32-bit view, which says nothing of whose it is.
+const WOW6432_NODE: &str = "WOW6432Node";
 /// What a choice calls a folder and an entry, which is all a scan is told of either.
 const FOLDER_ID_PREFIX: &str = "folder:";
 const ENTRY_ID_PREFIX: &str = "entry:";
@@ -276,6 +279,7 @@ impl NearMatchLook {
             system,
             &mut picks.warnings,
         ));
+        picks.also_named.push(names);
         for root in roots {
             let refusal = self.folder_refusal(&root, scan, system);
             match refusal {
@@ -302,9 +306,56 @@ impl NearMatchLook {
                 .filter(|file| self.may_add_loose_file(file, scan, system)),
         );
         if !scan.installed_for_one_account {
-            picks.recorded_keys.extend(source.registry_keys);
+            picks.recorded_keys.extend(
+                source
+                    .registry_keys
+                    .into_iter()
+                    .filter(|key| !self.is_another_apps_key(&key.key_path)),
+            );
         }
-        picks.also_named.push(names);
+    }
+
+    /// Why a hidden entry is not to be offered or added, if so. What it calls itself is only what it
+    /// says, and picking it brings in what goes by that name, which would then be another app's.
+    fn part_refusal(
+        &self,
+        record: &UninstallRecord,
+        folder: &Path,
+        scan: &AppBeingScanned<'_>,
+        system: &SystemContext,
+    ) -> Option<&'static str> {
+        if self.is_named_like_another_app(&record.display_name) {
+            return Some("it goes by another app's name");
+        }
+        self.folder_refusal(folder, scan, system)
+    }
+
+    fn is_named_like_another_app(&self, name: &str) -> bool {
+        self.others.iter().any(|other| {
+            other
+                .names
+                .matches_top_level(name, MatchScope::ProgramFolders)
+        })
+    }
+
+    /// Whether a registry key is what another app would take by its name, as its folders go by it.
+    fn is_another_apps_key(&self, key_path: &str) -> bool {
+        let parts: Vec<&str> = key_path
+            .split('\\')
+            .filter(|part| !part.eq_ignore_ascii_case(WOW6432_NODE))
+            .collect();
+        self.others.iter().any(|other| {
+            parts.iter().enumerate().any(|(index, part)| {
+                other
+                    .names
+                    .matches_top_level(part, MatchScope::ProgramFolders)
+                    || index.checked_sub(1).is_some_and(|before| {
+                        other
+                            .names
+                            .matches_nested(parts[before], part, MatchScope::ProgramFolders)
+                    })
+            })
+        })
     }
 
     /// Whether a file an entry's install record names may come along with it. It has no folder of its
@@ -317,6 +368,7 @@ impl NearMatchLook {
     ) -> bool {
         system.may_read(file)
             && first_link_to(file).is_none()
+            && is_written_as_it_is_called(file)
             && !system.is_in_another_profile(file)
             && (!scan.installed_for_one_account || system.is_the_accounts_own(file))
             && !path_is_within(file, &system.windows_dir())
@@ -339,6 +391,9 @@ impl NearMatchLook {
         let kind = kind_for_path(&logical);
         if (anyone_can_create_in(&kind) && is_a_link(path)) || first_link_to(path).is_some() {
             return Some("it goes through a link");
+        }
+        if !is_written_as_it_is_called(path) {
+            return Some("it is not written the way it is really called");
         }
         if system.is_in_another_profile(path)
             || (is_of_one_account(&kind) && !system.is_the_accounts_own(path))
@@ -490,11 +545,12 @@ pub(crate) fn look_for_near_matches(
             .iter()
             .filter(|record| !is_itself(record) && !is_a_part(record))
             .map(|record| OtherApp {
+                // As it says, and as it really is, which a short name would not match.
                 folders: record
                     .install_location
                     .iter()
                     .chain(&record.program_folders)
-                    .cloned()
+                    .flat_map(|folder| [folder.clone(), resolved_location(folder)])
                     .collect(),
                 names: names_of_app(
                     None,
@@ -511,7 +567,7 @@ pub(crate) fn look_for_near_matches(
         let Some(folder) = own_folder_of(record) else {
             continue;
         };
-        match look.folder_refusal(&folder, scan, system) {
+        match look.part_refusal(record, &folder, scan, system) {
             Some(refusal) => look.refused.push(RefusedNearMatch {
                 name: record.display_name.clone(),
                 path: system.logical_path(&folder),
@@ -590,6 +646,7 @@ impl NearMatchLook {
                 .is_some_and(|known| comparable_path(known) == comparable_path(&folder))
         });
         if let Some(offer) = found {
+            offer.near.name = format!("{}, {}", offer.near.name, record.display_name);
             offer.records.push(record.clone());
             return;
         }
@@ -619,6 +676,14 @@ impl NearMatchLook {
             rank: 2,
         });
     }
+}
+
+/// Every rule here goes by how a path is written, and a short name such as `PROGRA~3` is not how any
+/// of them would know it. A drive can give a folder any short name, so this asks what it is really
+/// called. A drive that has a letter as well as being mounted on a folder is refused by this too,
+/// which only ever leaves something out.
+fn is_written_as_it_is_called(path: &Path) -> bool {
+    comparable_path(&resolved_location(path)) == comparable_path(path)
 }
 
 /// Whether what is here comes with the User data option. It is the same test a scan makes of each
@@ -852,6 +917,98 @@ mod tests {
         }
     }
 
+    /// A real folder in a real place, by what Windows calls it, which a temp folder's own path may
+    /// not be: a runner's has `RUNNER~1` in it.
+    fn a_real_folder() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let real = resolved_location(temp.path());
+        let real = real
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_owned();
+        (temp, PathBuf::from(real))
+    }
+
+    #[test]
+    fn a_folder_by_a_short_name_is_not_taken_at_its_word() {
+        use std::os::windows::process::CommandExt as _;
+
+        let (_temp, base) = a_real_folder();
+        let long = base.join("Long Folder Name");
+        std::fs::create_dir_all(&long).unwrap_or_else(|error| panic!("{error}"));
+        // As written, since `cmd` does not read quotes as a program is expected to.
+        let listed = crate::path_utils::hidden_command("cmd")
+            .raw_arg(format!(
+                "/C for %I in (\"{}\") do @echo %~sI",
+                long.display()
+            ))
+            .output()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let short = String::from_utf8_lossy(&listed.stdout).trim().to_owned();
+        let system = SystemContext::live();
+        let install = base.join("Data Sync");
+        let app = app("Data Sync", "Fabrikam Inc.", &install);
+        let names = names_of_app(
+            None,
+            Some(&install),
+            Some("Data Sync"),
+            Some("Fabrikam Inc."),
+        );
+        let scan = scan_of(&app, &names);
+        let look = NearMatchLook::default();
+        assert_eq!(look.folder_refusal(&long, &scan, &system), None);
+        // A volume can have short names turned off, and then there is nothing to ask about.
+        if comparable_path(Path::new(&short)) != comparable_path(&long) {
+            assert_eq!(
+                look.folder_refusal(Path::new(&short), &scan, &system),
+                Some("it is not written the way it is really called"),
+                "{short}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_an_entry_calls_itself_cannot_take_another_apps_keys() {
+        let look = look_with_others(&[other_app_record("Mozilla Firefox", None)]);
+        assert!(look.is_named_like_another_app("Mozilla Firefox"));
+        assert!(!look.is_named_like_another_app("Fabrikam Helper"));
+        let (_temp, base) = a_real_folder();
+        let own = base.join("Its Own Folder");
+        std::fs::create_dir_all(&own).unwrap_or_else(|error| panic!("{error}"));
+        let system = SystemContext::live();
+        let install = base.join("Data Sync");
+        let app = app("Data Sync", "Fabrikam Inc.", &install);
+        let names = names_of_app(
+            None,
+            Some(&install),
+            Some("Data Sync"),
+            Some("Fabrikam Inc."),
+        );
+        let scan = scan_of(&app, &names);
+        assert_eq!(
+            look.part_refusal(
+                &other_app_record("Mozilla Firefox", Some(&own)),
+                &own,
+                &scan,
+                &system
+            ),
+            Some("it goes by another app's name"),
+            "wherever it says it is"
+        );
+        assert_eq!(
+            look.part_refusal(
+                &other_app_record("Fabrikam Helper", Some(&own)),
+                &own,
+                &scan,
+                &system
+            ),
+            None
+        );
+        assert!(look.is_another_apps_key(r"Software\Mozilla\Firefox"));
+        assert!(look.is_another_apps_key(r"Software\WOW6432Node\Mozilla Firefox\Settings"));
+        assert!(!look.is_another_apps_key(r"Software\Fabrikam\Helper"));
+    }
+
     #[test]
     fn nothing_shared_can_be_offered_or_added() {
         let system = SystemContext::live();
@@ -893,8 +1050,8 @@ mod tests {
 
     #[test]
     fn a_folder_that_holds_this_app_or_is_named_only_for_its_publisher_is_not_offered() {
-        let base = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let vendor = base.path().join("Fabrikam");
+        let (_temp, base) = a_real_folder();
+        let vendor = base.join("Fabrikam");
         let install = vendor.join("Data Sync");
         std::fs::create_dir_all(&install).unwrap_or_else(|error| panic!("{error}"));
         let system = SystemContext::live();
@@ -912,12 +1069,12 @@ mod tests {
 
     #[test]
     fn another_apps_folder_is_not_offered_by_where_it_is_what_it_holds_or_its_name() {
-        let base = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let install = base.path().join(r"Fabrikam\Data Sync");
-        let beside = base.path().join(r"Fabrikam\Data Sync Tools");
+        let (_temp, base) = a_real_folder();
+        let install = base.join(r"Fabrikam\Data Sync");
+        let beside = base.join(r"Fabrikam\Data Sync Tools");
         let inside = beside.join("Parts");
-        let named = base.path().join(r"Fabrikam\Data Sync Pro");
-        let free = base.path().join(r"Fabrikam\Data Sync Extras");
+        let named = base.join(r"Fabrikam\Data Sync Pro");
+        let free = base.join(r"Fabrikam\Data Sync Extras");
         for folder in [&install, &inside, &named, &free] {
             std::fs::create_dir_all(folder).unwrap_or_else(|error| panic!("{error}"));
         }
@@ -1164,8 +1321,8 @@ mod tests {
 
     impl NearDrive {
         fn new() -> Self {
-            let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
-            let root = temp.path().join("drive");
+            let (temp, base) = a_real_folder();
+            let root = base.join("drive");
             let account = root.join(r"Users\me");
             let install = root.join(r"Program Files\Fabrikam\Data Sync");
             for folder in [

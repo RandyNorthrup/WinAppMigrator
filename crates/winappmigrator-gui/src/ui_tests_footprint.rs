@@ -13,10 +13,11 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use winappmigrator_core::{
     AppArchitecture, CREDENTIALS_LEFT_OUT_TEXT, ChoiceId, ExecutableMetadata, FileClassification,
     FileEntry, FirewallRuleEntry, Footprint, FootprintKind, FootprintLocation, InstallScope,
-    InstalledApp, LeftOutItem, MatchConfidence, NearMatch, NearMatchKind, RegistryEntry,
-    RegistryHive, RegistryValueKind, RuntimePrerequisite, RuntimePrerequisiteKind,
-    SCAN_SCHEMA_VERSION, ScanFlags, ScanMonitor, ScanOptions, ScanReport, ScheduledTaskEntry,
-    ServiceEntry, ShortcutEntry, SignatureStatus, VolumeStats, WinAppMigratorError,
+    InstalledApp, LeftOutItem, LicenseArtifact, LicenseArtifactKind, LicenseFramework,
+    MatchConfidence, NearMatch, NearMatchKind, RegistryEntry, RegistryHive, RegistryValueKind,
+    RuntimePrerequisite, RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanFlags, ScanMonitor,
+    ScanOptions, ScanReport, ScheduledTaskEntry, ServiceEntry, ShortcutEntry, SignatureStatus,
+    SystemChangeKind, TransferableHint, VolumeStats, WinAppMigratorError,
 };
 
 use crate::theme::ThemeMode;
@@ -376,11 +377,17 @@ const FLAGS: ScanFlags = ScanFlags {
 /// The app with a scan that has finished, as it would be if it was just looked at. Nothing of the PC
 /// the test runs on is in what is shown, whoever is running it.
 pub(crate) fn with_ready_scan(app: &mut WinAppMigratorApp) {
+    with_ready_scan_of(app, |_| {});
+}
+
+/// The same, of a scan that found something else as well.
+fn with_ready_scan_of(app: &mut WinAppMigratorApp, change: impl FnOnce(&mut ScanReport)) {
     let selected = app.selected_app().cloned();
     let (Some(selected), Some(key)) = (selected, app.wanted_scan_key()) else {
         panic!("nothing selected to have looked at");
     };
-    let report = sample_report(&selected);
+    let mut report = sample_report(&selected);
+    change(&mut report);
     let mut footprint = Footprint::of(&report, FLAGS).unwrap_or_else(|error| panic!("{error}"));
     footprint.notes.clear();
     app.scan = ScanState::Ready(Box::new(ReadyScan {
@@ -658,12 +665,19 @@ fn what_stays_out_is_named_and_cannot_be_ticked() {
         license.accesskit_node().role(),
         egui::accesskit::Role::Label
     );
+    scroll_to_row(&mut harness, "license.lic");
     preview(&mut harness, "footprint-left-out-dark");
 }
 
 #[test]
 fn leaving_a_folder_out_takes_effect_at_once_and_says_what_goes_with_it() {
-    let mut harness = harness_with(ThemeMode::Dark, ready_app);
+    for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        leaving_a_folder_out(mode, name);
+    }
+}
+
+fn leaving_a_folder_out(mode: ThemeMode, name: &str) {
+    let mut harness = harness_sized(mode, egui::vec2(1240.0, 900.0), ready_app);
     harness.run_steps(2);
     let before = harness
         .state()
@@ -709,7 +723,10 @@ fn leaving_a_folder_out_takes_effect_at_once_and_says_what_goes_with_it() {
             .is_some(),
         "it says so plainly"
     );
-    preview(&mut harness, "footprint-left-out-folder-dark");
+    // This one is in the README, without a pointer on it.
+    harness.event(egui::Event::PointerGone);
+    harness.run_steps(2);
+    preview(&mut harness, &format!("footprint-left-out-folder-{name}"));
     assert!(
         !harness
             .get_by_label("Create installer")
@@ -730,6 +747,91 @@ fn leaving_a_folder_out_takes_effect_at_once_and_says_what_goes_with_it() {
             .map(|inputs| inputs.payload_bytes),
         before
     );
+}
+
+#[test]
+fn what_ties_it_into_windows_is_said_as_what_was_left_out_leaves_it() {
+    let mut harness = harness_sized(ThemeMode::Dark, egui::vec2(1240.0, 900.0), |app| {
+        select_first(app);
+        with_ready_scan_of(app, |report| {
+            report.firewall_rules[0].program = PathBuf::from(INSTALL).join(r"plugins\host.exe");
+        });
+        app.open_groups.insert(crate::ListGroup::Integrations);
+    });
+    harness.run_steps(2);
+    click_row(&mut harness, "plugins,");
+    wait_until(&mut harness, "what goes with it is known", |app| {
+        app.also_is_current()
+    });
+    let integrations = harness
+        .state()
+        .also
+        .integrations
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        !integrations
+            .iter()
+            .any(|row| row.kind == SystemChangeKind::FirewallRule),
+        "{integrations:?}"
+    );
+    assert!(
+        harness
+            .state()
+            .also
+            .items
+            .iter()
+            .any(|item| item.title == "Fabrikam Data Sync"),
+        "and it says it went: {:?}",
+        harness.state().also.items
+    );
+    scroll_to_row(&mut harness, "Firewall rule");
+    assert!(
+        harness
+            .query_by_label_contains("Nothing left of it, because of what you left out")
+            .is_some(),
+        "the kind stays, with nothing left of it"
+    );
+}
+
+#[test]
+fn a_license_in_a_folder_left_out_is_said_to_still_go() {
+    let license = PathBuf::from(INSTALL).join(r"plugins\fabrikam.lic");
+    let mut harness = harness_sized(ThemeMode::Dark, egui::vec2(1240.0, 900.0), |app| {
+        select_first(app);
+        with_ready_scan_of(app, |report| {
+            report.license_artifacts.push(LicenseArtifact {
+                kind: LicenseArtifactKind::File,
+                framework: LicenseFramework::FileBased,
+                path: Some(license.clone()),
+                registry_location: None,
+                detail: String::new(),
+                machine_bound: false,
+                requires_admin: false,
+                transferable: TransferableHint::Likely,
+                should_copy: true,
+                package_relative_path: None,
+                size_bytes: Some(5),
+                hash_sha256: None,
+                store_files: Vec::new(),
+            });
+        });
+    });
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label_contains("still goes in, because that goes by the License")
+            .is_none(),
+        "nothing is left out yet"
+    );
+    click_row(&mut harness, "plugins,");
+    assert!(
+        harness
+            .query_by_label_contains("still goes in, because that goes by the License")
+            .is_some(),
+        "it is told, by name"
+    );
+    assert!(harness.query_by_label_contains("fabrikam.lic").is_some());
 }
 
 #[test]

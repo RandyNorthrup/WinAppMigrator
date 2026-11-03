@@ -274,6 +274,7 @@ impl WinAppMigratorApp {
             );
         }
         self.draw_also_left_out(ui, theme);
+        self.draw_licenses_that_still_go(ui, theme);
         self.draw_age_of_look(ui, theme);
     }
 
@@ -339,6 +340,37 @@ impl WinAppMigratorApp {
             &format!(
                 "That also leaves out {list}, because what they run or name would not be there. They \
                  will not be set up on the other PC."
+            ),
+        );
+    }
+
+    /// A license goes by the License option, wherever it is, and it should not be a surprise.
+    fn draw_licenses_that_still_go(&self, ui: &mut egui::Ui, theme: &Theme) {
+        let Some(footprint) = self.shown_footprint() else {
+            return;
+        };
+        let names: Vec<String> = footprint
+            .licenses_in_what_is_left_out(&self.choices)
+            .iter()
+            .take(4)
+            .map(|path| {
+                path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        ui.add_space(SPACE_XS);
+        widgets::hint(
+            ui,
+            theme,
+            &format!(
+                "License data in what you left out still goes in, because that goes by the License \
+                 option: {}.",
+                names.join(", ")
             ),
         );
     }
@@ -550,18 +582,32 @@ impl WinAppMigratorApp {
             return;
         }
         // A row for each kind, which can be left out, and under it a row for each thing of that kind
-        // while it is in.
-        let mut rows: Vec<(usize, Option<&SystemChange>)> = Vec::new();
+        // while it is in, as it stands after what else was left out.
+        let current = self.also.integrations.clone();
+        let changes_of = |group: &'_ IntegrationRow| -> Vec<SystemChange> {
+            current.as_ref().map_or_else(
+                || group.changes.clone(),
+                |rows| {
+                    rows.iter()
+                        .find(|row| row.kind == group.kind)
+                        .map_or_else(Vec::new, |row| row.changes.clone())
+                },
+            )
+        };
+        let mut rows: Vec<(usize, Option<SystemChange>)> = Vec::new();
+        let mut counts: Vec<usize> = Vec::with_capacity(groups.len());
         for (index, group) in groups.iter().enumerate() {
             rows.push((index, None));
+            let changes = changes_of(group);
+            counts.push(changes.len());
             if !self.choices.is_left_out(&group.id) {
-                rows.extend(group.changes.iter().map(|change| (index, Some(change))));
+                rows.extend(changes.into_iter().map(|change| (index, Some(change))));
             }
         }
         let enabled = self.can_choose();
         list_of_rows(ui, "integrations", rows.len(), |ui, index| {
-            let (group, change) = rows[index];
-            let group: &IntegrationRow = &groups[group];
+            let (group_index, change) = &rows[index];
+            let group: &IntegrationRow = &groups[*group_index];
             match change {
                 Some(change) => {
                     widgets::plain_row(ui, theme, &change.title, &change.detail, None);
@@ -569,7 +615,10 @@ impl WinAppMigratorApp {
                 }
                 None => {
                     let mut included = !self.choices.is_left_out(&group.id);
-                    let detail = plural(group.changes.len(), "thing set up", "things set up");
+                    let detail = match counts[*group_index] {
+                        0 => "Nothing left of it, because of what you left out".to_owned(),
+                        count => plural(count, "thing set up", "things set up"),
+                    };
                     let response = widgets::choice_row(
                         ui,
                         theme,

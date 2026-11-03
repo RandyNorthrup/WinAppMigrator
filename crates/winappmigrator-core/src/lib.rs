@@ -51,7 +51,7 @@ pub use errors::{Result, WinAppMigratorError, panic_text};
 pub use footprint::{
     AlsoLeftOut, ChoiceId, ChosenScan, FolderGroup, FolderRow, Footprint, FootprintChoices,
     IntegrationRow, ItemRow, LICENSES_LEFT_OUT_TEXT, LeftOutGroup, PrerequisiteRow, ScanFlags,
-    apply_choices, what_goes_with,
+    WhatGoes, apply_choices, what_goes_with,
 };
 pub use models::*;
 pub use near_match::{NearMatchLook, RefusedNearMatch, near_matches_of};

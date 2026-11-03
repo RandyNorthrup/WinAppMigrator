@@ -178,7 +178,7 @@ fn collect_uninstall_records(
             value
                 .as_deref()
                 .and_then(split_command_executable_path)
-                .and_then(|path| system.resolve_source_path(&path))
+                .and_then(|path| system.resolve_source_path_quietly(&path))
                 .filter(|path| !is_windows_or_installer_cache_path(path, system))
                 .and_then(|path| path.parent().map(Path::to_path_buf))
                 .and_then(|folder| usable_install_location(folder, known_bases, system))
@@ -197,7 +197,7 @@ fn collect_uninstall_records(
                 .install_location
                 .as_ref()
                 .map(PathBuf::from)
-                .and_then(|path| system.resolve_source_path(&path))
+                .and_then(|path| system.resolve_source_path_quietly(&path))
                 .and_then(|path| usable_install_location(path, known_bases, system)),
             program_folders: [&raw.display_icon, &raw.uninstall_string]
                 .into_iter()
