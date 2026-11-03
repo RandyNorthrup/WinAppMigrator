@@ -260,3 +260,87 @@ jobs:
       - name: Install it here, and look
         shell: pwsh
         run: .github/scripts/check-moved-app.ps1 -Folder "${{ runner.temp }}\wam-move"
+
+  # The same with real apps, from their publishers, at the versions and hashes in real-apps.json. What
+  # this uploads is a redistribution of them, for a day, to anyone signed in to GitHub, so they are all
+  # ones whose licenses allow that:
+  #   7-Zip: LGPL-2.1-or-later with the unRAR restriction, and BSD-3-Clause parts
+  #   PuTTY: MIT
+  #   Eclipse Mosquitto: EPL-2.0 OR BSD-3-Clause
+  #   windows_exporter: MIT
+  #   Git LFS: MIT
+  # No secrets here, and no credentials kept from the checkout, since it runs what they install.
+  real-apps-build:
+    name: Real apps, build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      WAM_ELEVATED_E2E: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The version comes from rust-toolchain.toml.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Cache build output
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Install the real apps from their publishers, and try them
+        shell: pwsh
+        run: .github/scripts/install-real-apps.ps1 -Output "${{ runner.temp }}\wam-real-apps"
+
+      - name: Build their installers, and look through them
+        shell: pwsh
+        env:
+          WAM_REAL_APPS_OUTPUT: ${{ runner.temp }}\wam-real-apps
+        run: cargo test --locked -p winappmigrator-installer --test elevated_real_apps -- --nocapture --test-threads=1
+
+      - name: Hand them on
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wam-real-apps
+          path: ${{ runner.temp }}\wam-real-apps
+          retention-days: 1
+          if-no-files-found: error
+
+  # Fresh runners, which take away any copy they came with, show that every check fails without the
+  # apps, install them, and show that Windows uses what was restored.
+  real-apps-install:
+    name: Real apps, install on ${{ matrix.os }}
+    needs: real-apps-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      WAM_ELEVATED_E2E: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-2022, windows-11-arm]
+
+    steps:
+      - name: Checkout the scripts, and none of the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Take what the other runner built
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wam-real-apps
+          path: ${{ runner.temp }}\wam-real-apps
+
+      - name: Take away any copy here, install them, and ask Windows to use them
+        shell: pwsh
+        run: .github/scripts/check-moved-real-apps.ps1 -Folder "${{ runner.temp }}\wam-real-apps"
