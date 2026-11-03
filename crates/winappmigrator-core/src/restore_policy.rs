@@ -556,6 +556,7 @@ const RUNNABLE_NAME_ENDS: &[&str] = &[
     ".exe.config",
     ".dll.config",
     ".runtimeconfig.json",
+    ".runtimeconfig.dev.json",
     ".deps.json",
     "._pth",
 ];
@@ -4938,6 +4939,7 @@ mod tests {
             r"C:\ProgramData\Other\VERSION.DLL",
             r"C:\ProgramData\Other\svc.exe.config",
             r"C:\ProgramData\Other\svc.runtimeconfig.json",
+            r"C:\ProgramData\Other\svc.runtimeconfig.dev.json",
             r"C:\ProgramData\Other\svc.deps.json",
             r"C:\ProgramData\Other\python39._pth",
             r"C:\Users\me\AppData\Local\Programs\Other\resources\app.asar",

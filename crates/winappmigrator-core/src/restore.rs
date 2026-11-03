@@ -59,6 +59,7 @@ use crate::restore_policy::{
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
     STATE_ROOT_REFUSAL, install_location_problem, overlaps_state_root, refuse_what_cannot_run_here,
+    store_file_destination,
 };
 use crate::rollback::{
     interrupted_installs, put_back_backup, recover_interrupted_installs, roll_back,
@@ -744,7 +745,7 @@ impl Run<'_, '_> {
                 .artifact
                 .store_files
                 .iter()
-                .map(|file| license.destination.join(&file.relative_path));
+                .map(|file| store_file_destination(&license.destination, file));
             let of_a_file = license
                 .artifact
                 .store_files

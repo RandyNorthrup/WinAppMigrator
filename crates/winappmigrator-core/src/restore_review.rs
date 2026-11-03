@@ -16,16 +16,16 @@ use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
     DESKTOP_FALLBACK, DESKTOP_VALUE, START_MENU_FALLBACK, START_MENU_VALUE, UserDataAnchor,
     UserFolderPlace, account_shell_folder, data_location_of, expand_env_vars, first_link_to,
-    has_reserved_device_name, known_base_dirs, link_refusal, split_user_data_relative,
-    user_data_base, user_folder_place,
+    has_reserved_device_name, known_base_dirs, link_refusal, safe_relative_path,
+    split_user_data_relative, user_data_base, user_folder_place,
 };
 use crate::journal::machine_state_root;
 use crate::license_scan::is_license_env_var;
 use crate::models::{
     AppArchitecture, CertificateEntry, DriverEntry, EnvironmentScope, EnvironmentVariableEntry,
     FileClassification, FileEntry, FirewallRuleEntry, LeftOutItem, LicenseArtifact,
-    PackageManifest, RegistryEntry, RegistryHive, ScheduledTaskEntry, ServiceEntry, Warning,
-    WarningSeverity,
+    LicenseStoreFile, PackageManifest, RegistryEntry, RegistryHive, ScheduledTaskEntry,
+    ServiceEntry, Warning, WarningSeverity,
 };
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
@@ -1061,7 +1061,7 @@ pub fn install_places(
             });
         }
         for file in &license.artifact.store_files {
-            let destination = license.destination.join(&file.relative_path);
+            let destination = store_file_destination(&license.destination, file);
             planned.push(PlannedFile {
                 new_bytes: file.size_bytes,
                 replaced_bytes: replaced_bytes(&destination),
@@ -1101,6 +1101,13 @@ pub fn refuse_without_room_to_install(needs: &[PlaceNeed]) -> Result<RoomCheck> 
     if shortfalls.is_empty() {
         return Ok(room);
     }
+/// Where a file of a license store goes. What a package says of it is cleaned the way the path it
+/// is written to is, so that what is worked out about it beforehand is about the same place. A
+/// path with a drive in it would otherwise be somewhere else altogether.
+pub(crate) fn store_file_destination(store: &Path, file: &LicenseStoreFile) -> PathBuf {
+    store.join(safe_relative_path(&file.relative_path))
+}
+
     Err(WinAppMigratorError::InvalidInput(format!(
         "there is not enough room for this, so nothing was changed. {}. Free up some space there, \
          or choose an install location on another drive.",
@@ -1826,6 +1833,30 @@ mod tests {
             true,
             &folders(),
             &|text| text.to_owned(),
+    #[test]
+    fn a_file_of_a_store_is_where_it_is_written_whatever_a_package_says_of_it() {
+        let store = Path::new(r"C:\ProgramData\Acme\store");
+        for said in [
+            r"C:\Windows\x.exe",
+            r"..\..\Other\x.exe",
+            r"\\server\share\x.exe",
+            r"\Windows\x.exe",
+            r"sub\x.exe",
+        ] {
+            let file = LicenseStoreFile {
+                relative_path: PathBuf::from(said),
+                size_bytes: 1,
+                hash_sha256: String::new(),
+            };
+            let destination = store_file_destination(store, &file);
+            assert!(
+                crate::path_utils::path_is_strictly_inside(&destination, store),
+                "{said} came to {}",
+                destination.display()
+            );
+        }
+    }
+
             &|_| Ok(None),
         )?;
         review.warnings.clear();
