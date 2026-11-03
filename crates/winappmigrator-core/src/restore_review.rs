@@ -2980,7 +2980,7 @@ mod tests {
             user_account_note: None,
         };
         let desktop = shortcut_placement(Path::new(r"%USERPROFILE%\Desktop\Acme.lnk"), &folders)
-            .expect("it goes");
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             desktop.destination,
             Path::new(r"C:\Users\here\Desktop\Acme.lnk")
@@ -2990,7 +2990,7 @@ mod tests {
             Path::new(r"%USERPROFILE%\Start Menu\Programs\Acme\Acme.lnk"),
             &folders,
         )
-        .expect("it goes");
+        .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             menu.destination,
             Path::new(

@@ -342,7 +342,7 @@ account's environment variables only go if all they say is where the app is. A s
 an account of its PC, and is set up as `LocalService` as before. What stays can still say something: an
 ODBC source can name a server and a user, and a plainly named value in an app's own key that points in its folder could be called
 anything. With the License option on as well, a license value in an account's key goes where it was,
-so its key's name goes with it.
+so its key's name goes with it, and so does the path of a license file in an account's folders.
 
 **What this cannot catch.** This goes by names and a few shapes of text, and a heuristic cannot find every secret:
 

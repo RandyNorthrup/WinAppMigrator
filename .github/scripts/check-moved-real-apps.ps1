@@ -133,13 +133,14 @@ foreach ($round in $rounds) {
     $task = Get-ScheduledTask -TaskPath $script:PersonalTaskPath -TaskName $script:PersonalTaskName -ErrorAction SilentlyContinue
     Check 'the task that ran as someone came, to run as whoever installed it' ([bool]$task -and ($task.Principal.UserId -split '\\')[-1] -eq $env:USERNAME) "$($task.Principal.UserId)"
     Check 'what it says of who wrote it did not' ([bool]$task -and -not $task.Author) "$($task.Author)"
-    Check 'it runs 7-Zip where it is now' ([bool]$task -and @($task.Actions).Count -eq 1 -and $task.Actions[0].Execute.Trim('"').StartsWith($roots['7zip'], [StringComparison]::OrdinalIgnoreCase)) "$(@($task.Actions | ForEach-Object Execute) -join ', ')"
+    $program = Join-Path $roots['7zip'] '7zFM.exe'
+    Check 'it runs 7-Zip where it is now' ([bool]$task -and @($task.Actions).Count -eq 1 -and $task.Actions[0].Execute.Trim('"') -eq $program) "$(@($task.Actions | ForEach-Object Execute) -join ', ')"
     $desktop = [Environment]::GetFolderPath('Desktop')
     $plain = Join-Path $desktop $script:PlainShortcut
     Check 'the shortcut that only opened the app came, to this account''s Desktop' (Test-Path -LiteralPath $plain) $plain
     if (Test-Path -LiteralPath $plain) {
         $target = (New-Object -ComObject WScript.Shell).CreateShortcut($plain).TargetPath
-        Check 'and opens the app where it is now' ($target.StartsWith($roots['7zip'], [StringComparison]::OrdinalIgnoreCase)) $target
+        Check 'and opens the app where it is now' ($target -eq $program) $target
     }
     Check 'the one with arguments did not' (-not (Test-Path -LiteralPath (Join-Path $desktop $script:PersonalShortcut))) ''
 

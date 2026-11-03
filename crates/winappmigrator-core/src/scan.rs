@@ -447,8 +447,21 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         let is_its_own = own_folders
             .iter()
             .any(|folder| path_is_within(root, folder));
+        // A record of what an installer did can name part of a vendor's folder. An uninstaller being
+        // somewhere in another app's only says it is there.
+        let is_only_where_an_uninstaller_is = install_source
+            .as_ref()
+            .and_then(|source| source.uninstaller_folder.as_deref())
+            == Some(root.as_path());
         let refusal = (!is_its_own)
-            .then(|| near_look.root_refusal(root, is_microsofts_own, &system))
+            .then(|| {
+                near_look
+                    .root_refusal(root, is_microsofts_own, &system)
+                    .or_else(|| {
+                        (is_only_where_an_uninstaller_is && near_look.is_in_another_apps_folder(root))
+                            .then_some("it is in another app's folder")
+                    })
+            })
             .flatten();
         if let Some(why) = refusal {
             folders_left_out.push(Warning::new(

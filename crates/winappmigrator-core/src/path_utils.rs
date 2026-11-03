@@ -36,16 +36,20 @@ Translate([Security.Principal.SecurityIdentifier]).Value } }; \
 /// What a tool may take from this process's environment, none of which can load code or say where
 /// Windows is. Where Windows and its folders are is set separately, from the registry.
 const TOOL_ENVIRONMENT: &[&str] = &[
-    "APPDATA",
     "COMPUTERNAME",
-    "HOMEDRIVE",
-    "HOMEPATH",
-    "LOCALAPPDATA",
     "NUMBER_OF_PROCESSORS",
     "OS",
     "PROCESSOR_ARCHITECTURE",
     "USERDOMAIN",
     "USERNAME",
+];
+/// Where an account's folders are, which a tool can go by. From what the registry says of that
+/// account when this is elevated, and otherwise, as nothing is at stake, as they were given.
+const ACCOUNT_FOLDER_VARIABLES: [&str; 5] = [
+    "APPDATA",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOCALAPPDATA",
     "USERPROFILE",
 ];
 /// Windows' own, so that it does not go by what an account has said it is.
@@ -84,13 +88,29 @@ pub fn hidden_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = tool_command(program.as_ref());
     // Without elevation there is no one to protect, and a tool may need to write where it can.
     if !may_be_elevated() {
-        for name in ["TEMP", "TMP"] {
+        for name in ACCOUNT_FOLDER_VARIABLES.iter().chain(&["TEMP", "TMP"]) {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }
         }
+    } else if let Some(profile) = current_user_sid().and_then(profile_of_sid) {
+        set_account_folders(&mut command, &profile);
     }
     command
+}
+
+/// An account's folders, as what they are by default, from where the registry says its profile is. A
+/// tool started here that needs one moved somewhere else can do without.
+fn set_account_folders(command: &mut Command, profile: &Path) {
+    command
+        .env("USERPROFILE", profile)
+        .env("APPDATA", profile.join(r"AppData\Roaming"))
+        .env("LOCALAPPDATA", profile.join(r"AppData\Local"));
+    if let Some(drive) = profile.components().next() {
+        command.env("HOMEDRIVE", drive.as_os_str());
+    }
+    let without_drive: PathBuf = profile.components().skip(1).collect();
+    command.env("HOMEPATH", without_drive);
 }
 
 /// [`hidden_command`], for asking whether this is elevated, which that goes by.
@@ -324,7 +344,7 @@ pub fn public_profile_dir() -> Option<&'static Path> {
 pub fn current_user_sid() -> Option<&'static str> {
     static SID: OnceLock<Option<String>> = OnceLock::new();
     SID.get_or_init(|| {
-        let output = hidden_command("whoami")
+        let output = tool_command(OsStr::new("whoami"))
             .args(["/user", "/fo", "csv", "/nh"])
             .output()
             .ok()?;
@@ -1271,9 +1291,11 @@ mod tests {
 
     #[test]
     fn a_walk_says_of_a_folder_it_went_no_further_into() {
-        let work = tempfile::tempdir().expect("a folder");
-        std::fs::create_dir_all(work.path().join(r"a\b\c")).expect("folders");
-        std::fs::write(work.path().join(r"a\b\c\deep.txt"), "x").expect("a file");
+        let work = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        std::fs::create_dir_all(work.path().join(r"a\b\c"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(work.path().join(r"a\b\c\deep.txt"), "x")
+            .unwrap_or_else(|error| panic!("{error}"));
         let found: Vec<(String, bool)> = walk_asking(work.path(), 2, |_, _| true)
             .flatten()
             .map(|entry| (file_name_string(&entry.path), entry.too_deep))

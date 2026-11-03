@@ -4,10 +4,9 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
-- **With the User data option off, a package says nothing of who it came from, by whichever route.** A real look through
-  what is written found the PC and account in a scheduled task's definition, what a warning quoted, a DLL found through
-  someone's own `Path`, a variable's other folders, a service's account, a certificate from an account's own store, and who an
-  app was registered to. Shortcuts in an account's own folders went whole, with their arguments. All of it now goes through
+- **With the User data option off, far less says who a package came from.** A real look through what is written found the
+  PC and account in a scheduled task's definition, what a warning quoted, a DLL found through someone's own `Path`, a variable's
+  other folders, a service's account, a certificate from an account's own store, and who an app was registered to. Shortcuts in an account's own folders went whole, with their arguments. All of it now goes through
   one function, which runs when a scan is asked and again at a build, since a person can untick all of a scan's data. What is
   only read says `<an account>` and the like, in one place, so that a warning added later is covered.
 - **A build takes a last look.** After writing a package with none of an account's data, it goes through the manifest and
@@ -16,7 +15,8 @@ All notable project changes are tracked here.
   app of one account's in that account's folders. Every leak so far was a route nobody had thought of.
 - **A scheduled task that ran as a person runs as whoever installs it.** On another PC they are nobody, and registering it for
   them failed, so such a task never moved. Who wrote it and who a trigger waited for go too, a password nobody has comes to
-  running while they are signed in, and a group of theirs comes to the PC's users. This is whichever way the option is. What
+  running while they are signed in, and one run for a group of theirs runs as whoever installs it as well, and not as everyone
+  on the PC. This is whichever way the option is. What
   else it runs from someone's folders goes with the option off, and one that is told to work on something there goes whole.
 - **A shortcut in an account's own folders goes only if it just opens the app.** One with arguments is theirs, and goes with
   User data. An app of one account's keeps its own, which can have arguments. Where one goes is said with no account in it,
@@ -30,7 +30,7 @@ All notable project changes are tracked here.
   now, 64 levels, and both are named in a warning.
 - **Tools started elevated get a fixed environment, not just PowerShell.** An elevated process gets what its account has set,
   and DISM and older setup programs load what they have unpacked from `TEMP`. Every tool now gets its `Path` from the Windows
-  folder and `TEMP` from there as well, and a setup program or DISM gets a folder of its own only administrators can write to,
+  folder, `TEMP` from there as well, and the account's folders from what the registry says of that account, and a setup program or DISM gets a folder of its own only administrators can write to,
   which goes when it has finished. If there is no such place, it does not run. Windows' own folders are read from the registry,
   not from `SystemRoot`, `ProgramData`, or `ProgramFiles`, everywhere they are asked for.
 - **A runtime older than the one a package brings gets that one.** Every Visual C++ 2015 and later says it is `14.0` by its key's

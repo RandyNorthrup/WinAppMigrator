@@ -26,7 +26,7 @@ use crate::task_scan::{
 };
 
 const USERS_FOLDER: &str = r"\users\";
-const PUBLIC_PROFILE: &str = r"\users\public";
+const PUBLIC_NAME: &str = "public";
 const START_MENU_PART: &str = r"\start menu\";
 const DESKTOP_PART: &str = r"\desktop\";
 /// Where a shortcut in an account's own folders goes, wherever that account's folders are. A restore
@@ -334,7 +334,7 @@ fn without_accounts_folders(text: &str) -> String {
         let at = look_from + found;
         let name_at = at + USERS_FOLDER.len();
         look_from = name_at;
-        if lower[at..].starts_with(PUBLIC_PROFILE) {
+        if !is_in_a_users_folder(&lower[at..]) {
             continue;
         }
         let rest = &text[name_at..];
@@ -404,10 +404,8 @@ fn text_in_hex(text: &str) -> Option<String> {
 
 /// Bytes read each way a value's can be, side by side.
 fn text_of_bytes(bytes: &[u8]) -> String {
-    let wide: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-        .collect();
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let wide: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
     format!(
         "{}\n{}",
         String::from_utf8_lossy(bytes),
@@ -526,23 +524,62 @@ pub(crate) fn what_a_package_still_says(
         .collect()
 }
 
-/// Whether a path is in someone's own folders, as `C:\Users\Public` is not.
-fn is_in_an_accounts_folders(path: &Path) -> bool {
+/// Whether a path is under `Users` and past the `Public` there, whose name has to be all of it.
+fn is_in_a_users_folder(lower: &str) -> bool {
+    lower.find(USERS_FOLDER).is_some_and(|at| {
+        let name = &lower[at + USERS_FOLDER.len()..];
+        let name = name.split('\\').next().unwrap_or_default();
+        !name.is_empty() && name != PUBLIC_NAME
+    })
+}
+
+/// Whether a path is in someone's own folders: under `Users`, or where this PC or drive says an
+/// account's folder is, which can be anywhere.
+fn is_in_an_accounts_folders(path: &Path, traces: &AccountTraces) -> bool {
     let lower = path
         .to_string_lossy()
         .replace('/', "\\")
         .to_ascii_lowercase();
-    lower.contains(USERS_FOLDER) && !lower.contains(PUBLIC_PROFILE)
+    is_in_a_users_folder(&lower)
+        || traces
+            .profile_folders
+            .iter()
+            .any(|folder| path_is_within(path, Path::new(folder)))
 }
 
 /// Whether text names a place in someone's own folders that is not one of the app's.
-fn names_a_place_of_an_account(text: &str, app_folders: &[PathBuf]) -> bool {
+fn names_a_place_of_an_account(
+    text: &str,
+    app_folders: &[PathBuf],
+    traces: &AccountTraces,
+) -> bool {
     let lower = text.replace('/', "\\").to_ascii_lowercase();
+    let is_the_apps = |path: &str| {
+        app_folders
+            .iter()
+            .any(|folder| path_is_within(Path::new(path), folder))
+    };
+    // A folder known to be someone's, which need not be anywhere called `Users`.
+    for folder in &traces.profile_folders {
+        let folder = folder.replace('/', "\\").to_ascii_lowercase();
+        let mut from = 0;
+        while let Some(found) = lower[from..].find(&folder) {
+            let at = from + found;
+            from = at + folder.len();
+            let path = lower[at..]
+                .split(['"', '<', '>', '|', ';', ','])
+                .next()
+                .unwrap_or_default();
+            if !is_the_apps(path) {
+                return true;
+            }
+        }
+    }
     let mut from = 0;
     while let Some(found) = lower[from..].find(USERS_FOLDER) {
         let at = from + found;
         from = at + USERS_FOLDER.len();
-        if lower[at..].starts_with(PUBLIC_PROFILE) {
+        if !is_in_a_users_folder(&lower[at..]) {
             continue;
         }
         // From the drive letter, if it has one, to where a command line would end the path.
@@ -553,10 +590,7 @@ fn names_a_place_of_an_account(text: &str, app_folders: &[PathBuf]) -> bool {
             .split(['"', '<', '>', '|', ';', ','])
             .next()
             .unwrap_or_default();
-        let is_the_apps = app_folders
-            .iter()
-            .any(|folder| path_is_within(Path::new(path), folder));
-        if !is_the_apps {
+        if !is_the_apps(path) {
             return true;
         }
     }
@@ -586,6 +620,7 @@ fn withhold_shortcuts(
     app_folders: &[PathBuf],
     main_program: &Path,
     installed_for_one_account: bool,
+    traces: &AccountTraces,
     left_out: &mut LeftOut,
 ) {
     let is_the_apps = |path: &Path| {
@@ -597,11 +632,11 @@ fn withhold_shortcuts(
     let mut withheld = 0_usize;
     shortcuts.retain_mut(|shortcut| {
         let arguments = shortcut.arguments.as_deref().unwrap_or_default();
-        if names_a_place_of_an_account(arguments, app_folders) {
+        if names_a_place_of_an_account(arguments, app_folders, traces) {
             withheld += 1;
             return false;
         }
-        if !is_in_an_accounts_folders(&shortcut.original_lnk_path) {
+        if !is_in_an_accounts_folders(&shortcut.original_lnk_path, traces) {
             return true;
         }
         let its_own = is_the_apps(&shortcut.target_path)
@@ -613,7 +648,7 @@ fn withhold_shortcuts(
         if let Some(location) = location_with_no_account(&shortcut.original_lnk_path) {
             shortcut.original_lnk_path = location;
         }
-        let keep = |path: &PathBuf| !is_in_an_accounts_folders(path) || is_the_apps(path);
+        let keep = |path: &PathBuf| !is_in_an_accounts_folders(path, traces) || is_the_apps(path);
         shortcut.working_directory = shortcut.working_directory.take().filter(keep);
         shortcut.icon_path = shortcut.icon_path.take().filter(keep);
         true
@@ -640,7 +675,7 @@ fn withhold_tasks(
     traces: &AccountTraces,
     left_out: &mut LeftOut,
 ) {
-    let names_them = |text: &str| names_a_place_of_an_account(text, app_folders);
+    let names_them = |text: &str| names_a_place_of_an_account(text, app_folders, traces);
     let is_named_for_them = |task: &ScheduledTaskEntry| {
         let name = format!("{}{}", task.task_path, task.task_name).to_ascii_lowercase();
         traces
@@ -709,6 +744,7 @@ pub(crate) fn withhold_settings(from: &mut Withholding<'_>, left_out: &mut LeftO
         from.app_folders,
         from.main_program,
         from.installed_for_one_account,
+        from.traces,
         left_out,
     );
     withhold_tasks(from.tasks, from.app_folders, from.traces, left_out);
@@ -720,6 +756,7 @@ fn withhold_variables(
     variables: &mut Vec<EnvironmentVariableEntry>,
     app_folders: &[PathBuf],
     expand: &dyn Fn(&str) -> String,
+    traces: &AccountTraces,
     left_out: &mut LeftOut,
 ) {
     let is_the_apps = |entry: &str| {
@@ -747,7 +784,8 @@ fn withhold_variables(
             return false;
         }
         if of_an_account
-            || (entries.len() > 1 && names_a_place_of_an_account(&variable.value, app_folders))
+            || (entries.len() > 1
+                && names_a_place_of_an_account(&variable.value, app_folders, traces))
         {
             if kept.is_empty() {
                 withheld += 1;
@@ -756,7 +794,7 @@ fn withhold_variables(
             variable.value = kept.join(";");
             return true;
         }
-        if names_a_place_of_an_account(&variable.value, app_folders) {
+        if names_a_place_of_an_account(&variable.value, app_folders, traces) {
             withheld += 1;
             return false;
         }
@@ -793,12 +831,15 @@ fn withhold_services(services: &mut [ServiceEntry]) {
 }
 
 /// A DLL found in someone's folders by what their `Path` said is known by its name.
-fn withhold_dependency_paths(dependencies: &mut [DependencyEntry], app_folders: &[PathBuf]) {
+fn withhold_dependency_paths(
+    dependencies: &mut [DependencyEntry],
+    app_folders: &[PathBuf],
+    traces: &AccountTraces,
+) {
     for dependency in dependencies {
-        let names_them = dependency
-            .resolved_path
-            .as_deref()
-            .is_some_and(|path| names_a_place_of_an_account(&path.to_string_lossy(), app_folders));
+        let names_them = dependency.resolved_path.as_deref().is_some_and(|path| {
+            names_a_place_of_an_account(&path.to_string_lossy(), app_folders, traces)
+        });
         if names_them {
             dependency.resolved_path = Some(PathBuf::from(&dependency.name));
         }
@@ -806,10 +847,18 @@ fn withhold_dependency_paths(dependencies: &mut [DependencyEntry], app_folders: 
 }
 
 /// What is in someone's folders and not going says nothing here, whatever kind of file it is.
-fn withhold_files_staying(files: &mut Vec<FileEntry>, app_folders: &[PathBuf]) {
+fn withhold_files_staying(
+    files: &mut Vec<FileEntry>,
+    app_folders: &[PathBuf],
+    traces: &AccountTraces,
+) {
     files.retain(|file| {
         file.should_copy
-            || !names_a_place_of_an_account(&file.original_path.to_string_lossy(), app_folders)
+            || !names_a_place_of_an_account(
+                &file.original_path.to_string_lossy(),
+                app_folders,
+                traces,
+            )
     });
 }
 
@@ -868,14 +917,15 @@ pub(crate) fn withhold_what_is_an_accounts(report: &mut ScanReport, include_lice
         &mut report.environment_variables,
         &folders,
         &crate::path_utils::expand_env_vars,
+        &traces,
         &mut left_out,
     );
     withhold_services(&mut report.services);
     for driver in &mut report.drivers {
         withhold_service_account(&mut driver.account_name, &driver.service_name);
     }
-    withhold_dependency_paths(&mut report.dependencies, &folders);
-    withhold_files_staying(&mut report.file_inventory, &folders);
+    withhold_dependency_paths(&mut report.dependencies, &folders, &traces);
+    withhold_files_staying(&mut report.file_inventory, &folders, &traces);
     report
         .certificates
         .retain(|certificate| certificate.hive != RegistryHive::CurrentUser);
@@ -884,7 +934,7 @@ pub(crate) fn withhold_what_is_an_accounts(report: &mut ScanReport, include_lice
         say_no_more_of_licenses_than_the_apps_key(
             &mut report.license_artifacts,
             &mut left_out,
-            &is_in_an_accounts_folders,
+            &|path| is_in_an_accounts_folders(path, &traces),
         );
         report.licenses_left_out.append(&mut left_out.licenses);
     }
@@ -950,6 +1000,7 @@ mod tests {
             folders,
             Path::new(MAIN),
             one_account,
+            &AccountTraces::default(),
             &mut left_out,
         );
         left_out.settings.into_iter().map(|item| item.why).collect()
@@ -1051,6 +1102,7 @@ mod tests {
             &folders,
             Path::new(&main),
             true,
+            &AccountTraces::default(),
             &mut left_out,
         );
         assert_eq!(shortcuts.len(), 2, "{shortcuts:?}");
@@ -1141,7 +1193,7 @@ mod tests {
             "included_license_data": false,
             "included_program_data": false,
         }))
-        .expect("a manifest reads");
+        .unwrap_or_else(|error| panic!("{error}"));
         manifest.items_intentionally_excluded = vec![value.to_owned()];
         manifest
     }
@@ -1152,7 +1204,7 @@ mod tests {
             "made by alice".to_owned(),
             r"C:\Users\ALICE\a.txt".to_owned(),
             // As a binary registry value holds it, in each encoding.
-            "616c69636520".repeat(1) + "68657265",
+            "616c6963652068657265".to_owned(),
             "61,00,6c,00,69,00,63,00,65,00".to_owned(),
         ];
         for form in forms {
@@ -1231,6 +1283,7 @@ mod tests {
             &mut variables,
             &folders,
             &|text| text.to_owned(),
+            &AccountTraces::default(),
             &mut left_out,
         );
         let kept: Vec<(&str, &str)> = variables
@@ -1280,22 +1333,58 @@ mod tests {
     fn what_names_someones_folder_is_told_from_the_apps_own() {
         let app = r"C:\Users\randy\AppData\Local\Acme";
         let folders = [PathBuf::from(app)];
+        let none = AccountTraces::default();
         assert!(names_a_place_of_an_account(
             r"--config C:\Users\randy\work\a.ini",
-            &folders
+            &folders,
+            &none
         ));
         assert!(names_a_place_of_an_account(
             r#"--config="C:\Users\Bob Smith\a.ini""#,
-            &folders
+            &folders,
+            &none
         ));
         assert!(!names_a_place_of_an_account(
             &format!(r#"--config "{app}\a.ini""#),
-            &folders
+            &folders,
+            &none
         ));
         assert!(!names_a_place_of_an_account(
             r"--shared C:\Users\Public\Documents\a.ini",
-            &folders
+            &folders,
+            &none
         ));
-        assert!(!names_a_place_of_an_account("--port 80", &folders));
+        assert!(!names_a_place_of_an_account("--port 80", &folders, &none));
+        assert!(names_a_place_of_an_account(
+            r"--shared C:\Users\Publicity\a.ini",
+            &folders,
+            &none
+        ));
+        let elsewhere = AccountTraces {
+            profile_folders: vec![r"D:\Profiles\Alice".to_owned()],
+            ..AccountTraces::default()
+        };
+        assert!(!names_a_place_of_an_account(
+            r"D:\Profiles\Alice\a.ini",
+            &folders,
+            &none
+        ));
+        assert!(names_a_place_of_an_account(
+            r"D:\Profiles\Alice\a.ini",
+            &folders,
+            &elsewhere
+        ));
+        assert!(is_in_an_accounts_folders(
+            Path::new(r"D:\Profiles\Alice\Desktop\a.lnk"),
+            &elsewhere
+        ));
+        assert!(!is_in_an_accounts_folders(
+            Path::new(r"C:\Users\Public\Desktop\a.lnk"),
+            &none
+        ));
+        assert!(is_in_an_accounts_folders(
+            Path::new(r"C:\Users\Publicity\Desktop\a.lnk"),
+            &none
+        ));
     }
 }

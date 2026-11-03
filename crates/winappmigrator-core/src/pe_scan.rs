@@ -921,11 +921,11 @@ fn metadata_root_offset(bytes: &[u8]) -> Option<usize> {
         return find_bytes(bytes, SIGNATURE);
     };
     let (cli_header, _) = layout.directories.get(CLI_HEADER_DIRECTORY).copied()?;
-    let at = usize::try_from(layout.file_offset_of(cli_header)?).ok()?;
+    let at = layout.file_offset_of(cli_header)?;
     let field =
         bytes.get(at.checked_add(METADATA_RVA_FIELD)?..at.checked_add(METADATA_RVA_FIELD + 4)?)?;
     let metadata = u32::from_le_bytes([field[0], field[1], field[2], field[3]]);
-    let root = usize::try_from(layout.file_offset_of(metadata)?).ok()?;
+    let root = layout.file_offset_of(metadata)?;
     (bytes.get(root..root.checked_add(SIGNATURE.len())?)? == SIGNATURE).then_some(root)
 }
 

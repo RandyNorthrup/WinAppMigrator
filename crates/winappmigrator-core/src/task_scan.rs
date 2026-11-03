@@ -37,7 +37,6 @@ const WINDOWS_OWN_AUTHORITIES: [&str; 5] = [
     "Window Manager",
     "Font Driver Host",
 ];
-const USERS_GROUP_SID: &str = "S-1-5-32-545";
 /// How a task runs whoever is signed in. With a password it would run without them, and a package has
 /// no one's password.
 const SIGNED_IN_LOGON_TYPE: &str = "InteractiveToken";
@@ -328,6 +327,10 @@ impl DocumentEdits {
         }
     }
 
+    fn replace_with(&mut self, element: roxmltree::Node<'_, '_>, written: &str) {
+        self.edits.push((element.range(), written.to_owned()));
+    }
+
     fn remove(&mut self, element: roxmltree::Node<'_, '_>) {
         self.edits.push((element.range(), String::new()));
     }
@@ -352,8 +355,8 @@ impl DocumentEdits {
 
 /// A task's definition as any PC could take it. Who wrote it, who a trigger waits for, and who it runs
 /// as were someone on the PC it came from: there they are that person, on another they are nobody, and
-/// registering the task fails. So it runs as whoever installs it. A group of theirs comes to all of
-/// the PC's users, and a password nobody has comes to running when they are signed in. Anything that
+/// registering the task fails. So it runs as whoever installs it, as does one run for a group of theirs,
+/// and a password nobody has comes to running when they are signed in. Anything that
 /// will not parse stays as it is, and a restore refuses it. Says whether it came to running as anyone.
 pub(crate) fn task_for_whoever_installs_it(xml: &str) -> Option<(String, bool)> {
     let document = roxmltree::Document::parse(xml).ok()?;
@@ -395,8 +398,16 @@ pub(crate) fn task_for_whoever_installs_it(xml: &str) -> Option<(String, bool)> 
                     }
                 }
             }
+            // Their group is nobody here, and every user here is more than it was. So it comes to the
+            // one person it can be said to be, as an account would.
             "GroupId" if names_a_person(&node_text(element)) => {
-                edits.set_text(element, USERS_GROUP_SID);
+                edits.replace_with(
+                    element,
+                    &format!(
+                        "<UserId>{WHOEVER_INSTALLS_IT}</UserId><LogonType>{SIGNED_IN_LOGON_TYPE}</LogonType>"
+                    ),
+                );
+                runs_as_a_person = true;
             }
             _ => {}
         }
@@ -695,7 +706,7 @@ mod tests {
     #[test]
     fn a_task_says_nothing_of_who_it_ran_as_and_runs_as_whoever_installs_it() {
         let (kept, runs_as_a_person) =
-            task_for_whoever_installs_it(PERSONAL_TASK).expect("it parses");
+            task_for_whoever_installs_it(PERSONAL_TASK).unwrap_or_else(|| panic!("it parses"));
         assert!(runs_as_a_person);
         for gone in [
             "OLD-PC", "randy N", "Randy N", "S-1-5-21", "<Author>", "Password",
@@ -707,14 +718,14 @@ mod tests {
             kept.contains("<LogonType>InteractiveToken</LogonType>"),
             "{kept}"
         );
-        let parsed = parse_task_xml(&kept).expect("it still parses");
+        let parsed = parse_task_xml(&kept).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(parsed.account.as_deref(), Some(WHOEVER_INSTALLS_IT));
         assert_eq!(
             parsed.actions.len(),
             2,
             "what it runs is not this one's to say"
         );
-        let (again, _) = task_for_whoever_installs_it(&kept).expect("it parses");
+        let (again, _) = task_for_whoever_installs_it(&kept).unwrap_or_else(|| panic!("it parses"));
         assert_eq!(again, kept, "running again changes nothing");
     }
 
@@ -742,12 +753,16 @@ mod tests {
     }
 
     #[test]
-    fn a_group_of_theirs_comes_to_the_pcs_users() {
+    fn a_group_of_theirs_comes_to_whoever_installs_it_and_not_to_everyone() {
         let xml = r"<Task><Principals><Principal><GroupId>CORP\Domain Users</GroupId></Principal></Principals></Task>";
-        let (kept, runs_as_a_person) = task_for_whoever_installs_it(xml).expect("it parses");
-        assert!(!runs_as_a_person);
-        assert!(kept.contains(USERS_GROUP_SID), "{kept}");
+        let (kept, runs_as_a_person) =
+            task_for_whoever_installs_it(xml).unwrap_or_else(|| panic!("it parses"));
+        assert!(runs_as_a_person);
+        assert!(!kept.contains("S-1-5-32-545"), "{kept}");
         assert!(!kept.contains("CORP"), "{kept}");
+        assert!(!kept.contains("GroupId"), "{kept}");
+        let parsed = parse_task_xml(&kept).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(parsed.account.as_deref(), Some(WHOEVER_INSTALLS_IT));
     }
 
     #[test]

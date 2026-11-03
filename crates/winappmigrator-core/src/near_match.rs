@@ -586,6 +586,16 @@ impl NearMatchLook {
         holds_another_app.then_some(IS_ANOTHER_APPS)
     }
 
+    /// Whether a folder is somewhere inside what another app has on record as its own.
+    pub(crate) fn is_in_another_apps_folder(&self, path: &Path) -> bool {
+        self.others.iter().any(|other| {
+            other
+                .folders
+                .iter()
+                .any(|folder| path_is_within(path, folder))
+        })
+    }
+
     /// Whether another app is there, or anywhere in it, or the folder is what another app would
     /// take by its own name.
     fn is_another_apps(&self, path: &Path, name: &str) -> bool {
@@ -1149,10 +1159,10 @@ mod tests {
 
     #[test]
     fn a_folder_on_record_is_refused_for_what_it_holds_and_not_for_what_it_is_in() {
-        let work = tempfile::tempdir().expect("a folder");
+        let work = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
         let vendor = work.path().join("Vendor");
         let dist = vendor.join(r"Client\dist");
-        std::fs::create_dir_all(&dist).expect("folders");
+        std::fs::create_dir_all(&dist).unwrap_or_else(|error| panic!("{error}"));
         let system = SystemContext::live();
         let other = other_app_record("Vendor Agent", Some(&vendor));
         let look = look_with_others(std::slice::from_ref(&other));

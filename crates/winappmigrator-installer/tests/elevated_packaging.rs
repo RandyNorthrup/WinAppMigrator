@@ -825,6 +825,9 @@ fn what_an_account_says_of_windows_own_folders_is_not_gone_by() -> TestResult {
         ("ProgramW6432", files.as_path()),
         ("SystemRoot", windows.as_path()),
         ("windir", windows.as_path()),
+        ("USERPROFILE", files.as_path()),
+        ("APPDATA", files.as_path()),
+        ("LOCALAPPDATA", files.as_path()),
     ];
     let hostile_text = path_text(hostile.path());
     let package = hand_built_package(HOSTILE_APP, &[])?;

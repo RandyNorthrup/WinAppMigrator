@@ -127,6 +127,8 @@ pub struct InstallSource {
     pub registry_keys: Vec<RecordedRegistryKey>,
     /// Human-readable signals used to reverse-engineer the install.
     pub evidence: Vec<String>,
+    /// The folder its uninstaller is in, when that is one of `roots`, and all that says it is.
+    pub uninstaller_folder: Option<PathBuf>,
 }
 
 /// Authoritative key paths recorded for a product in the MSI component database.
@@ -272,6 +274,7 @@ pub(crate) fn detect_install_source_unless(
         InstallMethod::Generic => {}
     }
 
+    let mut uninstaller_folder = None;
     // App Paths registration is an authoritative, documented source of the
     // launcher location and any extra DLL search directories.
     if let Some(executable) = app.main_executable.as_ref() {
@@ -294,6 +297,7 @@ pub(crate) fn detect_install_source_unless(
         && !is_windows_or_installer_cache_path(&parent, system)
     {
         if uninstaller_folder_is_the_apps(app, &parent, &names, system) {
+            uninstaller_folder = Some(parent.clone());
             roots.push(parent);
         } else {
             loose_files.extend(system.resolve_source_path(&executable));
@@ -309,6 +313,7 @@ pub(crate) fn detect_install_source_unless(
         recorded_files,
         registry_keys,
         evidence,
+        uninstaller_folder,
     }
 }
 
@@ -2469,6 +2474,7 @@ mod tests {
 
     fn test_source(method: InstallMethod) -> InstallSource {
         InstallSource {
+            uninstaller_folder: None,
             method,
             product_code: None,
             authoritative_file_count: 0,

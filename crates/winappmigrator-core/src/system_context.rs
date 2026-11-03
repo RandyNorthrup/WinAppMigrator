@@ -646,7 +646,7 @@ fn copy_a_hive_file(
                 .map_err(|error| WinAppMigratorError::io(source, error))?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            copy_a_denied_hive_file(source, destination, most_of_it, bytes_left, cancel)?;
+            copy_a_denied_hive_file(source, destination, size, most_of_it, bytes_left, cancel)?;
         }
         Err(error) => return Err(WinAppMigratorError::io(source, error)),
     }
@@ -676,6 +676,7 @@ fn too_large_for_a_hive(source: &Path, size: u64) -> WinAppMigratorError {
 fn copy_a_denied_hive_file(
     source: &Path,
     destination: &Path,
+    size: u64,
     most: u64,
     bytes_left: &mut u64,
     cancel: Option<&AtomicBool>,
@@ -701,7 +702,8 @@ fn copy_a_denied_hive_file(
         return Err(too_large_for_a_hive(source, taken().max(most)));
     }
     copied?;
-    *bytes_left = bytes_left.saturating_sub(taken());
+    // Its size has been counted. What it brought besides has not.
+    *bytes_left = bytes_left.saturating_sub(taken().saturating_sub(size));
     Ok(())
 }
 

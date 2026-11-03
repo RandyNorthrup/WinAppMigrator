@@ -192,6 +192,8 @@ fn registered_version(probe: &PrerequisiteRegistryProbe) -> Option<RuntimeVersio
                 .open_subkey_with_flags(key_path, KEY_READ | view)
                 .ok()?;
             let part = |name: &str| key.get_value::<u32, _>(name).ok();
+            // What an uninstalled one left says nothing of what is here.
+            part(&probe.value_name).filter(|value| *value >= probe.min_value)?;
             Some((part("Major")?, part("Minor")?, part("Bld")?))
         })
     })
