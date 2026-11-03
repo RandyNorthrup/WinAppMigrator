@@ -543,7 +543,7 @@ fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
         task.commands
             .iter()
             .any(|command| is_it(Path::new(command.trim().trim_matches('"'))))
-            || names_it(&task.xml)
+            || task.arguments.iter().any(|arguments| names_it(arguments))
     }) {
         return Some(format!("the scheduled task {}", task.entry.task_name));
     }
@@ -973,6 +973,9 @@ impl Run<'_, '_> {
         }
         let earlier_place = place_of_an_earlier_install(self.options, self.earlier_install_here);
         for service in &self.review.services {
+            if self.monitor.is_cancelled() {
+                return;
+            }
             let name = &service.entry.service_name;
             // Only one of this install's own. What is on this PC under that name may be another's,
             // which is refused when it comes to it, and until then is not to be touched.
@@ -5321,6 +5324,39 @@ mod tests {
             what_would_run(&review, file),
             Some("the service Acme".to_owned())
         );
+
+        // A task's arguments, read as Windows reads them, and what only describes it is not that.
+        let task_with = |description: &str, arguments: &str| {
+            manifest_with(&|manifest| {
+                manifest.scheduled_tasks_detected = vec![crate::models::ScheduledTaskEntry {
+                    task_name: "Acme".to_owned(),
+                    task_path: r"\Acme\".to_owned(),
+                    action_command: PathBuf::new(),
+                    arguments: None,
+                    working_directory: None,
+                    trigger_summary: None,
+                    run_level: None,
+                    account: None,
+                    requires_admin: false,
+                    restore_instructions: String::new(),
+                    definition_xml: Some(format!(
+                        r#"<Task><RegistrationInfo><Description>{description}</Description></RegistrationInfo><Actions><Exec><Command>C:\Program Files\Acme\acme.exe</Command><Arguments>{arguments}</Arguments></Exec></Actions></Task>"#
+                    )),
+                }];
+            })
+        };
+        let used = task_with("Nothing to see", &format!("--plugin={data}"))?;
+        let review = ReviewedPackage::new(&used, target, true, false)?;
+        assert!(review.refused.is_empty(), "{:?}", review.refused);
+        assert_eq!(
+            what_would_run(&review, file),
+            Some("the scheduled task Acme".to_owned())
+        );
+
+        let described = task_with(&format!("Tracks {data}"), "--quiet")?;
+        let review = ReviewedPackage::new(&described, target, true, false)?;
+        assert!(review.refused.is_empty(), "{:?}", review.refused);
+        assert_eq!(what_would_run(&review, file), None);
         Ok(())
     }
 

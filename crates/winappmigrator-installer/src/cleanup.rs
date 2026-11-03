@@ -151,13 +151,19 @@ fn create_staging_dir_where(
         .filter(|target| !is_network_path(&target.to_string_lossy()))
         .and_then(|target| target.ancestors().find(|ancestor| is_real_folder(ancestor)))
         .filter(|place| first_link_to(place).is_none());
-    let admin_only = state_root.and_then(|root| admin_only_staging_root(root).ok());
+    let last_failure = RefCell::new(None);
+    let admin_only = state_root.and_then(|root| match admin_only_staging_root(root) {
+        Ok(admin_only) => Some(admin_only),
+        Err(error) => {
+            *last_failure.borrow_mut() = Some(format!("{}: {error}", root.display()));
+            None
+        }
+    });
     let beside_installer = executable.parent();
     let temp = std::env::temp_dir();
     let has_room = |place: &Path, needed: u64| {
         volume_stats_at(place).is_none_or(|stats| stats.free_bytes >= needed)
     };
-    let last_failure = RefCell::new(None);
     let make_in_protected = |place: &Path| match ProtectedFolder::new_in(place, EXTRACTION_PREFIX) {
         Ok(staging) => Some(staging),
         Err(error) => {

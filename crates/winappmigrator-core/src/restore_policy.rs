@@ -2577,6 +2577,8 @@ pub fn environment_refusal(name: &str) -> Option<String> {
 pub struct TaskDefinition {
     /// The command of every program action, with XML escaping removed.
     pub commands: Vec<String>,
+    /// What each program action is given, with XML escaping removed.
+    pub arguments: Vec<String>,
     /// An action that is not a program, such as a COM handler, which no path can vouch for.
     pub has_other_actions: bool,
     pub runs_as_system: bool,
@@ -2622,6 +2624,12 @@ pub fn read_task_definition(xml: &str) -> std::result::Result<TaskDefinition, St
                     action
                         .descendants()
                         .filter(|child| child.tag_name().name() == "Command")
+                        .map(node_text),
+                );
+                definition.arguments.extend(
+                    action
+                        .descendants()
+                        .filter(|child| child.tag_name().name() == "Arguments")
                         .map(node_text),
                 );
             }

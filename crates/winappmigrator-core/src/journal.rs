@@ -402,8 +402,10 @@ fn prepare_state_folders(state_root: &Path) -> Result<PathBuf> {
     for folder in [state_root, installs.as_path()] {
         ensure_protected_folder(folder).map_err(|error| WinAppMigratorError::io(folder, error))?;
     }
-    refuse_what_others_put_in(state_root)
-        .map_err(|error| WinAppMigratorError::io(state_root, error))?;
+    for folder in [state_root, installs.as_path()] {
+        refuse_what_others_put_in(folder)
+            .map_err(|error| WinAppMigratorError::io(folder, error))?;
+    }
     Ok(installs)
 }
 

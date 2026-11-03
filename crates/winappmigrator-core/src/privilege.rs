@@ -54,14 +54,15 @@ Where-Object { $_.AccessControlType -eq 'Allow' -and ([int]$_.FileSystemRights -
 ([int]$_.InheritanceFlags -band 1) -and $admins -notcontains $_.IdentityReference.Value }); \
 if ($others.Count -gt 0) { 'yes' } else { 'no' }";
 /// `yes` if only Administrators, its members, SYSTEM, and TrustedInstaller own and can change all of
-/// what is directly in a folder. See [`ONLY_ADMINISTRATORS_CAN_CHANGE_SCRIPT`].
+/// what is directly in a folder. See [`ONLY_ADMINISTRATORS_CAN_CHANGE_SCRIPT`]. Not the file that marks
+/// one install at a time, which is owned by whoever last made it, and nothing is ever read from.
 const ONLY_ADMINISTRATORS_MADE_WHAT_IS_INSIDE_SCRIPT: &str = "Import-Module Microsoft.PowerShell.LocalAccounts \
 -ErrorAction Ignore; \
 $admins = @('S-1-5-32-544', 'S-1-5-18', \
 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464') + \
 @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Ignore | ForEach-Object { $_.SID.Value }); \
 $write = 0x2 -bor 0x4 -bor 0x10 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000; \
-$bad = @(Get-ChildItem -Force -LiteralPath $env:WAM_ACL_PATH | Where-Object { \
+$bad = @(Get-ChildItem -Force -LiteralPath $env:WAM_ACL_PATH | Where-Object { $_.Name -ne 'busy.lock' } | Where-Object { \
 $acl = Get-Acl -LiteralPath $_.FullName; \
 $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; \
 $others = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | \

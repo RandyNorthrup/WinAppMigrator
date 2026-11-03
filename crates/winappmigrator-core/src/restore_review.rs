@@ -87,6 +87,8 @@ pub(crate) struct ReviewedTask<'a> {
     pub entry: &'a ScheduledTaskEntry,
     pub xml: String,
     pub commands: Vec<String>,
+    /// What those commands are given.
+    pub arguments: Vec<String>,
     pub runs_as_system: bool,
     /// The account its definition names, which is what it will run as.
     pub account: Option<String>,
@@ -759,6 +761,7 @@ impl<'a> ReviewedPackage<'a> {
                 entry: task,
                 xml,
                 commands: definition.commands,
+                arguments: definition.arguments,
                 runs_as_system: definition.runs_as_system,
                 highest_available: definition.highest_available,
                 account: definition.account,
