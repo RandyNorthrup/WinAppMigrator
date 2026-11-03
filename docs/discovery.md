@@ -632,7 +632,8 @@ For an offline volume, `SystemContext`:
   (`to_volume`), and the other way (`to_logical`).
 - **Lists its accounts from `ProfileList`** in its `SOFTWARE` hive. A profile folder with a hive and no
   record is kept too, known by its name, since this may be the only chance at it.
-- **Reads its computer name and Windows version** from those hives, for the manifest.
+- **Reads its computer name and Windows version** from those hives, for the manifest. The name only
+  goes in with the User data option on.
 
 Paths come in two kinds. **Logical** paths are what the source PC called things: what its registry
 holds, what a value is compared with, and everything in the report and manifest, including the install

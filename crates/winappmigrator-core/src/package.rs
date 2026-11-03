@@ -248,6 +248,7 @@ fn what_a_package_says_of(report: &ScanReport, options: &PackageOptions) -> Scan
     // is in that account's folders, and what is said of its own files still has to be.
     if !options.include_user_data {
         said.user_data_profile = None;
+        said.source_computer_name = None;
         let app_folder = report.install_location.as_deref();
         said.secrets_left_out.retain(|item| {
             let path = Path::new(&item.name);
@@ -2203,6 +2204,7 @@ mod tests {
         let options = installer_options(root.path(), &exe, &stub);
         let mut report = scan_of(&options)?;
         report.user_data_profile = Some("the-secret-account".to_owned());
+        report.source_computer_name = Some("THE-SECRET-PC".to_owned());
         report.install_location = Some(PathBuf::from(
             r"C:\Users\the-secret-account\AppData\Local\Programs\Acme",
         ));
@@ -2219,12 +2221,88 @@ mod tests {
         ];
         let said = what_a_package_says_of(&report, &options);
         assert_eq!(said.user_data_profile, None);
+        assert_eq!(said.source_computer_name, None);
         assert_eq!(
             said.secrets_left_out.len(),
             1,
             "the app's own is still said"
         );
         assert!(said.secrets_left_out[0].name.ends_with(".env"));
+        Ok(())
+    }
+
+    /// Every place a package says what it says, read as it was written.
+    fn what_a_built_package_holds(result: &PackageResult) -> Result<String> {
+        let mut all = fs::read_to_string(&result.manifest_path)
+            .map_err(|error| WinAppMigratorError::io(&result.manifest_path, error))?;
+        for entry in fs::read_dir(&result.reports_dir)
+            .map_err(|error| WinAppMigratorError::io(&result.reports_dir, error))?
+        {
+            let path = entry
+                .map_err(|error| WinAppMigratorError::io(&result.reports_dir, error))?
+                .path();
+            all.push_str(
+                &fs::read_to_string(&path)
+                    .map_err(|error| WinAppMigratorError::io(&path, error))?,
+            );
+        }
+        Ok(all)
+    }
+
+    #[test]
+    fn a_package_only_names_the_pc_it_came_from_with_the_user_data_option() -> Result<()> {
+        const NAME: &str = "THE-SECRET-PC";
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let mut options = installer_options(root.path(), &exe, &stub);
+        options.include_user_data = false;
+        options.include_program_data = false;
+
+        let mut report = scan_of(&options)?;
+        assert_eq!(
+            report.source_computer_name, None,
+            "a scan with the option off does not hold on to it either"
+        );
+        // A scan is not all that decides: a person can leave all the data out of one that had it.
+        report.source_computer_name = Some(NAME.to_owned());
+        let without = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+        let held = what_a_built_package_holds(&without)?;
+        assert!(
+            held.contains("source_computer_name"),
+            "this read the manifest"
+        );
+        assert!(!held.contains(NAME), "{held}");
+
+        options.include_user_data = true;
+        options.include_program_data = true;
+        options.output_dir = root.path().join("with-data");
+        let with = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+        assert!(what_a_built_package_holds(&with)?.contains(NAME));
+        Ok(())
+    }
+
+    #[test]
+    fn a_scan_with_the_user_data_option_on_knows_what_pc_it_is_on() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let mut options = installer_options(root.path(), &exe, &stub);
+        options.include_user_data = true;
+        assert_eq!(
+            scan_of(&options)?.source_computer_name,
+            std::env::var("COMPUTERNAME").ok()
+        );
         Ok(())
     }
 

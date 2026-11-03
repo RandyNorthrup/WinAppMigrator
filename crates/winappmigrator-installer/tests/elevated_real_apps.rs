@@ -683,6 +683,13 @@ fn what_an_account_has_follows_the_options() -> TestResult {
         if !manifest.settings_left_out.is_empty() {
             problems.push(format!("{name}: it left settings out with the option on"));
         }
+        // The search of a package with the option off finds nothing of this, and this says it could.
+        if manifest.source_computer_name != std::env::var("COMPUTERNAME").ok() {
+            problems.push(format!(
+                "{name}: with the option on it should say what PC it came from, and says {:?}",
+                manifest.source_computer_name
+            ));
+        }
         for mark in marks.iter().filter(|mark| mark.app == id) {
             let found = where_a_mark_is(&mark.text, &names, &unpacked)?;
             println!(

@@ -1506,6 +1506,18 @@ mod tests {
     }
 
     #[test]
+    fn it_only_says_what_pc_an_app_came_from_if_the_package_does() {
+        let harness = harness_for(sample_installer(ThemeMode::Dark));
+        assert!(harness.query_by_label_contains("OLD-LAPTOP").is_some());
+        assert!(harness.query_by_label_contains("Captured from").is_some());
+
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.source_computer = String::new();
+        let harness = harness_for(app);
+        assert!(harness.query_by_label_contains("Captured from").is_none());
+    }
+
+    #[test]
     fn the_window_says_how_much_room_it_needs_where() {
         let harness = harness_for(sample_installer(ThemeMode::Dark));
         assert!(

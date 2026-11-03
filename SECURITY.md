@@ -335,7 +335,8 @@ So an installer can contain secrets, and **it has to be handled accordingly**: d
 would not hand the PC to. Reading the list of what was left out tells you what was found, and says nothing of what
 was not.
 
-The package also records the name of the computer the app was on, and the name of that account's profile folder.
+With the User data option on, the package also records the name of the computer the app was on, and the name of that
+account's profile folder, and the installer shows them. With it off, it records neither.
 
 ## How the executables protect themselves
 

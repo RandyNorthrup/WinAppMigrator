@@ -171,7 +171,8 @@ pub struct ScanReport {
     /// says where other accounts' folders are, and goes no further than this run.
     #[serde(skip)]
     pub other_accounts: OtherAccountsFolders,
-    /// The name of the PC the app was on, as that PC recorded it.
+    /// The name of the PC the app was on, as that PC recorded it, if the User data option asked for
+    /// any of what is on it.
     #[serde(default)]
     pub source_computer_name: Option<String>,
     /// The version of Windows the app was on.
@@ -353,6 +354,7 @@ pub enum SignatureStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageManifest {
     pub schema_version: String,
+    /// The name of the PC the app was on, in a package with some of what was on it in it.
     pub source_computer_name: Option<String>,
     pub source_windows_version: Option<String>,
     /// Which build and architecture of Windows the app was on, as that PC recorded them.

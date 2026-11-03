@@ -500,7 +500,9 @@ fn metric_tile(ui: &mut Ui, theme: &Theme, metric: &Metric) {
 pub fn kv_row(ui: &mut Ui, theme: &Theme, key: &str, value: &str) {
     const KEY_WIDTH: f32 = 96.0;
     ui.horizontal_top(|ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(KEY_WIDTH, 18.0), Sense::hover());
+        let (rect, response) = ui.allocate_exact_size(vec2(KEY_WIDTH, 18.0), Sense::hover());
+        // Painted, so it would otherwise not be there for a screen reader.
+        response.widget_info(|| WidgetInfo::labeled(A11yRole::Label, true, key));
         ui.painter().text(
             pos2(rect.left(), rect.center().y),
             Align2::LEFT_CENTER,

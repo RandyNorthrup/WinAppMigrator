@@ -672,7 +672,11 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         &system,
         &mut warnings,
     );
-    // A package with none of an account's data has no reason to carry its name.
+    // A package with none of an account's data has no reason to carry its name, or the PC's.
+    let source_computer_name = options
+        .include_user_data
+        .then_some(identity.computer_name)
+        .flatten();
     let user_data_profile = options
         .include_user_data
         .then(|| system.user_hives().into_iter().next().map(|user| user.name))
@@ -694,7 +698,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
                         .filter_map(|artifact| artifact.path.as_deref()),
                 ),
         ),
-        source_computer_name: identity.computer_name,
+        source_computer_name,
         source_windows_version: identity.windows_version,
         source_platform,
         program_needs,
