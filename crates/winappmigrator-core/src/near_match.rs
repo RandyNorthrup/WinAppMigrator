@@ -306,19 +306,7 @@ impl NearMatchLook {
         picks: &mut Picks,
     ) {
         let source = detect_install_source_unless(&record.as_installed_app(), system, is_cancelled);
-        // An install record that says another app's is its own, as one chaining that app or read
-        // from where that app is does, says nothing about which keys are this one's.
-        let names_another_apps = source
-            .roots
-            .iter()
-            .any(|root| self.folder_refusal(root, scan, system) == Some(IS_ANOTHER_APPS))
-            || source.loose_files.iter().any(|file| {
-                self.is_another_apps(file, &file_name_string(file))
-                    || self
-                        .files_of_others
-                        .binary_search(&comparable_path(file))
-                        .is_ok()
-            });
+        let names_another_apps = self.record_names_another_apps(&source.roots, &source.loose_files);
         let mut roots = source.roots;
         let names = names_of_app(
             None,
@@ -411,11 +399,7 @@ impl NearMatchLook {
             return Some("its install record is another app's");
         }
         // Where its uninstaller or icon is, which is where its install record would be read from.
-        let is_read_from_another_app = record
-            .program_folders
-            .iter()
-            .any(|folder| self.folder_refusal(folder, scan, system) == Some(IS_ANOTHER_APPS));
-        if is_read_from_another_app {
+        if self.is_read_from_another_app(record) {
             return Some("its install record is another app's");
         }
         let names = names_of_app(
@@ -430,6 +414,35 @@ impl NearMatchLook {
             return Some("it is named only for the publisher, and may hold its other products");
         }
         self.folder_refusal(folder, scan, system)
+    }
+
+    /// Whether an entry's uninstaller or icon is in a folder another entry says is its own. This asks
+    /// that of itself, since that folder may be refused anyway, for what it is called, and the record
+    /// in it read all the same.
+    fn is_read_from_another_app(&self, record: &UninstallRecord) -> bool {
+        record.program_folders.iter().any(|folder| {
+            self.others.iter().any(|other| {
+                other
+                    .folders
+                    .iter()
+                    .any(|others_folder| path_is_within(folder, others_folder))
+            })
+        })
+    }
+
+    /// Whether an install record names anything of another app's, as one chaining that app or read
+    /// from where it is does. Then it says nothing about which keys are this one's.
+    fn record_names_another_apps(&self, roots: &[PathBuf], loose_files: &[PathBuf]) -> bool {
+        roots.iter().any(|root| {
+            self.is_another_apps(root, &file_name_string(root))
+                || self.holds_a_file_of_another_app(root)
+        }) || loose_files.iter().any(|file| {
+            self.is_another_apps(file, &file_name_string(file))
+                || self
+                    .files_of_others
+                    .binary_search(&comparable_path(file))
+                    .is_ok()
+        })
     }
 
     fn is_named_like_another_app(&self, name: &str) -> bool {
@@ -1385,6 +1398,54 @@ mod tests {
     }
 
     #[test]
+    fn what_is_another_apps_counts_however_else_its_folder_would_be_refused() {
+        let (_temp, base) = a_real_folder();
+        // Named only for the publisher, and with a name that says nothing, and another app's.
+        let publishers = base.join("Fabrikam");
+        let launcher = base.join(r"Games\Launcher");
+        let own = base.join("Fabrikam Part");
+        let shared = base.join(r"Shared\one.dll");
+        let look = NearMatchLook {
+            files_of_others: vec![comparable_path(&shared)],
+            ..look_with_others(&[
+                other_app_record("Fabrikam Reports", Some(&publishers)),
+                other_app_record("Game Launcher", Some(&launcher)),
+            ])
+        };
+        let part = |program_folders: Vec<PathBuf>| UninstallRecord {
+            program_folders,
+            ..other_app_record("Fabrikam Part", Some(&own))
+        };
+        for read_from in [&publishers, &launcher] {
+            assert!(
+                look.is_read_from_another_app(&part(vec![read_from.clone()])),
+                "{}",
+                read_from.display()
+            );
+            assert!(
+                look.record_names_another_apps(std::slice::from_ref(read_from), &[]),
+                "{}",
+                read_from.display()
+            );
+        }
+        assert!(
+            look.is_read_from_another_app(&part(vec![publishers.join("Uninstall")])),
+            "or anywhere in one"
+        );
+        assert!(!look.is_read_from_another_app(&part(vec![own.clone()])));
+        assert!(!look.record_names_another_apps(std::slice::from_ref(&own), &[]));
+        assert!(
+            look.record_names_another_apps(&[], std::slice::from_ref(&shared)),
+            "a file another app's record lists too"
+        );
+        assert!(
+            look.record_names_another_apps(std::slice::from_ref(&base.join("Shared")), &[]),
+            "or a folder with one in it"
+        );
+        assert!(!look.record_names_another_apps(&[], std::slice::from_ref(&own.join("one.dll"))));
+    }
+
+    #[test]
     fn only_an_entry_of_the_apps_publisher_brings_in_what_goes_by_its_name() {
         let drive = NearDrive::new();
         let system = SystemContext::offline_for_tests(&drive.root, &drive.account);
@@ -1445,7 +1506,7 @@ mod tests {
             r"C:\Program Files\Common Files\Merge Modules",
             r"C:\Windows.old\Users\Bob\Documents",
             r"C:\Windows.old.000\Users\Bob\Documents",
-            r"C:\Windows\Microsoft.NET\Primary Interop Assemblies",
+            r"C:\Program Files\Microsoft.NET\Primary Interop Assemblies",
             r"C:\Program Files\InstallShield Installation Information\{A}",
             r"C:\Program Files\Common Files\ODBC\Data Sources",
         ] {

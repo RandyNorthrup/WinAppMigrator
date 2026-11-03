@@ -64,6 +64,8 @@ const NAMED_LIKE_PART_ROOT: &str = r"C:\Program Files\Part Named Tool";
 const CODED_ROOT: &str = r"C:\Program Files\WAM Footprint Vendor Coded";
 const BORROWED_ROOT: &str = r"C:\Program Files\WAM Footprint Vendor Borrowed";
 const NAMED_LIKE_WINDOWS_CHILD: &str = r"C:\Program Files\Windows WAM Folder\Below";
+const BORROWED_FROM_GENERIC_ROOT: &str = r"C:\Program Files\WAM Footprint Vendor Generic";
+const GENERIC_APP_ROOT: &str = r"C:\WAM Games\Launcher";
 const LOCKED_KEY_FILE: &str = r"C:\Program Files\WAM Footprint Vendor Helper\locked.pem";
 const BELOW_MICROSOFT_ROOT: &str = r"C:\ProgramData\Microsoft\WAM Footprint App Below";
 const UNINSTALL: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall";
@@ -513,6 +515,40 @@ fn set_up_what_must_not_be_offered() -> TestResult<bool> {
             "REG_SZ",
             "/d",
             &format!("MsiExec.exe /X{MSI_APP_CODE}"),
+            "/f",
+        ],
+    )?;
+    // The same, from an app in a folder with a name that says nothing, which is refused for that
+    // before it is ever asked whose it is.
+    let generic_uninstaller = format!(r"{GENERIC_APP_ROOT}\unins000.exe");
+    program_at(&generic_uninstaller)?;
+    uninstall_entry(
+        &format!(r"{UNINSTALL}\WAM Games Launcher"),
+        &[
+            ("DisplayName", "WAM Games Launcher"),
+            ("Publisher", "Someone Else"),
+            ("InstallLocation", GENERIC_APP_ROOT),
+        ],
+    )?;
+    write(
+        &format!(r"{BORROWED_FROM_GENERIC_ROOT}\borrowed.txt"),
+        "says it is another's",
+    )?;
+    hidden_entry(
+        "WAM Hostile Uninstaller In Generic",
+        BORROWED_FROM_GENERIC_ROOT,
+    )?;
+    must(
+        "reg.exe",
+        &[
+            "add",
+            &format!(r"{UNINSTALL}\WAM Hostile Uninstaller In Generic"),
+            "/v",
+            "UninstallString",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &format!("\"{generic_uninstaller}\""),
             "/f",
         ],
     )?;
@@ -973,6 +1009,7 @@ fn check_what_is_offered(
         MSI_APP_ROOT,
         CODED_ROOT,
         BORROWED_ROOT,
+        BORROWED_FROM_GENERIC_ROOT,
         NAMED_LIKE_WINDOWS_CHILD,
         OTHER_APP_ROOT,
         WINDOWS_NAMED_ROOT,

@@ -720,6 +720,16 @@ const RUNS_WHAT_IS_NAMED: &[&str] = &[
     ".exe", ".dll", ".cmd", ".bat", ".ps1", ".py", ".js", ".vbs", ".jar",
 ];
 
+/// Whether a service's setting has the name of a program in it. `.js` is not `.json`.
+fn names_something_it_runs(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    RUNS_WHAT_IS_NAMED.iter().any(|end| {
+        lower.match_indices(end).any(|(at, _)| {
+            !lower[at + end.len()..].starts_with(|next: char| next.is_ascii_alphanumeric())
+        })
+    })
+}
+
 /// What is left of a scan after a person's choices, as a package would have it, and what went with
 /// what they left out.
 struct Decision {
@@ -1019,9 +1029,7 @@ fn take_out_what_names_a_folder_left_out(
             .is_some_and(|arguments| folders.are_named_in_a_command(arguments))
             || service.parameters.iter().any(|value| {
                 value.value_data.as_deref().is_some_and(|data| {
-                    let lower = data.to_ascii_lowercase();
-                    RUNS_WHAT_IS_NAMED.iter().any(|end| lower.contains(end))
-                        && folders.are_named_in_a_command(data)
+                    names_something_it_runs(data) && folders.are_named_in_a_command(data)
                 })
             });
         if names_one {
@@ -2309,6 +2317,13 @@ mod tests {
             confidence: MatchConfidence::High,
             requires_admin: true,
         }];
+        let mut config = report.services[0].parameters[0].clone();
+        config.value_name = Some("Config".to_owned());
+        config.value_data = Some(format!(r"{INSTALL}\plugins\settings.json"));
+        report.services[0].parameters.push(config);
+        assert!(names_something_it_runs(r"C:\App\run.js --port 1"));
+        assert!(names_something_it_runs(r"C:\App\HOST.EXE"));
+        assert!(!names_something_it_runs(r"C:\App\settings.json"));
         let footprint = Footprint::of(&report, FLAGS)?;
         let chosen = apply_choices(&report, &footprint, &leaving_out(&[folder("plugins")]))?;
         assert!(
