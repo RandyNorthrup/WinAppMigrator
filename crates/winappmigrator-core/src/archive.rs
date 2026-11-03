@@ -1129,7 +1129,7 @@ fn refuse_oversized_installer(size: u64) -> Result<()> {
         return Ok(());
     }
     Err(WinAppMigratorError::InvalidInput(format!(
-        "the installer would be {}, and Windows cannot run an executable of 4 GiB or more; \
+        "the installer would be {}, and Windows cannot run an executable of 4 GB or more; \
          nothing was written",
         crate::space::size_text(size)
     )))

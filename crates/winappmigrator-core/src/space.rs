@@ -394,9 +394,10 @@ impl RoomCheck {
     }
 }
 
-/// A size in the units a person would say it in.
+/// A size in the units a person would say it in, as Windows Explorer shows them: by 1024, and called
+/// KB, MB, and GB.
 pub fn size_text(bytes: u64) -> String {
-    const UNITS: [(u64, &str); 3] = [(GIB, "GiB"), (MIB, "MiB"), (KIB, "KiB")];
+    const UNITS: [(u64, &str); 3] = [(GIB, "GB"), (MIB, "MB"), (KIB, "KB")];
     for (size, unit) in UNITS {
         if bytes >= size {
             return format!("{:.1} {unit}", bytes as f64 / size as f64);
@@ -517,12 +518,12 @@ mod tests {
             check.shortfalls()
         );
         assert!(
-            check.shortfalls()[0].contains("6.0 GiB"),
+            check.shortfalls()[0].contains("6.0 GB"),
             "{:?}",
             check.shortfalls()
         );
         assert!(
-            check.shortfalls()[0].contains("5.0 GiB"),
+            check.shortfalls()[0].contains("5.0 GB"),
             "{:?}",
             check.shortfalls()
         );
@@ -711,8 +712,8 @@ mod tests {
     #[test]
     fn sizes_read_as_a_person_would_say_them() {
         assert_eq!(size_text(512), "512 bytes");
-        assert_eq!(size_text(2 * KIB), "2.0 KiB");
-        assert_eq!(size_text(MIB + MIB / 2), "1.5 MiB");
-        assert_eq!(size_text(3 * GIB), "3.0 GiB");
+        assert_eq!(size_text(2 * KIB), "2.0 KB");
+        assert_eq!(size_text(MIB + MIB / 2), "1.5 MB");
+        assert_eq!(size_text(3 * GIB), "3.0 GB");
     }
 }

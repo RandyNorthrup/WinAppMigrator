@@ -1630,7 +1630,7 @@ mod tests {
         let harness = harness_for(sample_installer(ThemeMode::Dark));
         assert!(
             harness
-                .query_by_label_contains("up to 824.0 MiB on C: (356.0 GiB free)")
+                .query_by_label_contains("up to 824.0 MB on C: (356.0 GB free)")
                 .is_some()
         );
         assert!(

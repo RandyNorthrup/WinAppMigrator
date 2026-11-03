@@ -2064,8 +2064,8 @@ mod tests {
         assert!(
             matches!(&refused, Err(WinAppMigratorError::InvalidInput(message))
                 if message.contains("D:")
-                    && message.contains("10.0 GiB")
-                    && message.contains("2.0 GiB")
+                    && message.contains("10.0 GB")
+                    && message.contains("2.0 GB")
                     && message.contains("another drive")),
             "{refused:?}"
         );
