@@ -73,6 +73,20 @@ pub fn scan_shortcuts(
     (entries, warnings)
 }
 
+/// Where shortcuts for everyone on a PC are, which someone's settings pointing there do not make theirs.
+pub(crate) fn shared_shortcut_folders(system: &SystemContext) -> Vec<PathBuf> {
+    system
+        .public_dir()
+        .map(|public| public.join(DESKTOP_FALLBACK))
+        .into_iter()
+        .chain(
+            system
+                .program_data()
+                .map(|program_data| program_data.join(COMMON_START_MENU)),
+        )
+        .collect()
+}
+
 /// Where the account being scanned keeps shortcuts, by what its own settings say.
 pub(crate) fn folders_of_the_accounts_shortcuts(system: &SystemContext) -> Vec<PathBuf> {
     let mut warnings = Vec::new();
@@ -115,12 +129,7 @@ fn shortcut_folders(system: &SystemContext, warnings: &mut Vec<Warning>) -> Vec<
             warnings,
         ));
     }
-    if let Some(public) = system.public_dir() {
-        folders.push(public.join(DESKTOP_FALLBACK));
-    }
-    if let Some(program_data) = system.program_data() {
-        folders.push(program_data.join(COMMON_START_MENU));
-    }
+    folders.extend(shared_shortcut_folders(system));
     // A value can say an account's Desktop is someone else's.
     folders.retain(|folder| system.may_read(folder) && !system.is_in_another_profile(folder));
     folders

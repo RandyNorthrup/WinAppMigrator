@@ -17,10 +17,12 @@ use crate::models::{
     LeftOutItem, PackageManifest, RegistryHive, ScanReport, ScheduledTaskEntry, ServiceEntry,
     ShortcutEntry, Warning, WarningSeverity,
 };
-use crate::path_utils::{current_user_sid, is_person_sid, path_is_within, signed_in_user};
+use crate::path_utils::{
+    comparable_path, current_user_sid, is_person_sid, path_is_within, signed_in_user,
+};
 use crate::restore_policy::ServiceAccount;
 use crate::secret_rules::LeftOut;
-use crate::shortcut_scan::folders_of_the_accounts_shortcuts;
+use crate::shortcut_scan::{folders_of_the_accounts_shortcuts, shared_shortcut_folders};
 use crate::system_context::SystemContext;
 use crate::task_scan::{
     TaskThatNames, task_for_whoever_installs_it, without_what_names_an_account,
@@ -67,7 +69,7 @@ const NAMES_THAT_ARE_WORDS: [&str; 14] = [
 const NETWORK_PATH_START: &str = r"\\";
 const NOT_A_NETWORK_PATH: [&str; 2] = [r"\\?\", r"\\.\"];
 const MENTIONS_CODE: &str = "package_mentions_an_account";
-const ENDS_A_PATH_ON_A_COMMAND_LINE: [char; 7] = ['"', '\'', '<', '>', '|', ';', ','];
+const ENDS_A_PATH_ON_A_COMMAND_LINE: [char; 6] = ['"', '<', '>', '|', ';', ','];
 /// The shortest run of hex that can be a value's bytes, rather than a number.
 const SHORTEST_HEX_VALUE: usize = 6;
 
@@ -184,13 +186,12 @@ impl AccountTraces {
             }
         }
         // Where its own settings say its Desktop and Start Menu are, which can be anywhere.
-        let shared: Vec<PathBuf> = system
-            .public_dir()
-            .into_iter()
-            .chain(system.program_data())
-            .collect();
+        let shared = shared_shortcut_folders(system);
         for folder in folders_of_the_accounts_shortcuts(system) {
-            if !shared.iter().any(|base| path_is_within(&folder, base)) {
+            if !shared
+                .iter()
+                .any(|base| comparable_path(&folder) == comparable_path(base))
+            {
                 traces.add_folder(&system.logical_path(&folder));
             }
         }
@@ -593,11 +594,7 @@ fn names_a_place_of_an_account(
             if goes_on {
                 continue;
             }
-            let path = lower[at..]
-                .split(ENDS_A_PATH_ON_A_COMMAND_LINE)
-                .next()
-                .unwrap_or_default();
-            if !is_the_apps(path) {
+            if !is_the_apps(path_on_a_command_line(&lower, at)) {
                 return true;
             }
         }
@@ -613,15 +610,24 @@ fn names_a_place_of_an_account(
         let start = lower[..at]
             .rfind(['"', '\'', ' ', '=', ',', ';'])
             .map_or(0, |at| at + 1);
-        let path = lower[start..]
-            .split(ENDS_A_PATH_ON_A_COMMAND_LINE)
-            .next()
-            .unwrap_or_default();
-        if !is_the_apps(path) {
+        if !is_the_apps(path_on_a_command_line(&lower, start)) {
             return true;
         }
     }
     false
+}
+
+/// The path starting here. An apostrophe can be in a name, as `O'Neil` has, so it only ends one that
+/// it also started.
+fn path_on_a_command_line(text: &str, start: usize) -> &str {
+    let path = text[start..]
+        .split(ENDS_A_PATH_ON_A_COMMAND_LINE)
+        .next()
+        .unwrap_or_default();
+    if text[..start].ends_with('\'') {
+        return path.split('\'').next().unwrap_or_default();
+    }
+    path
 }
 
 /// What a shortcut in an account's own folders is called wherever it goes, with no account in it. What
@@ -920,10 +926,18 @@ pub(crate) fn withhold_what_is_an_accounts(report: &mut ScanReport, include_lice
             .definition_xml
             .as_deref()
             .and_then(task_for_whoever_installs_it);
-        if let Some((xml, runs_as_a_person)) = generalised {
-            task.definition_xml = Some(xml);
-            if runs_as_a_person {
-                task.account = Some(crate::restore_policy::WHOEVER_INSTALLS_IT.to_owned());
+        // What cannot be made to say nobody goes as a definition no one can read, which a restore
+        // refuses, rather than as it was.
+        match generalised {
+            Some((xml, runs_as_a_person)) => {
+                task.definition_xml = Some(xml);
+                if runs_as_a_person {
+                    task.account = Some(crate::restore_policy::WHOEVER_INSTALLS_IT.to_owned());
+                }
+            }
+            None => {
+                task.definition_xml = None;
+                task.account = None;
             }
         }
     }
@@ -1489,6 +1503,17 @@ mod tests {
         assert!(names_a_place_of_an_account(
             r"--home 'C:\Users\Bob\a.ini'",
             &folders,
+            &none
+        ));
+        let apostrophe = [PathBuf::from(r"C:\Users\O'Neil\App")];
+        assert!(!names_a_place_of_an_account(
+            r"C:\Users\O'Neil\App\app.exe",
+            &apostrophe,
+            &none
+        ));
+        assert!(!names_a_place_of_an_account(
+            r"'C:\Users\O'Neil\App\app.exe'",
+            &[PathBuf::from(r"C:\Users\O")],
             &none
         ));
         assert!(names_a_place_of_an_account(
