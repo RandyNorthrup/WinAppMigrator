@@ -31,8 +31,9 @@ use winappmigrator_core::{
     RestoreResult, RoomCheck, RuntimePrerequisite, RuntimePrerequisiteKind, SystemChange,
     SystemChanges, UndoReport, Warning, WarningSeverity, WinAppMigratorError,
     default_install_location, files_no_install_put_there, folder_has_files, hidden_command,
-    install_location_problem, install_places, panic_text, preview_needs, read_embedded_manifest,
-    refuse_without_room_to_install, restore_package_monitored, system_changes_restoring,
+    install_location_problem, install_places, location_a_list_is_for, panic_text, preview_needs,
+    read_embedded_manifest, refuse_without_room_to_install, restore_package_monitored,
+    system_changes_restoring,
 };
 use winappmigrator_ui::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
@@ -52,14 +53,22 @@ const MAX_LISTED_CHANGES: usize = 300;
 /// How many things left out are listed, so a package that asks for a great deal cannot
 /// push everything else off the screen.
 const MAX_LISTED_REFUSALS: usize = 20;
+/// How tall the list of the rest of them gets, in points.
+const MORE_LEFT_OUT_HEIGHT: f32 = 240.0;
 const UNSIGNED_TEXT: &str = "Not signed: publisher unknown";
 /// What a cancelled install is called in its errors.
 const CANCELLED_CODE: &str = "install_cancelled";
 /// Added to what the person agrees to when they click Install.
-const BEYOND_FILES_TEXT: &str = "All of this is done with administrator rights. If anything \
-                                 goes wrong, it is all put back. You can also undo the install \
-                                 later from Settings, under Installed apps. Files it replaces \
-                                 come back, and runtimes it installs stay.";
+const BEYOND_FILES_TEXT: &str = "All of this is done with administrator rights. If the install \
+                                 fails, what it changed is put back, and you are told of anything \
+                                 that could not be. You can also undo the install later from \
+                                 Settings, under Installed apps. Files it replaces come back, and \
+                                 runtimes it installs stay.";
+/// Said when what would be done at this location is not known yet, and so cannot be agreed to.
+const WORKING_OUT_TEXT: &str = "Working out what this would set up at this location…";
+/// Said when the list was out of date by the time Install was clicked.
+const LIST_CHANGED_TEXT: &str = "What this would do here has changed, so nothing was installed. Look \
+                                 over the list below, and click Install again if it is what you want.";
 
 pub fn run() -> eframe::Result {
     let native_options =
@@ -140,7 +149,7 @@ enum SignatureState {
 
 /// What the check behind the window found.
 enum Loaded {
-    Ready(Arc<EmbeddedPackage>, Box<PackageManifest>, ChangesByChoice),
+    Ready(Arc<EmbeddedPackage>, Arc<PackageManifest>, ChangesByChoice),
     NoPackage,
     Failed(String),
     Signature(SignatureState),
@@ -152,6 +161,8 @@ enum Msg {
     Progress(InstallStep),
     Done(Box<RestoreResult>),
     Failed(String),
+    /// What an install would do is not what the person was shown, so it did not go ahead.
+    ListChanged(Box<SystemChanges>),
     /// Cancelled before anything had changed.
     Cancelled,
 }
@@ -187,6 +198,15 @@ struct InstallerApp {
     changes: SystemChanges,
     /// The same for every way the boxes can be set, worked out ahead so that a click is instant.
     changes_by_choice: ChangesByChoice,
+    /// What the package says, for working out what it would do at another location.
+    manifest: Option<Arc<PackageManifest>>,
+    /// The location those lists are for. Nothing can be agreed to for any other.
+    listed_for: String,
+    /// Why this package cannot go to that location, if so.
+    list_problem: Option<String>,
+    list_receiver: Option<Receiver<(String, Result<ChangesByChoice, String>)>>,
+    /// The last Install did not go ahead, because the list had changed.
+    list_changed: bool,
     signature: SignatureState,
     /// Apps with an install that never finished.
     interrupted: Vec<String>,
@@ -227,6 +247,11 @@ impl InstallerApp {
             prereqs: Vec::new(),
             changes: SystemChanges::default(),
             changes_by_choice: ChangesByChoice::new(),
+            manifest: None,
+            listed_for: String::new(),
+            list_problem: None,
+            list_receiver: None,
+            list_changed: false,
             signature: SignatureState::Checking,
             interrupted: Vec::new(),
             phase: Phase::Idle,
@@ -290,6 +315,8 @@ impl InstallerApp {
                 self.unpacked_bytes = package.unpacked_bytes().unwrap_or(0);
                 self.package = Some(package);
                 self.apply_manifest(&manifest);
+                self.listed_for = location_a_list_is_for(&manifest).display().to_string();
+                self.manifest = Some(manifest);
                 self.changes_by_choice = changes_by_choice;
                 self.show_changes_for_the_choices();
                 self.screen = Screen::Ready;
@@ -355,6 +382,62 @@ impl InstallerApp {
         if let Some(changes) = self.changes_by_choice.get(&self.chosen()) {
             self.changes = changes.clone();
         }
+    }
+
+    /// Whether the list on screen is for the location in the box, which is what Install is agreeing
+    /// to. A value written with a variable can be set up at one location and left out at another.
+    fn list_is_for_this_location(&self) -> bool {
+        self.manifest.is_none()
+            || (self.list_problem.is_none() && self.listed_for == self.target_root.trim())
+    }
+
+    /// Work out the list again when the location has changed, behind the window, as a large package
+    /// takes a moment. One at a time, and whatever is in the box by then is what the next is for, so
+    /// typing does not start one for each letter. A location that cannot be used gets none, and
+    /// nothing is asked of it.
+    fn keep_the_list_for_the_location(&mut self, ctx: &egui::Context) {
+        let Some(manifest) = self.manifest.clone() else {
+            return;
+        };
+        if let Some(receiver) = self.list_receiver.as_ref() {
+            match receiver.try_recv() {
+                Ok((location, Ok(lists))) => {
+                    self.changes_by_choice = lists;
+                    self.list_problem = None;
+                    self.listed_for = location;
+                    self.show_changes_for_the_choices();
+                }
+                Ok((location, Err(problem))) => {
+                    self.list_problem = Some(problem);
+                    self.listed_for = location;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(BUSY_REPAINT_INTERVAL);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.list_problem = Some("working out what it would do stopped".to_owned());
+                    self.listed_for = self.target_root.trim().to_owned();
+                }
+            }
+            self.list_receiver = None;
+        }
+        let location = self.target_root.trim().to_owned();
+        if location == self.listed_for
+            || self.phase == Phase::Running
+            || self.target_problem().is_some()
+        {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.list_receiver = Some(receiver);
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let lists = changes_for_every_choice(&manifest, Path::new(&location))
+                .map_err(|error| error.to_string());
+            let _ = sender.send((location, lists));
+            ctx.request_repaint();
+        });
     }
 
     /// A full path is required: anything else would resolve against whatever folder
@@ -447,12 +530,14 @@ impl InstallerApp {
             progress_ctx.request_repaint();
         });
         self.monitor = Some(monitor.clone());
+        self.list_changed = false;
         let (restore_user_data, restore_license) = self.chosen();
         let choices = RestoreChoices {
             target_root: PathBuf::from(self.target_root.trim()),
             apply,
             restore_user_data,
             restore_license,
+            agreed_to: apply.then(|| self.changes.clone()),
         };
         let ctx = ctx.clone();
         thread::spawn(move || {
@@ -492,6 +577,14 @@ impl InstallerApp {
                 }
                 Ok(Msg::Failed(error)) => {
                     self.error = Some(error);
+                    self.finish_run();
+                    return;
+                }
+                Ok(Msg::ListChanged(now)) => {
+                    self.changes = *now;
+                    self.list_changed = true;
+                    // All of them, for whichever way the boxes go next.
+                    self.listed_for.clear();
                     self.finish_run();
                     return;
                 }
@@ -543,15 +636,27 @@ pub fn install_as_the_window_does(
     let package = EmbeddedPackage::open(exe)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "it carries no package".to_owned())?;
+    // What the window would have on screen, worked out as it works it out.
+    let agreed_to = if apply {
+        let manifest = read_embedded_manifest(&package).map_err(|error| error.to_string())?;
+        Some(
+            system_changes_restoring(&manifest, target_root, restore_user_data, restore_license)
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
     let choices = RestoreChoices {
         target_root: target_root.to_path_buf(),
         apply,
         restore_user_data,
         restore_license,
+        agreed_to,
     };
     match run_restore(exe, &package, choices, monitor) {
         Msg::Done(result) => Ok(*result),
         Msg::Failed(error) => Err(error),
+        Msg::ListChanged(_) => Err("what it would do had changed".to_owned()),
         Msg::Cancelled => Err("it was cancelled".to_owned()),
         Msg::Progress(_) => Err("it stopped part way".to_owned()),
     }
@@ -563,6 +668,8 @@ struct RestoreChoices {
     apply: bool,
     restore_user_data: bool,
     restore_license: bool,
+    /// For an install, what the person was shown when they clicked.
+    agreed_to: Option<SystemChanges>,
 }
 
 /// Hash-check the installer's package, read its manifest, and work out what it would do.
@@ -578,18 +685,19 @@ fn load_package(exe: &Path) -> Loaded {
         Ok(manifest) => manifest,
         Err(error) => return Loaded::Failed(format!("Could not read the installer: {error}")),
     };
-    match changes_for_every_choice(&manifest) {
-        Ok(changes) => Loaded::Ready(Arc::new(package), Box::new(manifest), changes),
+    match changes_for_every_choice(&manifest, &location_a_list_is_for(&manifest)) {
+        Ok(changes) => Loaded::Ready(Arc::new(package), Arc::new(manifest), changes),
         Err(error) => Loaded::Failed(format!(
             "This installer's package cannot be used on this PC: {error}"
         )),
     }
 }
 
-/// What an install would set up, for every way a package's boxes can be set. It comes from the same
-/// review an install goes by, given the same two options.
+/// What an install to this location would set up, for every way a package's boxes can be set. It comes
+/// from the same review an install goes by, given the same location and the same two options.
 fn changes_for_every_choice(
     manifest: &PackageManifest,
+    location: &Path,
 ) -> winappmigrator_core::Result<ChangesByChoice> {
     let offers_user_data = manifest.included_user_data || manifest.included_program_data;
     let mut lists = ChangesByChoice::new();
@@ -598,7 +706,9 @@ fn changes_for_every_choice(
             if let std::collections::hash_map::Entry::Vacant(place) =
                 lists.entry((user_data, license))
             {
-                place.insert(system_changes_restoring(manifest, user_data, license)?);
+                place.insert(system_changes_restoring(
+                    manifest, location, user_data, license,
+                )?);
             }
         }
     }
@@ -638,9 +748,24 @@ fn run_restore(
         apply,
         restore_user_data,
         restore_license,
+        agreed_to,
     } = choices;
     if apply {
         logging::open_machine_log();
+    }
+    let manifest = match read_embedded_manifest(package) {
+        Ok(manifest) => manifest,
+        Err(error) => return failed(format!("Could not read the package: {error}")),
+    };
+    // Once more now that Install has been clicked, before anything is unpacked. It is the one review
+    // an install goes by, and what is agreed to is what was on screen.
+    if let Some(agreed_to) = agreed_to {
+        match system_changes_restoring(&manifest, &target_root, restore_user_data, restore_license)
+        {
+            Ok(now) if now == agreed_to => {}
+            Ok(now) => return Msg::ListChanged(Box::new(now)),
+            Err(error) => return failed(error.to_string()),
+        }
     }
     // Remove extraction directories from previous or crashed runs first, so nothing
     // accumulates even if a prior window was killed before its own cleanup could run.
@@ -665,10 +790,6 @@ fn run_restore(
     ) {
         Ok(staging) => staging,
         Err(error) => return failed(format!("Could not create a staging folder: {error}")),
-    };
-    let manifest = match read_embedded_manifest(package) {
-        Ok(manifest) => manifest,
-        Err(error) => return failed(format!("Could not read the package: {error}")),
     };
     let places = if apply {
         install_places(
@@ -759,6 +880,8 @@ impl InstallerApp {
         // Clone the theme so widget calls (which borrow it) don't conflict with
         // the mutable field access the form controls need.
         let theme = self.theme.clone();
+        let ctx = ui.ctx().clone();
+        self.keep_the_list_for_the_location(&ctx);
 
         egui::Panel::top("header")
             .frame(
@@ -861,6 +984,10 @@ impl InstallerApp {
             widgets::notice(ui, theme, Role::Neutral, "Cancelled. Nothing was changed.");
             widgets::section_gap(ui);
         }
+        if self.list_changed {
+            widgets::notice(ui, theme, Role::Warning, LIST_CHANGED_TEXT);
+            widgets::section_gap(ui);
+        }
         if let Some(outcome) = self.outcome.as_ref() {
             outcome_ui(ui, theme, outcome, self.log_path.as_deref());
             widgets::section_gap(ui);
@@ -940,7 +1067,21 @@ impl InstallerApp {
             theme,
             "What this sets up beyond files",
             Some(BEYOND_FILES_TEXT),
-            |ui| system_changes_ui(ui, theme, &self.changes),
+            |ui| {
+                if let Some(problem) = self.list_problem.as_ref() {
+                    widgets::notice(
+                        ui,
+                        theme,
+                        Role::Danger,
+                        &format!("This package cannot go to this location: {problem}"),
+                    );
+                    ui.add_space(SPACE_SM);
+                } else if self.list_receiver.is_some() {
+                    widgets::hint(ui, theme, WORKING_OUT_TEXT);
+                    ui.add_space(SPACE_SM);
+                }
+                system_changes_ui(ui, theme, &self.changes);
+            },
         );
         widgets::section_gap(ui);
 
@@ -1071,7 +1212,8 @@ impl InstallerApp {
                 return;
             }
             let valid = self.target_is_valid();
-            if widgets::button(ui, theme, ButtonKind::Primary, "Install", valid).clicked() {
+            let can_agree = valid && self.list_is_for_this_location();
+            if widgets::button(ui, theme, ButtonKind::Primary, "Install", can_agree).clicked() {
                 self.start(true, &ctx);
             }
             if widgets::button(ui, theme, ButtonKind::Secondary, "Preview changes", valid).clicked()
@@ -1142,22 +1284,44 @@ fn system_change_row(ui: &mut egui::Ui, theme: &Theme, change: &SystemChange) {
     widgets::hint(ui, theme, &change.detail);
 }
 
+/// What was left out. The first few in full, and however many a package manages to ask for, the rest
+/// are there to be read, in a list of its own so they cannot push everything else off the screen.
 fn refused_ui(ui: &mut egui::Ui, theme: &Theme, refused: &[String]) {
     for reason in refused.iter().take(MAX_LISTED_REFUSALS) {
         ui.add_space(SPACE_XS);
         widgets::notice(ui, theme, Role::Warning, reason);
     }
-    if refused.len() > MAX_LISTED_REFUSALS {
-        ui.add_space(SPACE_XS);
-        widgets::hint(
-            ui,
-            theme,
-            &format!(
-                "and {} more were left out.",
-                widgets::format_count(refused.len() - MAX_LISTED_REFUSALS)
-            ),
-        );
-    }
+    let Some(rest) = refused
+        .get(MAX_LISTED_REFUSALS..)
+        .filter(|rest| !rest.is_empty())
+    else {
+        return;
+    };
+    ui.add_space(SPACE_XS);
+    egui::CollapsingHeader::new(
+        RichText::new(format!(
+            "{} more were left out",
+            widgets::format_count(rest.len())
+        ))
+        .size(13.0)
+        .color(theme.text),
+    )
+    .id_salt("more left out")
+    .show(ui, |ui| {
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
+        egui::ScrollArea::vertical()
+            .id_salt("more left out list")
+            .max_height(MORE_LEFT_OUT_HEIGHT)
+            .show_rows(ui, row_height, rest.len(), |ui, rows| {
+                for reason in &rest[rows] {
+                    ui.add(
+                        egui::Label::new(RichText::new(reason).size(12.5).color(theme.text_muted))
+                            .truncate(),
+                    )
+                    .on_hover_text(reason);
+                }
+            });
+    });
 }
 
 /// What is wrong with a folder that has files in it, unless a record says an install was there. The
@@ -1768,17 +1932,21 @@ mod tests {
             keys.sort_unstable();
             keys
         };
+        let location = location_a_list_is_for(&manifest);
         assert_eq!(
-            keys(&changes_for_every_choice(&manifest)?),
+            keys(&changes_for_every_choice(&manifest, &location)?),
             [(false, false)]
         );
         manifest.included_license_data = true;
         assert_eq!(
-            keys(&changes_for_every_choice(&manifest)?),
+            keys(&changes_for_every_choice(&manifest, &location)?),
             [(false, false), (false, true)]
         );
         manifest.included_program_data = true;
-        assert_eq!(keys(&changes_for_every_choice(&manifest)?).len(), 4);
+        assert_eq!(
+            keys(&changes_for_every_choice(&manifest, &location)?).len(),
+            4
+        );
         Ok(())
     }
 
@@ -1819,6 +1987,86 @@ mod tests {
         assert!(finished, "the window never came back");
     }
 
+    fn run_until_the_list_is_for_the_location(harness: &mut Harness<'static, InstallerApp>) {
+        let caught_up = (0..3000).any(|_| {
+            harness.run_steps(1);
+            std::thread::sleep(Duration::from_millis(10));
+            harness.state().list_is_for_this_location()
+        });
+        assert!(caught_up, "the list never caught up with the location");
+    }
+
+    /// A list is for one location, so nothing can be agreed to until it is the one in the box.
+    #[test]
+    fn install_waits_for_the_list_of_the_location_in_the_box() -> Result<()> {
+        let work = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let installer = real_installer_in(work.path())?;
+
+        let mut app = InstallerApp::blank();
+        app.theme = Theme::new(ThemeMode::Dark);
+        let ctx = egui::Context::default();
+        app.finish_load(load_package(&installer), &ctx);
+        assert!(matches!(app.screen, Screen::Ready));
+        assert!(
+            app.list_is_for_this_location(),
+            "it opens on where the package suggests"
+        );
+        let elsewhere = work.path().join("elsewhere");
+        app.target_root = elsewhere.display().to_string();
+        assert!(!app.list_is_for_this_location());
+        app.signature = SignatureState::Unsigned;
+
+        let mut harness = harness_for(app);
+        run_until_the_list_is_for_the_location(&mut harness);
+        assert_eq!(harness.state().listed_for, elsewhere.display().to_string());
+        assert_eq!(harness.state().list_problem, None);
+        Ok(())
+    }
+
+    /// What the person agreed to is what was on the screen, so if the install would do something
+    /// else, it does not go ahead, whatever that is. They see the new list and can click again.
+    #[test]
+    fn install_does_not_go_ahead_on_a_list_that_is_out_of_date() -> Result<()> {
+        let work = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let installer = real_installer_in(work.path())?;
+        let target = work.path().join("target");
+
+        let mut app = InstallerApp::blank();
+        app.theme = Theme::new(ThemeMode::Dark);
+        let ctx = egui::Context::default();
+        app.finish_load(load_package(&installer), &ctx);
+        app.target_root = target.display().to_string();
+        app.signature = SignatureState::Unsigned;
+
+        let mut harness = harness_for(app);
+        run_until_the_list_is_for_the_location(&mut harness);
+        harness.state_mut().changes.changes.push(SystemChange {
+            kind: SystemChangeKind::Service,
+            title: "Not what it would do".to_owned(),
+            detail: String::new(),
+            high_rights: false,
+        });
+        harness.run_steps(2);
+        harness.get_by_label("Install").click();
+        run_until_done(&mut harness);
+        run_until_the_list_is_for_the_location(&mut harness);
+
+        let state = harness.state();
+        assert!(state.list_changed);
+        assert_eq!(state.error, None);
+        assert!(state.outcome.is_none());
+        assert!(
+            !state
+                .changes
+                .changes
+                .iter()
+                .any(|change| change.title == "Not what it would do")
+        );
+        assert!(!target.exists());
+        assert!(harness.query_by_label_contains("has changed").is_some());
+        Ok(())
+    }
+
     /// The window has a route of its own through staging, room, and unpacking, and everything else
     /// goes by the one for scripts. Here a real package is loaded and worked as a person would, by
     /// what is on the screen, into a folder that is only ever looked at. Installing for real changes
@@ -1853,6 +2101,7 @@ mod tests {
         if winappmigrator_core::privilege::is_elevated() {
             return Ok(());
         }
+        run_until_the_list_is_for_the_location(&mut harness);
         harness.run_steps(2);
         harness.get_by_label("Install").click();
         run_until_done(&mut harness);
@@ -2038,7 +2287,12 @@ mod tests {
                 .query_by_label_contains("Evil20 was left out")
                 .is_none()
         );
-        assert!(harness.query_by_label_contains("and 5 more").is_some());
+        assert!(
+            harness
+                .query_by_label_contains("5 more were left out")
+                .is_some(),
+            "the rest are to be had"
+        );
     }
 
     #[test]

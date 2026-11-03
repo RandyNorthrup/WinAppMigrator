@@ -29,9 +29,9 @@ use crate::registry_target::is_path_variable;
 use crate::restore_policy::is_autostart_entry;
 use crate::restore_review::{
     AppKeys, CERTIFICATES_LEFT_OUT_TEXT, CREDENTIALS_LEFT_OUT_TEXT, ChangeRow, FONTS_LEFT_OUT_TEXT,
-    NO_TARGET_YET, ReviewedPackage, SETTINGS_LEFT_OUT_TEXT, SystemChange, SystemChangeKind,
-    autostart_choice, certificate_label, change_kind_of, described_rows, driver_choice,
-    is_other_setting, notes_of, registry_item, service_choice, shortcut_choice, task_choice,
+    ReviewedPackage, SETTINGS_LEFT_OUT_TEXT, SystemChange, SystemChangeKind, autostart_choice,
+    certificate_label, change_kind_of, described_rows, driver_choice, is_other_setting, notes_of,
+    registry_item, service_choice, shortcut_choice, task_choice,
 };
 use crate::space::BuildInputs;
 
@@ -256,7 +256,7 @@ impl Footprint {
             notes: notes_of(&review),
             ..Self::default()
         };
-        footprint.add_changes(described_rows(&review, Path::new(NO_TARGET_YET)), report);
+        footprint.add_changes(described_rows(&review), report);
         footprint.refused_driver_bytes = report
             .drivers
             .iter()
@@ -902,7 +902,7 @@ fn decide(
         )?;
         let now = allowed_by(&review);
         let reasons = reasons_of(&review);
-        integrations = integration_rows(&described_rows(&review, Path::new(NO_TARGET_YET)));
+        integrations = integration_rows(&described_rows(&review));
         drop(review);
         let taken = take_out_what_is_now_refused(&mut manifest, &footprint.allowed, &now, &reasons);
         if taken.is_empty() && !took_what_needed {

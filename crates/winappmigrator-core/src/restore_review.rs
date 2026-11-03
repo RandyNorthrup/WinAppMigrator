@@ -35,6 +35,7 @@ use crate::path_utils::{
     windows_architecture_name, windows_build, windows_version_numbers,
 };
 use crate::registry_target::{app_path_entries, is_path_variable, service_image_path};
+use crate::restore::default_install_location;
 use crate::restore_policy::{
     KnownFolders, PackageRegistrations, PlatformFit, Registration, SERVICES_PREFIX, ServiceAccount,
     ShortcutPlacement, WHOEVER_INSTALLS_IT, WindowsHere, architecture_from_name,
@@ -63,8 +64,9 @@ const PARAMETERS_SUBKEY: &str = "parameters";
 const REFUSED_CODE: &str = "restore_refused";
 const DISPLAY_NAME_VALUE: &str = "DisplayName";
 pub(crate) const STATE_ROOT_REFUSAL: &str = "it is where installs keep their records";
-/// A stand-in target, for describing a package before an install location is chosen.
-pub(crate) const NO_TARGET_YET: &str = r"C:\WinAppMigrator install location";
+/// A stand-in target, for describing a package that suggests no location anything could go to. No
+/// install goes here, and what is said for it is said again for the location really chosen.
+const NO_TARGET_YET: &str = r"C:\WinAppMigrator install location";
 
 /// How to look up a service already on this PC by name.
 type ExistingService<'a> = &'a dyn Fn(&str) -> std::io::Result<Option<String>>;
@@ -180,10 +182,9 @@ impl<'a> ReviewedPackage<'a> {
         )
     }
 
-    /// What a package would be allowed, for showing before an install location has been chosen, as
-    /// the installer's window does and as the app does before anything is built. Whether an item is
-    /// allowed does not depend on where the app is installed, and it does depend on these two
-    /// options, which are the ones an install will be given.
+    /// What a package would be allowed where it suggests going, as the app shows before anything is
+    /// built. Whether an item is allowed can depend on the location: a value written with a variable
+    /// says one place, which is a file of this package only if the app goes where that is.
     pub(crate) fn before_a_location_is_chosen(
         manifest: &'a PackageManifest,
         restore_user_data: bool,
@@ -191,7 +192,7 @@ impl<'a> ReviewedPackage<'a> {
     ) -> Result<Self> {
         Self::with_folders(
             manifest,
-            Path::new(NO_TARGET_YET),
+            &location_a_list_is_for(manifest),
             restore_user_data,
             restore_license,
             &current_known_folders(),
@@ -1068,30 +1069,41 @@ pub struct SystemChanges {
     pub notes: Vec<String>,
 }
 
-/// Describe what a package would do with the options an installer's window starts on. See
-/// [`system_changes_restoring`].
+/// Describe what a package would do where it suggests going, with the options an installer's window
+/// starts on. See [`system_changes_restoring`].
 pub fn system_changes(manifest: &PackageManifest) -> Result<SystemChanges> {
     system_changes_restoring(
         manifest,
+        &location_a_list_is_for(manifest),
         manifest.included_user_data || manifest.included_program_data,
         manifest.included_license_data,
     )
 }
 
-/// Describe what an install with these options would do, for showing before anything is installed.
-/// It goes by the same review an install does, given the same two options, so what this says was
-/// left out is left out. Whether an item is allowed does not depend on where the app is installed,
-/// so this is right for any install location chosen later. `Err` means the package would be refused
-/// whole.
+/// Where a package's list is worked out for until a location is chosen: where it suggests going. A
+/// location that is no use as one, or on another PC, which nothing may ask anything of before anyone
+/// has agreed to anything, gets a stand-in. Nothing can be installed until one is chosen, and the list
+/// is worked out again for that.
+pub fn location_a_list_is_for(manifest: &PackageManifest) -> PathBuf {
+    default_install_location(manifest)
+        .filter(|place| place.is_absolute() && !is_network_path(&place.to_string_lossy()))
+        .unwrap_or_else(|| PathBuf::from(NO_TARGET_YET))
+}
+
+/// Describe what an install to this location with these options would do, for showing before anything
+/// is installed. It is the review an install does, given the same location and the same two options,
+/// so what this says was left out is left out, and what it lists is what is set up. A value written
+/// with a variable can be a file of this package at one location and nothing at another, so a list is
+/// for one location. `Err` means the package would be refused whole.
 pub fn system_changes_restoring(
     manifest: &PackageManifest,
+    target_root: &Path,
     restore_user_data: bool,
     restore_license: bool,
 ) -> Result<SystemChanges> {
     let fit = refuse_what_cannot_run_here(manifest)?;
-    let review =
-        ReviewedPackage::before_a_location_is_chosen(manifest, restore_user_data, restore_license)?;
-    let mut changes = describe(&review, Path::new(NO_TARGET_YET));
+    let review = ReviewedPackage::new(manifest, target_root, restore_user_data, restore_license)?;
+    let mut changes = describe(&review);
     changes.notes.extend(fit.warnings);
     Ok(changes)
 }
@@ -1283,9 +1295,9 @@ pub(crate) fn overlaps_state_root(target_root: &Path, state_root: &Path) -> bool
         )
 }
 
-fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
+fn describe(review: &ReviewedPackage<'_>) -> SystemChanges {
     SystemChanges {
-        changes: described_rows(review, target_root)
+        changes: described_rows(review)
             .into_iter()
             .map(|row| row.change)
             .collect(),
@@ -1341,7 +1353,8 @@ pub(crate) fn autostart_choice(entry: &RegistryEntry) -> ChoiceId {
 
 /// The words a package's list of what it sets up uses, with each thing's own way to leave it out.
 /// Everything on that list comes through here, so what the app and an installer say cannot differ.
-pub(crate) fn described_rows(review: &ReviewedPackage<'_>, target_root: &Path) -> Vec<ChangeRow> {
+pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
+    let target_root = review.map.target_root();
     let mut changes = Vec::new();
     for service in &review.services {
         let starts = service
@@ -2666,7 +2679,7 @@ mod tests {
             "Updater",
             Some(task_xml(r"C:\Program Files\Acme\acme.exe", "S-1-5-18")),
         )];
-        let changes = describe(&review(&manifest)?, Path::new(TARGET));
+        let changes = describe(&review(&manifest)?);
 
         assert_eq!(changes.changes.len(), 1);
         assert_eq!(changes.changes[0].kind, SystemChangeKind::ScheduledTask);
@@ -2754,7 +2767,7 @@ mod tests {
                 r"C:\Program Files\Acme\acme.exe",
             ),
         ];
-        let changes = describe(&review(&manifest)?, Path::new(TARGET));
+        let changes = describe(&review(&manifest)?);
         let kinds: Vec<_> = changes.changes.iter().map(|change| change.kind).collect();
         assert_eq!(
             kinds,
@@ -2920,7 +2933,7 @@ mod tests {
         );
         let mut manifest = acme_manifest();
         manifest.scheduled_tasks_detected = vec![task(r"\Acme\", "Updater", Some(xml))];
-        let changes = describe(&review(&manifest)?, Path::new(TARGET));
+        let changes = describe(&review(&manifest)?);
         assert_eq!(changes.changes.len(), 1, "{:?}", changes.refused);
         let row = &changes.changes[0];
         assert!(row.detail.contains("S-1-5-21-1-2-3-500"), "{}", row.detail);
@@ -2954,7 +2967,7 @@ mod tests {
             reviewed.tasks[0].xml.matches(account.sid.as_str()).count(),
             2
         );
-        let changes = describe(&reviewed, Path::new(TARGET));
+        let changes = describe(&reviewed);
         assert!(
             changes.changes[0].detail.contains(THE_PERSON_INSTALLING),
             "{:?}",
@@ -3026,7 +3039,7 @@ mod tests {
     }
 
     fn other_settings_row(manifest: &PackageManifest) -> Result<Option<SystemChange>> {
-        Ok(describe(&review(manifest)?, Path::new(TARGET))
+        Ok(describe(&review(manifest)?)
             .changes
             .into_iter()
             .find(|change| change.kind == SystemChangeKind::OtherSettings))
@@ -3149,7 +3162,7 @@ mod tests {
             "<!-- looks empty -->S-1-5-18",
         );
         manifest.scheduled_tasks_detected = vec![task(r"\Acme\", "Updater", Some(hidden))];
-        let changes = describe(&review(&manifest)?, Path::new(TARGET));
+        let changes = describe(&review(&manifest)?);
         assert!(changes.changes[0].high_rights);
         assert!(changes.changes[0].detail.contains("SYSTEM"));
         Ok(())
@@ -3237,7 +3250,7 @@ mod tests {
             ),
             variable("ACME_HOME", SOURCE),
         ];
-        let changes = describe(&review(&manifest)?, Path::new(TARGET));
+        let changes = describe(&review(&manifest)?);
 
         let listed: Vec<_> = changes
             .changes
@@ -3300,34 +3313,26 @@ mod tests {
         rows
     }
 
-    /// What a person is shown is worked out for no location, and an install for a real one.
+    /// What the window asks, by its own route, and what an install goes by, with Windows' own
+    /// variables and no stand-in anywhere.
     fn what_is_shown_and_what_is_done(
         manifest: &PackageManifest,
+        location: &Path,
         restore_user_data: bool,
         restore_license: bool,
     ) -> Result<(SystemChanges, SystemChanges)> {
-        let shown = ReviewedPackage::with_folders(
-            manifest,
-            Path::new(NO_TARGET_YET),
-            restore_user_data,
-            restore_license,
-            &folders(),
-            &|text| text.to_owned(),
-            &|_| Ok(None),
-        )?;
+        let shown =
+            system_changes_restoring(manifest, location, restore_user_data, restore_license)?;
         let done = ReviewedPackage::with_folders(
             manifest,
-            Path::new(TARGET),
+            location,
             restore_user_data,
             restore_license,
-            &folders(),
-            &|text| text.to_owned(),
-            &|_| Ok(None),
+            &current_known_folders(),
+            &expand_env_vars,
+            &service_image_path,
         )?;
-        Ok((
-            describe(&shown, Path::new(NO_TARGET_YET)),
-            describe(&done, Path::new(TARGET)),
-        ))
+        Ok((shown, describe(&done)))
     }
 
     #[test]
@@ -3337,23 +3342,129 @@ mod tests {
             r"C:\ProgramData\Acme\helper.exe",
         ] {
             let manifest = package_that_runs_something_from_a_data_folder(data);
-            for (user_data, license) in every_choice() {
-                let (shown, done) = what_is_shown_and_what_is_done(&manifest, user_data, license)?;
-                assert_eq!(
-                    rows_of(&shown),
-                    rows_of(&done),
-                    "{data}, user data {user_data}, license {license}"
-                );
-                assert_eq!(
-                    shown.refused.len(),
-                    done.refused.len(),
-                    "{data}, user data {user_data}, license {license}: {:?} {:?}",
-                    shown.refused,
-                    done.refused
-                );
+            for location in [Path::new(SOURCE), Path::new(TARGET)] {
+                for (user_data, license) in every_choice() {
+                    let (shown, done) =
+                        what_is_shown_and_what_is_done(&manifest, location, user_data, license)?;
+                    assert_eq!(
+                        rows_of(&shown),
+                        rows_of(&done),
+                        "{data} at {}, user data {user_data}, license {license}",
+                        location.display()
+                    );
+                    assert_eq!(shown.refused, done.refused);
+                }
             }
         }
         Ok(())
+    }
+
+    fn task_running_as(command: &str, account: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Principals><Principal id="Author"><UserId>{account}</UserId></Principal></Principals><Actions Context="Author"><Exec><Command>{command}</Command></Exec></Actions></Task>"#
+        )
+    }
+
+    /// A task, a Run value and a service's DLL, each written with a variable, which is one place
+    /// whatever location is chosen and so is a file of this package only at the one that holds it.
+    fn package_writing_paths_with_a_variable() -> PackageManifest {
+        let mut manifest = acme_manifest();
+        acme_app(&mut manifest);
+        let mut service_with_a_dll = service("AcmeSvc", &format!(r"{SOURCE}\bin\svc.exe"));
+        service_with_a_dll.parameters = vec![value(
+            RegistryHive::LocalMachine,
+            r"SYSTEM\CurrentControlSet\Services\AcmeSvc\Parameters",
+            "ServiceDll",
+            r"%ProgramFiles%\Acme\bin\svc.exe",
+        )];
+        manifest.services_detected = vec![service_with_a_dll];
+        manifest.scheduled_tasks_detected = vec![task(
+            "\\Acme\\",
+            "HiddenSystemTask",
+            Some(task_running_as(r"%ProgramFiles%\Acme\acme.exe", "S-1-5-18")),
+        )];
+        manifest.registry_keys_exported = vec![value(
+            RegistryHive::LocalMachine,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            "HiddenRun",
+            r"%ProgramFiles%\Acme\acme.exe",
+        )];
+        manifest
+    }
+
+    /// A list worked out for a stand-in location said these were left out, at the very location the
+    /// package suggests, and the install then set them all up.
+    #[test]
+    fn what_is_written_with_a_variable_is_listed_as_the_install_will_do_it() -> Result<()> {
+        let manifest = package_writing_paths_with_a_variable();
+        let suggested = location_a_list_is_for(&manifest);
+        assert_eq!(suggested, Path::new(SOURCE));
+        for (user_data, license) in every_choice() {
+            let (shown, done) =
+                what_is_shown_and_what_is_done(&manifest, &suggested, user_data, license)?;
+            assert_eq!(rows_of(&shown), rows_of(&done));
+            assert_eq!(shown.refused, done.refused);
+            assert!(
+                shown.changes.iter().any(|change| {
+                    change.kind == SystemChangeKind::ScheduledTask && change.high_rights
+                }),
+                "{shown:?}"
+            );
+            for kind in [SystemChangeKind::Autostart, SystemChangeKind::Service] {
+                assert!(
+                    shown.changes.iter().any(|change| change.kind == kind),
+                    "{kind:?}: {shown:?}"
+                );
+            }
+            assert_eq!(shown.refused, Vec::<String>::new());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn at_another_location_the_list_says_what_that_install_would_do() -> Result<()> {
+        let manifest = package_writing_paths_with_a_variable();
+        let (shown, done) =
+            what_is_shown_and_what_is_done(&manifest, Path::new(TARGET), false, false)?;
+        assert_eq!(rows_of(&shown), rows_of(&done));
+        assert_eq!(shown.refused, done.refused);
+        assert!(
+            !shown
+                .changes
+                .iter()
+                .any(|change| change.kind == SystemChangeKind::ScheduledTask),
+            "{shown:?}"
+        );
+        assert!(
+            shown
+                .refused
+                .iter()
+                .any(|reason| reason.contains("HiddenSystemTask")),
+            "{:?}",
+            shown.refused
+        );
+        Ok(())
+    }
+
+    /// With nowhere usable suggested, nothing has been asked of it and the list is for a stand-in.
+    #[test]
+    fn a_list_is_not_worked_out_for_a_location_on_another_pc() {
+        let mut manifest = acme_manifest();
+        acme_app(&mut manifest);
+        for location in [
+            r"\\evil.example\share\app",
+            "//evil.example/share/app",
+            "relative",
+        ] {
+            if let Some(app) = manifest.application_metadata.as_mut() {
+                app.install_location = Some(PathBuf::from(location));
+            }
+            assert_eq!(
+                location_a_list_is_for(&manifest),
+                Path::new(NO_TARGET_YET),
+                "{location}"
+            );
+        }
     }
 
     #[test]
@@ -3714,7 +3825,7 @@ mod tests {
         let manifest = with_integrations();
         let reviewed = review(&manifest)?;
         assert!(reviewed.refused.is_empty(), "{:?}", reviewed.refused);
-        let changes = describe(&reviewed, Path::new(TARGET)).changes;
+        let changes = describe(&reviewed).changes;
         let kinds: Vec<SystemChangeKind> = changes.iter().map(|change| change.kind).collect();
         for wanted in [
             SystemChangeKind::ShellExtension,
@@ -3795,7 +3906,7 @@ mod tests {
         ]);
         let reviewed = review(&manifest)?;
         assert!(reviewed.refused.is_empty(), "{:?}", reviewed.refused);
-        let changes = describe(&reviewed, Path::new(TARGET)).changes;
+        let changes = describe(&reviewed).changes;
         let row = |kind: SystemChangeKind, title: &str| {
             changes
                 .iter()
