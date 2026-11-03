@@ -164,6 +164,8 @@ pub struct NearMatchLook {
     /// What looked close and is not to be offered, and why.
     pub refused: Vec<RefusedNearMatch>,
     others: Vec<OtherApp>,
+    /// What holds other things side by side here, which every folder looked at is asked about.
+    known_bases: std::cell::OnceCell<Vec<PathBuf>>,
     /// The product codes of other apps, for an entry that says it is one of those.
     products_of_others: Vec<String>,
     /// What Windows Installer says other apps have, as [`comparable_path`] writes it, in order. An
@@ -518,7 +520,8 @@ impl NearMatchLook {
             return Some("this app was installed for one account, and this is not that account's");
         }
         let windows_dir = system.windows_dir();
-        if !is_walkable_app_dir(path, &known_base_dirs(system), &windows_dir)
+        let known_bases = self.known_bases.get_or_init(|| known_base_dirs(system));
+        if !is_walkable_app_dir(path, known_bases, &windows_dir)
             || is_shared_folder(&logical)
             || is_shared_by_name(&logical)
         {
@@ -541,6 +544,46 @@ impl NearMatchLook {
             return Some(IS_ANOTHER_APPS);
         }
         None
+    }
+
+    /// Why a folder something on record names, other than where the app itself is, is not to be
+    /// walked as the app's, if so. What holds what is shared, or Windows', is nobody's whole, and
+    /// another app's folder is that app's, whatever a record of this one's says. Being somewhere in
+    /// another app's folder says less, as a vendor's products can be all in one, with one of them
+    /// on record for all of it. Microsoft's own apps are in `Program Files` under the names that say
+    /// a folder is everyone's, because it is Microsoft that means it.
+    pub(crate) fn root_refusal(
+        &self,
+        path: &Path,
+        is_microsofts_own: bool,
+        system: &SystemContext,
+    ) -> Option<&'static str> {
+        if has_parent_step(path) || !system.may_read(path) {
+            return Some("it may not be read");
+        }
+        if !is_written_as_it_is_called(path) {
+            return Some("it is not written the way it is really called");
+        }
+        let logical = system.logical_path(path);
+        let known_bases = self.known_bases.get_or_init(|| known_base_dirs(system));
+        let is_where_microsoft_keeps_its_own = is_microsofts_own
+            && system
+                .program_files_dirs()
+                .iter()
+                .any(|base| path_is_within(path, base));
+        if !is_walkable_app_dir(path, known_bases, &system.windows_dir())
+            || is_shared_folder(&logical)
+            || (!is_where_microsoft_keeps_its_own && is_shared_by_name(&logical))
+        {
+            return Some("it holds what is shared, or is part of Windows");
+        }
+        let holds_another_app = self.others.iter().any(|other| {
+            other
+                .folders
+                .iter()
+                .any(|folder| path_is_within(folder, path))
+        });
+        holds_another_app.then_some(IS_ANOTHER_APPS)
     }
 
     /// Whether another app is there, or anywhere in it, or the folder is what another app would
@@ -744,6 +787,9 @@ pub(crate) fn look_for_near_matches(
         near_named_folders(&base, scan, system, is_cancelled, &mut folders);
     }
     for (folder, near) in folders {
+        if is_cancelled() {
+            break;
+        }
         let name = file_name_string(&folder);
         let already_offered = look.offers.iter().any(|offer| {
             offer
@@ -1098,6 +1144,53 @@ mod tests {
             install_location: app.install_location.as_deref(),
             names,
             installed_for_one_account: false,
+        }
+    }
+
+    #[test]
+    fn a_folder_on_record_is_refused_for_what_it_holds_and_not_for_what_it_is_in() {
+        let work = tempfile::tempdir().expect("a folder");
+        let vendor = work.path().join("Vendor");
+        let dist = vendor.join(r"Client\dist");
+        std::fs::create_dir_all(&dist).expect("folders");
+        let system = SystemContext::live();
+        let other = other_app_record("Vendor Agent", Some(&vendor));
+        let look = look_with_others(std::slice::from_ref(&other));
+        assert_eq!(
+            look.root_refusal(&dist, false, &system),
+            None,
+            "a vendor's products can be all in one folder"
+        );
+        assert_eq!(
+            look.root_refusal(&vendor, false, &system),
+            Some(IS_ANOTHER_APPS),
+            "that folder is the other app's"
+        );
+        assert_eq!(
+            look.root_refusal(work.path(), false, &system),
+            Some(IS_ANOTHER_APPS),
+            "and what holds it holds that"
+        );
+    }
+
+    #[test]
+    fn a_folder_on_record_is_not_shared_by_a_record_saying_so() {
+        let system = SystemContext::live();
+        let look = NearMatchLook::default();
+        for shared in [
+            r"C:\Program Files\Common Files\System\ado",
+            r"C:\Program Files\Common Files\Microsoft Shared\VC",
+            r"C:\Program Files\WindowsApps\Foo_1.0_x64__abc",
+            r"C:\ProgramData\Microsoft\Crypto\RSA",
+        ] {
+            let path = Path::new(shared);
+            if path.is_dir() {
+                assert!(
+                    look.root_refusal(path, false, &system).is_some(),
+                    "{shared}"
+                );
+            }
+            assert!(is_shared_by_name(path), "{shared}");
         }
     }
 

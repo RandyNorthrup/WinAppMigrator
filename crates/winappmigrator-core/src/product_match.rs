@@ -21,6 +21,9 @@ const MIN_USER_FOLDER_NAME_LEN: usize = 4;
 /// `ASUS` qualifies for `ASUSTeK Computer Inc.`. Shorter ones must be equal: `Git` is not
 /// `GitHub`.
 const MIN_VENDOR_PREFIX_LEN: usize = 4;
+/// A word this short at the start of a longer one is usually another word: `Intel` of `IntelliJ`,
+/// `Micro` of `Microsoft`.
+const SHORTEST_VENDOR_WORD_TO_GO_BY_THE_START_OF: usize = 6;
 /// A multi-word product name this long is specific enough to match under any parent.
 const MIN_ANY_PARENT_NAME_LEN: usize = 6;
 /// An executable's or folder's one-word name this short is a word anyone could use, as `Code` is, so
@@ -456,8 +459,10 @@ impl ProductNames {
     fn is_vendor_word(&self, word: &str) -> bool {
         self.vendors.iter().any(|vendor| {
             vendor == word
-                || (vendor.len() >= MIN_VENDOR_PREFIX_LEN
-                    && word.len() >= MIN_VENDOR_PREFIX_LEN
+                || (vendor.len() >= SHORTEST_VENDOR_WORD_TO_GO_BY_THE_START_OF
+                    && word.len() >= SHORTEST_VENDOR_WORD_TO_GO_BY_THE_START_OF
+                    && !is_publisher_of_everything(word)
+                    && !is_publisher_of_everything(vendor)
                     && (vendor.starts_with(word) || word.starts_with(vendor.as_str())))
         })
     }
@@ -847,6 +852,15 @@ mod tests {
 
         let game = ProductNames::new(Some("Skyrim"), Some("Bethesda"), &[], &[]);
         assert!(game.matches_nested("My Games", "Skyrim", USER));
+    }
+
+    #[test]
+    fn a_vendor_is_not_another_one_whose_name_starts_the_same() {
+        let focus = ProductNames::new(Some("Credentials"), Some("Micro Focus"), &[], &[]);
+        assert!(!focus.matches_nested("Microsoft", "Credentials", PROGRAM));
+        let intel = ProductNames::new(Some("Graphics"), Some("Intel Corporation"), &[], &[]);
+        assert!(!intel.matches_nested("IntelliJ IDEA", "Graphics", PROGRAM));
+        assert!(intel.matches_nested("Intel", "Graphics", PROGRAM));
     }
 
     #[test]

@@ -77,6 +77,7 @@ const MAX_CONFIDENCE_SCORE: i32 = 100;
 /// How many of an app's programs to record what they need of. Its main program, its services, and
 /// its drivers always are, and they come first.
 const MOST_PROGRAMS_RECORDED: usize = 2000;
+const MICROSOFT: &str = "microsoft";
 
 #[derive(Debug, Clone)]
 struct ConfidenceInputs<'a> {
@@ -258,7 +259,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     if let (Some(app), Some(source)) = (source_app.as_ref(), install_source.as_mut())
         && app.main_executable.is_none()
     {
-        add_app_paths_roots(source, &executable_path, &system);
+        add_app_paths_roots(source, app, &executable_path, &system);
     }
 
     let mut pe_scan = scan_pe(&executable_path)?;
@@ -431,6 +432,36 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         }
         extra_roots.extend(source.roots.iter().cloned());
     }
+    // However it was found, a folder is only walked as the app's if it could be. Its own are, as far
+    // as what they say goes. What a person ticked has been through this already.
+    let own_folders: Vec<PathBuf> = install_location
+        .iter()
+        .cloned()
+        .chain(executable_path.parent().map(Path::to_path_buf))
+        .collect();
+    let is_microsofts_own = publisher
+        .as_deref()
+        .is_some_and(|publisher| publisher.to_ascii_lowercase().starts_with(MICROSOFT));
+    let mut folders_left_out = Vec::new();
+    extra_roots.retain(|root| {
+        let is_its_own = own_folders
+            .iter()
+            .any(|folder| path_is_within(root, folder));
+        let refusal = (!is_its_own)
+            .then(|| near_look.root_refusal(root, is_microsofts_own, &system))
+            .flatten();
+        if let Some(why) = refusal {
+            folders_left_out.push(Warning::new(
+                "folder_left_out_of_the_app",
+                WarningSeverity::Warning,
+                format!(
+                    "Something on record for this app names a folder that was left out, because {why}."
+                ),
+                Some(root.display().to_string()),
+            ));
+        }
+        refusal.is_none()
+    });
     extra_roots.append(&mut picks.roots);
     monitor.report(ScanStep::Files);
     let DiscoveredFiles {
@@ -638,6 +669,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     take_secrets_from_license_values(&mut license_registry_entries, &mut left_out);
     let account_traces_of_the_scan = account_traces;
     let mut warnings = system.warnings();
+    warnings.append(&mut folders_left_out);
     warnings.append(&mut picks.warnings);
     warnings.extend(pe_scan.warnings);
     warnings.extend(resolver_warnings);

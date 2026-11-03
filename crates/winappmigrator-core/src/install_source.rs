@@ -182,7 +182,7 @@ pub(crate) fn detect_install_source_unless(
                     "Windows Installer database: {} component key paths",
                     authoritative_file_count + paths.registry_keys.len()
                 ));
-                let found = footprint_roots(&paths.files, &names, system);
+                let found = footprint_roots(&paths.files, &names, system, is_cancelled);
                 roots.extend(found.dirs);
                 loose_files.extend(found.loose_files);
                 recorded_files = paths.files;
@@ -201,7 +201,7 @@ pub(crate) fn detect_install_source_unless(
                     evidence.push(format!(
                         "Inno Setup uninstall log: {authoritative_file_count} recorded paths"
                     ));
-                    let found = footprint_roots(&manifest.files, &names, system);
+                    let found = footprint_roots(&manifest.files, &names, system, is_cancelled);
                     roots.extend(found.dirs);
                     loose_files.extend(found.loose_files);
                     recorded_files = manifest.files;
@@ -224,7 +224,7 @@ pub(crate) fn detect_install_source_unless(
                     evidence.push(format!(
                         "NSIS AdvUninstLog uninstall.log: {authoritative_file_count} recorded paths"
                     ));
-                    let found = footprint_roots(&files, &names, system);
+                    let found = footprint_roots(&files, &names, system, is_cancelled);
                     roots.extend(found.dirs);
                     loose_files.extend(found.loose_files);
                     recorded_files = files;
@@ -274,10 +274,9 @@ pub(crate) fn detect_install_source_unless(
 
     // App Paths registration is an authoritative, documented source of the
     // launcher location and any extra DLL search directories.
-    if let Some(executable) = app.main_executable.as_ref()
-        && let Some(name) = executable.file_name().and_then(|value| value.to_str())
-    {
-        let app_paths = app_paths_roots(name, system);
+    if let Some(executable) = app.main_executable.as_ref() {
+        let app_paths =
+            app_paths_roots(executable, app.install_location.as_deref(), &names, system);
         if !app_paths.is_empty() {
             evidence.push("App Paths registration".to_owned());
             roots.extend(app_paths);
@@ -286,14 +285,19 @@ pub(crate) fn detect_install_source_unless(
 
     // The uninstaller almost always lives in the install tree, so its directory
     // is a reliable anchor even when InstallLocation is absent. A Windows host such
-    // as rundll32 or an installer's cached copy of itself says nothing about the app.
+    // as rundll32 or an installer's cached copy of itself says nothing about the app. Nor does one
+    // somewhere else: a setup run from someone's Downloads is that file, and not all that is with it.
     if let Some(uninstall) = app.uninstall_string.as_deref()
         && let Some(executable) = split_command_executable_path(uninstall)
         && let Some(parent) = executable.parent()
         && let Some(parent) = system.resolve_source_path(parent)
         && !is_windows_or_installer_cache_path(&parent, system)
     {
-        roots.push(parent);
+        if uninstaller_folder_is_the_apps(app, &parent, &names, system) {
+            roots.push(parent);
+        } else {
+            loose_files.extend(system.resolve_source_path(&executable));
+        }
     }
 
     InstallSource {
@@ -308,13 +312,64 @@ pub(crate) fn detect_install_source_unless(
     }
 }
 
+/// Whether a folder says by its name that it is this app's: it is called what the app is called, or
+/// is in a folder of the app's vendor by that name.
+fn is_named_for_the_app(folder: &Path, names: &ProductNames) -> bool {
+    let Some(name) = folder.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let parent = folder
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|parent| parent.to_str());
+    names.matches_top_level(name, MatchScope::ProgramFolders)
+        || parent
+            .is_some_and(|parent| names.matches_nested(parent, name, MatchScope::ProgramFolders))
+}
+
+/// Whether the folder an uninstaller is in is the app's. Inside where its entry says the app is, it
+/// is. With no such place said, one in `Program Files` is what an installer made, and anywhere else
+/// it has to say so by its name, which is what tells `D:\Tools\Acme` from `D:\Downloads`.
+fn uninstaller_folder_is_the_apps(
+    app: &InstalledApp,
+    folder: &Path,
+    names: &ProductNames,
+    system: &SystemContext,
+) -> bool {
+    if is_named_for_the_app(folder, names) {
+        return true;
+    }
+    if let Some(location) = app
+        .install_location
+        .as_deref()
+        .and_then(|location| system.resolve_source_path(location))
+    {
+        return path_is_within(folder, &location);
+    }
+    if app
+        .main_executable
+        .as_deref()
+        .and_then(Path::parent)
+        .is_some_and(|parent| path_is_within(folder, parent))
+    {
+        return true;
+    }
+    system
+        .program_files_dirs()
+        .iter()
+        .any(|base| path_is_within(folder, base))
+}
+
 /// Add the App Paths directories of an executable that was only chosen after
 /// `detect_install_source` ran, because the uninstall entry named none.
-pub fn add_app_paths_roots(source: &mut InstallSource, executable: &Path, system: &SystemContext) {
-    let Some(name) = executable.file_name().and_then(|value| value.to_str()) else {
-        return;
-    };
-    let app_paths = app_paths_roots(name, system);
+pub fn add_app_paths_roots(
+    source: &mut InstallSource,
+    app: &InstalledApp,
+    executable: &Path,
+    system: &SystemContext,
+) {
+    let names = app_product_names(app);
+    let app_paths = app_paths_roots(executable, app.install_location.as_deref(), &names, system);
     if !app_paths.is_empty() {
         source.evidence.push("App Paths registration".to_owned());
         let mut roots = std::mem::take(&mut source.roots);
@@ -1311,23 +1366,52 @@ fn file_contains_signature(path: &Path, signature: &[u8]) -> bool {
         .any(|window| window == signature)
 }
 
-fn app_paths_roots(executable_name: &str, system: &SystemContext) -> Vec<PathBuf> {
+/// What an App Paths entry for this program adds. Its key goes by a file's name, which another program
+/// can have, so it has to say it is this program. What it lists as where to look can be anything, and
+/// only counts as far as it is the app's own.
+fn app_paths_roots(
+    executable: &Path,
+    install_location: Option<&Path>,
+    names: &ProductNames,
+    system: &SystemContext,
+) -> Vec<PathBuf> {
+    let Some(executable_name) = executable.file_name().and_then(|value| value.to_str()) else {
+        return Vec::new();
+    };
+    let is_this_program = |path: &str| {
+        let path = Path::new(path.trim().trim_matches('"'));
+        system
+            .resolve_source_path(path)
+            .is_some_and(|path| comparable_path(&path) == comparable_path(executable))
+    };
+    let is_the_apps = |folder: &Path| {
+        executable
+            .parent()
+            .is_some_and(|parent| path_is_within(folder, parent))
+            || install_location.is_some_and(|location| path_is_within(folder, location))
+            || is_named_for_the_app(folder, names)
+    };
     let mut roots = Vec::new();
     let subkey = format!("{APP_PATHS_PREFIX}\\{executable_name}");
     for flags in [KEY_READ | KEY_WOW64_64KEY, KEY_READ | KEY_WOW64_32KEY] {
         let Ok(key) = system.open_hklm(&subkey, flags) else {
             continue;
         };
-        if let Ok(default) = key.get_value::<String, _>("")
-            && let Some(parent) = PathBuf::from(default.trim_matches('"')).parent()
+        if !key
+            .get_value::<String, _>("")
+            .is_ok_and(|default| is_this_program(&default))
         {
-            roots.extend(system.resolve_source_path(parent));
+            continue;
         }
+        roots.extend(executable.parent().map(Path::to_path_buf));
         if let Ok(path_value) = key.get_value::<String, _>("Path") {
             for segment in path_value.split(';') {
                 let trimmed = segment.trim().trim_matches('"');
-                if !trimmed.is_empty() {
-                    roots.extend(system.resolve_source_path(&PathBuf::from(trimmed)));
+                if !trimmed.is_empty()
+                    && let Some(folder) = system.resolve_source_path(Path::new(trimmed))
+                    && is_the_apps(&folder)
+                {
+                    roots.push(folder);
                 }
             }
         }
@@ -1812,6 +1896,7 @@ fn footprint_roots(
     files: &[PathBuf],
     names: &ProductNames,
     system: &SystemContext,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> InstallRoots {
     let windows_dir = system.windows_dir();
     let footprint: Vec<PathBuf> = files
@@ -1820,7 +1905,11 @@ fn footprint_roots(
         .cloned()
         .collect();
     let mut roots = minimal_install_roots(&footprint, names);
-    roots.loose_files.retain(|path| path.is_file());
+    // Each of these asks the disk, and a record can name any number. Whatever is left of it when a
+    // person stops waiting has nothing to go by, and stopping is all that comes of it.
+    roots
+        .loose_files
+        .retain(|path| !is_cancelled() && path.is_file());
     roots
 }
 
