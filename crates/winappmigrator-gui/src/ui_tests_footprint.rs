@@ -186,18 +186,14 @@ pub(crate) fn sample_report(app: &InstalledApp) -> ScanReport {
         FileClassification::AppOwned,
     ));
     let data = r"C:\ProgramData\Fabrikam Data Sync";
-    files.extend(files_in(
-        data,
-        90,
-        300 * 1024,
-        FileClassification::MachineAppData,
-    ));
-    let mut not_copied = files_in(
+    // Looked at with the User data option off, as a person first sees it: this is known of, and stays.
+    let mut not_copied = files_in(data, 90, 300 * 1024, FileClassification::MachineAppData);
+    not_copied.extend(files_in(
         r"C:\Users\You\AppData\Roaming\Fabrikam Data Sync",
         48,
         64 * 1024,
         FileClassification::UserData,
-    );
+    ));
     for entry in &mut not_copied {
         entry.should_copy = false;
         entry.package_relative_path = None;
@@ -252,7 +248,7 @@ pub(crate) fn sample_report(app: &InstalledApp) -> ScanReport {
                 file_count: 0,
                 total_bytes: 0,
                 copyable_bytes: 0,
-                included: true,
+                included: false,
             },
         ],
         file_inventory: files,
@@ -379,6 +375,19 @@ const FLAGS: ScanFlags = ScanFlags {
     include_program_data: false,
     include_license_data: false,
 };
+
+/// What the sample's machine-wide data is like with the User data option on, when it goes in.
+fn with_its_data_going(report: &mut ScanReport) {
+    for entry in &mut report.file_inventory {
+        if entry.classification == FileClassification::MachineAppData {
+            entry.should_copy = true;
+            entry.package_relative_path = entry
+                .path
+                .file_name()
+                .map(|name| PathBuf::from(r"files\_external\data").join(name));
+        }
+    }
+}
 
 /// The app with a scan that has finished, as it would be if it was just looked at. Nothing of the PC
 /// the test runs on is in what is shown, whoever is running it.
@@ -656,7 +665,8 @@ fn a_small_window_does_not_cut_what_a_row_says_of_how_it_was_installed() {
 #[test]
 fn every_group_reads_in_plain_words_and_in_the_installers_own() {
     let mut harness = harness_with(ThemeMode::Light, |app| {
-        ready_app(app);
+        select_first(app);
+        with_ready_scan_of(app, with_its_data_going);
         app.open_groups.clear();
     });
     harness.run_steps(2);

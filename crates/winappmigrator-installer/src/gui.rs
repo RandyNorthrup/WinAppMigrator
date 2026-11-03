@@ -1952,10 +1952,22 @@ mod tests {
     #[test]
     fn ready_screen_offers_install_and_preview() {
         for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
-            let mut harness = harness_for(sample_installer(mode));
+            let harness = harness_for(sample_installer(mode));
             assert!(harness.query_by_label("Install").is_some());
             assert!(harness.query_by_label("Preview changes").is_some());
             assert!(harness.query_by_label("User data").is_some());
+
+            // The README's picture, of the installer it shows being built: nothing of an account's
+            // is in it, so there is no PC to name and no data to ask about.
+            let mut built_as_shown = sample_installer(mode);
+            built_as_shown.source_computer = String::new();
+            built_as_shown.show_user_data = false;
+            built_as_shown.show_license = false;
+            built_as_shown.restore_user_data = false;
+            built_as_shown.restore_license = false;
+            let mut harness = harness_for(built_as_shown);
+            assert!(harness.query_by_label_contains("Captured from").is_none());
+            assert!(harness.query_by_label("User data").is_none());
             preview(&mut harness, &format!("ready-{name}"));
         }
     }

@@ -82,7 +82,7 @@ fn sample_outcome(warnings: Vec<Warning>, package_valid: bool) -> MigrationOutco
             package_root: PathBuf::from(r"C:\staging"),
             manifest_path: PathBuf::from(r"C:\staging\manifest.json"),
             reports_dir: PathBuf::from(r"C:\staging\reports"),
-            files_copied: 1284,
+            files_copied: 1290,
             warnings,
             self_extracting_archive_path: Some(PathBuf::from(
                 r"C:\Users\You\WinAppMigrator\Fabrikam Data Sync\Fabrikam_Data_Sync_installer.exe",
@@ -371,7 +371,7 @@ fn a_running_build_locks_the_selection() {
         app.migrate_state = OperationState::Running;
         app.build_progress = Some(BuildProgress::Build(BuildStep::Packing {
             done: 412,
-            total: 1284,
+            total: 1290,
             bytes_done: 90 * 1024 * 1024,
             bytes_total: 410 * 1024 * 1024,
         }));
@@ -381,7 +381,7 @@ fn a_running_build_locks_the_selection() {
     assert!(harness.query_by_label("Cancel").is_some());
     assert!(
         harness
-            .query_by_label_contains("Reading and compressing files: 412 of 1,284")
+            .query_by_label_contains("Reading and compressing files: 412 of 1,290")
             .is_some()
     );
     assert!(
