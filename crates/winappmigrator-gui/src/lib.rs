@@ -59,10 +59,7 @@ pub fn run() -> eframe::Result {
         sweep_leaked_hive_mounts();
         signed_in_user();
     });
-    let native_options = eframe::NativeOptions {
-        viewport: WINDOW_SIZES.viewport("winappmigrator"),
-        ..Default::default()
-    };
+    let native_options = winappmigrator_ui::window_options(WINDOW_SIZES.viewport("winappmigrator"));
 
     eframe::run_native(
         WINDOW_TITLE,

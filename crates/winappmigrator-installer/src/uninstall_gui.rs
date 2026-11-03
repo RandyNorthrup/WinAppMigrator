@@ -37,10 +37,7 @@ pub fn run(cli: UninstallCli) -> eframe::Result {
     let for_window = Arc::clone(&finished);
     let result = eframe::run_native(
         WINDOW_TITLE,
-        eframe::NativeOptions {
-            viewport: WINDOW_SIZES.viewport("winappmigrator-uninstaller"),
-            ..Default::default()
-        },
+        winappmigrator_ui::window_options(WINDOW_SIZES.viewport("winappmigrator-uninstaller")),
         Box::new(move |cc| {
             theme::install_fonts(&cc.egui_ctx, &system_root().join("Fonts"));
             let mut app = UninstallApp::new(cli.id.clone(), cli.remove_user_data, for_window);

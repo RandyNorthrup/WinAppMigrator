@@ -62,10 +62,8 @@ const BEYOND_FILES_TEXT: &str = "All of this is done with administrator rights. 
                                  come back, and runtimes it installs stay.";
 
 pub fn run() -> eframe::Result {
-    let native_options = eframe::NativeOptions {
-        viewport: WINDOW_SIZES.viewport("winappmigrator-installer"),
-        ..Default::default()
-    };
+    let native_options =
+        winappmigrator_ui::window_options(WINDOW_SIZES.viewport("winappmigrator-installer"));
     eframe::run_native(
         WINDOW_TITLE,
         native_options,
