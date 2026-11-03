@@ -1,6 +1,7 @@
-# The second half of a real move between two PCs. This runner has never seen the app, has no Rust,
-# and has none of this project's code but the installers it was handed. It installs them and looks at
-# the result with Windows' own tools. See crates/winappmigrator-installer/tests/elevated_move.rs.
+# The second half of a real move between two PCs. This runner has never seen the app, builds nothing,
+# and has nothing of this project's to run but this script and the installers it was handed. It
+# installs them and looks at the result with Windows' own tools. See
+# crates/winappmigrator-installer/tests/elevated_move.rs.
 #
 # Run only by the job that downloads those installers, on a runner that is thrown away afterward.
 param([Parameter(Mandatory)][string]$Folder)
@@ -43,7 +44,7 @@ function Uninstaller-Of([string]$Id) { "C:\ProgramData\WinAppMigrator\installs\$
 
 function Check-Files($Files, [string]$Root, [string]$What) {
     foreach ($file in $Files) {
-        # By the full form of the path, as PowerShell's own commands will not look at a file named aux.h.
+        # By the full form of the path, which is a file whatever this Windows makes of a name like aux.h.
         $path = '\\?\' + (Join-Path $Root $file.relative)
         if (-not [IO.File]::Exists($path)) {
             Check "$What`: $($file.relative) is there" $false 'it is not'

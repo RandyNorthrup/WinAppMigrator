@@ -1,8 +1,8 @@
 //! The first half of a real move between two PCs, on GitHub's throwaway Windows runner and nowhere
 //! else. A harmless fake app is set up here and built into installers with the real code. They go to
 //! another runner, which has never seen any of this, and `check-moved-app.ps1` installs them there
-//! and looks at the result with Windows' own tools. That runner has no Rust and none of this
-//! project's code but the installers themselves.
+//! and looks at the result with Windows' own tools. That runner builds nothing, and has nothing of
+//! this project's to run but the installers themselves and that script.
 //!
 //! **This changes the machine it runs on, and nothing here undoes it.** It does nothing unless
 //! `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`, `WAM_ELEVATED_E2E=1`, and
@@ -111,11 +111,18 @@ fn powershell(script: &str) -> TestResult<String> {
 }
 
 /// Each file below a folder with its hash, by .NET, and nothing of this project's. By the full form of
-/// each path, as PowerShell's own commands, `Get-FileHash` among them, will not look at a file named
-/// `aux.h`, even on a Windows where it is a file like any other.
+/// each path, as Windows PowerShell's `Get-FileHash` will not look at a file named `aux.h`, even on a
+/// Windows where it is a file like any other.
 fn tree_hashes(root: &Path) -> TestResult<Vec<serde_json::Value>> {
     let shown = powershell(&format!(
-        "$root = '{}'; $sha = [Security.Cryptography.SHA256]::Create();          Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object {{            $stream = [IO.File]::OpenRead('\\?\' + $_.FullName);            $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '');            $stream.Dispose();            '{{0}}|{{1}}' -f $_.FullName.Substring($root.Length + 1), $hash.ToLowerInvariant() }}",
+        r"$root = (Get-Item -LiteralPath '{}').FullName
+        $sha = [Security.Cryptography.SHA256]::Create()
+        Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object {{
+            $stream = [IO.File]::OpenRead('\\?\' + $_.FullName)
+            $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '')
+            $stream.Dispose()
+            '{{0}}|{{1}}' -f $_.FullName.Substring($root.Length + 1), $hash.ToLowerInvariant()
+        }}",
         root.display()
     ))?;
     let mut files = Vec::new();
@@ -251,6 +258,32 @@ fn real_app_options(output: &Path, installers: &Path) -> TestResult<PackageOptio
         user_profile: ProfileChoice::Default,
         ui_theme: None,
     })
+}
+
+/// This only reads, in a folder of its own, so it runs anywhere, and a mistake in what those hashes
+/// are found by shows up here and not twelve minutes into the job on a runner.
+#[test]
+fn tree_hashes_reads_a_file_named_for_a_device_and_a_name_that_is_not_ascii() -> TestResult {
+    const SHA256_OF_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    let folder = tempfile::tempdir()?;
+    // The full form, which makes it a file on any Windows.
+    let root = fs::canonicalize(folder.path())?;
+    fs::create_dir_all(root.join("data"))?;
+    fs::write(root.join("aux.h"), "abc")?;
+    fs::write(root.join(r"data\Größe.txt"), "abc")?;
+
+    let found = tree_hashes(folder.path())?;
+
+    assert_eq!(found.len(), 2, "{found:?}");
+    for relative in ["aux.h", r"data\Größe.txt"] {
+        assert!(
+            found
+                .iter()
+                .any(|file| file["relative"] == relative && file["sha256"] == SHA256_OF_ABC),
+            "{relative} is not in {found:?}"
+        );
+    }
+    Ok(())
 }
 
 #[test]
