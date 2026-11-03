@@ -1426,14 +1426,18 @@ pub fn apply_choices(
     })
 }
 
-/// What a report says of each place, after some of what is in them has gone.
+/// What a report says of each place, after some of what is in them has gone. A place can be inside
+/// another, and what is in it counts as being in it and not the one around it.
 pub(crate) fn recount_locations(report: &mut ScanReport) {
     let mut counts: Vec<(usize, u64, u64)> = vec![(0, 0, 0); report.footprint_locations.len()];
     for file in &report.file_inventory {
         let found = report
             .footprint_locations
             .iter()
-            .position(|location| path_is_within(&file.original_path, &location.path));
+            .enumerate()
+            .filter(|(_, location)| path_is_within(&file.original_path, &location.path))
+            .max_by_key(|(_, location)| location.path.as_os_str().len())
+            .map(|(index, _)| index);
         if let Some(found) = found {
             let size = file.size_bytes.unwrap_or(0);
             let count = &mut counts[found];
@@ -2210,6 +2214,28 @@ mod tests {
         );
         assert_eq!(chosen.report.secrets_left_out.len(), 1, "it is still said");
         Ok(())
+    }
+
+    #[test]
+    fn what_is_in_a_place_inside_another_counts_as_being_in_it() {
+        let mut inner = report().footprint_locations[0].clone();
+        inner.path = PathBuf::from(format!(r"{INSTALL}\plugins"));
+        let mut report = report();
+        // Largest first, as a scan sorts them, which puts the one around it ahead of it.
+        report.footprint_locations.push(inner);
+        recount_locations(&mut report);
+        let in_plugins = report
+            .footprint_locations
+            .iter()
+            .find(|location| location.path.ends_with("plugins"));
+        assert!(in_plugins.is_some_and(|location| location.file_count > 0));
+        let all_files = report.file_inventory.len();
+        let counted: usize = report
+            .footprint_locations
+            .iter()
+            .map(|location| location.file_count)
+            .sum();
+        assert!(counted <= all_files, "each is counted once");
     }
 
     #[test]
