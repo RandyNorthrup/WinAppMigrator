@@ -18,10 +18,16 @@ use crate::{
     WinAppMigratorApp,
 };
 
-const DETAIL_PANEL_WIDTH: f32 = 400.0;
+/// The details panel takes what share of the window this says, within these, so that a list of what
+/// goes in has room to read on a large window and the list of apps has room on a small one.
+const DETAIL_PANEL_SHARE: f32 = 0.40;
+const MIN_DETAIL_PANEL_WIDTH: f32 = 420.0;
+const MAX_DETAIL_PANEL_WIDTH: f32 = 600.0;
 const ROW_HEIGHT: f32 = 36.0;
 const COLUMN_GUTTER: f32 = 12.0;
 const COLUMN_FRACTIONS: [f32; 5] = [0.38, 0.25, 0.14, 0.13, 0.10];
+const LICENSE_OPTION_TEXT: &str = "May be tied to this PC and need reactivation on the new one.";
+const USER_DATA_OPTION_TEXT: &str = "Settings, Documents, Saved Games, and ProgramData.";
 /// How many warnings to list before summarizing the rest.
 const MAX_LISTED_WARNINGS: usize = 200;
 /// How many accounts' names fit across the details panel, of a width anyone would have.
@@ -47,8 +53,10 @@ impl WinAppMigratorApp {
             )
             .show(ui, |ui| self.draw_header(ui, &theme));
 
+        let detail_width = (ui.ctx().content_rect().width() * DETAIL_PANEL_SHARE)
+            .clamp(MIN_DETAIL_PANEL_WIDTH, MAX_DETAIL_PANEL_WIDTH);
         egui::Panel::right("details")
-            .exact_size(DETAIL_PANEL_WIDTH)
+            .exact_size(detail_width)
             .resizable(false)
             .frame(egui::Frame::new().fill(theme.surface))
             .show(ui, |ui| self.draw_details(ui, &theme));
@@ -377,16 +385,18 @@ impl WinAppMigratorApp {
             .hline(rect.x_range(), separator, Stroke::new(1.0, theme.border));
     }
 
-    /// Select an app and prefill the default output directory for it. Selection is
-    /// locked during a build: the build and its result belong to the app it started
-    /// with.
+    /// Select an app and prefill the default output directory for it. What was chosen for another
+    /// app means nothing for this one, and any scan of that one stops the next time the window
+    /// looks. Selection is locked during a build: the build and its result belong to the app it
+    /// started with.
     pub(crate) fn select_app(&mut self, index: usize) {
-        if self.is_building() {
+        if self.is_building() || self.selected_app_index == Some(index) {
             return;
         }
         self.selected_app_index = Some(index);
         self.output_dir = crate::default_output_for(&self.apps[index].display_name);
         self.start_profile_lookup(self.apps[index].clone());
+        self.forget_choices();
         // A fresh selection starts a fresh migration result.
         self.migrate_state = OperationState::Idle;
         self.last_outcome = None;
@@ -443,64 +453,45 @@ impl WinAppMigratorApp {
                             // The result goes first: it is what the user is waiting
                             // for, and it holds the installer's path and folder button.
                             self.draw_build_result(ui, theme);
-                            ui.add_space(SPACE_MD);
+                            ui.add_space(SPACE_SM);
                             draw_app_facts(ui, theme, &app);
-                            ui.add_space(SPACE_LG);
-                            self.draw_build_options(ui, theme);
+                            ui.add_space(SPACE_MD);
+                            self.draw_footprint(ui, theme);
                         });
                 });
             });
     }
 
-    fn draw_build_options(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+    /// What is asked of a scan, so a change here looks at the app again. What it found can then be
+    /// chosen from, which is all a matter of what is left out.
+    pub(crate) fn draw_options(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         let enabled = !self.is_building();
-        widgets::field_label(ui, theme, "Include in the installer");
-        ui.add_space(2.0);
-        let mut always = true;
-        widgets::option_row(
-            ui,
-            theme,
-            &mut always,
-            "Program files and registry",
-            "Always included, with services, tasks, shortcuts, and runtimes.",
-            false,
-        );
-        widgets::option_row(
-            ui,
-            theme,
-            &mut self.backup_license,
-            "License and activation data",
-            "May be tied to this PC and need reactivation on the new one.",
-            enabled,
-        );
-        widgets::option_row(
-            ui,
-            theme,
-            &mut self.backup_user_data,
-            "User data",
-            "Settings, Documents, Saved Games, and ProgramData.",
-            enabled,
-        );
-        self.draw_profile_choice(ui, theme, enabled);
-
-        ui.add_space(SPACE_MD);
-        widgets::path_field(
-            ui,
-            theme,
-            "Output folder",
-            &mut self.output_dir,
-            r"C:\Users\You\WinAppMigrator",
-            enabled,
-            || rfd::FileDialog::new().pick_folder(),
-        );
-        if !self.output_dir_is_valid() {
-            ui.add_space(SPACE_XS);
-            widgets::hint(
+        widgets::control_row(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_MD;
+            widgets::inline_choice(
                 ui,
                 theme,
-                "Enter a full folder path, such as D:\\Installers.",
+                &mut self.backup_license,
+                "License and activation data",
+                LICENSE_OPTION_TEXT,
+                enabled,
             );
+            widgets::inline_choice(
+                ui,
+                theme,
+                &mut self.backup_user_data,
+                "User data",
+                USER_DATA_OPTION_TEXT,
+                enabled,
+            );
+        });
+        if self.backup_license {
+            widgets::hint(ui, theme, LICENSE_OPTION_TEXT);
         }
+        if self.backup_user_data {
+            widgets::hint(ui, theme, USER_DATA_OPTION_TEXT);
+        }
+        self.draw_profile_choice(ui, theme, enabled);
     }
 
     /// Whose data goes in, shown only when more than one account has any, or when something about
@@ -575,13 +566,6 @@ impl WinAppMigratorApp {
             });
             ui.add_space(SPACE_SM);
             widgets::progress_bar(ui, theme, fraction);
-            if let Some(room) = self.build_room.as_ref() {
-                ui.add_space(SPACE_XS);
-                widgets::hint(ui, theme, &format!("Needs {}", room.summary()));
-                for note in room.could_not_tell() {
-                    widgets::hint(ui, theme, &note);
-                }
-            }
             ui.add_space(SPACE_MD);
             let cancelling = self.is_cancelling();
             if widgets::wide_button(ui, theme, ButtonKind::Secondary, "Cancel", !cancelling)
@@ -602,7 +586,26 @@ impl WinAppMigratorApp {
             );
             ui.add_space(SPACE_SM);
         }
-        let can_build = self.stub_available && self.output_dir_is_valid();
+        // Beside the button that writes there, so that where it goes is always in view.
+        widgets::path_field(
+            ui,
+            theme,
+            "Output folder",
+            &mut self.output_dir,
+            r"C:\Users\You\WinAppMigrator",
+            true,
+            || rfd::FileDialog::new().pick_folder(),
+        );
+        if !self.output_dir_is_valid() {
+            ui.add_space(SPACE_XS);
+            widgets::hint(
+                ui,
+                theme,
+                "Enter a full folder path, such as D:\\Installers.",
+            );
+        }
+        ui.add_space(SPACE_SM);
+        let can_build = self.can_build();
         // Once an installer exists, the result is the next thing to act on.
         let (kind, label) = if matches!(self.migrate_state, OperationState::Completed) {
             (ButtonKind::Secondary, "Create installer again")
@@ -792,27 +795,17 @@ fn draw_app_title(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp) {
     });
 }
 
+/// Who made it, which version, and where it is, on as few lines as that takes, so that what goes
+/// in the installer is what the panel is about.
 fn draw_app_facts(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp) {
-    widgets::kv_row(
-        ui,
-        theme,
-        "Publisher",
-        app.publisher.as_deref().unwrap_or("Unknown"),
-    );
-    widgets::kv_row(
-        ui,
-        theme,
-        "Version",
-        app.version.as_deref().unwrap_or("Unknown"),
-    );
+    let publisher = app.publisher.as_deref().unwrap_or("Unknown publisher");
+    let line = match app.version.as_deref() {
+        Some(version) => format!("{publisher}, version {version}"),
+        None => publisher.to_owned(),
+    };
+    widgets::hint(ui, theme, &line);
     if let Some(location) = app.install_location.as_ref() {
-        ui.add_space(SPACE_SM);
-        widgets::mono_path(
-            ui,
-            theme,
-            "Install location",
-            &location.display().to_string(),
-        );
+        widgets::hint(ui, theme, &location.display().to_string());
     }
 }
 
@@ -827,18 +820,33 @@ fn busy_row(ui: &mut egui::Ui, theme: &Theme, label: &str) {
 /// that lost files still hash-verifies, because a file that was never copied has
 /// nothing to check, so that must not read as a clean success.
 pub(crate) fn outcome_summary(outcome: &MigrationOutcome) -> (Role, String) {
-    let missed = outcome
-        .package
-        .warnings
-        .iter()
-        .filter(|warning| warning.code == "file_copy_failed")
-        .count();
+    let count_of = |code: &str| {
+        outcome
+            .package
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == code)
+            .count()
+    };
+    let missed = count_of("file_copy_failed");
+    let gone = count_of("file_gone_since_it_was_looked_at");
     if !outcome.verification.package_valid {
         (
             Role::Danger,
             "Do not use this installer: it failed its hash check.".to_owned(),
         )
-    } else if missed > 0 {
+    } else if gone > 0 && missed == 0 {
+        (
+            Role::Warning,
+            format!(
+                "Installer built, but {gone} {} gone since the app was looked at, so {} not in it. \
+                 See Warnings below.",
+                if gone == 1 { "file was" } else { "files were" },
+                if gone == 1 { "it is" } else { "they are" },
+            ),
+        )
+    } else if missed + gone > 0 {
+        let missed = missed + gone;
         (
             Role::Warning,
             format!(
@@ -872,7 +880,13 @@ fn two_files_text(installer: &std::path::Path, data_file: &std::path::Path) -> S
     )
 }
 
-fn warning_list(ui: &mut egui::Ui, theme: &Theme, title: &str, warnings: &[Warning], open: bool) {
+pub(crate) fn warning_list(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    title: &str,
+    warnings: &[Warning],
+    open: bool,
+) {
     if warnings.is_empty() {
         return;
     }
@@ -927,8 +941,8 @@ fn warning_row(ui: &mut egui::Ui, theme: &Theme, warning: &Warning) {
 
 fn progress_label(progress: Option<&BuildProgress>) -> (String, Option<f32>) {
     match progress {
-        None | Some(BuildProgress::Build(BuildStep::Scanning)) => {
-            ("Reverse-engineering the app…".to_owned(), None)
+        None | Some(BuildProgress::Build(BuildStep::Scanning | BuildStep::Preparing)) => {
+            ("Working out what goes in…".to_owned(), None)
         }
         Some(BuildProgress::Build(BuildStep::RoomChecked(_))) => {
             ("Checking there is room…".to_owned(), None)

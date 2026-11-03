@@ -124,18 +124,39 @@ fn copy_failure() -> Warning {
     )
 }
 
+/// A scan that finds what the sample app has, with nothing of the PC this runs on.
+fn fake_scan() -> crate::ScanRunner {
+    std::sync::Arc::new(|options, _monitor| match &options.selection {
+        winappmigrator_core::AppSelection::InstalledApp(app) => {
+            Ok(crate::ui_tests_footprint::sample_report(app))
+        }
+        winappmigrator_core::AppSelection::ExecutablePath(_) => Err(
+            winappmigrator_core::WinAppMigratorError::InvalidInput("no such app".to_owned()),
+        ),
+    })
+}
+
 fn loaded_app(mode: ThemeMode) -> impl FnOnce(&egui::Context) -> WinAppMigratorApp {
     move |ctx| {
         let mut app = WinAppMigratorApp::new(ctx.clone(), mode);
         app.apps = sample_apps();
         app.inventory_state = InventoryState::Loaded;
         app.stub_available = true;
+        app.set_scan_runner(fake_scan());
         app
     }
 }
 
-fn harness_with(
+pub(crate) fn harness_with(
     mode: ThemeMode,
+    setup: impl FnOnce(&mut WinAppMigratorApp),
+) -> Harness<'static, WinAppMigratorApp> {
+    harness_sized(mode, egui::vec2(1240.0, 780.0), setup)
+}
+
+pub(crate) fn harness_sized(
+    mode: ThemeMode,
+    size: egui::Vec2,
     setup: impl FnOnce(&mut WinAppMigratorApp),
 ) -> Harness<'static, WinAppMigratorApp> {
     let ctx = egui::Context::default();
@@ -144,7 +165,7 @@ fn harness_with(
     setup(&mut app);
 
     let mut builder = Harness::builder();
-    builder = builder.with_size(egui::vec2(1240.0, 780.0));
+    builder = builder.with_size(size);
     let builder = if preview_dir().is_some() {
         builder.wgpu()
     } else {
@@ -157,6 +178,9 @@ fn harness_with(
         })
         .build_ui_state(
             |ui, app: &mut WinAppMigratorApp| {
+                // What a frame of the real window does before it draws.
+                app.poll_workers();
+                app.keep_scan_current();
                 // The harness adds a margin around its UI. The real window has none.
                 let window = ui.ctx().content_rect();
                 ui.scope_builder(egui::UiBuilder::new().max_rect(window), |ui| app.draw(ui));
@@ -172,7 +196,7 @@ fn preview_dir() -> Option<PathBuf> {
 }
 
 /// Save a PNG of the current state when previews were asked for.
-fn preview(harness: &mut Harness<'_, WinAppMigratorApp>, name: &str) {
+pub(crate) fn preview(harness: &mut Harness<'_, WinAppMigratorApp>, name: &str) {
     let Some(directory) = preview_dir() else {
         return;
     };
@@ -184,10 +208,16 @@ fn preview(harness: &mut Harness<'_, WinAppMigratorApp>, name: &str) {
     let _ = image.save(directory.join(format!("{name}.png")));
 }
 
-fn select_first(app: &mut WinAppMigratorApp) {
+pub(crate) fn select_first(app: &mut WinAppMigratorApp) {
     app.select_app(1);
     // The default comes from the real user profile, which has no place in a screenshot.
     app.output_dir = r"C:\Users\You\WinAppMigrator\Fabrikam Data Sync".to_owned();
+}
+
+/// [`select_first`], with the app looked at and found to have what the sample has.
+fn select_first_looked_at(app: &mut WinAppMigratorApp) {
+    select_first(app);
+    crate::ui_tests_footprint::with_ready_scan(app);
 }
 
 #[test]
@@ -203,11 +233,11 @@ fn nothing_selected_invites_a_pick() {
 #[test]
 fn selected_app_offers_the_build() {
     for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
-        let mut harness = harness_with(mode, select_first);
+        let mut harness = harness_with(mode, select_first_looked_at);
         assert!(harness.query_by_label("Create installer").is_some());
         assert!(
             harness
-                .query_by_label("License and activation data")
+                .query_by_label_contains("License and activation data")
                 .is_some()
         );
         preview(&mut harness, &format!("selected-{name}"));
@@ -325,7 +355,7 @@ fn when_who_is_signed_in_cannot_be_told_that_is_said_and_no_one_is_assumed() {
 
 #[test]
 fn before_the_accounts_have_been_looked_at_a_build_goes_by_the_default() {
-    let harness = harness_with(ThemeMode::Dark, select_first);
+    let harness = harness_with(ThemeMode::Dark, select_first_looked_at);
     assert_eq!(harness.state().profile_choice(), ProfileChoice::Default);
 }
 
@@ -334,7 +364,7 @@ fn a_running_build_locks_the_selection() {
     // Selecting another row mid-build used to reset the state and re-enable the build
     // button, starting a second build that deleted the first one's staging folder.
     let mut harness = harness_with(ThemeMode::Dark, |app| {
-        select_first(app);
+        select_first_looked_at(app);
         app.migrate_state = OperationState::Running;
         app.build_progress = Some(BuildProgress::Build(BuildStep::Packing {
             done: 412,
@@ -352,10 +382,8 @@ fn a_running_build_locks_the_selection() {
             .is_some()
     );
     assert!(
-        harness
-            .query_by_label_contains("Needs up to 412.0 MiB on C:")
-            .is_some(),
-        "the estimate is in the window, using what is already there"
+        harness.query_by_label("356.0 GB").is_some(),
+        "how much room there is is in the window, as the build itself found it"
     );
     preview(&mut harness, "building-dark");
 
@@ -406,7 +434,7 @@ fn a_clean_build_reads_as_success() {
 
     for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
         let mut harness = harness_with(mode, |app| {
-            select_first(app);
+            select_first_looked_at(app);
             app.migrate_state = OperationState::Completed;
             app.last_outcome = Some(sample_outcome(Vec::new(), true));
         });
@@ -427,7 +455,7 @@ fn a_build_too_big_for_one_file_says_its_two_files_must_stay_together() {
     };
     for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
         let mut harness = harness_with(mode, |app| {
-            select_first(app);
+            select_first_looked_at(app);
             app.migrate_state = OperationState::Completed;
             app.last_outcome = Some(two_files());
         });
@@ -466,7 +494,7 @@ fn a_partial_build_does_not_read_as_success() {
     assert!(message.contains("2 files"), "{message}");
 
     let mut harness = harness_with(ThemeMode::Dark, |app| {
-        select_first(app);
+        select_first_looked_at(app);
         app.migrate_state = OperationState::Completed;
         app.last_outcome = Some(sample_outcome(vec![copy_failure()], true));
     });
@@ -476,6 +504,25 @@ fn a_partial_build_does_not_read_as_success() {
             .is_some()
     );
     preview(&mut harness, "partial-dark");
+}
+
+#[test]
+fn files_gone_since_the_app_was_looked_at_are_said_to_be() {
+    let gone = Warning::new(
+        "file_gone_since_it_was_looked_at",
+        WarningSeverity::Warning,
+        "This was there when the app was looked at and is gone now.",
+        Some(r"C:\Program Files\Fabrikam\engine.dll".to_owned()),
+    );
+    let outcome = sample_outcome(vec![gone.clone()], true);
+    let (role, message) = outcome_summary(&outcome);
+    assert!(role == Role::Warning);
+    assert!(message.contains("1 file was gone"), "{message}");
+
+    let outcome = sample_outcome(vec![gone, copy_failure()], true);
+    let (role, message) = outcome_summary(&outcome);
+    assert!(role == Role::Warning);
+    assert!(message.contains("2 files"), "{message}");
 }
 
 #[test]

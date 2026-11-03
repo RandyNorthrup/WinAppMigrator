@@ -41,6 +41,7 @@ pub enum Icon {
     Monitor,
     ChevronUp,
     ChevronDown,
+    ChevronRight,
 }
 
 /// A single value tile shown in a metrics row.
@@ -667,6 +668,247 @@ pub fn option_row(
     response
 }
 
+/// How tall a row of a long list is. They are all the same, so that a list of any length can be
+/// scrolled with only the rows in view drawn.
+pub const LIST_ROW_HEIGHT: f32 = 44.0;
+
+fn paint_list_row_text(
+    ui: &Ui,
+    theme: &Theme,
+    rect: Rect,
+    left: f32,
+    title: &str,
+    detail: &str,
+    trailing: Option<&str>,
+) {
+    const TRAILING_GAP: f32 = SPACE_SM;
+    let right = rect.right() - SPACE_SM;
+    let trailing_left = trailing.map_or(right, |text| {
+        let galley =
+            ui.painter()
+                .layout_no_wrap(text.to_owned(), theme::regular(12.5), theme.text_muted);
+        let top = rect.top() + 7.0;
+        let left = right - galley.size().x;
+        ui.painter()
+            .galley(pos2(left, top), galley, theme.text_muted);
+        left
+    });
+    paint_elided(
+        ui,
+        title,
+        theme::semibold(13.5),
+        theme.text,
+        left,
+        rect.top() + 14.0,
+        (trailing_left - TRAILING_GAP - left).max(0.0),
+    );
+    paint_elided(
+        ui,
+        detail,
+        theme::regular(12.5),
+        theme.text_muted,
+        left,
+        rect.top() + 31.0,
+        (right - left).max(0.0),
+    );
+}
+
+/// A checkbox row of one height, whose title and description are cut with `…` to fit and whose
+/// tooltip has all of it, for a list that scrolls by rows. The whole row is the click target, and
+/// the space bar works it when it has the focus. A disabled row reads as what it says.
+pub fn choice_row(
+    ui: &mut Ui,
+    theme: &Theme,
+    checked: &mut bool,
+    title: &str,
+    detail: &str,
+    trailing: Option<&str>,
+    enabled: bool,
+) -> Response {
+    const BOX_SIZE: f32 = 16.0;
+    const BOX_GAP: f32 = 9.0;
+    let width = ui.available_width();
+    let (rect, mut response) = allocate_control(ui, vec2(width, LIST_ROW_HEIGHT), enabled);
+    if enabled && response.clicked() {
+        *checked = !*checked;
+        response.mark_changed();
+    }
+    let selected = *checked;
+    let name = format!("{title}, {detail}");
+    response.widget_info(|| WidgetInfo::selected(A11yRole::CheckBox, enabled, selected, &name));
+    if enabled && response.hovered() {
+        ui.painter().rect_filled(rect, RADIUS_SM, theme.card_hover);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.shrink(1.0),
+            RADIUS_SM,
+            Stroke::new(1.5, theme.accent),
+            StrokeKind::Inside,
+        );
+    }
+    let box_rect = Rect::from_min_size(
+        pos2(rect.left() + SPACE_XS, rect.top() + 6.0),
+        vec2(BOX_SIZE, BOX_SIZE),
+    );
+    paint_checkbox(ui, theme, box_rect, selected, enabled);
+    paint_list_row_text(
+        ui,
+        theme,
+        rect,
+        box_rect.right() + BOX_GAP,
+        title,
+        detail,
+        trailing,
+    );
+    response.on_hover_text(format!("{title}\n{detail}"))
+}
+
+/// A checkbox with one line of text, sized to it, to sit beside others in a row. What it does is
+/// its tooltip and part of its accessible name.
+pub fn inline_choice(
+    ui: &mut Ui,
+    theme: &Theme,
+    checked: &mut bool,
+    title: &str,
+    description: &str,
+    enabled: bool,
+) -> Response {
+    const BOX_SIZE: f32 = 16.0;
+    const BOX_GAP: f32 = 7.0;
+    let galley = ui
+        .painter()
+        .layout_no_wrap(title.to_owned(), theme::semibold(13.0), theme.text);
+    let size = vec2(
+        BOX_SIZE + BOX_GAP + galley.size().x + SPACE_XS,
+        CONTROL_HEIGHT,
+    );
+    let (rect, mut response) = allocate_control(ui, size, enabled);
+    if enabled && response.clicked() {
+        *checked = !*checked;
+        response.mark_changed();
+    }
+    let selected = *checked;
+    let name = format!("{title}, {description}");
+    response.widget_info(|| WidgetInfo::selected(A11yRole::CheckBox, enabled, selected, &name));
+    if enabled && response.hovered() {
+        ui.painter().rect_filled(rect, RADIUS_SM, theme.card_hover);
+    }
+    paint_focus_ring(ui, theme, rect, &response);
+    let box_rect = Rect::from_min_size(
+        pos2(rect.left() + 2.0, rect.center().y - BOX_SIZE / 2.0),
+        vec2(BOX_SIZE, BOX_SIZE),
+    );
+    paint_checkbox(ui, theme, box_rect, selected, enabled);
+    let top = rect.center().y - galley.size().y / 2.0;
+    ui.painter()
+        .galley(pos2(box_rect.right() + BOX_GAP, top), galley, theme.text);
+    response.on_hover_text(description)
+}
+
+fn paint_checkbox(ui: &Ui, theme: &Theme, box_rect: Rect, selected: bool, enabled: bool) {
+    let accent = if enabled {
+        theme.accent_fill
+    } else {
+        theme.text_subtle
+    };
+    if selected {
+        ui.painter().rect_filled(box_rect, RADIUS_SM - 2, accent);
+        paint_icon(
+            ui.painter(),
+            Icon::Check,
+            box_rect.shrink(3.0),
+            theme.on_accent,
+        );
+    } else {
+        ui.painter().rect(
+            box_rect,
+            RADIUS_SM - 2,
+            theme.field_bg,
+            Stroke::new(
+                1.5,
+                if enabled {
+                    theme.border_strong
+                } else {
+                    theme.border
+                },
+            ),
+            StrokeKind::Inside,
+        );
+    }
+}
+
+/// A row of a list that has nothing to choose, in the same height and place as [`choice_row`].
+pub fn plain_row(ui: &mut Ui, theme: &Theme, title: &str, detail: &str, trailing: Option<&str>) {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(vec2(width, LIST_ROW_HEIGHT), Sense::hover());
+    let name = format!("{title}, {detail}");
+    response.widget_info(|| WidgetInfo::labeled(A11yRole::Label, true, &name));
+    paint_list_row_text(
+        ui,
+        theme,
+        rect,
+        rect.left() + SPACE_XS,
+        title,
+        detail,
+        trailing,
+    );
+    response.on_hover_text(format!("{title}\n{detail}"));
+}
+
+/// A heading that opens and closes what is below it, with a summary at its right. Returns whether
+/// it was clicked. The Enter key and the space bar work it when it has the focus.
+pub fn disclosure_row(
+    ui: &mut Ui,
+    theme: &Theme,
+    open: bool,
+    title: &str,
+    summary: &str,
+) -> Response {
+    const HEIGHT: f32 = 34.0;
+    let width = ui.available_width();
+    let (rect, response) = allocate_control(ui, vec2(width, HEIGHT), true);
+    let name = format!(
+        "{title}, {summary}, {}",
+        if open { "open" } else { "closed" }
+    );
+    response.widget_info(|| WidgetInfo::labeled(A11yRole::Button, true, &name));
+    if response.hovered() {
+        ui.painter().rect_filled(rect, RADIUS_SM, theme.card_hover);
+    }
+    paint_focus_ring(ui, theme, rect, &response);
+    let icon_rect =
+        Rect::from_center_size(pos2(rect.left() + 11.0, rect.center().y), vec2(11.0, 11.0));
+    paint_icon(
+        ui.painter(),
+        if open {
+            Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
+        },
+        icon_rect,
+        theme.text_muted,
+    );
+    let summary_galley =
+        ui.painter()
+            .layout_no_wrap(summary.to_owned(), theme::regular(12.5), theme.text_muted);
+    let summary_left = rect.right() - SPACE_XS - summary_galley.size().x;
+    let top = rect.center().y - summary_galley.size().y / 2.0;
+    ui.painter()
+        .galley(pos2(summary_left, top), summary_galley, theme.text_muted);
+    let title_left = icon_rect.right() + SPACE_XS;
+    paint_elided(
+        ui,
+        title,
+        theme::semibold(13.5),
+        theme.text,
+        title_left,
+        rect.center().y,
+        (summary_left - SPACE_SM - title_left).max(0.0),
+    );
+    response
+}
+
 /// A single-line text field at the shared control height.
 pub fn text_field(ui: &mut Ui, value: &mut String, hint: &str, width: f32) -> Response {
     ui.add(
@@ -968,6 +1210,9 @@ pub fn paint_icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color3
         }
         Icon::ChevronDown => {
             line(&[(0.14, 0.34), (0.5, 0.7), (0.86, 0.34)]);
+        }
+        Icon::ChevronRight => {
+            line(&[(0.34, 0.14), (0.7, 0.5), (0.34, 0.86)]);
         }
     }
 }
