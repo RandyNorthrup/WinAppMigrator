@@ -10,7 +10,9 @@ use std::time::{Duration, SystemTime};
 use winappmigrator_core::file_discovery::first_link_to;
 use winappmigrator_core::journal::{STAGING_PREFIX, admin_only_staging_root, staging_root_in};
 use winappmigrator_core::path_utils::is_network_path;
-use winappmigrator_core::privilege::{ProtectedFolder, others_could_keep_a_folder_made_in};
+use winappmigrator_core::privilege::{
+    ProtectedFolder, TOOL_TEMP_PREFIX, others_could_keep_a_folder_made_in, tool_temp_root_in,
+};
 use winappmigrator_core::space::{on_same_volume, volume_stats_at};
 
 const DELETE: u32 = 0x0001_0000;
@@ -51,20 +53,27 @@ fn sweep_extractions_older_than(
         }
     }
     roots.extend(state_root.map(staging_root_in));
-    for root in roots {
-        let Ok(entries) = std::fs::read_dir(&root) else {
-            continue;
+    let sweep = |root: &Path, prefix: &str| {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let is_extraction = path
+            let is_ours = path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(EXTRACTION_PREFIX));
-            if is_extraction && is_stale_folder(&path, now, age) {
+                .is_some_and(|name| name.starts_with(prefix));
+            if is_ours && is_stale_folder(&path, now, age) {
                 let _ = std::fs::remove_dir_all(&path);
             }
         }
+    };
+    for root in &roots {
+        sweep(root, EXTRACTION_PREFIX);
+    }
+    // What a setup program unpacked, if the installer that started it never got to remove it.
+    if let Some(state_root) = state_root {
+        sweep(&tool_temp_root_in(state_root), TOOL_TEMP_PREFIX);
     }
 }
 
@@ -256,6 +265,24 @@ mod tests {
 
         assert!(!stale.exists(), "stale extraction dir should be removed");
         assert!(unrelated.exists(), "unrelated dir must be kept");
+        Ok(())
+    }
+
+    #[test]
+    fn what_a_setup_program_left_behind_is_swept_as_well() -> std::io::Result<()> {
+        let base = tempfile::tempdir()?;
+        let exe = base.path().join("SomeApp_installer.exe");
+        let state = base.path().join("state");
+        let left = tool_temp_root_in(&state).join(format!("{TOOL_TEMP_PREFIX}left"));
+        let other = tool_temp_root_in(&state).join("not-one-of-ours");
+        std::fs::create_dir_all(left.join("setup"))?;
+        std::fs::create_dir_all(&other)?;
+
+        let later = SystemTime::now() + STALE_AFTER + Duration::from_secs(60);
+        sweep_extractions_older_than(&exe, Some(&state), later, STALE_AFTER);
+
+        assert!(!left.exists());
+        assert!(other.exists());
         Ok(())
     }
 

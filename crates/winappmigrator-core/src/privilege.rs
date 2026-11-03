@@ -48,8 +48,9 @@ if ($admins -contains $owner -and $others.Count -eq 0) { 'yes' } else { 'no' }";
 /// theirs runs as with no elevation at all, on nearly any PC, and that is who this is about.
 /// Where a setup program keeps what it unpacks, in the admin-only folder this keeps its state in.
 const TOOL_TEMP_FOLDER: &str = "tool-temp";
-const TOOL_TEMP_PREFIX: &str = "tool-";
-const OTHERS_COULD_KEEP_A_NEW_FOLDER_SCRIPT: &str = "$acl = Get-Acl -LiteralPath $env:WAM_ACL_PATH; \
+pub const TOOL_TEMP_PREFIX: &str = "tool-";
+const OTHERS_COULD_KEEP_A_NEW_FOLDER_SCRIPT: &str = "$ErrorActionPreference = 'Stop'; \
+$acl = Get-Acl -LiteralPath $env:WAM_ACL_PATH; \
 $admins = @('S-1-5-32-544', 'S-1-5-18', 'S-1-3-0', \
 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'); \
 $control = 0x40000 -bor 0x80000 -bor 0x10000000; \
@@ -161,7 +162,7 @@ impl ProtectedFolder {
     }
 
     fn protect(temp: TempDir) -> io::Result<Self> {
-        let hold = hold_folder(temp.path())?;
+        let hold = hold_real_folder(temp.path())?;
         protect_staging_folder(temp.path())?;
         Ok(Self { _hold: hold, temp })
     }
@@ -302,6 +303,10 @@ pub fn others_could_keep_a_folder_made_in(parent: &Path) -> bool {
         Some(false) => return false,
         None => return true,
     }
+    its_permissions_say_others_could_keep_a_folder(parent)
+}
+
+fn its_permissions_say_others_could_keep_a_folder(parent: &Path) -> bool {
     let text = parent.to_string_lossy();
     powershell_command(format!(
         "{POWERSHELL_IMPORT_SECURITY}{OTHERS_COULD_KEEP_A_NEW_FOLDER_SCRIPT}"
@@ -604,6 +609,11 @@ fn path_under_any_env(path: &Path, env_vars: &[&str]) -> bool {
     })
 }
 
+/// Where what setup programs unpacked is kept, which an install sweeps as it does its own.
+pub fn tool_temp_root_in(state_root: &Path) -> PathBuf {
+    state_root.join(TOOL_TEMP_FOLDER)
+}
+
 /// Where a setup program this starts elevated keeps what it unpacks. Some load what they have just
 /// unpacked: DISM its host and providers, an older setup engine its own parts. In a folder another
 /// program of the same account can reach, that program can put its own DLL beside them, so each gets
@@ -616,7 +626,7 @@ pub(crate) fn protected_temp_for_a_tool() -> io::Result<Option<ProtectedFolder>>
     let root = machine_state_root()
         .ok_or_else(|| io::Error::other("Windows does not say where ProgramData is"))?;
     ensure_protected_folder(&root)?;
-    let temp = root.join(TOOL_TEMP_FOLDER);
+    let temp = tool_temp_root_in(&root);
     ensure_protected_folder(&temp)?;
     ProtectedFolder::new_in(&temp, TOOL_TEMP_PREFIX).map(Some)
 }
@@ -631,6 +641,41 @@ pub(crate) mod tests {
         let started = std::time::Instant::now();
         assert_eq!(is_elevated(), first);
         assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    /// A place that cannot be read says nothing, which is not the same as saying nobody could.
+    #[test]
+    fn a_folder_that_cannot_be_asked_counts_as_one_others_could_keep() {
+        assert!(its_permissions_say_others_could_keep_a_folder(Path::new(
+            r"C:\Definitely\Not\There"
+        )));
+    }
+
+    /// As a program with no rights at all can prepare one: full control for whatever is made in it,
+    /// and its permissions closed to whoever would look. As this test is whoever is looking, it closes
+    /// them to itself, whether or not it is running as an administrator.
+    #[test]
+    fn a_folder_closed_to_reading_says_nothing_of_who_could_keep_what_is_made_in_it()
+    -> std::io::Result<()> {
+        let me =
+            crate::path_utils::current_user_sid().ok_or_else(|| io::Error::other("who is this"))?;
+        let work = tempfile::tempdir()?;
+        let prepared = work.path().join("prepared");
+        fs::create_dir(&prepared)?;
+        let closed = hidden_command("icacls")
+            .arg(&prepared)
+            .args([
+                "/grant",
+                "*S-1-3-4:(S)",
+                "/deny",
+                &format!("*{me}:(RC)"),
+                "/deny",
+                "*S-1-5-32-544:(RC)",
+            ])
+            .output()?;
+        assert!(closed.status.success(), "{closed:?}");
+        assert!(its_permissions_say_others_could_keep_a_folder(&prepared));
+        Ok(())
     }
 
     #[test]
