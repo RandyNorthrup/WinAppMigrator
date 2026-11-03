@@ -473,6 +473,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         installed_for_one_account,
         also_the_apps,
         also_named: std::mem::take(&mut picks.also_named),
+        not_named: std::mem::take(&mut picks.not_named),
     };
     monitor.report(ScanStep::Registry);
     let names = context_product_names(&registry_context);

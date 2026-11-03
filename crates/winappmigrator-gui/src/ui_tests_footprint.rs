@@ -974,6 +974,28 @@ fn a_near_match_in_a_data_folder_comes_with_the_user_data_option() {
 }
 
 #[test]
+fn one_waiting_for_the_user_data_option_is_not_counted_as_added() {
+    let mut harness = harness_with(ThemeMode::Dark, ready_app);
+    harness.run_steps(2);
+    let Some(id) = harness.state().ready_scan().and_then(|ready| {
+        ready
+            .footprint
+            .near_matches
+            .iter()
+            .find(|near| near.follows_user_data)
+            .map(|near| near.id.clone())
+    }) else {
+        panic!("the sample has one");
+    };
+    harness.state_mut().near_picks.insert(id, true);
+    harness.run_steps(2);
+    assert!(
+        harness.query_by_label_contains("0 of 3 added").is_some(),
+        "it is not in while that option is off"
+    );
+}
+
+#[test]
 fn scanning_says_so_and_the_build_waits_for_it() {
     for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
         let (mut harness, scan) = scanning_harness(mode);

@@ -46,6 +46,17 @@ const OTHER_APP_ROOT: &str = r"C:\Program Files\WAM Footprint App Other";
 const WINDOWS_NAMED_ROOT: &str = r"C:\Program Files\Windows WAM Footprint App";
 const LINK_ROOT: &str = r"C:\Program Files\WAM Footprint App Link";
 const IMPOSTOR_ROOT: &str = r"C:\Program Files\WAM Footprint Vendor Impostor";
+const PUBLISHER_ROOT: &str = r"C:\Program Files\WAM Footprint Vendor";
+const MSI_APP_ROOT: &str = r"C:\Program Files\WAM Footprint Vendor Reports";
+/// A product's code, and how Windows Installer's database writes it, with each part read backwards.
+const MSI_APP_CODE: &str = "{11111111-2222-3333-4444-555555555555}";
+const MSI_APP_SQUISHED: &str = "11111111222233334444555555555555";
+const INSTALLER_USER_DATA: &str =
+    r"HKLM\Software\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18";
+const PART_KEY: &str = r"HKLM\Software\WAM Footprint Vendor\WAM Footprint Helper";
+const OTHER_VENDOR_KEY: &str = r"HKLM\Software\Another Publisher\WAM Footprint Helper";
+const MICROSOFT_KEY: &str = r"HKLM\Software\Microsoft\WAM Footprint Helper";
+const OTHER_APP_KEY: &str = r"HKLM\Software\WAM Footprint Vendor\WAM Footprint App Other";
 const BELOW_MICROSOFT_ROOT: &str = r"C:\ProgramData\Microsoft\WAM Footprint App Below";
 const UNINSTALL: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const USER_UNINSTALL: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall";
@@ -66,6 +77,13 @@ const SERVICE_HELPER: &str = "WamFootprintHelper";
 const TASK_KEPT: &str = "Kept";
 const TASK_CHOSEN_OUT: &str = "Chosen Out";
 const TASK_RUNS_LEFT_OUT: &str = "Runs Left Out";
+const PART_KEY_CANARY: &str = "wam-footprint-part-key-canary";
+const OTHER_VENDOR_KEY_CANARY: &str = "wam-footprint-other-vendor-key-canary";
+const MICROSOFT_KEY_CANARY: &str = "wam-footprint-microsoft-key-canary";
+const OTHER_APP_KEY_CANARY: &str = "wam-footprint-other-app-key-canary";
+const KEY_BY_CONTENT_CANARY: &str = "wam-footprint-key-by-content-canary";
+const CERTIFICATE_CANARY: &str = "wam-footprint-certificate-canary";
+const DATA_NEAR_CANARY: &str = "wam-footprint-data-near-canary";
 const SELF_REMOVAL_PATIENCE: Duration = Duration::from_secs(90);
 const FLAGS: ScanFlags = ScanFlags {
     include_user_data: false,
@@ -111,6 +129,8 @@ fn only_a_github_hosted_runner_in_the_dedicated_job_may_run_this() {
         (Some("true"), Some("self-hosted"), Some("1"), false),
         (Some("true"), Some("github-hosted"), Some("0"), false),
         (None, Some("github-hosted"), Some("1"), false),
+        (Some("true"), None, Some("1"), false),
+        (Some("true"), Some("github-hosted"), None, false),
     ] {
         assert_eq!(is_throwaway_runner(actions, environment, flag), expected);
     }
@@ -320,12 +340,29 @@ fn set_up_the_app() -> TestResult {
     write(&format!(r"{HELPER_ROOT}\credentials.json"), SECRET_CANARY)?;
     write(&format!(r"{HELPER_ROOT}\id_rsa"), KEY_CANARY)?;
     write(&format!(r"{HELPER_ROOT}\helper.lic"), LICENSE_CANARY)?;
+    write(
+        &format!(r"{HELPER_ROOT}\tls.pem"),
+        &format!("-----BEGIN PRIVATE KEY-----\n{KEY_BY_CONTENT_CANARY}\n"),
+    )?;
+    write(
+        &format!(r"{HELPER_ROOT}\ca.pem"),
+        &format!("-----BEGIN CERTIFICATE-----\n{CERTIFICATE_CANARY}\n"),
+    )?;
+    // What goes by the part's name, and what only says it does.
+    for (key, canary) in [
+        (PART_KEY, PART_KEY_CANARY),
+        (OTHER_VENDOR_KEY, OTHER_VENDOR_KEY_CANARY),
+        (MICROSOFT_KEY, MICROSOFT_KEY_CANARY),
+        (OTHER_APP_KEY, OTHER_APP_KEY_CANARY),
+    ] {
+        uninstall_entry(key, &[("Marker", canary)])?;
+    }
     hidden_entry(HELPER_NAME, HELPER_ROOT)?;
     create_service(SERVICE_HELPER, &helper)?;
 
     // Near by name and nobody's.
     write(&format!(r"{EXTRAS_ROOT}\extras.txt"), EXTRAS_CANARY)?;
-    write(&format!(r"{DATA_NEAR_ROOT}\settings.txt"), "some settings")?;
+    write(&format!(r"{DATA_NEAR_ROOT}\settings.txt"), DATA_NEAR_CANARY)?;
     Ok(())
 }
 
@@ -405,6 +442,43 @@ fn set_up_what_must_not_be_offered() -> TestResult {
     // A hidden entry of the same publisher, in a folder of its own, calling itself another app.
     write(&format!(r"{IMPOSTOR_ROOT}\impostor.txt"), "an impostor")?;
     hidden_entry_at("WAM Footprint Impostor Key", OTHER_APP_NAME, IMPOSTOR_ROOT)?;
+    // Named only for the publisher, with something in it, so that only its name can refuse it.
+    write(&format!(r"{PUBLISHER_ROOT}\a.txt"), "the publisher's")?;
+    // An app of the same publisher whose entry does not say where it is, as is common of an MSI's.
+    // Its folder is close by name, and only Windows Installer's database says whose it is.
+    let msi_program = format!(r"{MSI_APP_ROOT}\reports.exe");
+    program_at(&msi_program)?;
+    let msi_key = format!(r"{UNINSTALL}\{MSI_APP_CODE}");
+    uninstall_entry(
+        &msi_key,
+        &[
+            ("DisplayName", "Quarterly Figures"),
+            ("Publisher", VENDOR),
+            ("UninstallString", &format!("MsiExec.exe /X{MSI_APP_CODE}")),
+        ],
+    )?;
+    must(
+        "reg.exe",
+        &[
+            "add",
+            &format!(r"{INSTALLER_USER_DATA}\Products\{MSI_APP_SQUISHED}"),
+            "/f",
+        ],
+    )?;
+    must(
+        "reg.exe",
+        &[
+            "add",
+            &format!(r"{INSTALLER_USER_DATA}\Components\AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            "/v",
+            MSI_APP_SQUISHED,
+            "/t",
+            "REG_SZ",
+            "/d",
+            &msi_program,
+            "/f",
+        ],
+    )?;
     // In an account's own registry, which takes no rights to write, and says nothing of this app.
     let planted = r"C:\Program Files\WAM Footprint Planted";
     write(&format!(r"{planted}\a.txt"), "planted")?;
@@ -459,6 +533,7 @@ fn remove_the_app() -> TestResult {
         "reg.exe",
         &["delete", &format!(r"{UNINSTALL}\{HELPER_NAME}"), "/f"],
     )?;
+    must("reg.exe", &["delete", PART_KEY, "/f"])?;
     fs::remove_dir_all(SOURCE_ROOT)?;
     fs::remove_dir_all(HELPER_ROOT)?;
     Ok(())
@@ -517,19 +592,20 @@ fn machine_state(root: &str) -> TestResult<BTreeMap<String, String>> {
         state.insert(format!("task {task}"), task_state(task)?);
     }
     state.insert(format!("tree {root}"), tree_state(root)?);
+    let query = |key: &str| -> TestResult<String> {
+        let output = Command::new("reg.exe").args(["query", key]).output()?;
+        Ok(if output.status.success() {
+            text(&output.stdout)
+        } else {
+            "absent".to_owned()
+        })
+    };
     state.insert(
         "entry".to_owned(),
-        Command::new("reg.exe")
-            .args(["query", &format!(r"{UNINSTALL}\{APP_NAME}")])
-            .output()
-            .map(|output| {
-                if output.status.success() {
-                    text(&output.stdout)
-                } else {
-                    "absent".to_owned()
-                }
-            })?,
+        query(&format!(r"{UNINSTALL}\{APP_NAME}"))?,
     );
+    state.insert("every uninstall entry".to_owned(), query(UNINSTALL)?);
+    state.insert("the part's key".to_owned(), query(PART_KEY)?);
     Ok(state)
 }
 
@@ -581,11 +657,13 @@ impl PackageLook {
             .any(|entry| entry.split('\\').any(|part| part == folder))
     }
 
-    /// Whether this text is anywhere in anything in the package, in UTF-8 or UTF-16.
+    /// Whether this text is anywhere in anything in the package, in UTF-8 or UTF-16, whether or not
+    /// a file starts by saying which it is.
     fn holds_text(&self, needle: &str) -> TestResult<bool> {
         let found = powershell(&format!(
-            "$found = Get-ChildItem -LiteralPath {} -Recurse -File | \
-               Select-String -SimpleMatch -Pattern {} -List; \
+            "$files = Get-ChildItem -LiteralPath {} -Recurse -File; \
+             $found = @(foreach ($encoding in 'UTF8', 'Unicode') {{ \
+               $files | Select-String -SimpleMatch -Pattern {} -List -Encoding $encoding }}); \
              if ($found) {{ 'found' }} else {{ 'not found' }}",
             quoted(&self.unpacked.path().display().to_string()),
             quoted(needle),
@@ -658,6 +736,76 @@ fn scan_with(app: &InstalledApp, work: &Path, near_matches: &[String]) -> TestRe
     Ok(scan_app(&options, &ScanMonitor::default())?)
 }
 
+/// With every option on, and all that was ticked, what looks like a credential is still not there.
+fn check_with_every_option_on(
+    checks: &mut Checks,
+    app: &InstalledApp,
+    work: &Path,
+    helper_id: &str,
+    data_id: &str,
+) -> TestResult {
+    section("With the License and User data options on");
+    fs::create_dir_all(work)?;
+    let options = PackageOptions {
+        include_user_data: true,
+        include_program_data: true,
+        include_license_data: true,
+        ..package_options(app, work)
+    };
+    let mut scan = scan_options_for(&options);
+    scan.near_matches = vec![helper_id.to_owned(), data_id.to_owned()];
+    let report = scan_app(&scan, &ScanMonitor::default())?;
+    checks.that(
+        "both are ticked",
+        report
+            .near_matches
+            .iter()
+            .filter(|near| near.picked)
+            .count()
+            == 2,
+        format!("{:?}", report.near_matches),
+    );
+    let result = create_package_from_scan(
+        &options,
+        &report,
+        &FootprintChoices::default(),
+        &BuildMonitor::default(),
+    )?;
+    let installer = result
+        .self_extracting_archive_path
+        .ok_or("the build made no installer")?;
+    let look = look_in_package(&installer, work)?;
+    for (name, expected) in [
+        ("settings.txt", true),
+        ("helper.lic", true),
+        ("ca.pem", true),
+        ("credentials.json", false),
+        ("id_rsa", false),
+        ("tls.pem", false),
+    ] {
+        checks.same(
+            &format!("{name} in a package of everything"),
+            look.holds_file_named(name),
+            expected,
+        );
+    }
+    for (canary, expected) in [
+        (DATA_NEAR_CANARY, true),
+        (LICENSE_CANARY, true),
+        (CERTIFICATE_CANARY, true),
+        (SECRET_CANARY, false),
+        (KEY_CANARY, false),
+        (KEY_BY_CONTENT_CANARY, false),
+    ] {
+        checks.same(
+            &format!("{canary} in a package of everything"),
+            look.holds_text(canary)?,
+            expected,
+        );
+    }
+    Ok(())
+}
+
 fn folder_choice(relative: &str) -> ChoiceId {
     ChoiceId::Folder(format!(r"{SOURCE_ROOT}\{relative}").to_ascii_lowercase())
 }
@@ -728,6 +876,8 @@ fn check_what_is_offered(
         format!("{names:?}"),
     );
     for hostile in [
+        PUBLISHER_ROOT,
+        MSI_APP_ROOT,
         OTHER_APP_ROOT,
         WINDOWS_NAMED_ROOT,
         LINK_ROOT,
@@ -849,6 +999,22 @@ fn check_the_package(checks: &mut Checks, installer: &Path, work: &Path) -> Test
         look.holds_text("leave.txt")?,
         false,
     );
+    for (what, canary, expected) in [
+        ("the key by the part's name", PART_KEY_CANARY, true),
+        (
+            "one by that name of another publisher",
+            OTHER_VENDOR_KEY_CANARY,
+            false,
+        ),
+        (
+            "one by that name under Microsoft",
+            MICROSOFT_KEY_CANARY,
+            false,
+        ),
+        ("another app's key beside it", OTHER_APP_KEY_CANARY, false),
+    ] {
+        checks.same(what, look.holds_text(canary)?, expected);
+    }
 
     let package = EmbeddedPackage::open(installer)?.ok_or("no package in it")?;
     let manifest: PackageManifest = read_embedded_manifest(&package)?;
@@ -1019,6 +1185,12 @@ fn what_is_chosen_is_what_is_in_the_package_and_on_the_machine() -> TestResult {
     );
 
     let helper_id = check_what_is_offered(&mut checks, &app, work.path())?;
+    let data_id = scan_with(&app, work.path(), &[])?
+        .near_matches
+        .iter()
+        .find(|near| near.path.as_deref() == Some(Path::new(DATA_NEAR_ROOT)))
+        .map(|near| near.id.clone())
+        .unwrap_or_default();
 
     section("Choosing");
     let report = scan_with(&app, work.path(), std::slice::from_ref(&helper_id))?;
@@ -1111,7 +1283,29 @@ fn what_is_chosen_is_what_is_in_the_package_and_on_the_machine() -> TestResult {
         .self_extracting_archive_path
         .clone()
         .ok_or("the build made no installer")?;
+    checks.same(
+        "the build copied as many as were counted",
+        result.files_copied,
+        estimate.payload_files,
+    );
     check_the_package(&mut checks, &installer, work.path())?;
+    let in_the_package = look_in_package(&installer, work.path())?
+        .names
+        .iter()
+        .filter(|name| name.starts_with(r"files\") && !name.ends_with('\\'))
+        .count();
+    checks.same(
+        "and as many are in the package",
+        in_the_package,
+        estimate.payload_files,
+    );
+    check_with_every_option_on(
+        &mut checks,
+        &app,
+        &work.path().join("everything"),
+        &helper_id,
+        &data_id,
+    )?;
 
     section("Taking it off the runner");
     remove_the_app()?;
@@ -1144,8 +1338,17 @@ fn what_is_chosen_is_what_is_in_the_package_and_on_the_machine() -> TestResult {
         uninstall.success,
         &uninstall.output,
     );
+    checks.that(
+        "the record of the install has gone",
+        !Path::new(INSTALLS_DIR).join(&id).exists(),
+        &id,
+    );
     let after = machine_state(TARGET_ROOT)?;
-    checks.same("the machine is as it was", after, before);
+    checks.same(
+        "services, tasks, files, and uninstall entries are as they were",
+        after,
+        before,
+    );
 
     section("A failure late in an install");
     let denied = format!(r"{FAILED_TARGET_ROOT}\keep");
@@ -1167,7 +1370,11 @@ fn what_is_chosen_is_what_is_in_the_package_and_on_the_machine() -> TestResult {
         &failed.output,
     );
     let after = machine_state(FAILED_TARGET_ROOT)?;
-    checks.same("the machine is as it was", after, before);
+    checks.same(
+        "services, tasks, files, and uninstall entries are as they were",
+        after,
+        before,
+    );
     must("icacls", &[&denied, "/remove:d", "*S-1-1-0"])?;
 
     checks.finish()

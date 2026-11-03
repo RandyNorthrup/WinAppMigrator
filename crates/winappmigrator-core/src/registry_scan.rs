@@ -155,6 +155,8 @@ pub struct RegistryScanContext {
     pub also_the_apps: Vec<PathBuf>,
     /// The names of what a person added, which its keys go by as this app's go by its own.
     pub(crate) also_named: Vec<ProductNames>,
+    /// What other apps go by, which nothing found for a part of this one is to be.
+    pub(crate) not_named: Vec<ProductNames>,
 }
 
 /// A registry root as an install record names it.
@@ -232,7 +234,7 @@ pub(crate) fn scan_registry_artifacts(
     if !context.installed_for_one_account {
         scan_software_children(context, &names, &hklm, &mut entries, &mut warnings);
         for names in &context.also_named {
-            scan_software_children(context, names, &hklm, &mut entries, &mut warnings);
+            scan_part_keys(context, names, &hklm, &mut entries, &mut warnings);
         }
     }
     scan_class_registrations(
@@ -252,7 +254,7 @@ pub(crate) fn scan_registry_artifacts(
         scan_run_keys(context, &hkcu, &mut entries, &mut warnings);
         scan_software_children(context, &names, &hkcu, &mut entries, &mut warnings);
         for names in &context.also_named {
-            scan_software_children(context, names, &hkcu, &mut entries, &mut warnings);
+            scan_part_keys(context, names, &hkcu, &mut entries, &mut warnings);
         }
         scan_class_registrations(
             context,
@@ -776,6 +778,72 @@ fn scan_software_children(
             }
         }
     }
+}
+
+/// Capture what goes by the name of a part of the app that a person added. Where it is has been
+/// looked in already, with the rest of what goes by where the app is.
+fn scan_part_keys(
+    context: &RegistryScanContext,
+    names: &ProductNames,
+    root: &RegRoot,
+    entries: &mut Vec<RegistryEntry>,
+    warnings: &mut Vec<Warning>,
+) {
+    let children_of = |key_path: &str| -> Vec<String> {
+        root.open(key_path, KEY_READ)
+            .map(|key| key.enum_keys().flatten().collect())
+            .unwrap_or_default()
+    };
+    for software_path in SOFTWARE_VIEWS {
+        for key_path in part_keys_in_view(names, software_path, &children_of) {
+            if !is_shared_registry_key(&key_path)
+                && !is_named_for_another_app(&key_path, &context.not_named)
+            {
+                capture_registry_subtree(
+                    root,
+                    &key_path,
+                    MatchConfidence::Medium,
+                    entries,
+                    warnings,
+                );
+            }
+        }
+    }
+}
+
+/// [`product_keys_in_view`], of those that a part can have by what it calls itself, which can be
+/// anything: `Windows NT`, or what is another vendor's.
+pub(crate) fn part_keys_in_view(
+    names: &ProductNames,
+    software_path: &str,
+    children_of: &impl Fn(&str) -> Vec<String>,
+) -> Vec<String> {
+    product_keys_in_view(names, software_path, children_of)
+        .into_iter()
+        .filter(|key| {
+            let below = key[software_path.len()..].trim_start_matches('\\');
+            match below.split_once('\\') {
+                Some((parent, name)) => names.is_a_parts_own_name(Some(parent), name),
+                None => names.is_a_parts_own_name(None, below),
+            }
+        })
+        .collect()
+}
+
+/// Whether a key is what another app would take by its name, as its folders go by it.
+pub(crate) fn is_named_for_another_app(key_path: &str, others: &[ProductNames]) -> bool {
+    let parts: Vec<&str> = key_path
+        .split('\\')
+        .filter(|part| !part.eq_ignore_ascii_case(WOW6432_NODE))
+        .collect();
+    others.iter().any(|names| {
+        parts.iter().enumerate().any(|(index, part)| {
+            names.matches_top_level(part, MatchScope::ProgramFolders)
+                || index.checked_sub(1).is_some_and(|before| {
+                    names.matches_nested(parts[before], part, MatchScope::ProgramFolders)
+                })
+        })
+    })
 }
 
 /// The keys in one `Software` view named for the product. `children_of` lists a key's
@@ -1311,6 +1379,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn what_a_part_calls_itself_takes_only_what_is_under_its_own_publisher() {
+        let children = |path: &str| -> Vec<String> {
+            let names: &[&str] = match path {
+                "Software" => &[
+                    "Microsoft",
+                    "Fabrikam",
+                    "Fabrikam Helper",
+                    "Contoso",
+                    "Policies",
+                    "Windows NT",
+                ],
+                r"Software\Microsoft" => &["Windows NT", "Fabrikam Helper"],
+                r"Software\Fabrikam" => &["Fabrikam Helper", "Reports"],
+                r"Software\Contoso" => &["Fabrikam Helper", "Update Service"],
+                _ => &[],
+            };
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let part = ProductNames::new(Some("Fabrikam Helper"), Some("Fabrikam Inc."), &[], &[]);
+        assert_eq!(
+            part_keys_in_view(&part, "Software", &children),
+            [
+                r"Software\Fabrikam\Fabrikam Helper",
+                r"Software\Fabrikam Helper",
+            ]
+        );
+        for hostile in ["Windows NT", "Policies", "Update Service", "Microsoft"] {
+            let names = ProductNames::new(Some(hostile), Some("Fabrikam Inc."), &[], &[]);
+            assert_eq!(
+                part_keys_in_view(&names, "Software", &children),
+                Vec::<String>::new(),
+                "{hostile}"
+            );
+        }
+        let of_the_publisher = ProductNames::new(Some("Fabrikam"), Some("Fabrikam Inc."), &[], &[]);
+        assert_eq!(
+            part_keys_in_view(&of_the_publisher, "Software", &children),
+            Vec::<String>::new(),
+            "all of a publisher's key is not a part's"
+        );
+    }
+
+    #[test]
     fn an_app_for_one_account_can_only_say_things_about_that_accounts_registry() {
         let key = |root, key_path: &str| RecordedRegistryKey {
             root,
@@ -1358,6 +1469,7 @@ mod tests {
             installed_for_one_account: false,
             also_the_apps: Vec::new(),
             also_named: Vec::new(),
+            not_named: Vec::new(),
         };
 
         assert!(!value_matches_context(&context, "ad 9.6.8"));
@@ -1374,6 +1486,7 @@ mod tests {
             installed_for_one_account: false,
             also_the_apps: Vec::new(),
             also_named: Vec::new(),
+            not_named: Vec::new(),
         }
     }
 
@@ -1428,6 +1541,7 @@ mod tests {
             installed_for_one_account: false,
             also_the_apps: Vec::new(),
             also_named: Vec::new(),
+            not_named: Vec::new(),
         };
         assert!(!value_matches_context(
             &context,
@@ -1453,6 +1567,7 @@ mod tests {
             installed_for_one_account: false,
             also_the_apps: Vec::new(),
             also_named: Vec::new(),
+            not_named: Vec::new(),
         });
         assert!(
             seven_zip.matches_top_level("7-Zip", MatchScope::ProgramFolders),
@@ -1469,6 +1584,7 @@ mod tests {
             installed_for_one_account: false,
             also_the_apps: Vec::new(),
             also_named: Vec::new(),
+            not_named: Vec::new(),
         });
         assert!(
             !photoshop.matches_top_level("Adobe", MatchScope::ProgramFolders),

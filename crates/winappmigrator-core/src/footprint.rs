@@ -203,6 +203,8 @@ pub struct Footprint {
     pub data_not_included_bytes: u64,
     pub near_matches: Vec<NearMatch>,
     pub license_bytes: u64,
+    /// A driver's file goes in even if no install would set it up, for it to say why not.
+    refused_driver_bytes: u64,
     /// Where license data that goes in is from. A license goes by the License option, wherever it is.
     pub license_paths: Vec<PathBuf>,
     pub prerequisite_count: usize,
@@ -247,6 +249,17 @@ impl Footprint {
             ..Self::default()
         };
         footprint.add_changes(described_rows(&review, Path::new(NO_TARGET_YET)), report);
+        footprint.refused_driver_bytes = report
+            .drivers
+            .iter()
+            .filter(|driver| {
+                !footprint
+                    .allowed
+                    .drivers
+                    .contains(&driver.service_name.to_ascii_lowercase())
+            })
+            .map(|driver| driver_image_bytes(report, driver))
+            .fold(0, u64::saturating_add);
         footprint.add_what_is_left_out(report, &manifest);
         footprint.prerequisites = report
             .runtime_prerequisites
@@ -413,7 +426,7 @@ impl Footprint {
             } else {
                 0
             },
-            held_bytes: self.license_bytes,
+            held_bytes: self.license_bytes.saturating_add(self.refused_driver_bytes),
             ..BuildInputs::default()
         };
         for row in self
@@ -542,6 +555,14 @@ fn folder_rows(report: &ScanReport) -> Vec<FolderRow> {
             row.locked = Some("These always go with the main program");
         } else if path_is_within(main_program, &row.path) {
             row.locked = Some("Holds the main program, which always goes in");
+        } else if report.dependencies.iter().any(|dependency| {
+            !dependency.delay_loaded
+                && dependency
+                    .resolved_path
+                    .as_deref()
+                    .is_some_and(|path| path_is_within(path, &row.path))
+        }) {
+            row.locked = Some("Holds what the main program cannot start without");
         } else if row.goes_with.is_some() {
             row.locked = Some("Goes with its font, under what ties it into Windows");
         }
@@ -744,16 +765,51 @@ impl LeftOutFolders {
     /// Whether a value naming a path names something in one of these. Only as a whole path, so
     /// `C:\\App Extras` is not `C:\\App`.
     fn are_named_by(&self, text: &str) -> bool {
-        self.left_out
-            .iter()
-            .any(|folder| text_mentions_path(text, Path::new(folder), false))
+        self.are_mentioned(text, false)
     }
 
     /// The same of a command line, where a space ends a path as well.
     fn are_named_in_a_command(&self, text: &str) -> bool {
-        self.left_out
+        self.are_mentioned(text, true)
+    }
+
+    /// Whether text has a path in it that goes with one of these, which by [`Self::holds`] one in a
+    /// row of its own inside one does not.
+    fn are_mentioned(&self, text: &str, followed_by_arguments: bool) -> bool {
+        if !self
+            .left_out
             .iter()
-            .any(|folder| text_mentions_path(text, Path::new(folder), true))
+            .any(|folder| text_mentions_path(text, Path::new(folder), followed_by_arguments))
+        {
+            return false;
+        }
+        let ends_a_path = |character: char| {
+            matches!(character, '"' | '\'' | ';' | ',' | '\0' | '\r' | '\n')
+                || (followed_by_arguments && matches!(character, ' ' | '\t'))
+        };
+        // Both steps swap single bytes for single bytes, as `text_mentions_path` relies on too.
+        let lower = text.to_ascii_lowercase().replace('/', "\\");
+        self.left_out.iter().any(|folder| {
+            let mut from = 0;
+            while let Some(found) = lower[from..].find(folder.as_str()) {
+                let start = from + found;
+                let end = start + folder.len();
+                let is_whole = lower[end..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| next == '\\' || ends_a_path(next));
+                if is_whole {
+                    let path_end = lower[end..]
+                        .find(ends_a_path)
+                        .map_or(lower.len(), |ahead| end + ahead);
+                    if self.holds(lower[start..path_end].trim_end_matches('\\')) {
+                        return true;
+                    }
+                }
+                from = end;
+            }
+            false
+        })
     }
 
     /// The same of a task's definition, where a tag can end a path as well.
@@ -778,6 +834,9 @@ fn decide(
     // Only what this choice made it refuse. What it refuses anyway is for an installer to say.
     let mut integrations = Vec::new();
     for _ in 0..MOST_PASSES {
+        let needing = take_out_what_needs_what_is_out(&mut manifest, report);
+        let took_what_needed = !needing.is_empty();
+        also.extend(needing);
         let review = ReviewedPackage::before_a_location_is_chosen(
             &manifest,
             footprint.flags.include_license_data,
@@ -787,7 +846,7 @@ fn decide(
         integrations = integration_rows(&described_rows(&review, Path::new(NO_TARGET_YET)));
         drop(review);
         let taken = take_out_what_is_now_refused(&mut manifest, &footprint.allowed, &now, &reasons);
-        if taken.is_empty() {
+        if taken.is_empty() && !took_what_needed {
             break;
         }
         also.extend(taken);
@@ -798,6 +857,59 @@ fn decide(
         integrations,
         folders,
     })
+}
+
+/// A service that needs another that will not be there does not start, so it goes too.
+fn take_out_what_needs_what_is_out(
+    manifest: &mut PackageManifest,
+    report: &ScanReport,
+) -> Vec<AlsoLeftOut> {
+    let lower = |name: &String| name.to_ascii_lowercase();
+    let kept: HashSet<String> = manifest
+        .services_detected
+        .iter()
+        .map(|service| lower(&service.service_name))
+        .chain(
+            manifest
+                .drivers_detected
+                .iter()
+                .map(|driver| lower(&driver.service_name)),
+        )
+        .collect();
+    let out: HashSet<String> = report
+        .services
+        .iter()
+        .map(|service| lower(&service.service_name))
+        .chain(
+            report
+                .drivers
+                .iter()
+                .map(|driver| lower(&driver.service_name)),
+        )
+        .filter(|name| !kept.contains(name))
+        .collect();
+    let mut also = Vec::new();
+    if out.is_empty() {
+        return also;
+    }
+    manifest.services_detected.retain(|service| {
+        let needed = service
+            .dependencies
+            .iter()
+            .find(|needed| out.contains(&lower(needed)));
+        if let Some(needed) = needed {
+            also.push(AlsoLeftOut {
+                id: service_choice(&service.service_name),
+                title: service
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| service.service_name.clone()),
+                because: format!("it needs {needed}, which is left out"),
+            });
+        }
+        needed.is_none()
+    });
+    also
 }
 
 /// Whether a file at this path, as [`comparable_path`] writes it, goes in.
@@ -878,10 +990,17 @@ fn take_out_what_names_a_folder_left_out(
     }
     const WHY: &str = "it is told to use something in a folder you left out";
     manifest.services_detected.retain(|service| {
+        // What some services run is in their settings, and they run nothing without it.
         let names_one = service
             .arguments
             .as_deref()
-            .is_some_and(|arguments| folders.are_named_in_a_command(arguments));
+            .is_some_and(|arguments| folders.are_named_in_a_command(arguments))
+            || service.parameters.iter().any(|value| {
+                value
+                    .value_data
+                    .as_deref()
+                    .is_some_and(|data| folders.are_named_in_a_command(data))
+            });
         if names_one {
             also.push(AlsoLeftOut {
                 id: service_choice(&service.service_name),
@@ -1211,10 +1330,17 @@ pub fn apply_choices(
             .is_none_or(|source| !folders.holds(&comparable_path(Path::new(source))))
     });
     recount_locations(&mut chosen);
+    // Not one added and then left out, which its row can be.
     let added = report
         .near_matches
         .iter()
-        .filter(|near| near.picked)
+        .filter(|near| {
+            near.picked
+                && near
+                    .path
+                    .as_deref()
+                    .is_none_or(|path| !folders.holds(&comparable_path(path)))
+        })
         .map(|near| near.name.clone())
         .collect();
     let left_out = what_was_left_out(footprint, choices, &also);
@@ -1975,32 +2101,7 @@ mod tests {
     #[test]
     fn a_row_inside_one_left_out_still_goes_in_as_it_says() -> Result<()> {
         let mut report = report();
-        let data = r"C:\ProgramData\Acme";
-        let inner = r"C:\ProgramData\Acme\Agent";
-        for (location, name) in [(inner, "agent.exe"), (data, "data.dat")] {
-            let original = PathBuf::from(location).join(name);
-            report.file_inventory.push(FileEntry {
-                path: original.clone(),
-                original_path: original,
-                package_relative_path: Some(PathBuf::from(r"files\_external").join(name)),
-                suggested_destination_path: None,
-                size_bytes: Some(10),
-                hash_sha256: None,
-                classification: FileClassification::AppOwned,
-                should_copy: true,
-                reason: String::new(),
-                user_folder: None,
-            });
-            report.footprint_locations.push(FootprintLocation {
-                path: PathBuf::from(location),
-                kind: FootprintKind::Other,
-                scope: InstallScope::PerMachine,
-                file_count: 1,
-                total_bytes: 10,
-                copyable_bytes: 10,
-                included: true,
-            });
-        }
+        let (data, _) = with_a_row_inside_a_row(&mut report);
         let footprint = Footprint::of(&report, FLAGS)?;
         let choices = leaving_out(&[ChoiceId::Folder(comparable_path(Path::new(data)))]);
         let chosen = apply_choices(&report, &footprint, &choices)?;
@@ -2064,6 +2165,184 @@ mod tests {
             1,
             "it goes by the License option"
         );
+        Ok(())
+    }
+
+    /// A report with a row for a folder, and one of its own inside it.
+    fn with_a_row_inside_a_row(report: &mut ScanReport) -> (&'static str, &'static str) {
+        let data = r"C:\ProgramData\Acme";
+        let inner = r"C:\ProgramData\Acme\Agent";
+        for (location, name) in [(inner, "agent.exe"), (data, "data.dat")] {
+            let original = PathBuf::from(location).join(name);
+            report.file_inventory.push(FileEntry {
+                path: original.clone(),
+                original_path: original,
+                package_relative_path: Some(PathBuf::from(r"files\_external").join(name)),
+                suggested_destination_path: None,
+                size_bytes: Some(10),
+                hash_sha256: None,
+                classification: FileClassification::AppOwned,
+                should_copy: true,
+                reason: String::new(),
+                user_folder: None,
+            });
+            report.footprint_locations.push(FootprintLocation {
+                path: PathBuf::from(location),
+                kind: FootprintKind::Other,
+                scope: InstallScope::PerMachine,
+                file_count: 1,
+                total_bytes: 10,
+                copyable_bytes: 10,
+                included: true,
+            });
+        }
+        (data, inner)
+    }
+
+    #[test]
+    fn what_names_a_row_inside_one_left_out_stays_as_that_row_does() -> Result<()> {
+        let mut report = report();
+        let (data, inner) = with_a_row_inside_a_row(&mut report);
+        report.services[0].arguments = Some(format!(r#"--config "{inner}\a.ini""#));
+        report.services[1].arguments = Some(format!(r#"--config "{data}\a.ini""#));
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let choices = leaving_out(&[ChoiceId::Folder(comparable_path(Path::new(data)))]);
+        let chosen = apply_choices(&report, &footprint, &choices)?;
+        let services: Vec<&str> = chosen
+            .report
+            .services
+            .iter()
+            .map(|service| service.service_name.as_str())
+            .collect();
+        assert!(
+            services.contains(&report.services[0].service_name.as_str()),
+            "{services:?}"
+        );
+        assert!(
+            !services.contains(&report.services[1].service_name.as_str()),
+            "{services:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_service_that_needs_one_left_out_goes_too_and_says_so() -> Result<()> {
+        let mut report = report();
+        let needed = report.services[1].service_name.clone();
+        report.services[0].dependencies = vec![needed.clone(), "Tcpip".to_owned()];
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let choices = leaving_out(&[service_choice(&needed)]);
+        let chosen = apply_choices(&report, &footprint, &choices)?;
+        assert!(
+            !chosen
+                .report
+                .services
+                .iter()
+                .any(|service| service.service_name == report.services[0].service_name),
+            "{:?}",
+            chosen.report.services
+        );
+        assert!(
+            chosen
+                .also
+                .iter()
+                .any(|item| item.because.contains(&needed)),
+            "{:?}",
+            chosen.also
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_service_whose_settings_name_what_it_runs_goes_with_it() -> Result<()> {
+        let mut report = report();
+        report.services[0].parameters = vec![RegistryEntry {
+            hive: RegistryHive::LocalMachine,
+            key_path: format!(
+                r"SYSTEM\CurrentControlSet\Services\{}\Parameters",
+                report.services[0].service_name
+            ),
+            value_name: Some("Application".to_owned()),
+            value_data: Some(format!(r"{INSTALL}\plugins\host.exe")),
+            value_kind: Some(RegistryValueKind::String),
+            value_bytes_hex: None,
+            confidence: MatchConfidence::High,
+            requires_admin: true,
+        }];
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let chosen = apply_choices(&report, &footprint, &leaving_out(&[folder("plugins")]))?;
+        assert!(
+            !chosen
+                .report
+                .services
+                .iter()
+                .any(|service| service.service_name == report.services[0].service_name),
+            "{:?}",
+            chosen.report.services
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn what_the_main_program_loads_stays_with_it() -> Result<()> {
+        let mut report = report();
+        report.dependencies.push(crate::models::DependencyEntry {
+            name: "needed.dll".to_owned(),
+            resolved_path: Some(PathBuf::from(INSTALL).join(r"plugins\needed.dll")),
+            architecture: AppArchitecture::X64,
+            hash_sha256: None,
+            version_info: None,
+            publisher: None,
+            source_category: crate::models::DependencySourceCategory::AppLocal,
+            should_copy: true,
+            system_provided: false,
+            runtime_prerequisite: false,
+            missing: false,
+            delay_loaded: false,
+        });
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let row = footprint
+            .folders
+            .iter()
+            .find(|row| row.name == "plugins")
+            .ok_or_else(|| crate::errors::WinAppMigratorError::Archive("no row".to_owned()))?;
+        assert!(row.locked.is_some());
+        assert!(
+            footprint.folder_is_in(row, &leaving_out(&[folder("plugins")])),
+            "asking changes nothing"
+        );
+        report.dependencies[0].delay_loaded = true;
+        let footprint = Footprint::of(&report, FLAGS)?;
+        assert!(
+            footprint
+                .folders
+                .iter()
+                .any(|row| row.name == "plugins" && row.locked.is_none()),
+            "what it only loads when it needs to is not that"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn what_was_added_and_then_left_out_is_not_said_to_be_added() -> Result<()> {
+        let mut report = report();
+        report.near_matches.push(NearMatch {
+            id: "folder:x".to_owned(),
+            kind: crate::models::NearMatchKind::Folder,
+            name: "Plugins, as a near match".to_owned(),
+            path: Some(PathBuf::from(INSTALL).join("plugins")),
+            why: String::new(),
+            follows_user_data: false,
+            file_count: 1,
+            total_bytes: 1,
+            measured_all: true,
+            picked: true,
+        });
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let kept = apply_choices(&report, &footprint, &FootprintChoices::default())?;
+        assert_eq!(kept.added, ["Plugins, as a near match"]);
+        let chosen = apply_choices(&report, &footprint, &leaving_out(&[folder("plugins")]))?;
+        assert_eq!(chosen.added, Vec::<String>::new());
         Ok(())
     }
 

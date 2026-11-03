@@ -424,6 +424,26 @@ impl ProductNames {
         !is_publisher_of_everything(first) && vendor_words(publisher) == self.publisher_words
     }
 
+    /// Whether something can be taken to be a part of an app by what it is called, given what the
+    /// part says of itself is only what it says, and it could say anything. That takes it being under
+    /// what the part's own publisher is called, or starting with that and going on, and no publisher
+    /// on everything says anything. `parent` is what it is in, if that is not the top of where to look.
+    pub(crate) fn is_a_parts_own_name(&self, parent: Option<&str>, name: &str) -> bool {
+        let says_nothing = |text: &str| {
+            significant_words(text)
+                .next()
+                .is_none_or(|first| is_publisher_of_everything(&first))
+        };
+        match parent {
+            Some(parent) => !says_nothing(parent) && self.is_vendor_name(parent),
+            None => {
+                !says_nothing(name)
+                    && !self.is_named_only_for_publisher(name)
+                    && self.is_vendor_name(name)
+            }
+        }
+    }
+
     fn is_vendor_name(&self, folder: &str) -> bool {
         self.vendors.contains(&normalize_name_for_match(folder))
             || significant_words(folder)
@@ -962,6 +982,21 @@ mod tests {
         assert!(!instruments.is_named_only_for_publisher("Native Instruments Extras"));
         assert!(instruments.has_publisher_like("Native Instruments GmbH"));
         assert!(!instruments.has_publisher_like("Native Sounds"));
+
+        let part = ProductNames::new(Some("Fabrikam Helper"), Some("Fabrikam Inc."), &[], &[]);
+        assert!(part.is_a_parts_own_name(Some("Fabrikam"), "Fabrikam Helper"));
+        assert!(part.is_a_parts_own_name(None, "Fabrikam Helper"));
+        assert!(
+            !part.is_a_parts_own_name(None, "Fabrikam"),
+            "that is all of it"
+        );
+        assert!(!part.is_a_parts_own_name(Some("Contoso"), "Fabrikam Helper"));
+        assert!(!part.is_a_parts_own_name(Some("Microsoft"), "Fabrikam Helper"));
+        assert!(!part.is_a_parts_own_name(None, "Helper"));
+        let of_everyone =
+            ProductNames::new(Some("Some Part"), Some("Microsoft Corporation"), &[], &[]);
+        assert!(!of_everyone.is_a_parts_own_name(Some("Microsoft"), "Some Part"));
+        assert!(!of_everyone.is_a_parts_own_name(None, "Microsoft Some Part"));
 
         let short = ProductNames::new(Some("Vive"), Some("HTC Corp."), &[], &[]);
         assert!(

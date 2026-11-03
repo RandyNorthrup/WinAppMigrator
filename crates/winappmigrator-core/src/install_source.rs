@@ -23,7 +23,7 @@ use winreg::enums::{KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
 use crate::models::{InstallMethod, InstallScope, InstalledApp};
 use crate::path_utils::{
-    is_auxiliary_executable, is_drive_root, looks_like_executable, path_is_within,
+    comparable_path, is_auxiliary_executable, is_drive_root, looks_like_executable, path_is_within,
     split_command_executable_path, walk_asking,
 };
 use crate::privilege::only_administrators_can_change;
@@ -1446,7 +1446,7 @@ fn local_app_data_dirs(system: &SystemContext) -> Vec<PathBuf> {
         .collect()
 }
 
-fn extract_product_code(app: &InstalledApp) -> Option<String> {
+pub(crate) fn extract_product_code(app: &InstalledApp) -> Option<String> {
     if let Some(last) = app.registry_source_path.rsplit(['\\', '/']).next()
         && is_guid(last)
     {
@@ -1634,6 +1634,61 @@ fn msi_component_paths(
         files,
         registry_keys,
     })
+}
+
+/// Every file the MSI component database records for any of these products, each as
+/// [`comparable_path`] writes it, in order. For what an app's entry does not say of where it is, and
+/// about nothing being scanned, so what cannot be followed is not said to be.
+pub(crate) fn msi_files_of_others(
+    product_codes: &[String],
+    system: &SystemContext,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Vec<String> {
+    let squished_products: BTreeSet<String> = product_codes
+        .iter()
+        .filter_map(|code| squish_guid(code))
+        .collect();
+    if squished_products.is_empty() {
+        return Vec::new();
+    }
+    let Ok(user_data) = system.open_hklm(USERDATA_PATH, KEY_READ | KEY_WOW64_64KEY) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for sid in component_sweep_sids(&user_data, &squished_products) {
+        let Ok(components) = user_data
+            .open_subkey_with_flags(format!(r"{sid}\Components"), KEY_READ | KEY_WOW64_64KEY)
+        else {
+            continue;
+        };
+        for component in components.enum_keys().flatten() {
+            if is_cancelled() {
+                return Vec::new();
+            }
+            let Ok(component_key) =
+                components.open_subkey_with_flags(&component, KEY_READ | KEY_WOW64_64KEY)
+            else {
+                continue;
+            };
+            for (product, value) in component_key.enum_values().flatten() {
+                if !squished_products.contains(&product) {
+                    continue;
+                }
+                let key_path = registry_value_text(&value);
+                if key_path.is_empty() || is_registry_key_path(&key_path) {
+                    continue;
+                }
+                files.extend(
+                    system
+                        .resolve_source_path_quietly(Path::new(&msi_file_path(&key_path)))
+                        .map(|file| comparable_path(&file)),
+                );
+            }
+        }
+    }
+    files.sort_unstable();
+    files.dedup();
+    files
 }
 
 /// The SIDs whose `Components` subtree to sweep for a product's key paths.

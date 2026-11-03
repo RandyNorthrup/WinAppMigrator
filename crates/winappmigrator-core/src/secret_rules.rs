@@ -407,7 +407,8 @@ fn name_from_key(key_path: &str) -> Option<&str> {
 }
 
 /// Whether a file's name says it holds credentials, or a private key. `read_start` gives what it
-/// holds, for a kind of file that can go either way.
+/// holds, for a kind of file that can go either way. One of those that cannot be read to tell counts
+/// as one, since a package is made with more rights than this has, and can read what this cannot.
 pub fn is_secret_file(path: &Path, read_start: impl FnOnce() -> Option<Vec<u8>>) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -428,7 +429,7 @@ pub fn is_secret_file(path: &Path, read_start: impl FnOnce() -> Option<Vec<u8>>)
         return true;
     }
     KEY_FILE_EXTENSIONS.contains(&extension.as_str())
-        && read_start().is_some_and(|bytes| {
+        && read_start().is_none_or(|bytes| {
             bytes
                 .windows(PRIVATE_KEY_MARKER.len())
                 .any(|window| window == PRIVATE_KEY_MARKER)
@@ -1144,7 +1145,10 @@ mod tests {
             Path::new(r"C:\App\cacert.pem"),
             certificate
         ));
-        assert!(!is_secret_file(Path::new(r"C:\App\unread.pem"), || None));
+        assert!(
+            is_secret_file(Path::new(r"C:\App\unread.pem"), || None),
+            "what cannot be read to tell stays out"
+        );
     }
 
     #[test]

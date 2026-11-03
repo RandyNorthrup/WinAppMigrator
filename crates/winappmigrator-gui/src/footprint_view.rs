@@ -668,7 +668,11 @@ impl WinAppMigratorApp {
         }
         let ticked = rows
             .iter()
-            .filter(|near| self.near_picks.contains_key(&near.id))
+            .filter(|near| {
+                // One waiting for the User data option is not in, whatever its box says.
+                self.near_picks.contains_key(&near.id)
+                    && (!near.follows_user_data || self.backup_user_data)
+            })
             .count();
         let summary = format!("{ticked} of {} added", rows.len());
         if !self.group_heading(

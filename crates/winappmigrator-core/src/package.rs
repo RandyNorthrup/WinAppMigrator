@@ -651,6 +651,10 @@ fn files_to_pack(
     let mut secrets_since = Vec::new();
     for file in report.file_inventory.iter().filter(|file| file.should_copy) {
         let is_a_secret_by_now = crate::secret_rules::is_secret_file(&file.original_path, || {
+            // One that has gone says so when it is copied. It holds nothing now.
+            if !file.path.exists() {
+                return Some(Vec::new());
+            }
             reader
                 .check(&file.path)
                 .ok()
@@ -1082,6 +1086,16 @@ fn package_one_license_artifact(
         return false;
     };
     if source.is_file() {
+        // A license goes by its option, and what looks like a credential goes nowhere, by now as well.
+        if crate::secret_rules::is_secret_file(&source, || read_small_file(&source)) {
+            warnings.push(Warning::new(
+                "license_store_file_left_out",
+                WarningSeverity::Info,
+                "A license file looks like a credential, and was left out.",
+                Some(logical.display().to_string()),
+            ));
+            return false;
+        }
         let staged = copy_hashing_into_package(&source, &destination).and_then(|copied| {
             reader.check_after_copying(&source)?;
             Ok(copied)
@@ -2181,6 +2195,97 @@ mod tests {
                 .iter()
                 .any(|file| file.original_path == pem && !file.should_copy),
             "the manifest does not say it is there"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_license_file_that_holds_a_key_by_now_stays_out() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let license = root.path().join("license.key");
+        let write = |text: &str| {
+            fs::write(&license, text).map_err(|error| WinAppMigratorError::io(&license, error))
+        };
+        write("ORDINARY LICENSE TEXT")?;
+        let out = root.path().join("out");
+        let reader = SourceReader {
+            volume: None,
+            other_accounts: Default::default(),
+        };
+        let artifact = || LicenseArtifact {
+            kind: crate::models::LicenseArtifactKind::File,
+            framework: crate::models::LicenseFramework::FileBased,
+            path: Some(license.clone()),
+            registry_location: None,
+            detail: String::new(),
+            machine_bound: false,
+            requires_admin: false,
+            transferable: crate::models::TransferableHint::Likely,
+            should_copy: true,
+            package_relative_path: None,
+            size_bytes: Some(21),
+            hash_sha256: None,
+            store_files: Vec::new(),
+        };
+        let mut warnings = Vec::new();
+        assert!(package_one_license_artifact(
+            &out,
+            &mut artifact(),
+            &reader,
+            &mut warnings
+        ));
+        write("-----BEGIN PRIVATE KEY-----\nCANARY\n")?;
+        assert!(!package_one_license_artifact(
+            &out.join("again"),
+            &mut artifact(),
+            &reader,
+            &mut warnings
+        ));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code == "license_store_file_left_out"),
+            "{warnings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_key_file_that_has_gone_is_gone_rather_than_a_credential() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let folder = exe
+            .parent()
+            .ok_or_else(|| WinAppMigratorError::Archive("no folder".to_owned()))?
+            .to_path_buf();
+        let pem = folder.join(r"data\tls.pem");
+        fs::write(&pem, "-----BEGIN CERTIFICATE-----\n")
+            .map_err(|error| WinAppMigratorError::io(&pem, error))?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let report = scan_of(&options)?;
+        fs::remove_file(&pem).map_err(|error| WinAppMigratorError::io(&pem, error))?;
+        let result = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.code == FILE_GONE_CODE),
+            "{:?}",
+            result.warnings
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "secret_left_out"),
+            "{:?}",
+            result.warnings
         );
         Ok(())
     }

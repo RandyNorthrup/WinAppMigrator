@@ -21,7 +21,10 @@ use crate::file_discovery::{
     is_a_link, is_of_one_account, is_volatile_dir, is_walkable_app_dir, kind_for_path,
     known_base_dirs, names_of_app,
 };
-use crate::install_source::{detect_install_source_unless, is_chained_runtime, is_shared_folder};
+use crate::install_source::{
+    detect_install_source_unless, extract_product_code, is_chained_runtime, is_shared_folder,
+    msi_files_of_others,
+};
 use crate::models::{
     FootprintKind, FootprintLocation, InstallScope, InstalledApp, NearMatch, NearMatchKind,
     Warning, WarningSeverity,
@@ -31,11 +34,9 @@ use crate::path_utils::{
     resolved_location, walk_asking,
 };
 use crate::product_match::{MatchScope, NearName, ProductNames, is_generic_name};
-use crate::registry_scan::RecordedRegistryKey;
+use crate::registry_scan::{RecordedRegistryKey, is_named_for_another_app};
 use crate::system_context::SystemContext;
 
-/// A key's name in the registry's 32-bit view, which says nothing of whose it is.
-const WOW6432_NODE: &str = "WOW6432Node";
 /// What a choice calls a folder and an entry, which is all a scan is told of either.
 const FOLDER_ID_PREFIX: &str = "folder:";
 const ENTRY_ID_PREFIX: &str = "entry:";
@@ -102,6 +103,9 @@ const NEVER_OFFERED_PREFIXES: &[&str] = &["windows "];
 /// Nothing below one of these is offered, whatever it is called. Not `Common Files`, which is
 /// where a vendor can keep what only its own products use.
 const NEVER_OFFERED_BELOW: &[&str] = &["microsoft", "microsoft shared", "windows", "windowsapps"];
+/// What is Windows' in `Common Files`, which is all of what is in these, and of no vendor.
+const NEVER_OFFERED_IN_COMMON_FILES: &[&str] = &["designer", "services", "speechengines", "system"];
+const COMMON_FILES: &str = "common files";
 
 /// What is being scanned, as far as telling what is close to it takes.
 pub(crate) struct AppBeingScanned<'a> {
@@ -138,6 +142,9 @@ pub struct NearMatchLook {
     /// What looked close and is not to be offered, and why.
     pub refused: Vec<RefusedNearMatch>,
     others: Vec<OtherApp>,
+    /// What Windows Installer says other apps have, as [`comparable_path`] writes it, in order. An
+    /// entry need not say where its app is, so this is what says that of one that does not.
+    files_of_others: Vec<String>,
 }
 
 /// An app other than the one being scanned, and what it goes by.
@@ -158,6 +165,8 @@ pub(crate) struct Picks {
     pub also_the_apps: Vec<PathBuf>,
     pub recorded_keys: Vec<RecordedRegistryKey>,
     pub also_named: Vec<ProductNames>,
+    /// What other apps go by, which is not to be taken for any of that.
+    pub not_named: Vec<ProductNames>,
     /// What each is called, for saying what was added.
     pub ids: BTreeSet<String>,
     pub warnings: Vec<Warning>,
@@ -232,6 +241,13 @@ impl NearMatchLook {
         is_cancelled: &dyn Fn() -> bool,
     ) -> Picks {
         let mut picks = Picks::default();
+        if !ids.is_empty() {
+            picks.not_named = self
+                .others
+                .iter()
+                .map(|other| other.names.clone())
+                .collect();
+        }
         for id in ids {
             let Some(offer) = self.offers.iter().find(|offer| offer.near.id == *id) else {
                 picks.warnings.push(Warning::new(
@@ -306,12 +322,14 @@ impl NearMatchLook {
                 .filter(|file| self.may_add_loose_file(file, scan, system)),
         );
         if !scan.installed_for_one_account {
+            let not_named = std::mem::take(&mut picks.not_named);
             picks.recorded_keys.extend(
                 source
                     .registry_keys
                     .into_iter()
-                    .filter(|key| !self.is_another_apps_key(&key.key_path)),
+                    .filter(|key| !is_named_for_another_app(&key.key_path, &not_named)),
             );
+            picks.not_named = not_named;
         }
     }
 
@@ -327,6 +345,17 @@ impl NearMatchLook {
         if self.is_named_like_another_app(&record.display_name) {
             return Some("it goes by another app's name");
         }
+        let names = names_of_app(
+            None,
+            record.install_location.as_deref(),
+            Some(&record.display_name),
+            record.publisher.as_deref(),
+        );
+        if names.is_named_only_for_publisher(&record.display_name)
+            || scan.names.is_named_only_for_publisher(&record.display_name)
+        {
+            return Some("it is named only for the publisher, and may hold its other products");
+        }
         self.folder_refusal(folder, scan, system)
     }
 
@@ -338,24 +367,15 @@ impl NearMatchLook {
         })
     }
 
-    /// Whether a registry key is what another app would take by its name, as its folders go by it.
-    fn is_another_apps_key(&self, key_path: &str) -> bool {
-        let parts: Vec<&str> = key_path
-            .split('\\')
-            .filter(|part| !part.eq_ignore_ascii_case(WOW6432_NODE))
-            .collect();
-        self.others.iter().any(|other| {
-            parts.iter().enumerate().any(|(index, part)| {
-                other
-                    .names
-                    .matches_top_level(part, MatchScope::ProgramFolders)
-                    || index.checked_sub(1).is_some_and(|before| {
-                        other
-                            .names
-                            .matches_nested(parts[before], part, MatchScope::ProgramFolders)
-                    })
-            })
-        })
+    /// Whether Windows Installer says another app has a file in this folder, however deep.
+    fn holds_a_file_of_another_app(&self, folder: &Path) -> bool {
+        let below = format!(r"{}\", comparable_path(folder));
+        let first = self
+            .files_of_others
+            .partition_point(|file| file.as_str() < below.as_str());
+        self.files_of_others
+            .get(first)
+            .is_some_and(|file| file.starts_with(&below))
     }
 
     /// Whether a file an entry's install record names may come along with it. It has no folder of its
@@ -374,6 +394,10 @@ impl NearMatchLook {
             && !path_is_within(file, &system.windows_dir())
             && !is_below_what_is_shared(&system.logical_path(file))
             && !self.is_another_apps(file, &file_name_string(file))
+            && self
+                .files_of_others
+                .binary_search(&comparable_path(file))
+                .is_err()
     }
 
     /// Why a folder is not to be offered or added, if so.
@@ -423,7 +447,7 @@ impl NearMatchLook {
         {
             return Some("it holds this app's own folder, and may hold more");
         }
-        if self.is_another_apps(path, &name) {
+        if self.is_another_apps(path, &name) || self.holds_a_file_of_another_app(path) {
             return Some("it is another app's");
         }
         None
@@ -465,9 +489,17 @@ fn is_shared_by_name(path: &Path) -> bool {
 
 /// Whether anything above this says it is Windows' or everyone's.
 fn is_below_what_is_shared(path: &Path) -> bool {
-    path.parent().into_iter().flat_map(Path::iter).any(|above| {
+    let is_below_a_name = path.parent().into_iter().flat_map(Path::iter).any(|above| {
         NEVER_OFFERED_BELOW.contains(&above.to_string_lossy().to_ascii_lowercase().as_str())
-    })
+    });
+    let parts: Vec<String> = path
+        .iter()
+        .map(|part| part.to_string_lossy().to_ascii_lowercase())
+        .collect();
+    is_below_a_name
+        || parts.windows(2).any(|pair| {
+            pair[0] == COMMON_FILES && NEVER_OFFERED_IN_COMMON_FILES.contains(&pair[1].as_str())
+        })
 }
 
 /// The data folders named for one thing, as a scan finds its own.
@@ -477,8 +509,9 @@ fn data_folders_named_for(
     system: &SystemContext,
     warnings: &mut Vec<Warning>,
 ) -> Vec<PathBuf> {
-    let mut roots: Vec<DiscoveryRoot> = Vec::new();
+    let mut folders = Vec::new();
     for (base, kind) in data_bases(scan, system) {
+        let mut roots: Vec<DiscoveryRoot> = Vec::new();
         collect_matching_dirs(
             &base,
             kind,
@@ -488,8 +521,30 @@ fn data_folders_named_for(
             &mut roots,
             warnings,
         );
+        folders.extend(
+            roots
+                .into_iter()
+                .map(|root| root.path)
+                .filter(|folder| is_a_parts_own_folder(names, &base, folder)),
+        );
     }
-    roots.into_iter().map(|root| root.path).collect()
+    folders
+}
+
+/// Whether a folder in `base` can be taken to be a part's by its name, however it matched.
+fn is_a_parts_own_folder(names: &ProductNames, base: &Path, folder: &Path) -> bool {
+    let Ok(below) = folder.strip_prefix(base) else {
+        return false;
+    };
+    let below: Vec<String> = below
+        .iter()
+        .map(|part| part.to_string_lossy().into_owned())
+        .collect();
+    match below.as_slice() {
+        [name] => names.is_a_parts_own_name(None, name),
+        [parent, name] => names.is_a_parts_own_name(Some(parent), name),
+        _ => false,
+    }
 }
 
 /// Where an app's data can be under a name that is close: a folder a person names is theirs, so
@@ -535,11 +590,11 @@ pub(crate) fn look_for_near_matches(
         .filter(|record| !is_itself(record))
         .filter_map(|record| why_a_part(record, scan).map(|why| (record, why)))
         .collect();
-    let is_a_part = |record: &UninstallRecord| {
-        parts
-            .iter()
-            .any(|(part, _)| part.registry_source_path == record.registry_source_path)
-    };
+    let part_keys: Vec<String> = parts
+        .iter()
+        .map(|(part, _)| part.registry_source_path.clone())
+        .collect();
+    let is_a_part = |record: &UninstallRecord| part_keys.contains(&record.registry_source_path);
     let mut look = NearMatchLook {
         others: records
             .iter()
@@ -588,7 +643,9 @@ pub(crate) fn look_for_near_matches(
                 .as_deref()
                 .is_some_and(|readable| path_is_within(readable, &folder))
         });
-        if already_offered || look.offers.len() >= MOST_OFFERED {
+        // An entry refused for what it calls itself is no less refused for what its folder is called.
+        if already_offered || look.was_refused(&folder, system) || look.offers.len() >= MOST_OFFERED
+        {
             continue;
         }
         if let Some(refusal) = look.folder_refusal(&folder, scan, system) {
@@ -623,12 +680,49 @@ pub(crate) fn look_for_near_matches(
             rank,
         });
     }
+    if !look.offers.is_empty() {
+        let products: Vec<String> = records
+            .iter()
+            .filter(|record| !is_itself(record) && !is_a_part(record))
+            .filter_map(|record| extract_product_code(&record.as_installed_app()))
+            .collect();
+        look.files_of_others = msi_files_of_others(&products, system, is_cancelled);
+        look.take_back_what_holds_a_file_of_another_app(system);
+    }
     look.offers
         .sort_by(|left, right| (left.rank, &left.near.name).cmp(&(right.rank, &right.near.name)));
     look
 }
 
 impl NearMatchLook {
+    fn was_refused(&self, folder: &Path, system: &SystemContext) -> bool {
+        let logical = comparable_path(&system.logical_path(folder));
+        self.refused
+            .iter()
+            .any(|refused| comparable_path(&refused.path) == logical)
+    }
+
+    fn take_back_what_holds_a_file_of_another_app(&mut self, system: &SystemContext) {
+        let offers = std::mem::take(&mut self.offers);
+        for offer in offers {
+            let is_another_apps = offer
+                .readable
+                .as_deref()
+                .is_some_and(|folder| self.holds_a_file_of_another_app(folder));
+            if !is_another_apps {
+                self.offers.push(offer);
+                continue;
+            }
+            if let Some(folder) = offer.readable.as_deref() {
+                self.refused.push(RefusedNearMatch {
+                    name: offer.near.name.clone(),
+                    path: system.logical_path(folder),
+                    why: "it is another app's",
+                });
+            }
+        }
+    }
+
     /// Offer a hidden entry, with any that says it is in the same folder as one thing.
     fn add_part(
         &mut self,
@@ -968,6 +1062,125 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_windows_installer_says_has_another_apps_files_is_not_offered() {
+        let (_temp, base) = a_real_folder();
+        let reports = base.join("Fabrikam Reports");
+        let free = base.join("Fabrikam Extras");
+        for folder in [&reports, &free] {
+            std::fs::create_dir_all(folder.join("Engine"))
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        let shared = reports.join(r"Engine\reports.exe");
+        let mut look = look_with_others(&[]);
+        look.files_of_others = vec![comparable_path(&shared)];
+        let system = SystemContext::live();
+        let install = base.join("Data Sync");
+        let app = app("Data Sync", "Fabrikam Inc.", &install);
+        let names = names_of_app(
+            None,
+            Some(&install),
+            Some("Data Sync"),
+            Some("Fabrikam Inc."),
+        );
+        let scan = scan_of(&app, &names);
+        assert_eq!(
+            look.folder_refusal(&reports, &scan, &system),
+            Some("it is another app's")
+        );
+        assert_eq!(
+            look.folder_refusal(&reports.join("Engine"), &scan, &system),
+            Some("it is another app's"),
+            "or any part of it that has one"
+        );
+        assert_eq!(look.folder_refusal(&free, &scan, &system), None);
+        assert!(
+            !look.may_add_loose_file(&shared, &scan, &system),
+            "nor a file of it, by itself"
+        );
+        assert!(look.may_add_loose_file(&free.join("Engine"), &scan, &system));
+    }
+
+    #[test]
+    fn what_is_windows_in_common_files_is_not_offered() {
+        for shared in [
+            r"C:\Program Files\Common Files\System",
+            r"C:\Program Files\Common Files\System\Ole DB",
+            r"C:\Program Files\Common Files\system\ado\msado15.dll",
+            r"C:\Program Files (x86)\Common Files\DESIGNER",
+        ] {
+            assert!(is_below_what_is_shared(Path::new(shared)), "{shared}");
+        }
+        for vendors in [
+            r"C:\Program Files\Common Files\Adobe\ARM",
+            r"C:\Program Files\Fabrikam\System",
+        ] {
+            assert!(!is_below_what_is_shared(Path::new(vendors)), "{vendors}");
+        }
+    }
+
+    #[test]
+    fn a_data_folder_by_a_parts_name_is_only_under_its_own_publisher() {
+        let base = Path::new(r"C:\ProgramData");
+        let part = names_of_app(None, None, Some("Fabrikam Helper"), Some("Fabrikam Inc."));
+        for (folder, expected) in [
+            (r"C:\ProgramData\Fabrikam\Fabrikam Helper", true),
+            (r"C:\ProgramData\Fabrikam Helper", true),
+            (r"C:\ProgramData\Contoso\Fabrikam Helper", false),
+            (r"C:\ProgramData\Microsoft\Fabrikam Helper", false),
+            (r"C:\ProgramData\Fabrikam", false),
+            (r"C:\Elsewhere\Fabrikam Helper", false),
+        ] {
+            assert_eq!(
+                is_a_parts_own_folder(&part, base, Path::new(folder)),
+                expected,
+                "{folder}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_named_only_for_its_publisher_is_not_offered() {
+        let (_temp, base) = a_real_folder();
+        let own = base.join("Its Own Folder");
+        std::fs::create_dir_all(&own).unwrap_or_else(|error| panic!("{error}"));
+        let system = SystemContext::live();
+        let install = base.join("Data Sync");
+        let app = app("Data Sync", "Fabrikam Inc.", &install);
+        let names = names_of_app(
+            None,
+            Some(&install),
+            Some("Data Sync"),
+            Some("Fabrikam Inc."),
+        );
+        let scan = scan_of(&app, &names);
+        let look = NearMatchLook::default();
+        assert_eq!(
+            look.part_refusal(
+                &other_app_record("Fabrikam", Some(&own)),
+                &own,
+                &scan,
+                &system
+            ),
+            Some("it is named only for the publisher, and may hold its other products"),
+        );
+    }
+
+    #[test]
+    fn what_was_refused_for_its_name_stays_refused_for_its_folder() {
+        let (_temp, base) = a_real_folder();
+        let impostor = base.join("Fabrikam Impostor");
+        let mut look = NearMatchLook::default();
+        let system = SystemContext::live();
+        assert!(!look.was_refused(&impostor, &system));
+        look.refused.push(RefusedNearMatch {
+            name: "Fabrikam Reports".to_owned(),
+            path: system.logical_path(&impostor),
+            why: "it goes by another app's name",
+        });
+        assert!(look.was_refused(&impostor, &system));
+    }
+
+    #[test]
     fn what_an_entry_calls_itself_cannot_take_another_apps_keys() {
         let look = look_with_others(&[other_app_record("Mozilla Firefox", None)]);
         assert!(look.is_named_like_another_app("Mozilla Firefox"));
@@ -1004,9 +1217,23 @@ mod tests {
             ),
             None
         );
-        assert!(look.is_another_apps_key(r"Software\Mozilla\Firefox"));
-        assert!(look.is_another_apps_key(r"Software\WOW6432Node\Mozilla Firefox\Settings"));
-        assert!(!look.is_another_apps_key(r"Software\Fabrikam\Helper"));
+        let others: Vec<ProductNames> = look
+            .others
+            .iter()
+            .map(|other| other.names.clone())
+            .collect();
+        assert!(is_named_for_another_app(
+            r"Software\Mozilla\Firefox",
+            &others
+        ));
+        assert!(is_named_for_another_app(
+            r"Software\WOW6432Node\Mozilla Firefox\Settings",
+            &others
+        ));
+        assert!(!is_named_for_another_app(
+            r"Software\Fabrikam\Helper",
+            &others
+        ));
     }
 
     #[test]
