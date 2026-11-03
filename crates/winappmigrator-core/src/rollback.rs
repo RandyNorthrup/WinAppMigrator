@@ -39,9 +39,7 @@ use winreg::enums::{
 use winreg::{RegKey, RegValue};
 
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{
-    PinnedPath, expand_env_vars, hold_path_below_root, pin_path_below_root,
-};
+use crate::file_discovery::{PinnedPath, hold_path_below_root, pin_path_below_root};
 use crate::hashing::sha256_file;
 use crate::journal::{
     Backup, Change, ItemKind, Journal, JournalLock, ReadJournal, STAGING_PREFIX, ServiceConfig,
@@ -50,8 +48,8 @@ use crate::journal::{
 };
 use crate::models::{EnvironmentScope, FirewallRuleEntry, RegistryHive, UndoReport};
 use crate::path_utils::{
-    POWERSHELL_IMPORT_UTILITY, current_user_sid, escape_powershell_single, hidden_command,
-    path_is_within, system_root, text_mentions_path,
+    POWERSHELL_IMPORT_UTILITY, current_user_sid, escape_powershell_single, expand_env_vars,
+    hidden_command, path_is_within, powershell_command, system_root, text_mentions_path,
 };
 use crate::privilege::{confirm_protected_folder, hold_folder, hold_real_folder, is_pin_file_name};
 use crate::progress::{InstallMonitor, InstallPhase, InstallStep};
@@ -1195,9 +1193,7 @@ impl Undoer<'_> {
 
     fn undo_task_folder(&mut self, path: &str) {
         let script = delete_empty_task_folder_script(path);
-        let output = hidden_command(crate::restore::POWERSHELL_EXE)
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .output();
+        let output = powershell_command(&script).output();
         match output {
             Ok(output) if output.status.success() => {}
             Ok(output) if output.status.code() == Some(TASK_FOLDER_NOT_EMPTY_EXIT) => {

@@ -17,8 +17,8 @@ use crate::models::{
 use crate::package::{PreparedPackage, read_embedded_manifest, read_manifest};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
-    POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command,
-    system_root,
+    POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT, escape_powershell_single,
+    powershell_command, system_root,
 };
 use crate::prerequisites::{is_present, spec_for_bundle};
 use crate::progress::BuildMonitor;
@@ -39,7 +39,6 @@ use crate::task_scan::live_task_xml;
 
 const VERIFICATION_REPORT_JSON: &str = "verification_report.json";
 const VERIFICATION_REPORT_MARKDOWN: &str = "verification_report.md";
-const POWERSHELL_EXE: &str = "powershell.exe";
 
 /// How a package's own files are checked.
 #[derive(Clone, Copy)]
@@ -1448,9 +1447,7 @@ fn shortcut_target(path: &Path) -> std::io::Result<Option<String>> {
         "{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_UTILITY}$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath",
         escape_powershell_single(path.display().to_string().as_str())
     );
-    let output = hidden_command(POWERSHELL_EXE)
-        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
-        .output()?;
+    let output = powershell_command(script.as_str()).output()?;
     if output.status.success() {
         Ok(Some(
             String::from_utf8_lossy(&output.stdout).trim().to_owned(),

@@ -15,8 +15,8 @@ use winreg::enums::{HKEY_USERS, KEY_READ};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
     DESKTOP_FALLBACK, DESKTOP_VALUE, MAX_EMPTY_FOLDERS, START_MENU_FALLBACK, START_MENU_VALUE,
-    UserDataAnchor, UserFolderPlace, account_shell_folder, data_location_of, expand_env_vars,
-    first_link_to, has_reserved_device_name, known_base_dirs, link_refusal, safe_relative_path,
+    UserDataAnchor, UserFolderPlace, account_shell_folder, data_location_of, first_link_to,
+    has_reserved_device_name, known_base_dirs, link_refusal, safe_relative_path,
     split_user_data_relative, user_data_base, user_folder_place,
 };
 use crate::footprint::ChoiceId;
@@ -30,9 +30,9 @@ use crate::models::{
 };
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
-    SignedInUser, current_user_sid, path_is_within, resolved_location, signed_in_user,
-    strip_prefix_ignore_case, system_root, windows_architecture_name, windows_build,
-    windows_version_numbers,
+    SignedInUser, current_user_sid, expand_env_vars, path_is_within, resolved_location,
+    signed_in_user, strip_prefix_ignore_case, system_root, windows_architecture_name,
+    windows_build, windows_version_numbers,
 };
 use crate::registry_target::{app_path_entries, is_path_variable, service_image_path};
 use crate::restore_policy::{

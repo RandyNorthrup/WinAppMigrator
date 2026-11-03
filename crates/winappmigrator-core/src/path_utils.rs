@@ -100,6 +100,50 @@ pub fn hidden_command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
+/// Expand `%VAR%` references using the current process environment. Unknown
+/// variables are left intact.
+pub(crate) fn expand_env_vars(value: &str) -> String {
+    expand_vars_with(value, &|name| {
+        std::env::var_os(name).and_then(|value| value.into_string().ok())
+    })
+}
+
+/// Expand `%VAR%` references using what `lookup` says of each. Unknown variables are left intact.
+pub(crate) fn expand_vars_with(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut output = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else {
+            output.push('%');
+            output.push_str(after);
+            return output;
+        };
+        let name = &after[..end];
+        match lookup(name) {
+            Some(resolved) => output.push_str(&resolved),
+            None => {
+                output.push('%');
+                output.push_str(name);
+                output.push('%');
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// PowerShell, to run this script and nothing else of the user's. See [`hidden_command`].
+pub fn powershell_command(script: impl AsRef<OsStr>) -> Command {
+    let mut command = hidden_command(POWERSHELL_EXE);
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(script);
+    command
+}
+
 /// Give PowerShell a fixed environment instead of inheriting one. The user's environment
 /// is theirs to change, and an elevated process gets it. PowerShell is a .NET program, so
 /// `COMPLUS_InstallRoot` can load a runtime from any folder, `COR_PROFILER` can load a DLL,
@@ -296,9 +340,7 @@ fn query_signed_in_user() -> SignedInUser {
     }
     let script =
         format!("{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_MANAGEMENT}{SESSION_SHELL_SCRIPT}");
-    let output = hidden_command(POWERSHELL_EXE)
-        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
-        .output();
+    let output = powershell_command(script.as_str()).output();
     let shown = match output {
         Ok(output) if output.status.success() => {
             String::from_utf8_lossy(&output.stdout).into_owned()
@@ -1023,6 +1065,22 @@ mod tests {
     }
 
     #[test]
+    fn expands_known_env_vars_and_keeps_unknown() {
+        // USERPROFILE is always present on Windows; avoid mutating the env.
+        if let Some(profile) = std::env::var_os("USERPROFILE").and_then(|v| v.into_string().ok()) {
+            assert_eq!(
+                expand_env_vars(r"%USERPROFILE%\Documents"),
+                format!(r"{profile}\Documents")
+            );
+        }
+        assert_eq!(
+            expand_env_vars(r"%WAM_DEFINITELY_MISSING%\x"),
+            r"%WAM_DEFINITELY_MISSING%\x"
+        );
+        assert_eq!(expand_env_vars("no-vars-here"), "no-vars-here");
+    }
+
+    #[test]
     fn powershell_is_given_its_module_folder_and_tools_from_the_windows_folder() {
         let command = hidden_command("powershell.exe");
         let envs: Vec<_> = command.get_envs().collect();
@@ -1039,9 +1097,7 @@ mod tests {
     }
 
     fn powershell_output(script: &str) -> std::io::Result<String> {
-        let output = hidden_command("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .output()?;
+        let output = powershell_command(script).output()?;
         assert!(output.status.success());
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }

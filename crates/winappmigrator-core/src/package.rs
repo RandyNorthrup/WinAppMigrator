@@ -34,6 +34,7 @@ use crate::path_utils::{
 use crate::prerequisites::PREREQUISITES_DIR;
 use crate::privilege::ProtectedFolder;
 use crate::progress::{BuildMonitor, BuildStep};
+use crate::registry_target::hex_decode;
 use crate::reporting::write_scan_reports;
 use crate::scan::scan_app;
 use crate::space::{BuildInputs, RoomCheck, build_needs, build_places};
@@ -1642,7 +1643,8 @@ fn registry_export_value(entry: &RegistryEntry) -> String {
             escape_reg_string(entry.value_data.as_deref().unwrap_or_default())
         ),
         Some(RegistryValueKind::Dword) => {
-            let bytes = hex_decode(entry.value_bytes_hex.as_deref().unwrap_or_default());
+            let bytes = hex_decode(entry.value_bytes_hex.as_deref().unwrap_or_default())
+                .unwrap_or_default();
             if bytes.len() == 4 {
                 let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 format!("dword:{value:08x}")
@@ -1676,17 +1678,6 @@ fn registry_hex_value(prefix: &str, entry: &RegistryEntry) -> String {
 
 fn escape_reg_string(value: &str) -> String {
     value.replace('\\', r"\\").replace('"', "\\\"")
-}
-
-fn hex_decode(value: &str) -> Vec<u8> {
-    value
-        .as_bytes()
-        .chunks(2)
-        .filter_map(|pair| {
-            let text = std::str::from_utf8(pair).ok()?;
-            u8::from_str_radix(text, 16).ok()
-        })
-        .collect()
 }
 
 fn sanitize_artifact_name(value: &str) -> String {

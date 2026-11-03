@@ -9,14 +9,15 @@ use std::sync::OnceLock;
 
 use tempfile::TempDir;
 
-use crate::path_utils::{POWERSHELL_IMPORT_SECURITY, hidden_command, without_verbatim_prefix};
+use crate::path_utils::{
+    POWERSHELL_IMPORT_SECURITY, hidden_command, powershell_command, without_verbatim_prefix,
+};
 
 /// SIDs rather than names, because the names are translated on other Windows languages.
 const ADMINISTRATORS_SID: &str = "*S-1-5-32-544";
 const ADMINISTRATORS_ONLY_GRANTS: [&str; 2] = ["*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"];
 /// The mandatory labels of a process running with full rights: High, and System.
 const ELEVATED_LABELS: [&str; 2] = ["S-1-16-12288", "S-1-16-16384"];
-const POWERSHELL_EXE: &str = "powershell.exe";
 /// The path travels in this variable, so that no quoting can go wrong.
 const ACL_PATH_VARIABLE: &str = "WAM_ACL_PATH";
 const READ_SDDL_SCRIPT: &str = "(Get-Acl -LiteralPath $env:WAM_ACL_PATH).Sddl";
@@ -389,13 +390,7 @@ fn restrict_to_administrators(folder: &Path) -> io::Result<()> {
 /// volume that keeps none, such as FAT32 or exFAT, where the folder stays open to everyone,
 /// so it is the result that counts and not the exit code.
 fn confirm_administrators_only(folder: &Path) -> io::Result<()> {
-    let output = hidden_command(POWERSHELL_EXE)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!("{POWERSHELL_IMPORT_SECURITY}{READ_SDDL_SCRIPT}"),
-        ])
+    let output = powershell_command(format!("{POWERSHELL_IMPORT_SECURITY}{READ_SDDL_SCRIPT}"))
         .env(ACL_PATH_VARIABLE, folder)
         .output()?;
     let sddl = String::from_utf8_lossy(&output.stdout);
@@ -449,13 +444,7 @@ fn refuse_anything_already_inside(folder: &Path) -> io::Result<()> {
 /// that. `None` if that cannot be told.
 pub fn owner_of(path: &Path) -> Option<String> {
     let text = path.to_string_lossy();
-    let output = hidden_command(POWERSHELL_EXE)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!("{POWERSHELL_IMPORT_SECURITY}{READ_OWNER_SCRIPT}"),
-        ])
+    let output = powershell_command(format!("{POWERSHELL_IMPORT_SECURITY}{READ_OWNER_SCRIPT}"))
         .env(ACL_PATH_VARIABLE, without_verbatim_prefix(&text))
         .output()
         .ok()?;
@@ -472,18 +461,14 @@ pub fn only_administrators_can_change(path: &Path) -> bool {
         return true;
     }
     let text = path.to_string_lossy();
-    hidden_command(POWERSHELL_EXE)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!("{POWERSHELL_IMPORT_SECURITY}{ONLY_ADMINISTRATORS_CAN_CHANGE_SCRIPT}"),
-        ])
-        .env(ACL_PATH_VARIABLE, without_verbatim_prefix(&text))
-        .output()
-        .is_ok_and(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "yes"
-        })
+    powershell_command(format!(
+        "{POWERSHELL_IMPORT_SECURITY}{ONLY_ADMINISTRATORS_CAN_CHANGE_SCRIPT}"
+    ))
+    .env(ACL_PATH_VARIABLE, without_verbatim_prefix(&text))
+    .output()
+    .is_ok_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "yes"
+    })
 }
 
 pub fn target_requires_admin(target_root: &Path) -> bool {
@@ -772,9 +757,7 @@ public static class WamLink {{
             folder.display(),
             target.display()
         );
-        let output = hidden_command(POWERSHELL_EXE)
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .output()?;
+        let output = powershell_command(&script).output()?;
         assert!(
             output.status.success(),
             "{}",

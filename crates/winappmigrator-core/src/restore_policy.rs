@@ -977,7 +977,7 @@ fn holds_a_command(entry: &RegistryEntry) -> bool {
 pub fn restored_value_text(entry: &RegistryEntry, map: &RestoreMap) -> String {
     let rewritten = map.rewrite(entry.value_data.as_deref().unwrap_or_default());
     let rewritten = if starts_with_a_variable(&rewritten) {
-        let expanded = crate::file_discovery::expand_env_vars(&rewritten);
+        let expanded = crate::path_utils::expand_env_vars(&rewritten);
         let moved = map.rewrite(&expanded);
         if moved == expanded { rewritten } else { moved }
     } else {

@@ -2,17 +2,15 @@ use std::path::{Path, PathBuf};
 
 use winreg::enums::KEY_READ;
 
-use crate::file_discovery::expand_env_vars;
 use crate::models::{DriverEntry, DriverKind, ServiceEntry, Warning, WarningSeverity};
 use crate::path_utils::{
-    POWERSHELL_IMPORT_SECURITY, POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command,
-    path_is_strictly_inside,
+    POWERSHELL_IMPORT_SECURITY, POWERSHELL_UTF8_OUTPUT, escape_powershell_single, expand_env_vars,
+    path_is_strictly_inside, powershell_command,
 };
 use crate::registry_scan::capture_hklm_subtree;
 use crate::restore_policy::service_image_path_value;
 use crate::system_context::SystemContext;
 
-const POWERSHELL_EXE: &str = "powershell.exe";
 /// Each one starts PowerShell, and a registry can name any number.
 const MAX_DRIVER_SIGNERS_ASKED: usize = 16;
 
@@ -255,10 +253,7 @@ fn driver_signer(image_path: &Path) -> Option<String> {
         "{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_SECURITY}$s = Get-AuthenticodeSignature -LiteralPath '{}'; if ($s -and $s.SignerCertificate) {{ $s.SignerCertificate.Subject }}",
         escape_powershell_single(&image_path.display().to_string())
     );
-    let output = hidden_command(POWERSHELL_EXE)
-        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
-        .output()
-        .ok()?;
+    let output = powershell_command(script.as_str()).output().ok()?;
     if !output.status.success() {
         return None;
     }

@@ -8,7 +8,7 @@ use crate::file_discovery::{
 use crate::models::{ShortcutEntry, Warning, WarningSeverity};
 use crate::path_utils::{
     DEEPEST_WALK, POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT,
-    escape_powershell_single, hidden_command, path_has_extension, path_is_strictly_inside,
+    escape_powershell_single, path_has_extension, path_is_strictly_inside, powershell_command,
     trim_icon_suffix, walk_asking,
 };
 use crate::system_context::SystemContext;
@@ -255,9 +255,7 @@ fn run_powershell(script: &str) -> std::io::Result<String> {
     let script = format!(
         "{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_MANAGEMENT}{POWERSHELL_IMPORT_UTILITY}{script}"
     );
-    let output = hidden_command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()?;
+    let output = powershell_command(&script).output()?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -430,6 +428,7 @@ fn utf16_string(data: &[u8], offset: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path_utils::hidden_command;
 
     /// A shortcut holding the given local path, in the ANSI form or also the Unicode one.
     fn lnk_bytes(base: &str, suffix: &str, unicode: bool, id_list: &[u8]) -> Vec<u8> {

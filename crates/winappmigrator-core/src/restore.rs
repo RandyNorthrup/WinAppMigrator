@@ -35,7 +35,7 @@ use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_TASKS, POWERSHELL_IMPORT_UTILITY,
     POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, path_is_strictly_inside,
-    path_is_within, strip_prefix_ignore_case, system_root,
+    path_is_within, powershell_command, strip_prefix_ignore_case, system_root,
 };
 use crate::prerequisites::{
     PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
@@ -68,7 +68,6 @@ use crate::service_scan::DELAYED_AUTOMATIC_START_LABEL;
 use crate::task_scan::live_task_xml;
 use crate::verify::{PackageFiles, verify_prepared_package, without_what_was_refused};
 
-pub(crate) const POWERSHELL_EXE: &str = "powershell.exe";
 pub(crate) const SC_EXE: &str = "sc.exe";
 /// Buffer for copying a file out of the package. Large files are the slow ones.
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
@@ -3164,9 +3163,7 @@ fn missing_task_folders(levels: &[String]) -> io::Result<Vec<String>> {
          $s = New-Object -ComObject Schedule.Service; $s.Connect(); \
          foreach ($path in @({names})) {{ try {{ $null = $s.GetFolder($path) }} catch {{ $path }} }}"
     );
-    let output = hidden_command(POWERSHELL_EXE)
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()?;
+    let output = powershell_command(&script).output()?;
     if !output.status.success() {
         return Err(io::Error::other(
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
@@ -3710,17 +3707,14 @@ fn powershell_error_summary(text: &str) -> String {
 }
 
 pub(crate) fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
-    let output = hidden_command(POWERSHELL_EXE)
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-        .map_err(|error| {
-            Warning::new(
-                "powershell_start_failed",
-                WarningSeverity::Error,
-                format!("Failed to start PowerShell: {error}"),
-                None,
-            )
-        })?;
+    let output = powershell_command(script).output().map_err(|error| {
+        Warning::new(
+            "powershell_start_failed",
+            WarningSeverity::Error,
+            format!("Failed to start PowerShell: {error}"),
+            None,
+        )
+    })?;
     if output.status.success() {
         return Ok(());
     }

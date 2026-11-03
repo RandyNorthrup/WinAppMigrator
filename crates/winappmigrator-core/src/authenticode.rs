@@ -8,10 +8,10 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::path_utils::{
-    POWERSHELL_IMPORT_SECURITY, POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT, hidden_command,
+    POWERSHELL_IMPORT_SECURITY, POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT,
+    powershell_command,
 };
 
-const POWERSHELL_EXE: &str = "powershell.exe";
 /// The path travels in this variable, so that no quoting can go wrong. The script only
 /// reads it through the provider, as a literal path.
 const PATH_VARIABLE: &str = "WAM_SIGNATURE_PATH";
@@ -65,15 +65,9 @@ impl Signature {
 /// Read a file's signature. An error means the question could not be asked, which is
 /// never to be taken as a good answer.
 pub fn read_signature(path: &Path) -> Result<Signature, String> {
-    let output = hidden_command(POWERSHELL_EXE)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!(
+    let output = powershell_command(format!(
                 "{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_SECURITY}{POWERSHELL_IMPORT_UTILITY}{SIGNATURE_SCRIPT}"
-            ),
-        ])
+            ))
         .env(PATH_VARIABLE, path)
         .output()
         .map_err(|error| format!("could not start PowerShell: {error}"))?;

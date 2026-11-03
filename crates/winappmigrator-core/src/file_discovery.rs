@@ -15,8 +15,8 @@ use crate::models::{
     Warning, WarningSeverity,
 };
 use crate::path_utils::{
-    UserAccount, comparable_path, file_name_string, is_auxiliary_executable, is_drive_root,
-    is_really_within, path_has_extension, path_is_strictly_inside, path_is_within,
+    UserAccount, comparable_path, expand_vars_with, file_name_string, is_auxiliary_executable,
+    is_drive_root, is_really_within, path_has_extension, path_is_strictly_inside, path_is_within,
     program_data_dir, public_profile_dir, resolved_location, signed_in_user,
     strip_prefix_ignore_case, walk_asking, windows_build,
 };
@@ -1350,41 +1350,6 @@ fn public_documents_dir(system: &SystemContext) -> Option<PathBuf> {
         .public_dir()
         .map(|base| base.join(DOCUMENTS_FALLBACK))
         .filter(|path| system.is_dir(path))
-}
-
-/// Expand `%VAR%` references using the current process environment. Unknown
-/// variables are left intact.
-pub(crate) fn expand_env_vars(value: &str) -> String {
-    expand_vars_with(value, &|name| {
-        std::env::var_os(name).and_then(|value| value.into_string().ok())
-    })
-}
-
-/// Expand `%VAR%` references using what `lookup` says of each. Unknown variables are left intact.
-pub(crate) fn expand_vars_with(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
-    let mut output = String::new();
-    let mut rest = value;
-    while let Some(start) = rest.find('%') {
-        output.push_str(&rest[..start]);
-        let after = &rest[start + 1..];
-        let Some(end) = after.find('%') else {
-            output.push('%');
-            output.push_str(after);
-            return output;
-        };
-        let name = &after[..end];
-        match lookup(name) {
-            Some(resolved) => output.push_str(&resolved),
-            None => {
-                output.push('%');
-                output.push_str(name);
-                output.push('%');
-            }
-        }
-        rest = &after[end + 1..];
-    }
-    output.push_str(rest);
-    output
 }
 
 /// Find directories under `base` named for the application, at either the top level
@@ -2860,22 +2825,6 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains(r"\public\")
         );
-    }
-
-    #[test]
-    fn expands_known_env_vars_and_keeps_unknown() {
-        // USERPROFILE is always present on Windows; avoid mutating the env.
-        if let Some(profile) = std::env::var_os("USERPROFILE").and_then(|v| v.into_string().ok()) {
-            assert_eq!(
-                expand_env_vars(r"%USERPROFILE%\Documents"),
-                format!(r"{profile}\Documents")
-            );
-        }
-        assert_eq!(
-            expand_env_vars(r"%WAM_DEFINITELY_MISSING%\x"),
-            r"%WAM_DEFINITELY_MISSING%\x"
-        );
-        assert_eq!(expand_env_vars("no-vars-here"), "no-vars-here");
     }
 
     #[test]

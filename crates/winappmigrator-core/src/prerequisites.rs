@@ -29,12 +29,13 @@ use crate::models::{
     AppArchitecture, DotNetFlavor, PrerequisiteBundle, PrerequisiteRegistryProbe,
     RuntimePrerequisiteKind,
 };
-use crate::path_utils::{POWERSHELL_IMPORT_APPX, POWERSHELL_IMPORT_UTILITY, hidden_command};
+use crate::path_utils::{
+    POWERSHELL_IMPORT_APPX, POWERSHELL_IMPORT_UTILITY, hidden_command, powershell_command,
+};
 
 const WINGET_EXE: &str = "winget.exe";
 const WINGET_NOT_INSTALLED: &str = "winget is not installed";
 const DISM_EXE: &str = "dism";
-const POWERSHELL_EXE: &str = "powershell.exe";
 /// Where the package keeps prerequisite payloads, and the only place one can be run from.
 pub const PREREQUISITES_DIR: &str = "prerequisites";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
@@ -399,15 +400,11 @@ fn run_windows_feature(feature: &str) -> PrerequisiteInstallOutcome {
 /// Where winget really is, checked the same way as a payload. The `winget` on `PATH` is a
 /// shortcut in a folder the user can write to, so it could be anything.
 fn trusted_winget_path() -> std::result::Result<PathBuf, String> {
-    let output = hidden_command(POWERSHELL_EXE)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!("{POWERSHELL_IMPORT_APPX}{POWERSHELL_IMPORT_UTILITY}{WINGET_LOCATION_SCRIPT}"),
-        ])
-        .output()
-        .map_err(|error| format!("could not look for winget: {error}"))?;
+    let output = powershell_command(format!(
+        "{POWERSHELL_IMPORT_APPX}{POWERSHELL_IMPORT_UTILITY}{WINGET_LOCATION_SCRIPT}"
+    ))
+    .output()
+    .map_err(|error| format!("could not look for winget: {error}"))?;
     let location = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !output.status.success() || location.is_empty() {
         return Err(WINGET_NOT_INSTALLED.to_owned());

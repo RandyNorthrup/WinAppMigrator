@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::models::{ScheduledTaskEntry, Warning, WarningSeverity};
 use crate::path_utils::{
     DEEPEST_WALK, POWERSHELL_IMPORT_TASKS, POWERSHELL_UTF8_OUTPUT, escape_powershell_single,
-    hidden_command, path_is_strictly_inside, walk_asking,
+    path_is_strictly_inside, powershell_command, walk_asking,
 };
 use crate::privilege::only_administrators_can_change;
 use crate::restore_policy::{is_system_account, node_text};
@@ -33,9 +33,7 @@ pub(crate) fn live_task_xml(task_path: &str, task_name: &str) -> std::io::Result
         name = escape_powershell_single(task_name),
         path = escape_powershell_single(task_path),
     );
-    let output = hidden_command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
-        .output()?;
+    let output = powershell_command(script.as_str()).output()?;
     if output.status.code() == Some(2) {
         return Ok(None);
     }
@@ -417,6 +415,7 @@ fn path_matches(context: &TaskScanContext, candidate: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path_utils::hidden_command;
 
     fn context() -> TaskScanContext {
         TaskScanContext {

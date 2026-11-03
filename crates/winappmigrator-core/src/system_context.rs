@@ -1533,7 +1533,7 @@ impl SystemContext {
     /// On a drive, the folders any Windows has, on its Windows drive: its other variables are not
     /// known here, and this PC's mean nothing there, so they stay as they are and match nothing.
     pub fn expand_source_variables(&self, text: &str) -> String {
-        crate::file_discovery::expand_vars_with(text, &|name| self.source_variable(name))
+        crate::path_utils::expand_vars_with(text, &|name| self.source_variable(name))
     }
 
     fn source_variable(&self, name: &str) -> Option<String> {
