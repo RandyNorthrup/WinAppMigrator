@@ -37,11 +37,11 @@ use crate::path_utils::{
 use crate::registry_target::{app_path_entries, is_path_variable, service_image_path};
 use crate::restore_policy::{
     KnownFolders, PackageRegistrations, PlatformFit, Registration, SERVICES_PREFIX, ServiceAccount,
-    ShortcutPlacement, WindowsHere, architecture_from_name, driver_destination,
-    environment_refusal, existing_service_refusal, firewall_refusal, install_location_refusal,
-    install_placement_refusal, is_autostart_entry, is_source_uninstall_value,
-    is_uninstall_entry_key, is_valid_service_name, license_destination, normalized_key,
-    platform_fit, read_task_definition, registered_value_refusal, registration_of,
+    ShortcutPlacement, WindowsHere, architecture_from_name, data_location_refusal,
+    driver_destination, environment_refusal, existing_service_refusal, firewall_refusal,
+    install_location_refusal, install_placement_refusal, is_autostart_entry,
+    is_source_uninstall_value, is_uninstall_entry_key, is_valid_service_name, license_destination,
+    normalized_key, platform_fit, read_task_definition, registered_value_refusal, registration_of,
     registration_refusal, registration_unit_of, registry_refusal, shortcut_placement, task_refusal,
 };
 use crate::space::{
@@ -678,7 +678,15 @@ impl<'a> ReviewedPackage<'a> {
             ) else {
                 continue;
             };
-            match license_destination(original, &self.map, restore_user_data, &real_location) {
+            let destination =
+                license_destination(original, &self.map, restore_user_data, &real_location)
+                    .and_then(|destination| {
+                        match store_file_refusal(artifact, original, &destination, &self.map) {
+                            Some(reason) => Err(reason),
+                            None => Ok(destination),
+                        }
+                    });
+            match destination {
                 Ok(destination) => self.license.push(ReviewedLicense {
                     artifact,
                     package_relative_path: relative,
@@ -869,6 +877,25 @@ fn real_location(original: &Path) -> Option<(PathBuf, PathBuf)> {
     }
     let base = user_data_base(anchor)?;
     Some((base.join(&tail), tail))
+}
+
+/// Why a file of a license store cannot go where the store does, if so. A store's root can be
+/// somewhere fine, and what it holds can be named to land in a Startup folder or where Office loads
+/// from. Under the install location a file's name means nothing to Windows. The whole store goes
+/// or stays, since a part of one is not a license, and one that asks for this is not one.
+fn store_file_refusal(
+    artifact: &LicenseArtifact,
+    original: &Path,
+    destination: &Path,
+    map: &RestoreMap,
+) -> Option<String> {
+    if path_is_within(destination, map.target_root()) {
+        return None;
+    }
+    artifact.store_files.iter().find_map(|file| {
+        let source = original.join(safe_relative_path(&file.relative_path));
+        split_user_data_relative(&source).and_then(|(_, tail)| data_location_refusal(&tail))
+    })
 }
 
 /// The Desktop and Start Menu folders of whoever is signed in, whoever this is running as, and the
@@ -2726,6 +2753,60 @@ mod tests {
         assert_eq!(reviewed.license_registry.len(), 1);
         assert_eq!(reviewed.license_registry[0].hive, RegistryHive::CurrentUser);
         assert!(reviewed.refused[0].message.contains("only reported"));
+        Ok(())
+    }
+
+    /// As the review found it: a store rooted at a plain folder, holding what Windows or Office
+    /// would run. A plain license file there was refused, and a store's file was not looked at.
+    #[test]
+    fn each_file_of_a_license_store_goes_by_the_rule_for_where_it_lands() -> Result<()> {
+        let store_of = |relative: &str| {
+            let mut store = license_file(r"C:\Users\bob\AppData\Roaming\Microsoft");
+            store.store_files = vec![
+                LicenseStoreFile {
+                    relative_path: PathBuf::from("license.dat"),
+                    size_bytes: 1,
+                    hash_sha256: String::new(),
+                },
+                LicenseStoreFile {
+                    relative_path: PathBuf::from(relative),
+                    size_bytes: 1,
+                    hash_sha256: String::new(),
+                },
+            ];
+            store
+        };
+        for relative in [
+            r"Windows\Start Menu\Programs\Startup\evil.url",
+            r"Word\STARTUP\evil.dotm",
+            r"Excel\XLSTART\evil.xlsm",
+        ] {
+            let mut manifest = acme_manifest();
+            manifest.license_artifacts_detected = vec![store_of(relative)];
+            let reviewed = ReviewedPackage::with_folders(
+                &manifest,
+                Path::new(TARGET),
+                true,
+                true,
+                &folders(),
+                &|text| text.to_owned(),
+                &|_| Ok(None),
+            )?;
+            assert!(reviewed.license.is_empty(), "{relative}");
+            assert_eq!(reviewed.refused.len(), 1, "{relative}");
+        }
+        let mut manifest = acme_manifest();
+        manifest.license_artifacts_detected = vec![store_of(r"Acme\more.dat")];
+        let reviewed = ReviewedPackage::with_folders(
+            &manifest,
+            Path::new(TARGET),
+            true,
+            true,
+            &folders(),
+            &|text| text.to_owned(),
+            &|_| Ok(None),
+        )?;
+        assert_eq!(reviewed.license.len(), 1, "{:?}", reviewed.refused);
         Ok(())
     }
 
