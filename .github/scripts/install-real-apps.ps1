@@ -4,14 +4,15 @@
 # crates/winappmigrator-installer/tests/elevated_real_apps.rs.
 #
 # Run only by the job that builds their installers, on a runner that is thrown away afterward.
-param([Parameter(Mandatory)][string]$Output)
+param([Parameter(Mandatory)][string]$Output, [string]$Only = '')
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot 'real-app-checks.ps1')
 Require-ThrowawayRunner
 
-$apps = (Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'real-apps.json') | ConvertFrom-Json).apps
+$list = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'real-apps.json') | ConvertFrom-Json
+$apps = @($list.apps | Where-Object { -not $Only -or $_.id -eq $Only })
 $downloads = New-WorkFolder
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
 
@@ -38,6 +39,14 @@ foreach ($app in $apps) {
     foreach ($entry in $entries) { Write-Host "  now in Settings: $($entry.DisplayName), at $($entry.Key), location [$($entry.InstallLocation)]: $($entry.Uninstall)" }
     if ($entries.Count -ne 1) { throw "$($entries.Count) entries start with $($app.name)" }
     if (-not (Test-Path -LiteralPath $app.installed_at)) { throw "$($app.name) is not at $($app.installed_at)" }
+}
+
+Write-Host "`n=== What an account would have in them by now, with marks in it that are in nothing else"
+foreach ($setting in @($list.account_settings | Where-Object { $_.app -in $apps.id })) {
+    Set-AccountSetting $setting
+    $problem = AccountSetting-Problem $setting
+    if ($problem) { throw "$($setting.key)\$($setting.name) did not take: $problem" }
+    Write-Host "  HKCU\$($setting.key) : $($setting.name), $($setting.kind), goes with $($setting.goes_with)"
 }
 
 Write-Host "`n=== What the publishers' own installers give, with no reboot"

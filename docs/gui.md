@@ -69,7 +69,7 @@ visibly off-center.
 2. **See what goes in**, which comes from a scan that starts when the app is selected. See
    [What goes in](#what-goes-in).
 3. **Choose what to include**: optionally back up the app's license/activation data,
-   and optionally its user data (settings, Documents, Saved Games, ProgramData), and untick
+   and optionally its user data (settings and history, Documents, Saved Games, ProgramData), and untick
    what you do not want. An installer holds one account's data. With User data
    on and more than one account to offer, a **Whose data** row of `segmented` controls appears,
    starting at the signed-in user. On a connected drive, the only account with data needs no

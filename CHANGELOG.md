@@ -4,6 +4,33 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **What an account keeps for an app now goes by the User data option.** An app's key under `HKEY_CURRENT_USER` is where it
+  remembers things: 7-Zip the folders and archives it last opened, PuTTY the hosts it has been to and who as. An installer
+  built with the option off used to carry all of that, because none of it is called what it is, so the rules for credentials
+  did not see it. Now, with the option off, all that goes of an account's is what Windows itself looks in for an app, and a
+  value that says where the app's own folder is. The rest goes only with the option on, for the account chosen, and the
+  rules for credentials still apply. The screen and the installer say how much was left out of which app's key, and no more
+  than that, since a host can be what a key is called. A real 7-Zip and PuTTY show this on every push, with marks left in
+  those keys that are searched for through the whole of a package, in every form a value is written in.
+- **An app's empty folders come along.** A package went by files, so a folder with nothing in it was not on the other PC,
+  such as windows_exporter's `textfile_inputs`. It is made again now, by the same rules as a file going there, if the rest
+  of what is around it is going, and it is listed for the installer to check. An uninstall takes it away if it is still
+  empty, and says so if not.
+- **A PC with no Visual C++ runtime is tried for real.** Every runner has that runtime, so nothing showed that one without
+  it works. A job now builds Mosquitto the way the app builds things, takes the runtime off a runner, shows the broker
+  cannot start, installs, shows the runtime came from what was in the package, and has the broker serve a real client.
+- **Real windows are opened for real.** Every other test of the screens draws them with no window. A job opens the app and
+  an installer on Windows Server 2022 and 2025 and Windows 11 on Arm, on runners with no graphics card, and looks at
+  what is on the screen, and does the same with graphics that cannot start. The message then says what the program needs,
+  and an installer's says how to install without a window. The app's log says which graphics adapter it picked.
+- **More credentials are known for what they are.** `.ovpn` profiles, `passwords.txt` and the like, what SQLite keeps beside a
+  store of passwords such as `Login Data-journal`, a key in binary in a `.key` file, a `.pem` or `.key` written in UTF-16,
+  and a `.crt` or `.cer` with a private key in it. A `.crt` with only a certificate in it still goes, even if it cannot be read
+  to tell.
+- **Two smaller things from a review.** A task that runs a program in a folder with a space in its name, such as `plugins
+  Extra`, went when `plugins` was left out, because its path was read as ending at the space. And a near match holding
+  something named like FlexLM's own files made all of `ProgramData\FLEXlm` count as the app's licenses. It now takes that
+  in the app's own folder.
 - **Real apps are moved between PCs on every push.** 7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter, and Git LFS, from
   their publishers at exact versions and hashes, go through custom, MSI, NSIS, and Inno Setup installers into real
   installers on one runner, and on to fresh runners on Windows Server 2022 and 2025 and Windows 11 on Arm, where each was

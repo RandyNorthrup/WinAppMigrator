@@ -293,13 +293,21 @@ Treat an installer as being as sensitive as the PC it came from.
 **What is left out.** A registry value, a service's setting, an environment variable, or a command-line
 option named for a credential (`Password`, `ApiKey`, `Token`, `ClientSecret`, and so on), or holding a connection
 string or URL with one in it, or a blob only DPAPI can read, is not captured at all, whatever else was asked
-for. Nor are files named for what they hold (`.env`, `id_rsa`, `credentials.json`, a browser's `Login Data`,
-`*.pfx`, `*.kdbx`, and so on), or a `.pem` or `.key` that holds a private key or cannot be read to tell. They are named when you build and in the
+for. Nor are files named for what they hold (`.env`, `id_rsa`, `credentials.json`, `passwords.txt`, a browser's `Login Data`
+and what SQLite keeps beside it, `*.pfx`, `*.kdbx`, `*.ovpn`, and so on), a `.pem` or `.key` that holds a private key or cannot be
+read to tell, a `.key` that is a key in binary, or a `.crt` or `.cer` that holds a private key. They are named when you build and in the
 installer, and never with what they hold. Since there is nothing of them in a package, there is nothing to
 overwrite what the other PC has, and you may have to enter them again.
 
 With the License option off, the same goes for license files, values, variables, and options, by the same rules
 that find them when it is on. With it on, licenses come along and credentials still do not.
+
+With the User data option off, what an account keeps for an app in its part of the registry stays behind too: recent files
+and folders, saved sessions, the hosts it has been to. All of it goes but what Windows itself looks in for an app, such as
+file types, COM classes, App Paths, Run values, and its entry in Settings, and a value whose whole data is a path in the
+app's own folder. This goes by where a value is, so nothing that finds one can get round it, and it says how many went from
+which app's key and nothing below that, since a host can be what a key is called. What stays can still say something: an
+ODBC source can name a server and a user, and a value pointing in the app's folder goes with the name of the key it is in.
 
 **What this cannot catch.** This goes by names and a few shapes of text, and a heuristic cannot find every secret:
 
@@ -308,7 +316,8 @@ that find them when it is on. With it on, licenses come along and credentials st
 - A value whose name does not say what it holds, such as `Data` or `Blob1`, is captured, unless what it holds has one
   of those shapes.
 - Rules that catch more would break more apps, so `TokenizerPath` and `PasswordPolicyVersion` are kept, and a file
-  called `tokens.txt` is too.
+  called `tokens.txt` is too. A `.key` in binary is known by its shape alone, so one of a kind of its own is not, and a `.crt`
+  is only read up to 1 MiB, so a private key in one bigger than that is not found.
 - An installer says which PC it came from, and what it holds can say more. Some of what a setup keeps of who ran it stays
   behind: an Inno Setup app's uninstall log, `unins000.dat`, which names the PC and the account and can hold paths in
   that account's folders, the account, name, and organization in its entry in Settings, and where a Windows Installer setup

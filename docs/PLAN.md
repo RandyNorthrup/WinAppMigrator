@@ -60,6 +60,10 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
 - Layered footprint discovery (MSI component DB, Inno `unins*.dat`, NSIS
   `uninstall.log`, App Paths, plus a Program Files/ProgramData/AppData walk), PE/delay-import/SxS/.NET analysis, runtime-prerequisite
   detection, and authoritative file counts.
+- What an account keeps for an app in the registry goes by the User data option, shown on real apps with marks searched for
+  through a whole package. An app's empty folders are made again.
+- A PC with no Visual C++ runtime, tried for real, and real windows opened on runners with no graphics card, with what a person is
+  told when graphics cannot start.
 - Optional per-user/ProgramData data backup and optional license detection/
   backup (opt-in; never decrypts, bypasses activation, or emulates dongles).
 - End-to-end test (`crates/winappmigrator-installer/tests/installer_e2e.rs`) runs the

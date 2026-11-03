@@ -440,6 +440,15 @@ data folder goes by the User data option, like any other.
 
 `wam_near_matches` runs this for every app on a PC. See [CONTRIBUTING](../CONTRIBUTING.md#seeing-what-near-matches-would-offer).
 
+What these rules cannot tell, all of it from a person ticking something that starts unticked:
+
+- A publisher goes by its words without the ones most companies have, so `Data Labs` passes as `Data Systems`.
+- Windows Installer's records are only asked about what another app has. A record naming another app's key and no files passes by
+  its names alone, and so does one that names files only by their short names. A candidate inside a Windows Installer app's folder
+  that holds no key file of that app's, or a Burn bundle's folder, can be offered.
+- In the safe direction, a real part can lose keys: one whose publisher is named by fewer words, or one with a file its sibling also has.
+- A hidden entry ticked, with its folder then unticked, is said to be both added and left out, since its keys and data can still go.
+
 ## Registry, services, and other integrations
 
 - `registry_scan.rs` captures the keys and values the install record names, values under
@@ -559,6 +568,10 @@ This cannot catch everything. See [SECURITY.md](../SECURITY.md#an-installer-can-
 - `ScanOptions.include_program_data` / `PackageOptions.include_program_data` — controls
   machine-wide `ProgramData` separately from per-user data. The app drives it from the
   same option.
+- With `include_user_data` false, `account_settings.rs` also takes out of the captured registry what an account keeps for the
+  app. It goes by where a value is: of `HKEY_CURRENT_USER`, what stays is what `is_where_windows_looks_for_an_app` knows, and a
+  text value whose whole data is a path in one of the app's folders. It runs after `license_scan`, so a license value goes by the
+  License option either way, and before anything names what it finds, since a key's name can be what was being kept.
 - `ScanOptions.include_hashes` — SHA-256 of copyable files during a scan. It dominates scan
   time for large apps. Packaging leaves it off and hashes each file from what it reads into
   the package, so the hash describes what is in the package, including files read in backup
@@ -791,5 +804,4 @@ The ones that most affect what gets captured:
   the app, so one named anything else stays behind.
 - **A secret can be missed.** The rules go by names and a few shapes of text. See
   [What is not captured at all](#what-is-not-captured-at-all).
-- **A folder with nothing in it does not come along.** A package goes by files, so windows_exporter's empty
-  `textfile_inputs` is not on the other PC. It starts and serves without it, and an app that expects one to be there may not.
+- **At most 10,000 empty folders come along.** More than that is said, and the rest are not made.

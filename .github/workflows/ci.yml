@@ -65,6 +65,15 @@ jobs:
         shell: pwsh
         run: cargo build --locked --workspace --release
 
+      # For the jobs that open it. Unsigned, as every build here is, and gone in a day.
+      - name: Hand on the app
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wam-app
+          path: target\release\winappmigrator.exe
+          retention-days: 1
+          if-no-files-found: error
+
   # Runs the code that changes the machine for real, on this throwaway runner, which is
   # elevated and is discarded afterward. The test does nothing without this variable and
   # GitHub's own, and with them it fails rather than skips if it is not elevated.
@@ -312,6 +321,16 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # What this builds holds what an account had, with marks in it, so it stays on this runner.
+      - name: With the User data option on, what an account has goes too
+        shell: pwsh
+        env:
+          WAM_REAL_APPS_USER_DATA: ${{ runner.temp }}\wam-real-apps-user-data
+        run: |
+          cargo test --locked -p winappmigrator-installer --test elevated_real_apps -- --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .github/scripts/check-account-settings.ps1 -Folder "${{ runner.temp }}\wam-real-apps-user-data"
+
   # Fresh runners, which take away any copy they came with, show that every check fails without the
   # apps, install them, and show that Windows uses what was restored.
   real-apps-install:
@@ -344,3 +363,93 @@ jobs:
       - name: Take away any copy here, install them, and ask Windows to use them
         shell: pwsh
         run: .github/scripts/check-moved-real-apps.ps1 -Folder "${{ runner.temp }}\wam-real-apps"
+
+  # What a target with no Visual C++ runtime does with an installer built the way the app builds one.
+  # Every runner has that runtime, so this one has it taken away. Microsoft's redistributable is in
+  # what this builds, and its license does not cover handing that on, so nothing here is uploaded.
+  real-apps-runtime:
+    name: Real apps, a PC with no runtime
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      WAM_ELEVATED_E2E: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The version comes from rust-toolchain.toml.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Cache build output
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Install it from its publisher
+        shell: pwsh
+        run: .github/scripts/install-real-apps.ps1 -Output "${{ runner.temp }}\wam-runtime" -Only mosquitto
+
+      - name: Build its installer with the runtime in it
+        shell: pwsh
+        env:
+          WAM_REAL_APPS_RUNTIME: ${{ runner.temp }}\wam-runtime
+        run: cargo test --locked -p winappmigrator-installer --test elevated_real_apps -- --nocapture --test-threads=1
+
+      - name: Take the runtime away, install it, and ask it to serve
+        shell: pwsh
+        run: .github/scripts/check-runtime-arrives.ps1 -Folder "${{ runner.temp }}\wam-runtime"
+
+  # Every other test of the screens draws them with no window. This opens the real programs on runners
+  # that have no graphics card, and looks at what is on the screen. It clicks nothing.
+  real-windows:
+    name: Real windows on ${{ matrix.os }}
+    needs: [windows-quality, move-build]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      WAM_ELEVATED_E2E: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-2022, windows-11-arm]
+
+    steps:
+      - name: Checkout the scripts, and none of the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Take the app
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wam-app
+          path: ${{ runner.temp }}\wam-app
+
+      - name: Take an installer of the test app
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wam-move-installers
+          path: ${{ runner.temp }}\wam-move
+
+      - name: Open them, and look at what is on the screen
+        shell: pwsh
+        run: .github/scripts/check-real-windows.ps1 -App "${{ runner.temp }}\wam-app\winappmigrator.exe" -Installers "${{ runner.temp }}\wam-move" -Pictures "${{ runner.temp }}\wam-pictures"
+
+      # Of the test app, and of the runner's own list of what it has installed.
+      - name: Keep the pictures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wam-pictures-${{ matrix.os }}
+          path: ${{ runner.temp }}\wam-pictures
+          retention-days: 1
+          if-no-files-found: warn

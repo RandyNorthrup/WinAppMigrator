@@ -172,6 +172,39 @@ function Remove-Preinstalled($App) {
     }
 }
 
+# --- What an account has in an app's keys, and what each is written as.
+
+function Setting-Bytes($Setting) {
+    return [Text.Encoding]::Unicode.GetBytes($Setting.marker)
+}
+
+function Set-AccountSetting($Setting) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($Setting.key)
+    if ($Setting.kind -eq 'binary-utf16') {
+        $key.SetValue($Setting.name, [byte[]](Setting-Bytes $Setting), [Microsoft.Win32.RegistryValueKind]::Binary)
+    } else {
+        $key.SetValue($Setting.name, [string]$Setting.marker, [Microsoft.Win32.RegistryValueKind]::String)
+    }
+    $key.Dispose()
+}
+
+# What is wrong with the value as this account has it now, or nothing.
+function AccountSetting-Problem($Setting) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($Setting.key)
+    if (-not $key) { return "there is no key $($Setting.key)" }
+    $value = $key.GetValue($Setting.name, $null, 'DoNotExpandEnvironmentNames')
+    if ($null -eq $value) { return "there is no value $($Setting.name) in $($Setting.key)" }
+    if ($Setting.kind -eq 'binary-utf16') {
+        if ($key.GetValueKind($Setting.name) -ne 'Binary') { return "it is a $($key.GetValueKind($Setting.name))" }
+        $expected = [Convert]::ToHexString([byte[]](Setting-Bytes $Setting))
+        $got = [Convert]::ToHexString([byte[]]$value)
+        if ($got -ne $expected) { return "it holds $got, and $expected was expected" }
+    } elseif ($value -cne $Setting.marker) {
+        return "it holds [$value]"
+    }
+    return ''
+}
+
 # --- Each kind of check. Nothing returned, or an empty string, means it worked.
 
 function Entry-Problem([string]$Name) {
@@ -466,6 +499,15 @@ $script:Checks = @{
         }
     )
     'windows_exporter' = @(
+        @{ Name = 'Folder: the empty one its setup made is there, with nothing in it'; Test = {
+                param($Root)
+                $folder = Join-Path $Root 'textfile_inputs'
+                if (-not (Test-Path -LiteralPath $folder -PathType Container)) { return "$folder is not a folder here" }
+                $inside = @(Get-ChildItem -LiteralPath $folder -Force)
+                if ($inside.Count -gt 0) { return "it holds $($inside.Name -join ', ')" }
+                return ''
+            }
+        },
         @{ Name = 'Firewall: Windows has the rule, for the program in the app''s folder and its port'; Test = {
                 param($Root)
                 $rules = @(Get-NetFirewallRule -DisplayName 'windows_exporter' -ErrorAction SilentlyContinue)

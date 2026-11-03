@@ -123,7 +123,7 @@ foreach ($round in $rounds) {
         # PowerShell's names go by no case, so this must not be called anything like the folder of installers.
         foreach ($emptyOne in @($app.empty_folders)) {
             $there = Test-Path -LiteralPath (Join-Path $roots[$app.id] $emptyOne) -PathType Container
-            Write-Host "  note: the empty folder $emptyOne is $(if ($there) { 'here' } else { 'NOT here' })"
+            Check "$($app.id): the empty folder $emptyOne is here" $there (Join-Path $roots[$app.id] $emptyOne)
         }
         $status = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -in 'mosquitto', 'windows_exporter' } | ForEach-Object { "$($_.Name)=$($_.Status)/$($_.StartType)" }
         Write-Host "services now: $($status -join ', ')"

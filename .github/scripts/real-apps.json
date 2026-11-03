@@ -45,5 +45,63 @@
       "arguments": ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"],
       "installed_at": "C:\\Program Files\\Git LFS"
     }
+  ],
+  "account_settings": [
+    {
+      "app": "7zip",
+      "key": "Software\\7-Zip\\Compression",
+      "name": "ArcHistory",
+      "kind": "binary-utf16",
+      "marker": "WamMarkArcHistory7f3a",
+      "goes_with": "user_data"
+    },
+    {
+      "app": "7zip",
+      "key": "Software\\7-Zip\\FM",
+      "name": "FolderHistory",
+      "kind": "binary-utf16",
+      "marker": "WamMarkFolderHistory7f3a",
+      "goes_with": "user_data"
+    },
+    {
+      "app": "7zip",
+      "key": "Software\\7-Zip\\FM",
+      "name": "PanelPath0",
+      "kind": "string",
+      "marker": "D:\\WamMarkPanelPath7f3a",
+      "goes_with": "user_data"
+    },
+    {
+      "app": "7zip",
+      "key": "Software\\7-Zip",
+      "name": "LicenseKey",
+      "kind": "string",
+      "marker": "WamMarkLicense7f3a",
+      "goes_with": "license"
+    },
+    {
+      "app": "putty",
+      "key": "Software\\SimonTatham\\PuTTY\\Sessions\\WamMarkSession7f3a",
+      "name": "HostName",
+      "kind": "string",
+      "marker": "wam-mark-host-7f3a.example",
+      "goes_with": "user_data"
+    },
+    {
+      "app": "putty",
+      "key": "Software\\SimonTatham\\PuTTY\\Sessions\\WamMarkSession7f3a",
+      "name": "UserName",
+      "kind": "string",
+      "marker": "WamMarkUser7f3a",
+      "goes_with": "user_data"
+    },
+    {
+      "app": "putty",
+      "key": "Software\\SimonTatham\\PuTTY\\SshHostKeys",
+      "name": "ssh-ed25519@22:WamMarkHostKey7f3a",
+      "kind": "string",
+      "marker": "0xWamMarkHostKeyData7f3a",
+      "goes_with": "user_data"
+    }
   ]
 }

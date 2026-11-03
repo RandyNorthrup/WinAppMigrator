@@ -8,10 +8,16 @@
 //! redistribution of those apps, so each one's license has to allow that, and is in `real-apps.json`.
 //! It is also why this looks through each package for what is the runner's own before it goes.
 //!
+//! `install-real-apps.ps1` also leaves what an account would have in those apps' keys, with marks in it
+//! that are in nothing else. With the User data option off, none of that is anywhere in a package, in
+//! any form. Another run of this, in a step of its own that uploads nothing, builds with it on, and
+//! `check-account-settings.ps1` shows it arrive. With `WAM_REAL_APPS_RUNTIME` set, it builds Mosquitto
+//! the way the app does, with Microsoft's redistributable in it, which is why that goes nowhere either.
+//!
 //! **This changes the machine it runs on, and nothing here undoes it.** It does nothing unless
-//! `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`, `WAM_ELEVATED_E2E=1`, and
-//! `WAM_REAL_APPS_OUTPUT` are all set. Never set those on a real PC. With all of them set and no
-//! elevation it fails, so that the job cannot pass without having run.
+//! `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`, `WAM_ELEVATED_E2E=1`, and one of the
+//! variables naming where to build are all set. Never set those on a real PC. With all of them set and
+//! no elevation it fails, so that the job cannot pass without having run.
 
 use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
@@ -32,6 +38,11 @@ use winappmigrator_core::{
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 const OUTPUT_VARIABLE: &str = "WAM_REAL_APPS_OUTPUT";
+const USER_DATA_VARIABLE: &str = "WAM_REAL_APPS_USER_DATA";
+const RUNTIME_VARIABLE: &str = "WAM_REAL_APPS_RUNTIME";
+/// What goes with the User data option in what an account has, as `real-apps.json` says of each.
+const GOES_WITH_USER_DATA: &str = "user_data";
+const GOES_WITH_LICENSE: &str = "license";
 /// Hash, length, and magic, at the end of an installer, after the package.
 const FOOTER_BYTES: usize = 32 + 8 + 21;
 /// What the runner has of its own that a package must never hold, by what it is set to.
@@ -78,8 +89,8 @@ fn is_throwaway_runner(
         && flag == Some("1")
 }
 
-/// Whether this run may change the machine, and where to put what it builds.
-fn output_folder() -> TestResult<Option<PathBuf>> {
+/// Whether this run may change the machine, and where to put what it builds, by what names that.
+fn output_folder(variable: &str) -> TestResult<Option<PathBuf>> {
     let read = |name: &str| std::env::var(name).ok();
     if !is_throwaway_runner(
         read("GITHUB_ACTIONS").as_deref(),
@@ -92,8 +103,8 @@ fn output_folder() -> TestResult<Option<PathBuf>> {
         );
         return Ok(None);
     }
-    let Some(output) = read(OUTPUT_VARIABLE) else {
-        println!("skipping: it is the job that sets {OUTPUT_VARIABLE} that builds these");
+    let Some(output) = read(variable) else {
+        println!("skipping: it is the step that sets {variable} that builds these");
         return Ok(None);
     };
     if !is_elevated() {
@@ -240,6 +251,104 @@ fn say_what_was_found(found: Vec<String>, named: &[(String, &'static str)]) -> V
         .collect()
 }
 
+/// A mark left in what an account has, and what it is to go with.
+struct AccountMark {
+    app: String,
+    text: String,
+    goes_with: String,
+}
+
+/// A value's own mark, without what comes before it, which JSON and a `.reg` file write in ways of their
+/// own. What the keys and values are called have marks too, since a host can be what a key is called.
+fn account_marks() -> TestResult<Vec<AccountMark>> {
+    let parsed: Value = serde_json::from_slice(&fs::read(apps_file())?)?;
+    let settings = parsed["account_settings"]
+        .as_array()
+        .ok_or("real-apps.json lists no account settings")?;
+    let mut marks = Vec::new();
+    for setting in settings {
+        for field in ["marker", "key", "name"] {
+            let text = text_of(setting, field)?;
+            let mark = text
+                .find("WamMark")
+                .map_or(text, |start| &text[start..])
+                .to_owned();
+            let is_a_mark = field == "marker" || mark.starts_with("WamMark");
+            if is_a_mark && !marks.iter().any(|known: &AccountMark| known.text == mark) {
+                marks.push(AccountMark {
+                    app: text_of(setting, "app")?.to_owned(),
+                    text: mark,
+                    goes_with: text_of(setting, "goes_with")?.to_owned(),
+                });
+            }
+        }
+    }
+    Ok(marks)
+}
+
+/// Each form a package could hold this text in: as text of either width, and as the three ways a
+/// binary value is written down, which are the hex of a manifest, the same in a `.reg` file, and the
+/// numbers its text is shown as. All lowercase, as what is searched is.
+fn forms_of_a_mark(mark: &str) -> Vec<(&'static str, Vec<u8>)> {
+    let lower = mark.to_ascii_lowercase();
+    let wide: Vec<u8> = lower.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mixed: Vec<u8> = mark.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let in_hex = |bytes: &[u8], between: &str| -> Vec<u8> {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(between)
+            .into_bytes()
+    };
+    let numbers = |bytes: &[u8]| -> Vec<u8> {
+        bytes
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+            .into_bytes()
+    };
+    vec![
+        ("UTF-8", lower.clone().into_bytes()),
+        ("UTF-16", wide),
+        ("UTF-8 as hex", in_hex(mark.as_bytes(), "")),
+        ("UTF-16 as hex", in_hex(&mixed, "")),
+        ("UTF-8 as a .reg file's hex", in_hex(mark.as_bytes(), ",")),
+        ("UTF-16 as a .reg file's hex", in_hex(&mixed, ",")),
+        ("UTF-8 as numbers", numbers(mark.as_bytes())),
+        ("UTF-16 as numbers", numbers(&mixed)),
+    ]
+}
+
+/// Where in a package each form of a mark is, by the entry's name or what is in it.
+fn where_a_mark_is(mark: &str, names: &[String], unpacked: &Path) -> TestResult<Vec<String>> {
+    let forms = forms_of_a_mark(mark);
+    let holds = |bytes: &[u8]| -> Vec<&'static str> {
+        let lowered = bytes.to_ascii_lowercase();
+        forms
+            .iter()
+            .filter(|(_, form)| lowered.windows(form.len()).any(|at| at == form.as_slice()))
+            .map(|(name, _)| *name)
+            .collect()
+    };
+    let mut found = Vec::new();
+    for name in names {
+        for form in holds(name.as_bytes()) {
+            found.push(format!("the name of {name}, as {form}"));
+        }
+    }
+    for file in files_below(unpacked)? {
+        for form in holds(&fs::read(&file)?) {
+            found.push(format!(
+                "{}, as {form}",
+                file.strip_prefix(unpacked)?.display()
+            ));
+        }
+    }
+    Ok(found)
+}
+
 /// What is in an installer's package, by .NET's own zip reader, and where that unpacked it.
 fn unpack_package(installer: &Path, work: &Path) -> TestResult<(Vec<String>, PathBuf)> {
     let bytes = fs::read(installer)?;
@@ -290,12 +399,11 @@ fn files_below(root: &Path) -> TestResult<Vec<PathBuf>> {
 }
 
 /// What of the runner's account or its tokens would go out with this package.
-fn what_of_the_runners_it_holds(installer: &Path, work: &Path) -> TestResult<Vec<String>> {
-    let (names, unpacked) = unpack_package(installer, work)?;
+fn what_of_the_runners_it_holds(names: &[String], unpacked: &Path) -> TestResult<Vec<String>> {
     let named = runner_literals();
     let literals: Vec<String> = named.iter().map(|(value, _)| value.clone()).collect();
     let mut problems = Vec::new();
-    for name in &names {
+    for name in names {
         let lowered = name.to_ascii_lowercase();
         if lowered.contains(r"users\") || lowered.contains("appdata") {
             problems.push(format!("the entry {name}"));
@@ -304,9 +412,9 @@ fn what_of_the_runners_it_holds(installer: &Path, work: &Path) -> TestResult<Vec
             problems.push(format!("{found} in the name of {name}"));
         }
     }
-    for file in files_below(&unpacked)? {
+    for file in files_below(unpacked)? {
         let bytes = fs::read(&file)?;
-        let relative = file.strip_prefix(&unpacked)?;
+        let relative = file.strip_prefix(unpacked)?;
         for found in say_what_was_found(what_is_the_runners(&bytes, &literals), &named) {
             problems.push(format!("{found} in {}", relative.display()));
         }
@@ -385,12 +493,13 @@ fn show_what_it_took(manifest: &PackageManifest, root: &Path) {
         .map(|variable| format!("{:?} {}", variable.scope, variable.name))
         .collect();
     println!(
-        "  environment: {environment:?}\n  firewall: {:#?}\n  needs: {:#?}\n  left out: {:?} {:?}\n  \
+        "  environment: {environment:?}\n  firewall: {:#?}\n  needs: {:#?}\n  left out: {:?} {:?} {:?}\n  \
          excluded: {:#?}\n  warnings: {:#?}",
         manifest.firewall_rules_detected,
         manifest.runtime_prerequisites,
         manifest.secrets_left_out,
         manifest.licenses_left_out,
+        manifest.settings_left_out,
         manifest.items_intentionally_excluded,
         manifest.warnings,
     );
@@ -477,11 +586,275 @@ fn the_search_goes_by_the_shape_of_a_token_and_not_by_a_prefix_alone() {
     ));
 }
 
+/// Options the way the app has them for this, with everything the app's own switches leave off.
+fn options_for(app: InstalledApp, output: &Path, id: &str, work: &Path) -> PackageOptions {
+    PackageOptions {
+        selection: AppSelection::InstalledApp(Box::new(app)),
+        output_dir: work.join("staging").join(id),
+        current_directory: None,
+        create_self_extracting_archive: true,
+        self_extracting_stub: Some(InstallerStub::File(stub_binary())),
+        installer_dir: Some(output.to_path_buf()),
+        include_user_data: false,
+        include_program_data: false,
+        include_license_data: false,
+        bundle_prerequisites: false,
+        source: ScanSource::Live,
+        user_profile: ProfileChoice::Default,
+        ui_theme: None,
+    }
+}
+
+/// Build as the app does: a look at it first, and then by what that found.
+fn build(options: &PackageOptions) -> TestResult<(PathBuf, PackageManifest)> {
+    let report = scan_app(&scan_options_for(options), &ScanMonitor::default())?;
+    let result = create_package_from_scan(
+        options,
+        &report,
+        &FootprintChoices::default(),
+        &BuildMonitor::default(),
+    )?;
+    for warning in &result.warnings {
+        println!("  warning {}: {}", warning.code, warning.message);
+    }
+    let installer = result
+        .self_extracting_archive_path
+        .clone()
+        .ok_or("no installer was built")?;
+    let manifest = serde_json::from_slice(&fs::read(&result.manifest_path)?)?;
+    Ok((installer, manifest))
+}
+
+/// With the User data option on, what an account has for these apps is in what is built, and what is
+/// a license only ever goes by the License option, whichever way the other is. Uploads nothing:
+/// `check-account-settings.ps1` installs what this leaves, on this runner.
 #[test]
-fn build_what_goes_to_the_other_pcs() -> TestResult {
-    let Some(output) = output_folder()? else {
+fn what_an_account_has_follows_the_options() -> TestResult {
+    let Some(output) = output_folder(USER_DATA_VARIABLE)? else {
         return Ok(());
     };
+    fs::create_dir_all(&output)?;
+    let marks = account_marks()?;
+    let listed = list_installed_apps_from(&SystemContext::live())?;
+    let mut problems = Vec::new();
+    let mut built = Vec::new();
+    for spec in the_apps()? {
+        let id = text_of(&spec, "id")?;
+        if !marks.iter().any(|mark| mark.app == id) {
+            continue;
+        }
+        let name = text_of(&spec, "name")?;
+        println!("\n=== {name}, with the User data option on");
+        let app = the_app_named(&listed, name)?;
+        let work = tempfile::tempdir()?;
+        let (installer, manifest) = build(&PackageOptions {
+            include_user_data: true,
+            include_program_data: true,
+            ..options_for(app.clone(), &output, id, work.path())
+        })?;
+        let (names, unpacked) = unpack_package(&installer, work.path())?;
+        println!(
+            "  the package says it holds the data of {:?}, and left out {:?} and {:?}",
+            manifest.user_data_profile, manifest.settings_left_out, manifest.licenses_left_out
+        );
+        if !manifest.settings_left_out.is_empty() {
+            problems.push(format!("{name}: it left settings out with the option on"));
+        }
+        for mark in marks.iter().filter(|mark| mark.app == id) {
+            let found = where_a_mark_is(&mark.text, &names, &unpacked)?;
+            println!(
+                "  the mark {} (with {}) is in: {found:#?}",
+                mark.text, mark.goes_with
+            );
+            let should_be_there = mark.goes_with == GOES_WITH_USER_DATA;
+            if found.is_empty() == should_be_there {
+                problems.push(format!(
+                    "{name}: the mark {} goes with {}, and is in {found:?}",
+                    mark.text, mark.goes_with
+                ));
+            }
+        }
+        built.push(json!({
+            "id": id,
+            "name": name,
+            "installer": installer
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+        }));
+
+        if marks
+            .iter()
+            .any(|mark| mark.app == id && mark.goes_with == GOES_WITH_LICENSE)
+        {
+            println!("\n=== {name}, with the License option on and the User data option off");
+            let aside = tempfile::tempdir()?;
+            let elsewhere = aside.path().join("installers");
+            fs::create_dir_all(&elsewhere)?;
+            let (installer, manifest) = build(&PackageOptions {
+                include_license_data: true,
+                ..options_for(app, &elsewhere, id, aside.path())
+            })?;
+            let (names, unpacked) = unpack_package(&installer, aside.path())?;
+            for mark in marks.iter().filter(|mark| mark.app == id) {
+                let found = where_a_mark_is(&mark.text, &names, &unpacked)?;
+                println!(
+                    "  the mark {} (with {}) is in: {found:#?}",
+                    mark.text, mark.goes_with
+                );
+                let should_be_there = mark.goes_with == GOES_WITH_LICENSE;
+                if found.is_empty() == should_be_there {
+                    problems.push(format!(
+                        "{name}, with License on: the mark {} goes with {}, and is in {found:?}",
+                        mark.text, mark.goes_with
+                    ));
+                }
+            }
+            let in_its_list = manifest
+                .license_registry_entries
+                .iter()
+                .any(|entry| entry.value_name.as_deref() == Some("LicenseKey"));
+            let in_the_settings = manifest
+                .registry_keys_exported
+                .iter()
+                .any(|entry| entry.value_name.as_deref() == Some("LicenseKey"));
+            println!(
+                "  LicenseKey: in the license values {in_its_list}, in the rest {in_the_settings}"
+            );
+            if !in_its_list || in_the_settings {
+                problems.push(format!(
+                    "{name}: LicenseKey is in the license values {in_its_list}, in the rest {in_the_settings}"
+                ));
+            }
+        }
+    }
+    if !problems.is_empty() {
+        return Err(format!("{problems:#?}").into());
+    }
+    fs::write(
+        output.join("expected.json"),
+        serde_json::to_vec_pretty(&json!({ "apps": built }))?,
+    )?;
+    Ok(())
+}
+
+/// Mosquitto as the app builds it, with Microsoft's redistributable in the package, checked by its
+/// signature. Not uploaded: that license does not cover it. `check-runtime-arrives.ps1` takes that
+/// runtime off this runner, and installs what this leaves.
+#[test]
+fn build_one_with_its_runtime_in_it() -> TestResult {
+    let Some(output) = output_folder(RUNTIME_VARIABLE)? else {
+        return Ok(());
+    };
+    fs::create_dir_all(&output)?;
+    let spec = the_apps()?
+        .into_iter()
+        .find(|app| app["id"] == "mosquitto")
+        .ok_or("real-apps.json has no Mosquitto")?;
+    let name = text_of(&spec, "name")?;
+    let listed = list_installed_apps_from(&SystemContext::live())?;
+    let work = tempfile::tempdir()?;
+    let (installer, manifest) = build(&PackageOptions {
+        bundle_prerequisites: true,
+        ..options_for(
+            the_app_named(&listed, name)?,
+            &output,
+            "mosquitto",
+            work.path(),
+        )
+    })?;
+    println!("  needs: {:#?}", manifest.runtime_prerequisites);
+    let bundled: Vec<_> = manifest
+        .runtime_prerequisites
+        .iter()
+        .filter_map(|prerequisite| {
+            prerequisite
+                .bundle
+                .as_ref()
+                .and_then(|bundle| bundle.package_relative_path.as_ref())
+                .map(|relative| (prerequisite.name.clone(), relative.clone()))
+        })
+        .collect();
+    let [(prerequisite, relative)] = bundled.as_slice() else {
+        return Err(format!("it should hold one runtime, and holds {bundled:?}").into());
+    };
+    let (_, unpacked) = unpack_package(&installer, work.path())?;
+    let payload = unpacked.join(relative);
+    let signature = powershell(&format!(
+        "$signature = Get-AuthenticodeSignature -LiteralPath '{}'; \
+         $signature.Status.ToString() + '|' + $signature.SignerCertificate.Subject",
+        payload.display()
+    ))?;
+    println!(
+        "  {prerequisite} is in the package at {}: {signature}",
+        relative.display()
+    );
+    if !signature.trim().starts_with("Valid|") || !signature.contains("O=Microsoft Corporation") {
+        return Err(format!("its signature says {signature}").into());
+    }
+    fs::write(
+        output.join("expected.json"),
+        serde_json::to_vec_pretty(&json!({
+            "name": name,
+            "prerequisite": prerequisite,
+            "installer": installer
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+        }))?,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn every_form_of_a_mark_is_looked_for() -> TestResult {
+    const MARK: &str = "WamMark";
+    let work = tempfile::tempdir()?;
+    let wide: Vec<u8> = MARK.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("UTF-8", b"x wammark y".to_vec()),
+        ("UTF-16", wide.clone()),
+        (
+            "UTF-16 as hex",
+            wide.iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+                .into_bytes(),
+        ),
+        (
+            "UTF-16 as a .reg file's hex",
+            wide.iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(",")
+                .into_bytes(),
+        ),
+        ("UTF-16 as numbers", format!("{wide:?}").into_bytes()),
+    ];
+    for (form, bytes) in cases {
+        let file = work.path().join("a.txt");
+        fs::write(&file, bytes)?;
+        let found = where_a_mark_is(MARK, &[], work.path())?;
+        assert!(
+            found
+                .iter()
+                .any(|place| place.ends_with(&format!("as {form}"))),
+            "{form}: {found:?}"
+        );
+    }
+    fs::write(work.path().join("a.txt"), b"nothing of note")?;
+    assert!(where_a_mark_is(MARK, &[], work.path())?.is_empty());
+    assert_eq!(
+        where_a_mark_is(MARK, &[r"files\WamMark\a.txt".to_owned()], work.path())?.len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn build_what_goes_to_the_other_pcs() -> TestResult {
+    let Some(output) = output_folder(OUTPUT_VARIABLE)? else {
+        return Ok(());
+    };
+    let marks = account_marks()?;
     fs::create_dir_all(output.join("manifests"))?;
     let listed = list_installed_apps_from(&SystemContext::live())?;
 
@@ -503,21 +876,7 @@ fn build_what_goes_to_the_other_pcs() -> TestResult {
         );
 
         let work = tempfile::tempdir()?;
-        let options = PackageOptions {
-            selection: AppSelection::InstalledApp(Box::new(app)),
-            output_dir: work.path().join("staging").join(id),
-            current_directory: None,
-            create_self_extracting_archive: true,
-            self_extracting_stub: Some(InstallerStub::File(stub_binary())),
-            installer_dir: Some(output.clone()),
-            include_user_data: false,
-            include_program_data: false,
-            include_license_data: false,
-            bundle_prerequisites: false,
-            source: ScanSource::Live,
-            user_profile: ProfileChoice::Default,
-            ui_theme: None,
-        };
+        let options = options_for(app, &output, id, work.path());
         // The way the app does: a look at it first, and the build by what that found.
         let report = scan_app(&scan_options_for(&options), &ScanMonitor::default())?;
         let near: Vec<String> = report
@@ -545,8 +904,33 @@ fn build_what_goes_to_the_other_pcs() -> TestResult {
             output.join("manifests").join(format!("{id}.json")),
             &manifest_bytes,
         )?;
-        for problem in what_of_the_runners_it_holds(&installer, work.path())? {
+        let (names, unpacked) = unpack_package(&installer, work.path())?;
+        for problem in what_of_the_runners_it_holds(&names, &unpacked)? {
             holding_the_runners.push(format!("{name}: {problem}"));
+        }
+        // With the User data option off and the License option off, as this was built.
+        for mark in &marks {
+            let found = where_a_mark_is(&mark.text, &names, &unpacked)?;
+            println!(
+                "  the mark {} ({}'s, with {}): {}",
+                mark.text,
+                mark.app,
+                mark.goes_with,
+                if found.is_empty() {
+                    "in none of the package, in any form".to_owned()
+                } else {
+                    format!("FOUND in {found:?}")
+                }
+            );
+            if !found.is_empty() {
+                holding_the_runners.push(format!("{name}: the mark {} in {found:?}", mark.text));
+            }
+        }
+        let its_marks = marks.iter().filter(|mark| mark.app == id).count();
+        if its_marks > 0 && manifest.settings_left_out.is_empty() {
+            holding_the_runners.push(format!(
+                "{name}: it has settings to leave out, and says it left none out"
+            ));
         }
 
         let (files, empty_folders) = what_is_in_the_folder(&root)?;
@@ -554,6 +938,21 @@ fn build_what_goes_to_the_other_pcs() -> TestResult {
             "  its folder has {} files, by .NET, and these empty folders: {empty_folders:?}",
             files.len()
         );
+        let mut listed_empty: Vec<String> = manifest
+            .empty_folders
+            .iter()
+            .filter_map(|folder| folder.original_path.strip_prefix(&root).ok())
+            .map(|relative| relative.display().to_string())
+            .collect();
+        listed_empty.sort();
+        let mut really_empty = empty_folders.clone();
+        really_empty.sort();
+        println!("  the package will make: {listed_empty:?}");
+        if listed_empty != really_empty {
+            holding_the_runners.push(format!(
+                "{name}: it lists {listed_empty:?} as empty folders, and .NET found {really_empty:?}"
+            ));
+        }
         built.push(json!({
             "id": id,
             "files": files,

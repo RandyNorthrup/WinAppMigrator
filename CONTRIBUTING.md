@@ -95,6 +95,15 @@ packages say they set and by the names of the services, tasks, firewall rules, s
 once where each app was and once in a folder of another name. A check in `real-app-checks.ps1` asks Windows to do the thing rather than looking for a file or a key,
 so that only what was restored can make it pass. **Add a check only if it can fail, and never widen one to go green.**
 
+`install-real-apps.ps1` also leaves what an account would have in 7-Zip's and PuTTY's keys, with marks in it that are in
+nothing else. The build goes through each package for those marks, in every form a value is written in, and none may be there
+with the User data option off. A step of that job that uploads nothing builds again with it on, where each has to be there, and
+`check-account-settings.ps1` installs that on the same runner, and shows each value arrive and go. `Real apps, a PC with no runtime`
+builds Mosquitto with its runtime in it, and `check-runtime-arrives.ps1` takes that runtime off the runner and shows the broker
+cannot start, then installs and has it serve a client. `Real windows` opens the app and an installer on each kind of runner,
+and looks at what is on the screen, without clicking anything, and again with graphics that cannot start. Its pictures are kept
+for a day, of the test app and of the runner's own list of what it has installed.
+
 What those jobs upload is a redistribution of those apps, for a day, to anyone signed in to GitHub, so an app goes
 in the list only if it is open source and its license allows that, and the workflow says which license. They hold no
 secrets, keep no credentials from the checkout, and do not use the `release` environment. Windows' own packages add
@@ -130,7 +139,8 @@ given. That file holds paths of this PC, so keep it out of anything you share.
 
 ## Changing the UI
 
-Do not drive a live window with scripted clicks. The UI tests drive the real screens headlessly, and
+Do not drive a live window with scripted clicks. `Real windows` on CI opens the real programs and only looks. The UI tests
+drive the real screens headlessly, and
 can write the main states as images, so you can see what you changed:
 
 ```powershell
