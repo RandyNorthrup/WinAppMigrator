@@ -62,6 +62,8 @@ const OTHER_APP_KEY: &str = r"HKLM\Software\WAM Footprint Vendor\Footprint Helpe
 const NAMED_LIKE_PART: &str = "Footprint Helper";
 const NAMED_LIKE_PART_ROOT: &str = r"C:\Program Files\Part Named Tool";
 const CODED_ROOT: &str = r"C:\Program Files\WAM Footprint Vendor Coded";
+const BORROWED_ROOT: &str = r"C:\Program Files\WAM Footprint Vendor Borrowed";
+const NAMED_LIKE_WINDOWS_CHILD: &str = r"C:\Program Files\Windows WAM Folder\Below";
 const LOCKED_KEY_FILE: &str = r"C:\Program Files\WAM Footprint Vendor Helper\locked.pem";
 const BELOW_MICROSOFT_ROOT: &str = r"C:\ProgramData\Microsoft\WAM Footprint App Below";
 const UNINSTALL: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall";
@@ -90,7 +92,7 @@ const OTHER_APP_KEY_CANARY: &str = "wam-footprint-other-app-key-canary";
 const KEY_BY_CONTENT_CANARY: &str = "wam-footprint-key-by-content-canary";
 const CERTIFICATE_CANARY: &str = "wam-footprint-certificate-canary";
 const DATA_NEAR_CANARY: &str = "wam-footprint-data-near-canary";
-const LOCKED_KEY_CANARY: &str = "wam-footprint-locked-key-canary";
+const LOCKED_FILE_CANARY: &str = "wam-footprint-locked-file-canary";
 const SELF_REMOVAL_PATIENCE: Duration = Duration::from_secs(90);
 const FLAGS: ScanFlags = ScanFlags {
     include_user_data: false,
@@ -356,10 +358,11 @@ fn set_up_the_app() -> TestResult {
         &format!("-----BEGIN CERTIFICATE-----\n{CERTIFICATE_CANARY}\n"),
     )?;
     // One no administrator can open, and a package is read with more rights than that. It cannot be
-    // told what it holds, so it has to stay out.
+    // told what it holds, so it has to stay out. What it holds would go in if it could be read, so
+    // this says it was the not being able to.
     write(
         LOCKED_KEY_FILE,
-        &format!("-----BEGIN PRIVATE KEY-----\n{LOCKED_KEY_CANARY}\n"),
+        &format!("-----BEGIN CERTIFICATE-----\n{LOCKED_FILE_CANARY}\n"),
     )?;
     must(
         "icacls",
@@ -398,8 +401,8 @@ fn short_name_of(folder: &str) -> TestResult<Option<String>> {
 }
 
 /// Everything that has a name close to the app's and must never be offered, each for its own reason.
-/// How many short names there were to try says whether that was tried.
-fn set_up_what_must_not_be_offered() -> TestResult<usize> {
+/// Whether there was a short name to try for what only that rule stops.
+fn set_up_what_must_not_be_offered() -> TestResult<bool> {
     write(&format!(r"{OTHER_APP_ROOT}\other.txt"), "another app's")?;
     program_at(&format!(r"{OTHER_APP_ROOT}\other.exe"))?;
     uninstall_entry(
@@ -417,6 +420,10 @@ fn set_up_what_must_not_be_offered() -> TestResult<usize> {
     write(
         &format!(r"{BELOW_MICROSOFT_ROOT}\a.txt"),
         "under Microsoft's",
+    )?;
+    write(
+        &format!(r"{NAMED_LIKE_WINDOWS_CHILD}\a.txt"),
+        "under what is named like Windows'",
     )?;
     // A junction to what no app should have, with a name that would otherwise be close.
     must(
@@ -440,10 +447,7 @@ fn set_up_what_must_not_be_offered() -> TestResult<usize> {
         ("WAM Hostile Users", r"C:\Users"),
         ("WAM Hostile Below Microsoft", BELOW_MICROSOFT_ROOT),
         ("WAM Hostile Link", LINK_ROOT),
-        (
-            "WAM Hostile Below Windows NT",
-            r"C:\Program Files\Windows NT\Accessories",
-        ),
+        ("WAM Hostile Below Windows' Name", NAMED_LIKE_WINDOWS_CHILD),
         ("WAM Hostile Other App", OTHER_APP_ROOT),
         (
             "WAM Hostile Publisher's Folder",
@@ -454,24 +458,47 @@ fn set_up_what_must_not_be_offered() -> TestResult<usize> {
         hidden_entry(name, location)?;
     }
     // The same by what else Windows calls them, which no rule goes by.
-    let mut short_names = 0;
     for (name, folder) in [
         (
             "WAM Hostile Short Common Files",
             r"C:\Program Files\Common Files",
         ),
         ("WAM Hostile Short Program Files", r"C:\Program Files"),
-        (
-            "WAM Hostile Short Windows NT",
-            r"C:\Program Files\Windows NT",
-        ),
     ] {
         if let Some(short) = short_name_of(folder)? {
             println!("{short} is a short name for {folder}");
             hidden_entry(name, &short)?;
-            short_names += 1;
         }
     }
+    // By its long name this is below `Microsoft`, and by a short one nothing else would say so.
+    let below_microsoft = short_name_of(BELOW_MICROSOFT_ROOT)?;
+    if let Some(short) = &below_microsoft {
+        println!("{short} is a short name for {BELOW_MICROSOFT_ROOT}");
+        hidden_entry("WAM Hostile Short Below Microsoft", short)?;
+    }
+    // A hidden entry in a folder of its own, whose uninstaller is another app's, which is where its
+    // install record would be read from.
+    write(
+        &format!(r"{BORROWED_ROOT}\borrowed.txt"),
+        "says it is another's",
+    )?;
+    let others_uninstaller = format!(r"{OTHER_APP_ROOT}\unins000.exe");
+    program_at(&others_uninstaller)?;
+    hidden_entry("WAM Hostile Uninstaller", BORROWED_ROOT)?;
+    must(
+        "reg.exe",
+        &[
+            "add",
+            &format!(r"{UNINSTALL}\WAM Hostile Uninstaller"),
+            "/v",
+            "UninstallString",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &format!("\"{others_uninstaller}\""),
+            "/f",
+        ],
+    )?;
     // A hidden entry in a folder of its own, whose install record is another product's.
     write(&format!(r"{CODED_ROOT}\coded.txt"), "says it is another's")?;
     hidden_entry("WAM Hostile Product Code", CODED_ROOT)?;
@@ -565,7 +592,7 @@ fn set_up_what_must_not_be_offered() -> TestResult<usize> {
             "/f",
         ],
     )?;
-    Ok(short_names)
+    Ok(below_microsoft.is_some())
 }
 
 /// Take off the runner everything the app would have left there, so what is found after an install
@@ -861,7 +888,7 @@ fn check_with_every_option_on(
         (SECRET_CANARY, false),
         (KEY_CANARY, false),
         (KEY_BY_CONTENT_CANARY, false),
-        (LOCKED_KEY_CANARY, false),
+        (LOCKED_FILE_CANARY, false),
     ] {
         checks.same(
             &format!("{canary} in a package of everything"),
@@ -945,6 +972,8 @@ fn check_what_is_offered(
         PUBLISHER_ROOT,
         MSI_APP_ROOT,
         CODED_ROOT,
+        BORROWED_ROOT,
+        NAMED_LIKE_WINDOWS_CHILD,
         OTHER_APP_ROOT,
         WINDOWS_NAMED_ROOT,
         LINK_ROOT,
@@ -1242,11 +1271,11 @@ fn what_is_chosen_is_what_is_in_the_package_and_on_the_machine() -> TestResult {
     let mut checks = Checks::default();
     let work = tempfile::tempdir()?;
     set_up_the_app()?;
-    let short_names = set_up_what_must_not_be_offered()?;
+    let tried_a_short_name = set_up_what_must_not_be_offered()?;
     checks.that(
-        "there were short names to try",
-        short_names > 0,
-        "none of the folders tried has one on this runner",
+        "there was a short name to try",
+        tried_a_short_name,
+        "what is below Microsoft has none on this runner",
     );
     let apps = list_installed_apps_from(&SystemContext::live())?;
     let app = apps

@@ -400,7 +400,7 @@ themselves.
 beside the app in the same folder, or has the same publisher, by all of its name. A runtime the app uses stays a prerequisite. An
 entry in an account's own hive takes no rights to write, so it only counts for an app of that same account. What an entry calls
 itself is only what it says, so one that goes by the name another app would take, or by nothing but its publisher's, or whose
-install record is another listed product's, is not offered, wherever it says it is, and its folder is not offered by its name
+install record is another listed product's or whose uninstaller or icon is in another app's folder, is not offered, wherever it says it is, and its folder is not offered by its name
 either. Several in one folder are one row, named for
 all of them.
 
@@ -410,9 +410,9 @@ root a hidden entry goes on to name:
 - A drive, the Windows folder, `Program Files`, `Common Files`, `ProgramData`, a profile, `AppData`, or anything that holds one
   of those, by the same `is_walkable_app_dir` a scan goes by.
 - What is Windows' or everyone's by name (`NEVER_OFFERED`, such as `dotnet`, `Windows Defender`, `Package Cache`), anything
-  under `Microsoft`, `Microsoft Shared`, `WindowsApps`, `dotnet`, `Internet Explorer`, `WindowsPowerShell`, `Windows.old`, or a folder
-  whose name starts with `Windows `, and `System`, `Services`, `SpeechEngines`, `Designer`, `InstallShield`, and `Merge Modules` in
-  `Common Files`.
+  under `Microsoft`, `Microsoft Shared`, `Microsoft.NET`, `WindowsApps`, `dotnet`, `Internet Explorer`, `WindowsPowerShell`,
+  `InstallShield Installation Information`, `Windows.old`, or a folder whose name starts with `Windows `, leaving aside what an account
+  is called, and `System`, `Services`, `SpeechEngines`, `Designer`, `InstallShield`, `Merge Modules`, and `ODBC` in `Common Files`.
 - A folder named only for the publisher, which may hold its other products, or one that holds this app's own folder.
 - **Another app's.** Where any other entry says it is, or anything that holds that or is inside it, or what that app would take
   by its own name. An entry on the list of apps is another app, even by the same publisher: it is there to be built by itself. An
@@ -433,7 +433,8 @@ is under a folder or key with all of its publisher's name, or starts with all of
 `Windows NT` or `Update Service` does not bring in what has that name elsewhere. Being beside the app says nothing of what it calls
 itself, so nothing comes by name for one with another publisher. A key found by name, by where something added is, or in an install
 record is left out when it is what another app would take by its name, and one found by name is left out when many apps share it.
-A file its install record lists is left out when another app's record lists it too. All of this is before `take_secret_files` and
+A file its install record lists is left out when another app's record lists it too, and if that record names anything of another
+app's at all, none of the keys it lists come along. All of this is before `take_secret_files` and
 `license_scan`, so what looks like a credential stays out and a license goes by its option, however it came. What is in a
 data folder goes by the User data option, like any other.
 

@@ -716,7 +716,9 @@ fn reasons_of(review: &ReviewedPackage<'_>) -> HashMap<String, String> {
 }
 
 /// What in a service's settings says it is a program it runs, and not a folder it keeps things in.
-const RUNS_WHAT_IS_NAMED: &[&str] = &[".exe", ".dll", ".cmd", ".bat", ".ps1"];
+const RUNS_WHAT_IS_NAMED: &[&str] = &[
+    ".exe", ".dll", ".cmd", ".bat", ".ps1", ".py", ".js", ".vbs", ".jar",
+];
 
 /// What is left of a scan after a person's choices, as a package would have it, and what went with
 /// what they left out.
