@@ -485,7 +485,10 @@ data folder goes by the User data option, like any other.
 - An app's entry in Settings goes, with its uninstall string replaced by this project's uninstaller, less what is only true
   where it was installed: `InstallSource`, `ModifyPath`, and `WindowsInstaller`, because Windows Installer has never heard of
   the app on another PC, and Inno Setup's `Inno Setup: User`, `User Info: Name`, and `User Info: Organization`, because they
-  say who ran the setup. `Inno Setup: User Info: Serial` goes by the License option.
+  say who ran the setup. `Inno Setup: User Info: Serial` is license data, by the same rules as any other license value.
+- Inno Setup's uninstall log, `unins000.dat` beside `unins000.exe`, is read to find what the app has and is not copied. It
+  names the PC and the account that ran the setup, and lists where things were on that PC, so its uninstaller would look in
+  the wrong places anywhere else. Without it, that uninstaller only says it is missing. Settings removes the app another way.
 
 ### What ties an app into Windows
 

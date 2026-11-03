@@ -42,7 +42,7 @@ use crate::restore_policy::architecture_from_name;
 use crate::runtime_detection::{AppRuntimes, ArchitectureKey, DotNetNeed, inspect_app_runtimes};
 use crate::secret_rules::{
     LeftOut, ScannedSettings, is_license_registry_entry, is_only_true_where_it_was_installed,
-    names_who_ran_the_setup, take_licenses_from_settings, take_secret_files,
+    names_who_ran_the_setup, take_inno_setup_logs, take_licenses_from_settings, take_secret_files,
     take_secrets_from_license_values, take_secrets_from_settings,
 };
 use crate::service_scan::{ServiceScanContext, scan_drivers, scan_services};
@@ -538,6 +538,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     let mut left_out = LeftOut::default();
     // First, so that nothing else counts one as a license, or anything else that would be copied.
     take_secret_files(&mut file_inventory, &system, &mut left_out);
+    let left_inno_logs_out = take_inno_setup_logs(&mut file_inventory);
     monitor.checkpoint()?;
     let (license_artifacts, mut license_registry_entries, license_warnings) =
         scan_license_artifacts(
@@ -720,9 +721,16 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         generated_artifacts: Some(artifacts),
     };
 
+    if left_inno_logs_out {
+        report
+            .items_excluded
+            .push(INNO_SETUP_LOG_LEFT_OUT.to_owned());
+    }
     use_what_the_source_pc_calls_things(&mut report, &system);
     Ok(report)
 }
+
+const INNO_SETUP_LOG_LEFT_OUT: &str = "Inno Setup's uninstall log (unins000.dat) stays behind: it names the PC and the account that ran the setup, and lists where things were on that PC. The app's entry in Settings removes it another way.";
 
 /// Everything found on a drive so far is where it is now. All that goes on from here is about the
 /// PC it came from, whose paths are in its registry, and what an installer offers and rewrites.

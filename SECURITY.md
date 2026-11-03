@@ -309,12 +309,12 @@ that find them when it is on. With it on, licenses come along and credentials st
   of those shapes.
 - Rules that catch more would break more apps, so `TokenizerPath` and `PasswordPolicyVersion` are kept, and a file
   called `tokens.txt` is too.
-- An installer says which PC it came from, and an app's own files can say more. Every app installed by Inno Setup has
-  an uninstall log, `unins000.dat`, that names the PC and the account that ran its setup, and can hold paths from that
-  account's folders. It goes in the package, because the app's own uninstaller cannot work without it. What that setup
-  wrote in the app's entry in Settings of who ran it, their account, name, and organization, stays behind. So does a
-  serial typed into it, unless the License option is on, and where a Windows Installer setup was run from. A shortcut or
-  a service of the app can also name the account, if that is where it points.
+- An installer says which PC it came from, and what it holds can say more. Some of what a setup keeps of who ran it stays
+  behind: an Inno Setup app's uninstall log, `unins000.dat`, which names the PC and the account and can hold paths in
+  that account's folders, the account, name, and organization in its entry in Settings, and where a Windows Installer setup
+  was run from. A serial typed into a setup is a license like any other, so it stays behind with the License option off, and
+  with it on, one for a machine-wide app is only reported. An app installed for one account has that account's folders in
+  the paths a package records, and a shortcut or a service of any app can name the account if that is where it points.
 - What is encrypted some other way than DPAPI is copied as it is, and is not decrypted to look.
 
 So an installer can contain secrets, and **it has to be handled accordingly**: do not post one or send it to anyone you

@@ -11,6 +11,7 @@
 //! The rules are pure, and false positives are pinned below, since a setting wrongly left out can
 //! break an app.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::license_scan::is_license_registry_name;
@@ -635,6 +636,40 @@ pub(crate) fn names_who_ran_the_setup(entry: &RegistryEntry) -> bool {
             .iter()
             .any(|value| name.eq_ignore_ascii_case(value))
     })
+}
+
+/// Whether this is the log Inno Setup keeps of a setup: `unins000.dat`, or the next number, beside
+/// the `unins000.exe` that reads it. That is what tells it from any other file with such a name.
+fn is_inno_setup_log(path: &Path, files: &HashSet<String>) -> bool {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_named_for_it = name
+        .strip_prefix("unins")
+        .and_then(|rest| rest.strip_suffix(".dat"))
+        .is_some_and(|number| number.len() == 3 && number.bytes().all(|b| b.is_ascii_digit()));
+    is_named_for_it
+        && files.contains(
+            &path
+                .with_extension("exe")
+                .to_string_lossy()
+                .to_ascii_lowercase(),
+        )
+}
+
+/// Take Inno Setup's logs out of what is copied, and say whether there were any. A log names the PC
+/// and the account that ran the setup, and can hold paths in that account's folders. What it lists is
+/// where things were on that PC, so anywhere else its uninstaller would look in the wrong places, and
+/// the app's entry in Settings removes it another way. Without one, that uninstaller only says so.
+pub(crate) fn take_inno_setup_logs(files: &mut Vec<FileEntry>) -> bool {
+    let all: HashSet<String> = files
+        .iter()
+        .map(|file| file.original_path.to_string_lossy().to_ascii_lowercase())
+        .collect();
+    let before = files.len();
+    files.retain(|file| !is_inno_setup_log(&file.original_path, &all));
+    files.len() != before
 }
 
 /// What a Windows Installer app's entry in Settings says that is only true where it was installed:
@@ -1448,6 +1483,49 @@ mod tests {
             value_name: None,
             ..named("x")
         }));
+    }
+
+    #[test]
+    fn inno_setups_log_stays_behind_and_only_that() {
+        let file_at = |path: &str| FileEntry {
+            path: path.into(),
+            original_path: path.into(),
+            package_relative_path: None,
+            suggested_destination_path: None,
+            size_bytes: None,
+            hash_sha256: None,
+            classification: crate::models::FileClassification::AppOwned,
+            should_copy: true,
+            reason: String::new(),
+            user_folder: None,
+        };
+        let mut files: Vec<FileEntry> = [
+            r"C:\Program Files\Git LFS\git-lfs.exe",
+            r"C:\Program Files\Git LFS\unins000.dat",
+            r"C:\Program Files\Git LFS\unins000.exe",
+            r"C:\Program Files\Other\UNINS001.DAT",
+            r"C:\Program Files\Other\unins001.exe",
+            // None of these is one: nothing reads it, or it is not called that.
+            r"C:\Program Files\Alone\unins000.dat",
+            r"C:\Program Files\Near\uninstall.dat",
+            r"C:\Program Files\Near\uninstall.exe",
+            r"C:\Program Files\Near\unins00.dat",
+            r"C:\Program Files\Near\unins00.exe",
+            r"C:\Program Files\Near\unins0000.dat",
+            r"C:\Program Files\Near\unins0000.exe",
+        ]
+        .into_iter()
+        .map(file_at)
+        .collect();
+        let count = files.len();
+
+        assert!(take_inno_setup_logs(&mut files));
+        assert_eq!(files.len(), count - 2);
+        assert!(!files.iter().any(|file| {
+            let path = file.original_path.to_string_lossy().to_ascii_lowercase();
+            path.ends_with(r"git lfs\unins000.dat") || path.ends_with(r"other\unins001.dat")
+        }));
+        assert!(!take_inno_setup_logs(&mut files), "there are none left");
     }
 
     #[test]

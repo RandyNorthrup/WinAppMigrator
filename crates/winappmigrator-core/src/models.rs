@@ -88,8 +88,9 @@ pub struct InstalledApp {
     pub architecture: AppArchitecture,
     pub install_scope: InstallScope,
     /// Whose it is, for an app installed for one account: what
-    /// [`crate::system_context::UserHive::id`] says of that account.
-    #[serde(default)]
+    /// [`crate::system_context::UserHive::id`] says of that account. For this PC to go by, so it
+    /// never goes in a package.
+    #[serde(default, skip_serializing)]
     pub owner_profile: Option<String>,
 }
 

@@ -17,7 +17,8 @@ All notable project changes are tracked here.
   in a folder you left out still went, pointing at nothing. Every package named the account it was built by, even with the
   User data option off. A shortcut with no icon of its own was given one of `,0`. An Inno Setup app's entry in Settings
   took along the account that ran its setup and what was typed as a name and organization, and a serial typed into
-  a setup went even with the License option off. A Windows Installer app's entry took along where its setup was run from,
+  a setup went even with the License option off. Its uninstall log, which names the PC and the account and lists where things
+  were on that PC, went too, and now stays behind. A Windows Installer app's entry took along where its setup was run from,
   usually someone's Downloads, and said Windows Installer has it, which on another PC it does not. A captured `Path` held the
   whole of the variable, which is all of what else is on the PC, when only the app's entries are ever used. An app with a
   32-bit setup and 64-bit programs was listed as x86.

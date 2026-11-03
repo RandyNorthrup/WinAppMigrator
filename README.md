@@ -155,8 +155,9 @@ an app with online activation, a driver, or the size of an office suite. So try 
 
 Please read these before relying on it, especially on a one-way trip from a failing PC.
 
-- **The app's own setup does not know it moved.** Windows Installer has no record of an MSI app on the new PC, so
-  Settings removes it with this project's uninstaller, and the app's own updater or repair can treat it as not installed.
+- **The app's own setup does not know it moved.** Settings removes it with this project's uninstaller. Windows Installer
+  has no record of an MSI app on the new PC, so the app's own updater or repair can treat it as not installed, and an
+  Inno Setup app's own uninstaller, if something else runs it, only says its log is missing.
 - **A folder with nothing in it does not come along,** because a package goes by files. An app that expects one to
   be there may need it made again.
 - **It can miss what is kept under another name.** Beyond what the install records name, folders and

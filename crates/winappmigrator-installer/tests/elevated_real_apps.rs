@@ -289,16 +289,6 @@ fn files_below(root: &Path) -> TestResult<Vec<PathBuf>> {
     Ok(found)
 }
 
-/// Every Inno Setup uninstall log names the PC and the account that ran the setup, and the app's own
-/// uninstaller cannot work without it, so it stays, and SECURITY.md says so. That is all it may do.
-fn is_an_inno_log_naming_its_account(relative: &Path, found: &str) -> bool {
-    let is_log = relative
-        .file_name()
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
-        .is_some_and(|name| name.starts_with("unins") && name.ends_with(".dat"));
-    is_log && found == "the value of USERNAME"
-}
-
 /// What of the runner's account or its tokens would go out with this package.
 fn what_of_the_runners_it_holds(installer: &Path, work: &Path) -> TestResult<Vec<String>> {
     let (names, unpacked) = unpack_package(installer, work)?;
@@ -318,14 +308,7 @@ fn what_of_the_runners_it_holds(installer: &Path, work: &Path) -> TestResult<Vec
         let bytes = fs::read(&file)?;
         let relative = file.strip_prefix(&unpacked)?;
         for found in say_what_was_found(what_is_the_runners(&bytes, &literals), &named) {
-            if is_an_inno_log_naming_its_account(relative, &found) {
-                println!(
-                    "  {} names the account, as such a log does",
-                    relative.display()
-                );
-            } else {
-                problems.push(format!("{found} in {}", relative.display()));
-            }
+            problems.push(format!("{found} in {}", relative.display()));
         }
     }
     println!(
@@ -479,29 +462,6 @@ fn the_search_finds_what_is_the_runners_however_it_is_written() {
     );
     // A blank value of a variable that is not set finds nothing.
     assert!(what_is_the_runners(b"anything", &[String::new()]).is_empty());
-}
-
-#[test]
-fn only_an_inno_log_may_name_the_account_and_nothing_may_hold_a_token() {
-    let named = "the value of USERNAME";
-    assert!(is_an_inno_log_naming_its_account(
-        Path::new(r"files\unins000.dat"),
-        named
-    ));
-    for (file, found) in [
-        (r"manifest.json", named),
-        (r"files\unins000.exe", named),
-        (r"files\unins000.dat", "the value of GITHUB_TOKEN"),
-        (
-            r"files\unins000.dat",
-            "something the shape of a GitHub token",
-        ),
-    ] {
-        assert!(
-            !is_an_inno_log_naming_its_account(Path::new(file), found),
-            "{file} {found}"
-        );
-    }
 }
 
 #[test]
