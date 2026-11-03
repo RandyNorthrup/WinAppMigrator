@@ -641,7 +641,11 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         &system,
         &mut warnings,
     );
-    let user_data_profile = system.user_hives().into_iter().next().map(|user| user.name);
+    // A package with none of an account's data has no reason to carry its name.
+    let user_data_profile = options
+        .include_user_data
+        .then(|| system.user_hives().into_iter().next().map(|user| user.name))
+        .flatten();
     let mut report = ScanReport {
         schema_version: SCAN_SCHEMA_VERSION.to_owned(),
         generated_at_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,

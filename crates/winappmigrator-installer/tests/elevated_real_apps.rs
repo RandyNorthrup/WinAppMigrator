@@ -148,7 +148,8 @@ fn has_token_shape(bytes: &[u8]) -> bool {
             })
 }
 
-/// What in these bytes is the runner's own, as UTF-8 or as UTF-16, whatever its case.
+/// What in these bytes is the runner's own, as UTF-8 or as UTF-16, whatever its case. Each literal
+/// comes back as it was asked for, so a caller can say what kind of thing it found without showing it.
 fn what_is_the_runners(bytes: &[u8], literals: &[String]) -> Vec<String> {
     let every_other = |start: usize| -> Vec<u8> {
         bytes
@@ -178,11 +179,25 @@ fn what_is_the_runners(bytes: &[u8], literals: &[String]) -> Vec<String> {
     found
 }
 
-fn runner_literals() -> Vec<String> {
+/// Each thing to look for, with the name of the variable it came from, to say instead of its value.
+fn runner_literals() -> Vec<(String, &'static str)> {
     RUNNER_VARIABLES
         .iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .filter(|value| !value.is_empty())
+        .filter_map(|name| std::env::var(name).ok().map(|value| (value, *name)))
+        .filter(|(value, _)| !value.is_empty())
+        .collect()
+}
+
+/// What these found, named by variable, since what was found could be a token.
+fn say_what_was_found(found: Vec<String>, named: &[(String, &'static str)]) -> Vec<String> {
+    found
+        .into_iter()
+        .map(|literal| {
+            named
+                .iter()
+                .find(|(value, _)| *value == literal)
+                .map_or(literal.clone(), |(_, name)| format!("the value of {name}"))
+        })
         .collect()
 }
 
@@ -238,20 +253,25 @@ fn files_below(root: &Path) -> TestResult<Vec<PathBuf>> {
 /// Nothing of the runner's account or its tokens goes out with a package.
 fn check_nothing_of_the_runners(installer: &Path, work: &Path) -> TestResult {
     let (names, unpacked) = unpack_package(installer, work)?;
-    let literals = runner_literals();
+    let named = runner_literals();
+    let literals: Vec<String> = named.iter().map(|(value, _)| value.clone()).collect();
     let mut problems = Vec::new();
     for name in &names {
         let lowered = name.to_ascii_lowercase();
         if lowered.contains(r"users\") || lowered.contains("appdata") {
             problems.push(format!("the entry {name}"));
         }
-        for found in what_is_the_runners(name.as_bytes(), &literals) {
+        for found in say_what_was_found(what_is_the_runners(name.as_bytes(), &literals), &named) {
             problems.push(format!("{found} in the name of {name}"));
         }
     }
     for file in files_below(&unpacked)? {
-        for found in what_is_the_runners(&fs::read(&file)?, &literals) {
-            problems.push(format!("{found} in {}", file.display()));
+        let bytes = fs::read(&file)?;
+        for found in say_what_was_found(what_is_the_runners(&bytes, &literals), &named) {
+            problems.push(format!(
+                "{found} in {}",
+                file.strip_prefix(&unpacked)?.display()
+            ));
         }
     }
     println!(
@@ -261,16 +281,7 @@ fn check_nothing_of_the_runners(installer: &Path, work: &Path) -> TestResult {
     if problems.is_empty() {
         return Ok(());
     }
-    // Not what was found, which could be a token, only which rule found it and where.
-    let shown: Vec<String> = problems
-        .iter()
-        .map(|problem| {
-            literals.iter().fold(problem.clone(), |text, literal| {
-                text.replace(literal, "<a value of the runner's>")
-            })
-        })
-        .collect();
-    Err(format!("the package holds the runner's own: {shown:#?}").into())
+    Err(format!("the package holds the runner's own: {problems:#?}").into())
 }
 
 /// What the scan took, for a person to read in the log, with what is outside the app's folder by name.

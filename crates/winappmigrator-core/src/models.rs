@@ -182,7 +182,7 @@ pub struct ScanReport {
     /// What each of the app's programs and drivers needs from Windows.
     #[serde(default)]
     pub program_needs: Vec<ProgramNeed>,
-    /// The account whose per-user data and settings were read, if any.
+    /// The account whose per-user data was read, if the User data option asked for any.
     #[serde(default)]
     pub user_data_profile: Option<String>,
     pub source_app: Option<InstalledApp>,
@@ -418,7 +418,7 @@ pub struct PackageManifest {
     /// older packages, which the installer treats as the default (dark).
     #[serde(default)]
     pub ui_theme: Option<String>,
-    /// The account on the source PC whose per-user data and settings are in the package.
+    /// The account on the source PC whose per-user data is in the package, if any is.
     #[serde(default)]
     pub user_data_profile: Option<String>,
 }
