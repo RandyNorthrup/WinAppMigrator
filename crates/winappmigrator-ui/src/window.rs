@@ -8,6 +8,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use eframe::egui::{self, Rect, Vec2, ViewportCommand, vec2};
 
@@ -43,9 +44,12 @@ fn mode_in(path: &Path) -> Option<ThemeMode> {
     let mut tag = String::new();
     File::open(path)
         .ok()?
-        .take(MOST_MODE_FILE_BYTES)
+        .take(MOST_MODE_FILE_BYTES + 1)
         .read_to_string(&mut tag)
         .ok()?;
+    if tag.len() as u64 > MOST_MODE_FILE_BYTES {
+        return None;
+    }
     ThemeMode::from_tag(tag.trim())
 }
 
@@ -61,29 +65,31 @@ pub fn remember_chosen_mode(mode: ThemeMode) {
 /// file an administrator can change. A new file put in its place replaces the name, and leaves alone
 /// whatever else that name led to. And a link in the way of the folder is not written through at all.
 fn write_mode(path: &Path, mode: ThemeMode) {
+    static ATTEMPTS: AtomicU32 = AtomicU32::new(0);
     let Some(folder) = path.parent() else {
         return;
     };
-    let _ = fs::create_dir_all(folder);
     let is_a_link = |place: &Path| {
         fs::symlink_metadata(place).is_ok_and(|metadata| metadata.file_type().is_symlink())
     };
-    if folder.ancestors().any(is_a_link) {
+    // Before making the folder as well, which would make it wherever a link leads.
+    if folder.ancestors().any(is_a_link) || fs::create_dir_all(folder).is_err() {
         return;
     }
-    let beside = folder.join(format!("{MODE_FILE}.{}", std::process::id()));
+    let attempt = ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    let name = format!("{MODE_FILE}.{}.{attempt}", std::process::id());
+    put_mode_in_place(path, mode, &folder.join(name));
+}
+
+fn put_mode_in_place(path: &Path, mode: ThemeMode, beside: &Path) {
     // Not over anything already there, which is not to be written through either.
-    let Ok(mut file) = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&beside)
-    else {
+    let Ok(mut file) = OpenOptions::new().write(true).create_new(true).open(beside) else {
         return;
     };
     let written = file.write_all(mode.as_tag().as_bytes());
     drop(file);
-    if written.is_err() || fs::rename(&beside, path).is_err() {
-        let _ = fs::remove_file(&beside);
+    if written.is_err() || fs::rename(beside, path).is_err() {
+        let _ = fs::remove_file(beside);
     }
 }
 
@@ -387,6 +393,9 @@ mod tests {
         // However much of it there is, only as much as could be a word is read.
         assert!(fs::write(&file, "light".repeat(1000)).is_ok());
         assert_eq!(mode_in(&file), None);
+        // And what starts with a word and goes on past that is not that word.
+        assert!(fs::write(&file, format!("light{}x", " ".repeat(20))).is_ok());
+        assert_eq!(mode_in(&file), None);
         assert!(fs::remove_file(&file).is_ok());
         assert!(fs::create_dir(&file).is_ok());
         assert_eq!(mode_in(&file), None, "a folder of that name");
@@ -427,14 +436,24 @@ mod tests {
     fn choosing_a_mode_goes_no_further_if_its_scratch_file_is_there_already() {
         let place = Place::new("scratch");
         let file = place.0.join(MODE_FILE);
-        let scratch = place.0.join(format!("{MODE_FILE}.{}", std::process::id()));
+        let scratch = place.0.join("scratch");
         assert!(fs::write(&scratch, "someone else's").is_ok());
-        write_mode(&file, ThemeMode::Light);
+        put_mode_in_place(&file, ThemeMode::Light, &scratch);
         assert_eq!(
             fs::read_to_string(&scratch).ok().as_deref(),
             Some("someone else's")
         );
         assert_eq!(mode_in(&file), None);
+        // The next time it goes by another name.
+        write_mode(&file, ThemeMode::Light);
+        assert_eq!(mode_in(&file), Some(ThemeMode::Light));
+        let left: Vec<_> = fs::read_dir(&place.0)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(left.len(), 2, "nothing of its own is left behind: {left:?}");
     }
 
     fn input_with(screen: Option<Vec2>, system: Option<egui::Theme>) -> RawInput {

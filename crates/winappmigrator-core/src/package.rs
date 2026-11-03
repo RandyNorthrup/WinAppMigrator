@@ -18,7 +18,7 @@ use crate::file_discovery::{
     MAX_EMPTY_FOLDERS, has_reserved_device_name, is_user_profile_path, package_destination_path,
     safe_relative_path,
 };
-use crate::footprint::{Footprint, FootprintChoices, ScanFlags, apply_choices};
+use crate::footprint::{Footprint, FootprintChoices, ScanFlags, apply_choices, recount_locations};
 use crate::hashing::{hex_lower, sha256_file};
 use crate::models::{
     AppArchitecture, AppSelection, DriverEntry, FileClassification, FileEntry, FootprintKind,
@@ -590,16 +590,8 @@ fn what_was_built(report: &ScanReport, manifest: &PackageManifest) -> ScanReport
     built
         .runtime_prerequisites
         .clone_from(&manifest.runtime_prerequisites);
-    // The scan worked out how much of a location it hoped to copy. This is how much of it went.
-    for location in &mut built.footprint_locations {
-        location.copyable_bytes = manifest
-            .file_inventory
-            .iter()
-            .filter(|file| file.should_copy && path_is_within(&file.original_path, &location.path))
-            .filter_map(|file| file.size_bytes)
-            .sum();
-        location.included = location.copyable_bytes > 0;
-    }
+    // The scan worked out how much of each place it hoped to copy. This is how much of it went.
+    recount_locations(&mut built);
     built
 }
 

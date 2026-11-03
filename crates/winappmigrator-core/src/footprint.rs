@@ -1427,7 +1427,7 @@ pub fn apply_choices(
 }
 
 /// What a report says of each place, after some of what is in them has gone.
-fn recount_locations(report: &mut ScanReport) {
+pub(crate) fn recount_locations(report: &mut ScanReport) {
     let mut counts: Vec<(usize, u64, u64)> = vec![(0, 0, 0); report.footprint_locations.len()];
     for file in &report.file_inventory {
         let found = report
