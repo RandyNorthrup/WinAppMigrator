@@ -104,10 +104,12 @@ foreach ($round in $rounds) {
             Check "$($app.id): and so is its quiet one" ($entry.QuietUninstall -ceq "$own --quiet") $entry.QuietUninstall
         }
         # What the publisher's own installer left in its folder, whatever the scan made of it.
+        $relativePaths = @($app.files | ForEach-Object relative)
         foreach ($file in @($app.files)) {
             $path = Join-Path $roots[$app.id] $file.relative
-            # It names who ran the setup, and lists where things were on that PC. See SECURITY.md.
-            if ($file.relative -match '^unins\d{3}\.dat$') {
+            # It names who ran the setup, and lists where things were on that PC. See SECURITY.md. It is
+            # only that beside the program that reads it, as the scan goes by.
+            if ((Split-Path -Leaf $file.relative) -match '^unins\d{3}\.dat$' -and $relativePaths -contains ($file.relative -replace '\.dat$', '.exe')) {
                 Check "$($app.id): its Inno Setup log stayed behind" (-not (Test-Path -LiteralPath $path)) $path
                 continue
             }

@@ -572,7 +572,10 @@ function Captured-Values([string]$Manifests, $Apps) {
             }
             $name = if ($entry.value_name -eq '(Default)') { '' } else { $entry.value_name }
             $value = $key.GetValue($name, $null, 'DoNotExpandEnvironmentNames')
-            if ($null -ne $value) { "$($hive.Name)\$($entry.key_path) : $($entry.value_name) = $($value -join ' ')" }
+            if ($null -ne $value) {
+                # By its kind and in a form where no two different values read the same.
+                "$($hive.Name)\$($entry.key_path) : $($entry.value_name) = $($key.GetValueKind($name)) $(ConvertTo-Json -InputObject $value -Compress)"
+            }
         }
     }
 }
@@ -608,14 +611,16 @@ function Get-MachineState([string]$Manifests, $Apps) {
         'Environment'     = @($environment.GetValueNames() | ForEach-Object { "$_=$($environment.GetValue($_, '', 'DoNotExpandEnvironmentNames'))" })
     }
     $state = @{}
-    foreach ($kind in $names.Keys) { $state[$kind] = @($names[$kind] | Sort-Object -Unique) }
+    foreach ($kind in $names.Keys) { $state[$kind] = @($names[$kind] | Sort-Object -Unique -CaseSensitive) }
     return $state
 }
 
 function State-Differences($Before, $After) {
     foreach ($kind in ($Before.Keys | Sort-Object)) {
-        $set = [Collections.Generic.HashSet[string]]::new([string[]]$Before[$kind], [StringComparer]::OrdinalIgnoreCase)
-        $now = [Collections.Generic.HashSet[string]]::new([string[]]$After[$kind], [StringComparer]::OrdinalIgnoreCase)
+        # What a value holds has to come back exactly. What a thing is called goes by no case, as Windows does.
+        $comparer = if ($kind -in 'What they set', 'Environment') { [StringComparer]::Ordinal } else { [StringComparer]::OrdinalIgnoreCase }
+        $set = [Collections.Generic.HashSet[string]]::new([string[]]$Before[$kind], $comparer)
+        $now = [Collections.Generic.HashSet[string]]::new([string[]]$After[$kind], $comparer)
         foreach ($item in $After[$kind]) {
             if ($set.Contains($item)) { continue }
             # Windows adds these itself for its own packages, whenever it first starts one.
