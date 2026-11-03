@@ -28,6 +28,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 use winappmigrator_core::path_utils::POWERSHELL_UTF8_OUTPUT;
 use winappmigrator_core::privilege::is_elevated;
+use winappmigrator_core::restore_policy::WHOEVER_INSTALLS_IT;
 use winappmigrator_core::{
     AppSelection, BuildMonitor, FootprintChoices, InstalledApp, InstallerStub, PackageManifest,
     PackageOptions, ProfileChoice, ScanMonitor, ScanSource, SystemContext,
@@ -45,6 +46,8 @@ const GOES_WITH_USER_DATA: &str = "user_data";
 const GOES_WITH_LICENSE: &str = "license";
 /// Hash, length, and magic, at the end of an installer, after the package.
 const FOOTER_BYTES: usize = 32 + 8 + 21;
+/// What `install-real-apps.ps1` registers, running 7-Zip as this runner's account.
+const PERSONAL_TASK: &str = "WAM Personal Task";
 /// What the runner has of its own that a package must never hold, by what it is set to.
 const RUNNER_VARIABLES: [&str; 8] = [
     "USERNAME",
@@ -960,6 +963,57 @@ fn build_what_goes_to_the_other_pcs() -> TestResult {
             );
             if !found.is_empty() {
                 holding_the_runners.push(format!("{name}: the mark {} in {found:?}", mark.text));
+            }
+        }
+        // What the build itself looked for last, in what it wrote. These apps are machine-wide, and
+        // were built with none of an account's data, so nothing should have come of that.
+        for warning in result
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == "package_mentions_an_account")
+        {
+            holding_the_runners.push(format!("{name}: the build says: {}", warning.message));
+        }
+        if id == "7zip" {
+            let tasks = &manifest.scheduled_tasks_detected;
+            println!("  its tasks: {tasks:#?}");
+            println!("  its shortcuts: {:#?}", manifest.shortcuts_detected);
+            println!("  what it left out: {:#?}", manifest.settings_left_out);
+            let mine = tasks.iter().find(|task| task.task_name == PERSONAL_TASK);
+            let says_who = mine.is_some_and(|task| {
+                task.account.as_deref() == Some(WHOEVER_INSTALLS_IT)
+                    && task
+                        .definition_xml
+                        .as_deref()
+                        .is_some_and(|xml| !xml.contains("<Author>") && !xml.contains("run.cmd"))
+            });
+            if !says_who {
+                holding_the_runners
+                    .push(format!("{name}: its task is not as it should be: {mine:?}"));
+            }
+            let left_out_the_rest = |what: &str| {
+                manifest
+                    .settings_left_out
+                    .iter()
+                    .any(|item| item.name.contains(what))
+            };
+            if !left_out_the_rest(PERSONAL_TASK) || !left_out_the_rest("Shortcuts") {
+                holding_the_runners.push(format!(
+                    "{name}: it does not say what it left out of what someone made of it"
+                ));
+            }
+            let locations: Vec<String> = manifest
+                .shortcuts_detected
+                .iter()
+                .map(|shortcut| shortcut.original_lnk_path.display().to_string())
+                .collect();
+            if !locations.iter().any(|location| {
+                location.eq_ignore_ascii_case(r"%USERPROFILE%\Desktop\WAM Plain 7-Zip.lnk")
+            }) || locations
+                .iter()
+                .any(|location| location.contains("WAM Personal"))
+            {
+                holding_the_runners.push(format!("{name}: its shortcuts are {locations:?}"));
             }
         }
         let its_marks = marks.iter().filter(|mark| mark.app == id).count();

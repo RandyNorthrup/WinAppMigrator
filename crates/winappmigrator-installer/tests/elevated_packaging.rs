@@ -35,6 +35,7 @@ use winappmigrator_core::{
     create_installer_with_data_file, create_package, create_package_monitored,
     create_self_extracting_archive, data_file_beside, read_embedded_manifest, verify_installer,
 };
+use winappmigrator_core::{ScanMonitor, ScanOptions, SystemContext, hidden_command, scan_app};
 use winappmigrator_installer::gui::install_as_the_window_does;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -721,6 +722,201 @@ fn the_window_installs_what_it_checked_from_where_nobody_else_can_get_in() -> Te
         format!("{taken_up:?}"),
     );
 
+    section("What a planted file in the folder of installs does, and the one that is not planted");
+    let installs = package.work.path().join("state-installs");
+    ensure_protected_folder(&installs)?;
+    let give_to_users = |file: &Path| {
+        Command::new("icacls")
+            .arg(file)
+            .args(["/setowner", "*S-1-5-32-545"])
+            .output()
+    };
+    let lock = installs.join("busy.lock");
+    fs::write(&lock, b"")?;
+    let given = give_to_users(&lock)?;
+    checks.that(
+        "the lock was given to Users",
+        given.status.success(),
+        String::from_utf8_lossy(&given.stdout),
+    );
+    let with_only_the_lock = refuse_what_others_put_in(&installs);
+    checks.that(
+        "a lock is what a running install keeps there, and is nobody's doing",
+        with_only_the_lock.is_ok(),
+        format!("{with_only_the_lock:?}"),
+    );
+    let planted_install = installs.join("planted-record");
+    fs::create_dir(&planted_install)?;
+    let given = give_to_users(&planted_install)?;
+    checks.that(
+        "the record was given to Users",
+        given.status.success(),
+        String::from_utf8_lossy(&given.stdout),
+    );
+    let with_a_record = refuse_what_others_put_in(&installs);
+    checks.that(
+        "a record someone else made there is not taken up",
+        with_a_record.is_err(),
+        format!("{with_a_record:?}"),
+    );
+
+    checks.finish()
+}
+
+/// What this reports of itself, run with a hostile environment by the test below, one line each. An
+/// elevated process gets what its account has set, so any of this could be up to a program of theirs.
+const HOSTILE_CHILD_VARIABLE: &str = "WAM_HOSTILE_ENVIRONMENT_CHILD";
+const HOSTILE_APP: &str = "WAM Hostile Env App";
+
+#[test]
+fn reports_what_it_is_told_under_a_hostile_environment() -> TestResult {
+    if std::env::var_os(HOSTILE_CHILD_VARIABLE).is_none() {
+        return Ok(());
+    }
+    let system = SystemContext::live();
+    println!("WINDOWS={}", system.windows_dir().display());
+    println!("PROGRAMDATA={:?}", system.program_data());
+    println!("PROGRAMFILES={:?}", system.program_files_dirs());
+    let tools = hidden_command("cmd").args(["/D", "/C", "set"]).output()?;
+    println!("TOOL={}", String::from_utf8_lossy(&tools.stdout));
+    let program = Path::new(PROGRAM_FILES)
+        .join(HOSTILE_APP)
+        .join(format!("{HOSTILE_APP}.exe"));
+    let report = scan_app(
+        &ScanOptions {
+            include_program_data: true,
+            ..ScanOptions::for_executable(&program, Path::new(""))
+        },
+        &ScanMonitor::default(),
+    )?;
+    for file in &report.file_inventory {
+        println!("FILE={}", file.original_path.display());
+    }
+    Ok(())
+}
+
+#[test]
+fn what_an_account_says_of_windows_own_folders_is_not_gone_by() -> TestResult {
+    if !may_change_this_machine()? {
+        return Ok(());
+    }
+    let mut checks = Checks::default();
+    let hostile = tempfile::tempdir()?;
+    let folder = |name: &str| -> TestResult<PathBuf> {
+        let folder = hostile.path().join(name);
+        fs::create_dir_all(&folder)?;
+        Ok(folder)
+    };
+    let (temp, data, files, windows) = (
+        folder("temp")?,
+        folder("data")?,
+        folder("files")?,
+        folder("windows")?,
+    );
+    let planted = data.join(HOSTILE_APP);
+    fs::create_dir_all(&planted)?;
+    fs::write(planted.join("planted.dll"), b"x")?;
+    let environment = [
+        ("TEMP", temp.as_path()),
+        ("TMP", temp.as_path()),
+        ("ProgramData", data.as_path()),
+        ("ALLUSERSPROFILE", data.as_path()),
+        ("ProgramFiles", files.as_path()),
+        ("ProgramW6432", files.as_path()),
+        ("SystemRoot", windows.as_path()),
+        ("windir", windows.as_path()),
+    ];
+    let hostile_text = path_text(hostile.path());
+    let package = hand_built_package(HOSTILE_APP, &[])?;
+
+    section("Control: what is set reaches a program that goes by it");
+    let mut control = Command::new("cmd");
+    control.args(["/D", "/C", "echo %ProgramData%;%TEMP%"]);
+    for (name, value) in environment {
+        control.env(name, value);
+    }
+    let control = String::from_utf8_lossy(&control.output()?.stdout).to_string();
+    println!("{control}");
+    checks.that(
+        "a plain child sees it",
+        control.contains(&path_text(&data)) && control.contains(&path_text(&temp)),
+        &control,
+    );
+
+    section("What the app makes of it, as itself");
+    let mut child = Command::new(std::env::current_exe()?);
+    child.args([
+        "--exact",
+        "reports_what_it_is_told_under_a_hostile_environment",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    child.env(HOSTILE_CHILD_VARIABLE, "1");
+    for (name, value) in environment {
+        child.env(name, value);
+    }
+    let child = child.output()?;
+    let told = String::from_utf8_lossy(&child.stdout).to_string();
+    println!("{told}\n{}", String::from_utf8_lossy(&child.stderr));
+    checks.that("it ran", child.status.success(), &told);
+    checks.that(
+        "it asked for the folders ran",
+        told.contains("WINDOWS=") && told.contains("PROGRAMDATA=") && told.contains("TOOL="),
+        &told,
+    );
+    let says_hostile: Vec<&str> = told
+        .lines()
+        .filter(|line| line.contains(&hostile_text))
+        .collect();
+    checks.that(
+        "not one thing it says goes by what was set",
+        says_hostile.is_empty(),
+        format!("{says_hostile:#?}"),
+    );
+    checks.that(
+        "and what was planted there is not the app's",
+        !told.contains("planted.dll"),
+        &told,
+    );
+
+    section("A real install, in the same environment");
+    let installer = package.one_file("hostile.exe")?;
+    let target = tempfile::tempdir()?;
+    let target_text = path_text(&target.path().join("app"));
+    let mut install = Command::new(&installer);
+    install.args(["--apply", "--target-root", target_text.as_str()]);
+    for (name, value) in environment {
+        install.env(name, value);
+    }
+    let install = install.output()?;
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&install.stdout),
+        String::from_utf8_lossy(&install.stderr)
+    );
+    println!("exit {:?}\n{said}", install.status.code());
+    checks.that("it installs", install.status.success(), &said);
+    let mut made_in_it = Vec::new();
+    let mut folders = vec![hostile.path().to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder)?.flatten() {
+            if entry.path().is_dir() {
+                folders.push(entry.path());
+            } else if entry.file_name() != "planted.dll" {
+                made_in_it.push(entry.path());
+            }
+        }
+    }
+    checks.that(
+        "nothing was made where it was told to look",
+        made_in_it.is_empty(),
+        format!("{made_in_it:#?}"),
+    );
+    if install.status.success() {
+        let id = install_id_in(&said)?;
+        uninstall_quietly(&id)?;
+    }
+    fs::remove_dir_all(Path::new(PROGRAM_FILES).join(HOSTILE_APP))?;
     checks.finish()
 }
 

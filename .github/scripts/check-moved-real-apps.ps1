@@ -129,7 +129,21 @@ foreach ($round in $rounds) {
         Write-Host "services now: $($status -join ', ')"
     }
 
-    Section "$($round.Name): what starts by itself is running, with nothing having asked but the install"
+    Section "$($round.Name): what someone made of 7-Zip came as far as it could, and with no one's name"
+    $task = Get-ScheduledTask -TaskPath $script:PersonalTaskPath -TaskName $script:PersonalTaskName -ErrorAction SilentlyContinue
+    Check 'the task that ran as someone came, to run as whoever installed it' ([bool]$task -and ($task.Principal.UserId -split '\\')[-1] -eq $env:USERNAME) "$($task.Principal.UserId)"
+    Check 'what it says of who wrote it did not' ([bool]$task -and -not $task.Author) "$($task.Author)"
+    Check 'it runs 7-Zip where it is now' ([bool]$task -and @($task.Actions).Count -eq 1 -and $task.Actions[0].Execute.Trim('"').StartsWith($roots['7zip'], [StringComparison]::OrdinalIgnoreCase)) "$(@($task.Actions | ForEach-Object Execute) -join ', ')"
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $plain = Join-Path $desktop $script:PlainShortcut
+    Check 'the shortcut that only opened the app came, to this account''s Desktop' (Test-Path -LiteralPath $plain) $plain
+    if (Test-Path -LiteralPath $plain) {
+        $target = (New-Object -ComObject WScript.Shell).CreateShortcut($plain).TargetPath
+        Check 'and opens the app where it is now' ($target.StartsWith($roots['7zip'], [StringComparison]::OrdinalIgnoreCase)) $target
+    }
+    Check 'the one with arguments did not' (-not (Test-Path -LiteralPath (Join-Path $desktop $script:PersonalShortcut))) ''
+
+    Section "$($round.Name): what starts by itself is running, with nothing having asked but the install\"
     foreach ($name in 'mosquitto', 'windows_exporter') {
         $service = Get-Service -Name $name -ErrorAction SilentlyContinue
         Check "${name}: it is set to start by itself" ($service -and "$($service.StartType)" -eq 'Automatic') "$($service.StartType)"
@@ -172,6 +186,7 @@ foreach ($round in $rounds) {
     foreach ($app in $apps) {
         Check "$($app.id): its folder is gone" (-not (Test-Path -LiteralPath $roots[$app.id])) $roots[$app.id]
     }
+    Check 'what someone made of it went with it' (-not (Get-ScheduledTask -TaskPath $script:PersonalTaskPath -TaskName $script:PersonalTaskName -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath (Join-Path ([Environment]::GetFolderPath('Desktop')) $script:PlainShortcut))) ''
     $differences = @(State-Differences $cleanState (Get-MachineState $manifests $apps))
     foreach ($difference in $differences) { Write-Host "  $difference" }
     Check 'the machine is as it was before any of them' ($differences.Count -eq 0) ($differences -join '; ')

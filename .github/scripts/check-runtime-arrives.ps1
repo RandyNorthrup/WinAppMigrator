@@ -162,13 +162,23 @@ Check 'its service is gone' ($null -eq (Get-Service -Name mosquitto -ErrorAction
 
 Write-Host "`n=== Install what was built"
 $log = Join-Path $Folder 'install.log'
+# As an elevated process would be told by whatever its account has set. A setup program that goes by this
+# would unpack there what it then loads, where another program of that account could get at it.
+$hostileTemp = New-WorkFolder
+$told = $env:TEMP
+$env:TEMP = $hostileTemp
+$env:TMP = $hostileTemp
 $run = Run-Program (Join-Path $Folder $expected.installer) @('--apply', '--log', $log)
+$env:TEMP = $told
+$env:TMP = $told
+$madeThere = @(Get-ChildItem -LiteralPath $hostileTemp -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object FullName)
+Check 'a TEMP its account had set was not gone by' ($madeThere.Count -eq 0) ($madeThere -join '; ')
 Write-Host "exit $($run.Code)"
 Write-Host $run.Output
 Check 'the installer exits with 0' ($run.Code -eq 0) $run.Output
 if ($run.Code -ne 0) {
     # What the redistributable itself has to say of it, which it keeps in the temp folder.
-    foreach ($place in $env:TEMP, "$env:SystemRoot\Temp") {
+    foreach ($place in $env:TEMP, "$env:SystemRoot\Temp", 'C:\ProgramData\WinAppMigrator\tool-temp') {
         foreach ($log in @(Get-ChildItem -LiteralPath $place -Filter 'dd_vcredist*' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 2)) {
             Write-Host "`n--- $($log.FullName)"
             Get-Content -LiteralPath $log.FullName | Where-Object { $_ -match '(?i)related|Detected package: vcRuntime|e000|Exit code' } | ForEach-Object { Write-Host "  $_" }

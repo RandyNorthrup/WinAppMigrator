@@ -181,7 +181,8 @@ controlled. So:
   listing a folder is asked about by name before it is opened, and a walk goes in only after that. A name that ends
   that way, a name that is not text, or one this Windows would open as a device, is not read. A path a value records is
   first read as Windows would read it, so that it is the real name that is asked about.
-- **There are limits on what a drive can make this do.** A hive is copied by reading it, up to 4 GiB, and 32 GiB for
+- **There are limits on what a drive can make this do.** A hive is copied by reading it, or in backup mode if that is denied, where
+  how much room it takes is watched, since that brings streams a size says nothing of. Either way that is up to 4 GiB, and 32 GiB for
   all of a run's. There are limits on a program, an install log, an AppX manifest, a task, how many tasks an app keeps,
   how many accounts are listed, and how much of the registry is captured. How much of an app's own files can be read
   into a package is checked against the room there is, by what the listing says of each, and a file can only hold as
@@ -191,6 +192,11 @@ controlled. So:
   secrets, and are removed afterward. A run that dies leaves them, and hives loaded, so the app sweeps those when
   it starts. It goes by a lease each run holds, so it leaves another run's alone, and it only touches a key named
   the way this app names one.
+- **A loaded hive is protected by its own permissions, not the folder's.** While a scan or a listing runs, the key a hive is loaded
+  at is readable by whoever its security descriptor allows, typically any user for `SOFTWARE`. And a program holding that
+  key open keeps it from being unloaded, so after about five seconds this gives up, and the hive and its copies stay until the next
+  sweep. Nothing can write to the drive by this. This has not been narrowed, since it takes a running program of someone on this PC,
+  which can read what the account running this could already.
 - **Registry links depend on Windows.** A key in a hive can be a link to somewhere else in the registry, and this does
   not open them specially. On the runner, Windows refused `reg query` through one out of a hive loaded from `SOFTWARE` and
   from `NTUSER.DAT`, and what a link in those and in `SYSTEM` led to did not reach a package, which is tested. If Windows
@@ -329,7 +335,11 @@ plainly named value in the app's own key, no more than two below `Software`, who
 folder. This goes by where a value is, so nothing that finds one can get round it, and it says how many went from
 which app's key and nothing below that, since a host can be what a key is called. So does what a scan finds of an app's data with the option off, which only the screen is told of: a package says nothing of those
 files, what they are called, or a credential among them, and a folder of an account's that you left out is named without its path. What says a folder is an account's is mostly that it is under one called `Users`, so an account's folders somewhere else, as
-an administrator can arrange, can be named in a warning or in what you left out. What stays can still say something: an
+an administrator can arrange, can be named in a warning or in what you left out, unless that is the folder of the account being
+scanned or building, which is known. With the option off, a build looks through all it wrote for those last, in each form a value can
+be held in, and says on the done screen where it found any, but it does not change them, and it does not look in the app's own files. An
+account's environment variables only go if all they say is where the app is. A service that ran as someone is said to have run as
+an account of its PC, and is set up as `LocalService` as before. What stays can still say something: an
 ODBC source can name a server and a user, and a plainly named value in an app's own key that points in its folder could be called
 anything. With the License option on as well, a license value in an account's key goes where it was,
 so its key's name goes with it.
@@ -343,12 +353,13 @@ so its key's name goes with it.
 - Rules that catch more would break more apps, so `TokenizerPath` and `PasswordPolicyVersion` are kept, and a file
   called `tokens.txt` is too. A `.key` in binary is known by its shape alone, so one of a kind of its own is not, and a `.crt`
   is only read up to 1 MiB, so a private key in one bigger than that is not found.
-- An installer says which PC it came from, and what it holds can say more. Some of what a setup keeps of who ran it stays
+- With the User data option on, an installer says which PC it came from. With it off or on, what it holds can say more. Some of what a setup keeps of who ran it stays
   behind: an Inno Setup app's uninstall log, `unins000.dat`, which names the PC and the account and can hold paths in
   that account's folders, the account, name, and organization in its entry in Settings, and where a Windows Installer setup
   was run from. A serial typed into a setup is a license like any other, so it stays behind with the License option off, and
   with it on, one for a machine-wide app is only reported. An app installed for one account has that account's folders in
-  the paths a package records, and a shortcut or a service of any app can name the account if that is where it points.
+  the paths a package records. A shortcut in an account's own folders with the option off goes only if all it does is open the
+  app, and is said with no account in it, but a shortcut of any app can name the account in where it points.
 - What is encrypted some other way than DPAPI is copied as it is, and is not decrypted to look.
 
 So an installer can contain secrets, and **it has to be handled accordingly**: do not post one or send it to anyone you

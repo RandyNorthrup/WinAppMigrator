@@ -798,6 +798,8 @@ The ones that most affect what gets captured:
 - **An app made of several packages only gets its own, unless you add the rest.** NVIDIA App's `NVIDIA Container` and
   `NVIDIA Telemetry Client` are separate entries in the Uninstall key, marked as system components, so they are
   [offered](#near-matches), and only in the installer if ticked.
+- **A link in an app's folder is not followed, and nor is anything more than 64 levels down.** Each is named in a warning, by its
+  first few, so a `current` link or a `node_modules` that is one will show there, and what they point at stays behind.
 - **A connected drive only gives what is on it.** An app or data on another of that PC's disks,
   or reached through a link, stays behind, and the build lists what it did not follow. Only the
   folders every Windows has are known for a `%Variable%` in a value on a drive.

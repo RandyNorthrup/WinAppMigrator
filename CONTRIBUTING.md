@@ -96,12 +96,19 @@ packages say they set and by the names of the services, tasks, firewall rules, s
 once where each app was and once in a folder of another name. A check in `real-app-checks.ps1` asks Windows to do the thing rather than looking for a file or a key,
 so that only what was restored can make it pass. **Add a check only if it can fail, and never widen one to go green.**
 
+`install-real-apps.ps1` also registers a scheduled task running 7-Zip as the runner's account, written by it and waiting for it,
+which also runs something from its folders, and leaves shortcuts to 7-Zip on its Desktop, one with arguments. The search for
+what is the runner's goes through what is built from those, the build's own last look has to find nothing in these apps, and each
+fresh runner has to end up with the task running as its own account with nothing of the other's, and the one shortcut.
+
 `install-real-apps.ps1` also leaves what an account would have in 7-Zip's and PuTTY's keys, with marks in it that are in
 nothing else. The build goes through each package for those marks, in every form a value is written in, and none may be there
 with the User data option off. A step of that job that uploads nothing builds again with it on, where each has to be there, and
 `check-account-settings.ps1` installs that on the same runner, and shows each value arrive and go. `Real apps, a PC with no runtime`
 builds Mosquitto with its runtime in it, and `check-runtime-arrives.ps1` takes that runtime off the runner and shows the broker
-cannot start, then installs and has it serve a client. `Real windows` opens the app, an installer and an uninstaller on each kind of runner,
+cannot start, then installs with `TEMP` set to a folder nothing may use, and has it serve a client. `Elevated packaging` runs the
+app's own code and a real install with `TEMP`, `ProgramData`, `ProgramFiles`, and `SystemRoot` all set wrong, shows that a plain child
+goes by them, and that nothing here does. `Real windows` opens the app, an installer and an uninstaller on each kind of runner,
 and looks at what is on the screen, without clicking anything. Each has to fit in what Windows says a window can use, at the
 runner's 1024x768, and be in the mode Windows is in, set both ways, or the one chosen in the app. It does the same again with
 graphics that cannot start, and with the environment naming a folder of Direct3D's code, where it plants a stand-in built from

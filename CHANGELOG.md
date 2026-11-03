@@ -4,6 +4,50 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **With the User data option off, a package says nothing of who it came from, by whichever route.** A real look through
+  what is written found the PC and account in a scheduled task's definition, what a warning quoted, a DLL found through
+  someone's own `Path`, a variable's other folders, a service's account, a certificate from an account's own store, and who an
+  app was registered to. Shortcuts in an account's own folders went whole, with their arguments. All of it now goes through
+  one function, which runs when a scan is asked and again at a build, since a person can untick all of a scan's data. What is
+  only read says `<an account>` and the like, in one place, so that a warning added later is covered.
+- **A build takes a last look.** After writing a package with none of an account's data, it goes through the manifest and
+  what it wrote, in each form a value can be held in, for the account, profile, PC, and SID. It names on the done screen
+  where it found any, and never what. That changes nothing and stops nothing: it can be what makes the app work, such as an
+  app of one account's in that account's folders. Every leak so far was a route nobody had thought of.
+- **A scheduled task that ran as a person runs as whoever installs it.** On another PC they are nobody, and registering it for
+  them failed, so such a task never moved. Who wrote it and who a trigger waited for go too, a password nobody has comes to
+  running while they are signed in, and a group of theirs comes to the PC's users. This is whichever way the option is. What
+  else it runs from someone's folders goes with the option off, and one that is told to work on something there goes whole.
+- **A shortcut in an account's own folders goes only if it just opens the app.** One with arguments is theirs, and goes with
+  User data. An app of one account's keeps its own, which can have arguments. Where one goes is said with no account in it,
+  and it goes to the Desktop or Start Menu of whoever installs it.
+- **A folder is not the app's for having its uninstaller in it.** A setup run from `D:\Downloads` brought all of `D:\Downloads`,
+  with both options off. Now it brings that file, unless the folder says by its name that it is the app's. App Paths has to say it
+  is this program before anything it lists counts. Every folder a record names goes through the rules near matches do, unless it
+  is where the app itself is, and one that fails is said to be left out. Micro Focus is no longer Microsoft's vendor.
+- **What a walk leaves out is said.** A link in an app's folder was dropped with nothing said, though the docs said otherwise,
+  and a folder 24 levels down was neither walked nor said to be, and was recorded as empty. It goes as deep as every other walk
+  now, 64 levels, and both are named in a warning.
+- **Tools started elevated get a fixed environment, not just PowerShell.** An elevated process gets what its account has set,
+  and DISM and older setup programs load what they have unpacked from `TEMP`. Every tool now gets its `Path` from the Windows
+  folder and `TEMP` from there as well, and a setup program or DISM gets a folder of its own only administrators can write to,
+  which goes when it has finished. If there is no such place, it does not run. Windows' own folders are read from the registry,
+  not from `SystemRoot`, `ProgramData`, or `ProgramFiles`, everywhere they are asked for.
+- **A runtime older than the one a package brings gets that one.** Every Visual C++ 2015 and later says it is `14.0` by its key's
+  name, so a stale one read as there, and a program that needed a later one did not start. Windows Installer's own check still
+  has the last word. Winget is told which build to get, and is only used from where Windows keeps its own packages.
+- **A hive that can only be read in backup mode is held to the same limits.** A size says nothing of the streams that copy brings
+  too, so it watches how much room it is taking and stops there. A cancel reaches it as well.
+- **A damaged program is one file's problem.** A version resource that says it is longer than it is made the parser panic and the
+  whole scan fail, and an odd optional header was undefined behaviour. Those are now that file's warning, and a test tries
+  hundreds of damaged programs each time. A managed image's metadata is found by its headers, not by the first thing in the file
+  that looks like it, and a .NET program packed into one file says so.
+- **Smaller ones.** One unreadable installed file is one failed check and not a verification that could not run. A firewall rule
+  with a `TTK` condition or two `App`s is not carried, as it would let in more or read as another program's. A runtime config goes by
+  its own program's architecture, and can start with a byte order mark. `.\` in a path is the same file to what relies on it, and a
+  quoted name goes on to its closing quote. A file whose name holds a colon is not read as a drive. Why the folder of records would
+  not do is what an install says when nothing else will either. A cancel reaches near matches and a long install record.
+
 - **Nothing about how a window is drawn comes from the environment.** A program running as the account that started these could
   set `WGPU_DX12_AGILITY_SDK_PATH` and its version, which elevating keeps, and Direct3D then ran `D3D12Core.dll` from that
   folder with full rights, past the restriction of DLLs to System32. A check plants a stand-in and sees that none of it
