@@ -26,11 +26,14 @@ the app and the produced installer render identically:
   (`paint_logo`, `paint_icon`).
 - `winappmigrator-ui/src/hardening.rs` — `restrict_dll_search`, called first in both
   executables' `main`. See [signing.md](signing.md).
-- `winappmigrator-gui/src/lib.rs` — `WinAppMigratorApp` state and the two background
-  workers (installed-app inventory and the build pipeline) over `mpsc` channels and
-  threads.
+- `winappmigrator-gui/src/lib.rs`: `WinAppMigratorApp` state and the background workers (the
+  installed-app inventory, the scan of the selected app, what goes with a choice, how much room a
+  drive has, and the build pipeline) over `mpsc` channels and threads.
+- `winappmigrator-gui/src/worker.rs`: `LatestWorker`, one job at a time on its own thread and only
+  ever the newest, for what goes stale as a person clicks.
 - `winappmigrator-gui/src/views.rs` — the screen itself, implemented as
   `impl WinAppMigratorApp` so it can read and mutate app state directly.
+- `winappmigrator-gui/src/footprint_view.rs`: the part of it that says what goes in the installer.
 - `winappmigrator-gui/src/main.rs` — only hardening plus a call into the library. Both
   executables keep their logic in a library because they demand elevation: a test
   harness linked into the executable could not start from a normal shell.
@@ -44,8 +47,9 @@ view:
 ```text
 Panel::top("header")      → brand, inventory pill, reload, theme toggle
 Panel::right("details")   → the selected app
-  Panel::bottom           → Create installer, or progress + Cancel while building
-  CentralPanel            → ScrollArea: title, result, facts, options, output folder
+  Panel::bottom           → output folder and Create installer, or progress + Cancel while building
+  CentralPanel            → ScrollArea: title, result, facts, how big and whether it fits,
+                            options, then what goes in, what might also, and what stays out
 CentralPanel              → scan source, search + filter, the application table
 ```
 
@@ -62,9 +66,11 @@ visibly off-center.
 1. **Pick an app** from the searchable, sortable, virtualized table (name, publisher,
    version, scope, arch), with an All / Per-user / Per-machine filter. Arrow keys move
    the selection and Ctrl+F focuses the search.
-2. **Choose what to include**: optionally back up the app's license/activation data,
-   and optionally its user data (settings, Documents, Saved Games, ProgramData).
-   Program files are always included. An installer holds one account's data. With User data
+2. **See what goes in**, which comes from a scan that starts when the app is selected. See
+   [What goes in](#what-goes-in).
+3. **Choose what to include**: optionally back up the app's license/activation data,
+   and optionally its user data (settings, Documents, Saved Games, ProgramData), and untick
+   what you do not want. An installer holds one account's data. With User data
    on and more than one account to offer, a **Whose data** row of `segmented` controls appears,
    starting at the signed-in user. On a connected drive, the only account with data needs no
    asking, and otherwise it starts at whoever last signed in there. If who is signed in cannot
@@ -72,15 +78,13 @@ visibly off-center.
    data. Selecting an app looks this
    up on a worker thread, because it reads folders that may be on a failing drive. What it needs
    from each account's registry was read once, when the list of apps was.
-3. **Create the installer.** One background pipeline reverse-engineers the app
-   (analysis is part of building, not a separate step), works out how much room that will
-   take and stops if it is not there, reads each file straight into a self-extracting `.exe`,
-   hashing and compressing what it read, and then reads back what it wrote and hash-verifies
-   it. A `BuildMonitor` reports each step and carries the cancel request; cancelling takes
-   effect within a few megabytes of the file being read, or between steps. The scan itself
-   cannot stop part-way, so a cancel during it takes effect when it ends. A package that will
-   not fit in one executable comes out as a small loader and a data file, and the result says
-   the two have to stay together.
+4. **Create the installer.** One background pipeline takes the scan on the screen and what was
+   chosen, works out how much room that will take and stops if it is not there, reads each file
+   straight into a self-extracting `.exe`, hashing and compressing what it read, and then reads
+   back what it wrote and hash-verifies it. A `BuildMonitor` reports each step and carries the
+   cancel request; cancelling takes effect within a few megabytes of the file being read, or
+   between steps. A package that will not fit in one executable comes out as a small loader and
+   a data file, and the result says the two have to stay together.
 
 **Selection, source, reload, and options are locked while a build runs.** A build and
 its result belong to the app it started with.
@@ -96,6 +100,63 @@ The installer stub is **embedded inside WinAppMigrator** at build time (see
 written straight into the installer, never through a temp file. If the app was compiled
 without an embedded stub (a bootstrap build) it falls back to a sibling
 `winappmigrator-installer.exe`.
+
+## What goes in
+
+Selecting an app starts a scan (`scan_app`, with a `ScanMonitor`). It writes nothing, and it stops
+between its steps, and part-way through its files and its install record, when it is told to.
+Scans run on one worker, one at a time and only ever the newest, so clicking down a list starts
+one and stops it, and only the last goes on to the end. A finished scan is made into a `Footprint`
+on that worker: every file is added up onto a row for its folder, so a list never has a row per file.
+
+**A scan's key.** `ScanKey` holds everything its result depends on: the app, where it is read from,
+the License and User data options, whose data, and what is ticked of what might also be part of it.
+`keep_scan_current` compares that with what the window says, each frame. When they differ, the running
+scan is told to stop and another starts, so each of those choices takes effect the same way. Messages
+from a scan go by its number, so one stopped or replaced cannot turn up. A build goes by `ready_scan`,
+which is `None` unless the key matches what the window says now, so one app's scan cannot become another's
+build, and `create_package_from_scan` refuses a scan of anything but what it was told to build.
+
+**What changes need another look, and which do not.** The options and whose data change what a scan reads,
+so they look again, and what was unticked stays unticked, since it goes by what each thing is called. What is
+last known stays on the screen, greyed, until the new scan is ready. Unticking something, or the output folder,
+needs no scan: the size adds up rows there and then, and how much room there is comes from what a drive said
+for that folder, asked once on a worker, since it can be a drive that takes a long time to answer. A share is not
+asked about at all, as asking would connect to it. **Look again** starts another scan by hand, and past ten minutes
+the screen says how long ago it was.
+
+**A scan can get old.** A build goes by it and does not look again. Each file is hashed from what is read of it
+then, so a file that changed is right. One that has gone is listed, with its own wording, and the result says so. If
+the main program has gone, nothing is built, and it says to look again. The room check is made again when a build starts.
+
+**What goes with a choice.** `what_goes_with` runs on its own worker. It takes what was chosen out of a package as it
+would be, goes through the review an install goes by, and takes out what that now refuses and did not before, then does
+it again, since what goes can take more with it. A service, task, or shortcut told by a path to use something in a
+folder left out goes too, since the rules go by what runs, as does one told to start in such a folder. A shortcut whose icon
+only is there keeps going, without the icon. What goes is unticked on its row with why, and is said in a notice under the size.
+What ties the app into Windows is listed as that leaves it, so a firewall rule for a program left out is no longer on the
+list. A folder with a row of its own inside one left out still goes in as its row says, since a file goes by the nearest row
+around it, which is how the size is added up. The button waits for that, so what is on the screen is what is built, and a build applies the
+same choices by the same code. A plain setting of the app's own that names such a folder stays. So does license data with
+the License option on, wherever it is, since a license goes by that option alone. A hint under the size names what is in a
+folder left out.
+
+**The words** are the installer's. `described_rows` in `restore_review.rs` is what both go by, so a service reads the same
+on both screens. Left out, in order: what looks like a credential, licenses, certificates, fonts that only go by the app's
+name, and drivers that cannot be passed on, then what no installer would be allowed to set up. None has a box. A choice
+only takes away from what a scan found, so there is no way to ask for one of those.
+
+**Near matches** start unticked, with why. Ticking one looks again, since it is one more root for a scan, and what is in
+a data folder is greyed unless User data is on, as that is what brings data in. See
+[discovery](discovery.md#near-matches).
+
+Lists use `ScrollArea::show_rows` past six rows, and `widgets::choice_row` and `plain_row` are all of one height so that they can.
+A short list is simply in the panel's own scrolling. A row of a long list that gets the focus is brought into view by that list
+and then by the panel, since a scroll area takes what is asked of it before the one around it does.
+
+States: nothing selected, `Running` with what step it is on and a Stop button, `Ready`, `Failed` with why and Try again, and
+`Stopped` with Look again. Create installer is disabled in all but `Ready`, and while what goes with a choice is being worked
+out, or there is not the room.
 
 ## Scan source: this PC or a connected drive
 

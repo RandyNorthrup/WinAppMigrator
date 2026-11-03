@@ -4,7 +4,8 @@ This document describes how WinAppMigrator reverse-engineers an installed
 application's footprint. The goal is to be **authoritative where Windows records
 the truth**, and heuristic where it does not. The heuristics match whole names only, so
 they can miss a folder the app keeps under another name but should not take another
-product. See [Known limitations](#known-limitations).
+product. What is close to a name is [offered, and never taken](#near-matches). See
+[Known limitations](#known-limitations).
 
 ## Layered approach
 
@@ -29,7 +30,11 @@ Code:
 - `crates/winappmigrator-core/src/product_match.rs`: the name rules layer 3 and the
   registry scan share.
 - `crates/winappmigrator-core/src/scan.rs` — orchestrates the layers, folds the
-  install-source roots into discovery, and records the result on `ScanReport`.
+  install-source roots into discovery, and records the result on `ScanReport`. It writes nothing
+  (`scan_app`), so a window can look before anything is chosen.
+- `crates/winappmigrator-core/src/near_match.rs`: what is close to the app's names, for a person to choose from.
+- `crates/winappmigrator-core/src/footprint.rs`: what a scan found as rows to choose from, and what comes of a
+  choice.
 
 ## The application list
 
@@ -372,6 +377,58 @@ copyable_bytes, included }` groups the inventory by root for the report.
 `LocalAppData`, `LocalLowAppData`, `Documents`, `SavedGames`, `PublicDocuments`,
 `RegistryReference`, `Other`.
 
+## Near matches
+
+Exact names are what keep a scan from taking another product, and they leave things behind. `near_match.rs`
+finds what is close and says why, for a person to tick. None of it is taken by itself.
+
+**A folder** directly in `Program Files`, `ProgramData`, or the scanned account's `AppData`, or one level down, is close when
+(`ProductNames::near_match`, all by whole words):
+
+- it starts with the product's name and goes on (`Stream Deck Plugins`), or
+- it has the product's name in it, for a name of more than one word or of six letters (`Elgato Stream Deck`), or
+- directly in one of those folders, it starts with all of the publisher's name and goes on (`Mozilla-1de4eec8-...`).
+
+One level down, under anything but the publisher's folder or a plain container, a name of one word does not count, since
+`chrome-prof` under another tool's folder is that tool's. Being in the publisher's folder says nothing by itself. `Git` is not near
+`GitHub`, and one word of a longer name by itself is not a name: `Studio` from `OBS Studio` does not make `LM Studio` near it.
+A short executable or folder name such as `Code` is a word anyone could use, so it does not count. Microsoft is on
+everything, so its name says nothing either. `Documents` and `Saved Games` are not looked in, since people name those folders
+themselves.
+
+**A hidden entry** is one in the Uninstall key marked `SystemComponent=1`, which no list of apps shows. It counts when it is
+beside the app in the same folder, or has the same publisher, by all of its name. A runtime the app uses stays a prerequisite. An
+entry in an account's own hive takes no rights to write, so it only counts for an app of that same account. One that goes by
+the name another app would take is not offered, wherever it says it is, since what an entry calls itself is only what it says, and
+ticking it brings in what goes by that name. Several in one folder are one row, named for all of them.
+
+**What is never offered, or added.** Each of these is asked by `folder_refusal`, of a folder on the list and of each
+root a hidden entry goes on to name:
+
+- A drive, the Windows folder, `Program Files`, `Common Files`, `ProgramData`, a profile, `AppData`, or anything that holds one
+  of those, by the same `is_walkable_app_dir` a scan goes by.
+- What is Windows' or everyone's by name (`NEVER_OFFERED`, such as `dotnet`, `Windows Defender`, `Package Cache`), and anything
+  under `Microsoft`, `Microsoft Shared`, or `WindowsApps`.
+- A folder named only for the publisher, which may hold its other products, or one that holds this app's own folder.
+- **Another app's.** Where any other entry says it is, or anything that holds that or is inside it, or what that app would take
+  by its own name. An entry on the list of apps is another app, even by the same publisher: it is there to be built by itself.
+- Whatever goes through a link, or may not be read on a drive.
+- A path written some other way than the folder is really called, such as `C:\PROGRA~3\MICROS~1`, since all of this goes by
+  names. A drive with a letter that is also mounted on a folder is refused by that too, when it is read by the folder.
+- What is in another account's folders. An app of one account is offered nothing outside what is its own.
+- A name that says nothing, such as `bin` or a `Cache` folder.
+
+**Ticking one.** `ScanOptions.near_matches` holds what a window ticked, by id. A scan makes the same list again and takes only
+what is on it now, so an id cannot name a folder of its own, and it warns of one that is not there any more. What is
+ticked is one more root for `collect_roots`, which goes by its rules, and what goes by where the app is (services, tasks, shortcuts,
+variables, and registry values) goes by that folder too. An entry also brings its install record, what it says of itself is asked
+about again, and data folders and keys named exactly for it. A key its install record lists is left out when it is what another app
+would take by its name. All of this is before `take_secret_files` and
+`license_scan`, so what looks like a credential stays out and a license goes by its option, however it came. What is in a
+data folder goes by the User data option, like any other.
+
+`wam_near_matches` runs this for every app on a PC. See [CONTRIBUTING](../CONTRIBUTING.md#seeing-what-near-matches-would-offer).
+
 ## Registry, services, and other integrations
 
 - `registry_scan.rs` captures the keys and values the install record names, values under
@@ -696,16 +753,16 @@ Full list, with the planned fixes, in [PLAN.md](PLAN.md#open-issues-most-importa
 The ones that most affect what gets captured:
 
 - **Exact names can miss data.** A folder or key the app uses under another name is left
-  behind unless an install record names it or a value points at the install folder.
-  `ProgramData\Mozilla-1de4eec8-...` (Firefox's update data) and `Mozilla Maintenance
-  Service` are examples. The preview planned in [PLAN.md](PLAN.md#open-issues-most-important-first)
-  would offer such near matches for you to add.
+  behind unless an install record names it, a value points at the install folder, or it is close enough
+  to be [offered](#near-matches) and you tick it. `ProgramData\Mozilla-1de4eec8-...` (Firefox's update data) is
+  offered, and `Mozilla Maintenance Service` is an app of its own in the list, so it is not. What is under a name
+  nothing like the app's is not looked for.
 - **Same name, different product.** Side-by-side versions of one product can match each
   other's folders (`Programs\Python` for each Python), and an unrelated folder that happens
   to have exactly the product's name is taken.
-- **An app made of several packages only gets its own.** NVIDIA App's `NvContainer` and
-  `NvTelemetry` are separate entries in the Uninstall key, marked as system components, so an
-  installer built from NVIDIA App alone does not have them.
+- **An app made of several packages only gets its own, unless you add the rest.** NVIDIA App's `NVIDIA Container` and
+  `NVIDIA Telemetry Client` are separate entries in the Uninstall key, marked as system components, so they are
+  [offered](#near-matches), and only in the installer if ticked.
 - **A connected drive only gives what is on it.** An app or data on another of that PC's disks,
   or reached through a link, stays behind, and the build lists what it did not follow. Only the
   folders every Windows has are known for a `%Variable%` in a value on a drive.

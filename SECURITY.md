@@ -115,6 +115,31 @@ A package too big for one executable is a data file, beside a small loader that 
 - **A bare stub still cannot come out signed.** What an install leaves to uninstall with is cut from the loader as
   from any installer, and is byte for byte the stub, with no signature.
 
+## What a person chooses before a build
+
+The app runs elevated and shows what it would package, and a person chooses. So that cannot be a way around any of this:
+
+- **A choice only takes away.** There is a box for what a scan found, and none for what it left out. So what looks like a
+  credential cannot be ticked, whatever it is in, and a license only comes with the License option. That also means a
+  license in a folder left out still goes when that option is on, and the screen says so. A choice goes by what each thing
+  is called, and one that names nothing does nothing.
+- **Adding goes through the scan.** A near match is one more root for the same scan, so everything above and below holds for it.
+  What is ticked is only ever an id, compared with what the scan would offer now, so it cannot name a folder of its own.
+  [What is never offered](docs/discovery.md#near-matches): what is shared, another app's, under a link, in another account's
+  folders, or holds any of those, however it is written: a short name such as `PROGRA~3` is refused, since these rules go
+  by names. A hidden entry's folder is asked the same, one that calls itself another app is not offered, a key of another
+  app's does not come with one, and one in an account's own hive says nothing about a machine-wide app, since that hive
+  takes no rights to write. What is left is a person ticking something
+  that is close to the app and not its own, which an install record could not have said either. It says why it is offered.
+- **What is left with nothing to run is not set up.** What a choice leaves out goes through the review an install goes by, and
+  what that now refuses goes too. A service, task, or shortcut told by a path to use something left out goes with it,
+  including where it is told to start, a shortcut whose icon only is there loses the icon, and
+  a package says what was left out, for whoever installs it. A plain setting of the app's that names such a folder stays. What a
+  program does by itself, such as loading a file it knows the name of, cannot be told.
+- **A build goes by the scan on the screen, and only that.** One of another app, or of what the window no longer says, is not
+  used. A package holds what is read when it is built, with the same checks before and after each file. A file that has come to
+  hold a private key since the scan stays out, and the installer lists it with the rest.
+
 ## A drive from another PC
 
 The app runs elevated and reads a drive it has no reason to trust, which may be from a machine someone else

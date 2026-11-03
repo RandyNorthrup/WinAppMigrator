@@ -23,9 +23,14 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
 
 ## Done
 
-- Single-screen GUI: app list → pick → optional license / user-data toggles →
-  build self-extracting installer, with progress and cancel. Self-extracting output
-  is mandatory.
+- Single-screen GUI: app list → pick → what goes in, from a scan in the background →
+  optional license / user-data toggles and what to leave out → build self-extracting
+  installer, with progress and cancel. Self-extracting output is mandatory.
+- What goes in is shown before anything is built, in the words of the installer's own list,
+  with how big it can be, whether it fits, and what is left out and why. Choices only take away,
+  and what is left with nothing to run goes too and is said to.
+- Near matches: what exact names leave out and looks related, offered unticked with why, and
+  brought in through the scan by the same rules as any other root.
 - Each byte of an app is read once to build: hashed and compressed from what that read returned, straight
   into the installer, in parallel and in a fixed order, with already-compressed data stored. The package is
   then read back to check it. An install hashes as it unpacks, and reads back what it installed.
@@ -107,11 +112,6 @@ From the audit of 2026-11-01. Items are removed from this list as they are fixed
    folder also stays writable by other programs on the PC, which can race the link checks and
    change installed files afterward. A program already on the PC can swap a running installer's
    file in the moment before it opens it, which a handle to the running image would close.
-
-**Features**
-
-2. Footprint preview with include and exclude before building, offering folders that nearly
-   match the product's name, which are now left out.
 
 ## Not in scope for this release line
 

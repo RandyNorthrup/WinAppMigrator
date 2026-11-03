@@ -74,6 +74,11 @@ packages say they need what the runner is not. It also says how much a build and
 Windows' own count. `elevated_big_package.rs` builds, installs, and checks a real package past 4 GiB, with a real
 file over 4 GiB of data that does not compress, on a runner with the room to itself.
 
+`elevated_footprint.rs` has a job of its own too. A fake app has things to leave out, a hidden part to add, and things
+that must never be offered: a shared folder, another app's, a link, what is named like Windows', and hidden entries that
+name each of those. What is in the package goes by .NET's own zip reader and a search of what that unpacks, and what is on
+the machine by `sc.exe`, `schtasks.exe`, and `Get-FileHash`, then it is uninstalled and made to fail part-way.
+
 `elevated_move.rs` and `.github/scripts/check-moved-app.ps1` are a real move between two PCs. One job builds
 installers of a fake app and uploads them, unsigned and kept for a day, and others download them onto runners that
 have never seen it, each on a Windows of its own, which build nothing and check out only that script. They install
@@ -99,6 +104,13 @@ Keep the docs true: update the README, `docs/`, and `CHANGELOG.md` in the same c
 installer of a real app on this PC, and says how long each step took, how much it read and wrote by Windows' own
 count, and the most it had on disk. It reads the app, writes only in the work folder, removes that folder afterward,
 and never installs anything. Use a folder of your own for that, and read `README.md` on what a package can hold.
+
+## Seeing what near matches would offer
+
+`cargo run --release -p winappmigrator-core --example wam_near_matches -- <out.txt> [--scan "<app name>"]...` says what would
+be offered for every app listed on this PC, and what looked close and was refused and why. With `--scan`, that app also has its
+whole scan run, with how long it took. It reads names, counts a little of what is offered, and writes only the file it is
+given. That file holds paths of this PC, so keep it out of anything you share.
 
 ## Changing the UI
 

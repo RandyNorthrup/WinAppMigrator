@@ -30,7 +30,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/app-pick-dark.png">
-    <img alt="WinAppMigrator with an application selected, showing its details and the options to include in the installer" src="docs/images/app-pick-light.png" width="860">
+    <img alt="WinAppMigrator with an application selected, showing how big its installer can be, whether that fits, and what goes in it" src="docs/images/app-pick-light.png" width="860">
   </picture>
 </p>
 
@@ -48,6 +48,8 @@ services, and runtimes, and packs them into a single `.exe`, or two files if it 
   and embedded, so they install without internet.
 - **Checks its work.** The installer checks its package's hashes before writing anything, then reads back
   the files it installed and checks those.
+- **Shows you first.** Pick an app and it says what would go in the installer and how big that can be, before you
+  click anything. Leave out what you do not want, and add what looks related that exact names missed.
 - **Says whether it fits.** A build and an install each work out how much room they need before they start, and
   an app that cannot run on the other PC is refused before anything changes.
 - **Says what it will do.** Before installing, it lists the services, drivers, scheduled tasks, autostart
@@ -66,14 +68,34 @@ installing services both need it.
 
 ### 1. Pick an app
 
-Choose **This PC** or **Connected drive…**, then search or sort the list. Optionally include the
-app's license data and user data. An installer holds one account's data, so if more than one account has
-data for the app, you choose whose.
+Choose **This PC** or **Connected drive…**, then search or sort the list. Selecting an app looks at it in the
+background, and picking another stops that. Optionally include the app's license data and user data. An installer
+holds one account's data, so if more than one account has data for the app, you choose whose.
 
-### 2. Build the installer
+### 2. See what goes in
 
-Follow the progress, or cancel. It shows how much room it needs once it has looked at the app, and stops if
-that is not there. You get one file, named after what it contains, such as
+The screen says how big the installer can be and whether it fits, then lists what it holds: program files, data
+folders, services, startup items, scheduled tasks, shortcuts, what ties the app into Windows, and the runtimes it
+needs. Untick a folder, a service, or anything else you do not want, and the size follows. If that leaves something with
+nothing to run, it goes too, and the screen says so, so nothing is set up pointing at what you left out. Only what holds
+the main program has to stay.
+
+**Might also be part of it** lists what exact names left out and looks related, each with why, such as a folder with a
+close name or a part of the app that no list of apps shows. None of it goes in unless you tick it, and it then goes through
+the same checks as the rest. What looks like a credential cannot be ticked, whatever it is in. What is left out, and why,
+is at the end, by name.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/app-choose-dark.png">
+    <img alt="A folder left out, with the size updated, and a warning that a service and a task that ran files in it will not be set up" src="docs/images/app-choose-light.png" width="860">
+  </picture>
+</p>
+
+### 3. Build the installer
+
+Follow the progress, or cancel. The build goes by what is on the screen and reads each file then, so a file that changed
+is right, and one that has gone is listed. You get one file, named after what it contains, such as
 `Fabrikam_Data_Sync_userdata_license_installer.exe`. A package too big for one executable comes as two files,
 `.exe` and `.wamdata`, and the window says they have to stay together.
 
@@ -84,7 +106,7 @@ that is not there. You get one file, named after what it contains, such as
   </picture>
 </p>
 
-### 3. Run it on the other PC
+### 4. Run it on the other PC
 
 Copy the installer over, with its data file if it has one, and run it. Check the install location, preview the
 changes if you like, then click **Install**. Follow the progress, or cancel, which puts back whatever it has done
@@ -105,26 +127,34 @@ installer opens in the theme it was built with.</sub>
 
 | | Included | Notes |
 | --- | --- | --- |
-| **Program files** | Always | Found through MSI and Inno Setup records, NSIS logs, App Paths, and folders named exactly for the product |
-| **Registry** | Always | The app's keys, plus what points at a file it has: COM classes with their type libraries, interfaces, and AppIDs, file types, link protocols, menu commands, shell extensions, Default apps entries, and 32-bit Run and App Paths entries |
-| **Firewall rules, fonts, ODBC, event log sources, compatibility settings** | Always | Each only for a file the app has. A font in `C:\Windows\Fonts` comes only if a machine-wide install record names it, and goes in the install folder |
+| **Program files** | Yes, unless you untick a folder | Found through MSI and Inno Setup records, NSIS logs, App Paths, and folders named exactly for the product. What holds the main program always goes in |
+| **Registry** | Yes, unless you untick a kind of it | The app's keys, plus what points at a file it has: COM classes with their type libraries, interfaces, and AppIDs, file types, link protocols, menu commands, shell extensions, Default apps entries, and 32-bit Run and App Paths entries |
+| **Firewall rules, fonts, ODBC, event log sources, compatibility settings** | Yes, unless you untick a kind of it | Each only for a file the app has. A font in `C:\Windows\Fonts` comes only if a machine-wide install record names it, and goes in the install folder |
 | **Certificates** | Reported only | The ones the app seems to rely on are named. They are never installed, because whether to trust one is for you to decide |
-| **Services and drivers** | Always | Services keep their arguments, settings, and built-in account. A custom account's password cannot be moved, so that service is set up as LocalService and the installer says so. Drivers the app owns are re-registered. Vendor and inbox drivers are reported instead, because they cannot be redistributed |
-| **Scheduled tasks, shortcuts, environment variables** | Always | A captured `Path` is merged into the target's, never replaced |
-| **Runtimes** | Always | Read from all of the app's programs. Visual C++ 2005 and later, and .NET 6 to 10, are embedded, or come through winget if the download failed at build time. .NET Framework 3.5 is a Windows feature that can need internet on the target, and 4.x is part of Windows. A runtime with no installer here, such as Visual C++ 2003 or .NET 5, is named in a warning, and nothing is installed in its place |
+| **Services and drivers** | Yes, unless you untick one | Services keep their arguments, settings, and built-in account. A custom account's password cannot be moved, so that service is set up as LocalService and the installer says so. Drivers the app owns are re-registered. Vendor and inbox drivers are reported instead, because they cannot be redistributed |
+| **Scheduled tasks, shortcuts, environment variables** | Yes, unless you untick one or the kind | A captured `Path` is merged into the target's, never replaced |
+| **Runtimes** | Always, even if what needed one was left out | Read from all of the app's programs. Visual C++ 2005 and later, and .NET 6 to 10, are embedded, or come through winget if the download failed at build time. .NET Framework 3.5 is a Windows feature that can need internet on the target, and 4.x is part of Windows. A runtime with no installer here, such as Visual C++ 2003 or .NET 5, is named in a warning, and nothing is installed in its place |
 | **User data** | Your choice | AppData, ProgramData, Documents, and Saved Games. Online-only OneDrive files are skipped |
 | **License data** | Your choice | License files, values, and stores. With this off they are not captured at all, and only their names are noted. Reports whether each is likely tied to the machine. [Never bypasses activation](SECURITY.md#licensing-data) |
-| **Credentials** | Never | Values and files that look like passwords, tokens, or private keys are left out and named when you build. [This cannot catch everything](#security) |
+| **Near matches** | Only if you tick them | Folders with a close name, and parts of the app no list shows. [What is never offered](docs/discovery.md#near-matches) |
+| **Credentials** | Never | Values and files that look like passwords, tokens, or private keys are left out and named before you build, and cannot be ticked. [This cannot catch everything](#security) |
 
 ## Limitations
 
 Please read these before relying on it, especially on a one-way trip from a failing PC.
 
 - **It can miss what is kept under another name.** Beyond what the install records name, folders and
-  registry keys are matched by the product's exact name, so data under a different name stays behind.
-  Check the file count and size on the result. If they look wrong, don't rely on that installer.
-- **An app made of several packages only gets its own.** NVIDIA App's `NvContainer` is a separate package,
-  for example, so an installer built from NVIDIA App alone does not have it.
+  registry keys are matched by the product's exact name. What is close to that is offered for you to tick, and what is
+  under a name nothing like it stays behind. Check what the screen lists. If it looks wrong, don't rely on that installer.
+- **An app made of several packages only gets its own, unless you add the rest.** NVIDIA App's `NVIDIA Container` is a
+  separate hidden entry, for example, which is offered, and it goes in if you tick it. Another entry in the list of apps
+  is another app, and is not offered.
+- **What you leave out is up to you.** The screen knows what runs a file, and what is told to use one by a path. It
+  cannot know what a program does by itself, so a program can still need a folder you unticked.
+- **Runtimes stay as they were found.** A runtime only a folder you left out needed still goes in, since telling that
+  takes knowing what else needs it. It only costs room.
+- **What is on the screen is as of when the app was looked at.** A build reads each file then, so a file that changed is
+  right, and one that has gone is listed. Something new since then is not in it until you click **Look again**.
 - **An installer past 4 GiB is two files.** Windows cannot start an executable that large, so a package too big for
   one is a small `.exe` and a `.wamdata` file beside it with the same name. They have to stay together, in one
   folder, with those names. A data file that is missing, or is not the one it was built with, is refused and

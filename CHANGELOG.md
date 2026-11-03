@@ -4,6 +4,32 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **You see what goes in an installer before you build it.** Selecting an app looks at it in the background, and the
+  screen says how big the installer can be and whether it fits, what it holds, in plain groups and in the words the
+  installer's own list uses, and what is left out and why, with credentials, licenses, and certificates by name. Picking
+  another app stops the last look, and the window stays usable throughout. A build goes by that look rather than taking
+  another, and each file is still hashed from what is read of it then, so one that changed is right and one that has
+  gone is said to have. Changing the License or User data option, whose data, or where apps are read from looks again,
+  and keeps what you chose.
+- **You can leave things out.** Each folder of the app, each service, task, startup item, and shortcut, and each kind of
+  what ties it into Windows, has a box to untick, and the size and the room it needs follow at once. What holds the main
+  program stays. What is left with nothing to run goes too, and the screen says so: a service that runs a file in a folder
+  you left out is not set up on the other PC, and neither is a task told to use one. An installer says what its builder
+  left out and added. A license goes by the License option alone, so one in a folder you left out still goes in, and the
+  screen names it.
+- **Near matches are offered, not lost.** What exact names leave out and looks related is listed, unticked, each with why:
+  a folder whose name starts with or holds the product's, or starts with its publisher's, and an entry hidden from the list
+  of apps by the same publisher or beside the app, such as NVIDIA App's `NVIDIA Container`. Ticking one looks at the app
+  again with that as one more root, by the same rules as any other, so what looks like a credential still stays out and a
+  license still goes by its option. A shared folder, another app's, a link, anything that holds one of those, a path by a short
+  name such as `PROGRA~3`, or a hidden entry that calls itself another app is never offered, and a scan takes only what it would
+  offer itself. Run over the 160 apps listed on one real PC, it offered no shared folder and nothing of another listed app's. Some offers are close and still not the app's, such as a portable copy of another product of the same publisher that no list names, which is why each starts unticked and says why. See
+  [the rules](docs/discovery.md#near-matches).
+- **Two things an earlier review found.** What is worked out about a license store's files before an install, for which
+  folders were already there and how much room it takes, went by the path a package said, and the install by that path
+  cleaned. So a file saying `C:\Windows\x.exe` was looked at as being there and written under the store, and a program
+  could go in a data folder that was already there. Both go by the one path now. And `.runtimeconfig.dev.json`, which
+  says what a .NET program loads, counts as a program for that rule, as `.runtimeconfig.json` already did.
 - **A build reads each byte of an app once, and an install reads less.** An app's files used to be copied to a
   staging folder, hashed there, zipped from there, and hashed again: about five reads of every byte, and up to three
   times the installer's size on disk. They now go straight from where they are into the installer. What goes in the
