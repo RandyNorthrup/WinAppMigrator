@@ -44,7 +44,7 @@ use crate::hashing::sha256_file;
 use crate::journal::{
     Backup, Change, ItemKind, Journal, JournalLock, ReadJournal, STAGING_PREFIX, ServiceConfig,
     StoredValue, checked_install_folder, find_backup, has_no_journal, install_folders, is_in_use,
-    lock_journal, lock_state, read_journal, real_path,
+    lock_journal, lock_state, put_permissions_back, read_journal, real_path,
 };
 use crate::models::{EnvironmentScope, FirewallRuleEntry, RegistryHive, UndoReport};
 use crate::path_utils::{
@@ -58,8 +58,8 @@ use crate::registry_target::{
     stored_firewall_rules,
 };
 use crate::restore::{
-    SC_EXE, encode_utf16_nul, make_replaceable, register_task_script, run_checked,
-    run_powershell_script, sc_start_type, write_partial_copy, write_task_definition,
+    SC_EXE, StartAnswer, encode_utf16_nul, make_replaceable, register_task_script, run_checked,
+    run_powershell_script, run_sc_start, sc_start_type, write_partial_copy, write_task_definition,
 };
 use crate::restore_policy::{ServiceAccount, existing_task_refusal, image_path_matches};
 use crate::restore_policy::{
@@ -439,6 +439,7 @@ impl Undoer<'_> {
                 arguments,
                 prior,
             } => self.undo_service(name, *driver, binary, arguments.as_deref(), prior.as_ref()),
+            Change::ServiceStopped { name } => self.undo_service_stop(name),
             Change::TaskFolderCreated { path } => self.undo_task_folder(path),
             Change::Task {
                 task_path,
@@ -1026,6 +1027,21 @@ impl Undoer<'_> {
         }
     }
 
+    /// An install stopped a service to replace what it runs, and did not finish. By now what it runs
+    /// is as it was, as this was the first thing it did, and it was running then. After an install
+    /// that finished there is nothing of this to undo.
+    fn undo_service_stop(&mut self, name: &str) {
+        if matches!(self.mode, UndoMode::Uninstall { .. }) {
+            return;
+        }
+        if let StartAnswer::Failed(reason) = run_sc_start(name) {
+            self.kept(format!(
+                "The service {name} was running before this install, and did not start again: \
+                 {reason}."
+            ));
+        }
+    }
+
     fn undo_service(
         &mut self,
         name: &str,
@@ -1384,6 +1400,7 @@ pub(crate) fn put_back_backup(backup: &Backup, path: &Path) -> Result<()> {
                 let _ = fs::remove_file(&partial);
                 return copied;
             }
+            put_permissions_back(from, path);
             make_replaceable(from)?;
             fs::remove_file(from).map_err(|error| WinAppMigratorError::io(from, error))
         }
@@ -1463,6 +1480,16 @@ fn query_shows_state(output: &str, number: &str, state: &str) -> bool {
 }
 
 /// Stop a service if it is running, and say whether it was.
+pub(crate) fn service_is_running(name: &str) -> bool {
+    hidden_command(SC_EXE)
+        .args(["query", name])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && !query_shows_stopped(&String::from_utf8_lossy(&output.stdout))
+        })
+}
+
 pub(crate) fn stop_service(name: &str) -> std::result::Result<bool, String> {
     let is_stopped = || {
         hidden_command(SC_EXE)
@@ -1952,6 +1979,38 @@ mod tests {
             has_backup,
             exists,
             unchanged,
+        }
+    }
+
+    /// What was stopped is started again if the install did not finish, including when it was cut off
+    /// and this is the next run. Windows is asked about a service that is not there, so nothing starts.
+    #[test]
+    fn a_service_an_install_stopped_is_started_again_unless_it_finished() {
+        let name = "WamNoSuchServiceAtAll";
+        let change = Change::ServiceStopped {
+            name: name.to_owned(),
+        };
+        let journal = journal_with(vec![change], false);
+        for mode in [UndoMode::Rollback, UndoMode::Recovery] {
+            let report = undo_journal(
+                &journal,
+                mode,
+                &InstallMonitor::default(),
+                InstallPhase::RollingBack,
+            );
+            assert!(
+                report.kept.iter().any(|kept| kept.contains(name)),
+                "{mode:?} did not try: {report:?}"
+            );
+        }
+        for mode in [KEEP, REMOVE] {
+            let report = undo_journal(
+                &journal,
+                mode,
+                &InstallMonitor::default(),
+                InstallPhase::RollingBack,
+            );
+            assert!(report.kept.is_empty(), "{mode:?} tried: {report:?}");
         }
     }
 

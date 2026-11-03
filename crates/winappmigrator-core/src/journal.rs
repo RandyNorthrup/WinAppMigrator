@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tracing::warn;
 use winreg::RegValue;
 use winreg::enums::RegType;
 
@@ -32,7 +33,7 @@ use crate::file_discovery::{first_link_to, hold_root, link_refusal};
 use crate::hashing::hex_lower;
 use crate::models::{EnvironmentScope, RegistryHive};
 use crate::path_utils::{
-    current_user_sid, program_data_dir, signed_in_user, strip_prefix_ignore_case,
+    current_user_sid, hidden_command, program_data_dir, signed_in_user, strip_prefix_ignore_case,
     without_verbatim_prefix,
 };
 use crate::privilege::{
@@ -66,8 +67,12 @@ const ERROR_SHARING_VIOLATION: i32 = 32;
 const ERROR_NOT_SAME_DEVICE: i32 = 17;
 /// A backup that is the file itself, moved here with its permissions and everything else.
 const MOVED_BACKUP_SUFFIX: &str = "moved";
-/// A backup copied from another drive. It has this folder's permissions, not its own.
+/// A backup copied from another drive. It has this folder's permissions, not its own, which are kept
+/// beside it for when it goes back.
 const COPIED_BACKUP_SUFFIX: &str = "copied";
+const PERMISSIONS_SUFFIX: &str = "permissions";
+const RENAMED_PERMISSIONS_SUFFIX: &str = "permissions-renamed";
+const ICACLS: &str = "icacls";
 const UNFINISHED_BACKUP_SUFFIX: &str = "unfinished";
 
 /// The flag that makes the stub an uninstaller, followed by an install's id.
@@ -248,6 +253,10 @@ pub enum Change {
         binary: PathBuf,
         arguments: Option<String>,
         prior: Option<ServiceConfig>,
+    },
+    /// A running service of an earlier install, stopped so that what it runs can be replaced.
+    ServiceStopped {
+        name: String,
     },
     TaskFolderCreated {
         path: String,
@@ -653,8 +662,8 @@ impl Journal {
 
     /// Keep what is at `path` as a backup, leaving nothing there. Moved when it is on the
     /// same drive, so it comes back exactly as it was, permissions and all. From another
-    /// drive it is copied, with permissions those of the folder it comes back to, and only
-    /// gets its name once complete, so a copy cut short is never taken for a backup.
+    /// drive it is copied, with what its permissions were kept beside it, and only gets its
+    /// name once complete, so a copy cut short is never taken for a backup.
     pub(crate) fn back_up(&self, path: &Path, number: u64) -> Result<()> {
         let moved = backup_path(&self.folder, number, MOVED_BACKUP_SUFFIX);
         match fs::rename(path, &moved) {
@@ -667,6 +676,12 @@ impl Journal {
         let unfinished = backup_path(&self.folder, number, UNFINISHED_BACKUP_SUFFIX);
         let copied = backup_path(&self.folder, number, COPIED_BACKUP_SUFFIX);
         crate::restore::write_partial_copy(path, &unfinished, true)?;
+        // Without them a private file comes back readable by whoever can read that folder, which is
+        // worth saying, but no reason to stop what it would then be stopping.
+        let permissions = backup_path(&self.folder, number, PERMISSIONS_SUFFIX);
+        if let Err(error) = save_permissions(path, &permissions) {
+            warn!(path = %path.display(), %error, "could not keep a file's permissions");
+        }
         fs::rename(&unfinished, &copied)
             .map_err(|error| WinAppMigratorError::io(&copied, error))?;
         // That rename has to reach the disk before the delete below does, which is on another
@@ -800,6 +815,74 @@ pub(crate) fn backup_path(folder: &Path, number: u64, suffix: &str) -> PathBuf {
     folder
         .join(BACKUPS_FOLDER)
         .join(format!("{number:08}.{suffix}"))
+}
+
+/// Write what a file's permissions are to `saved`, in the form `icacls` reads them back from.
+fn save_permissions(file: &Path, saved: &Path) -> io::Result<()> {
+    let output = hidden_command(ICACLS)
+        .arg(file)
+        .arg("/save")
+        .arg(saved)
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(
+        String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+    ))
+}
+
+/// What `icacls /save` wrote for one file, for a file of this name. It goes by the name it finds there,
+/// in UTF-16, with the permissions on the line after, and a backup can go back under another name.
+fn saved_permissions_for(saved: &[u8], name: &str) -> Option<Vec<u8>> {
+    let (pairs, _) = saved.as_chunks::<2>();
+    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+    let text = String::from_utf16(&units).ok()?;
+    let (_, permissions) = text.split_once("\r\n")?;
+    Some(
+        format!("{name}\r\n{permissions}")
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+    )
+}
+
+/// Give a file back the permissions kept with its backup, if there are any, and let go of them. This
+/// takes the right to restore files, which an elevated install has. If it fails the file is still
+/// back, with its folder's permissions, as it would be with none kept.
+pub(crate) fn put_permissions_back(backup: &Path, file: &Path) {
+    let saved = backup.with_extension(PERMISSIONS_SUFFIX);
+    let Ok(bytes) = fs::read(&saved) else {
+        return;
+    };
+    let result = put_saved_permissions_on(&saved, &bytes, file);
+    if let Err(error) = result {
+        warn!(path = %file.display(), %error, "could not put a file's permissions back");
+    }
+    let _ = fs::remove_file(&saved);
+}
+
+fn put_saved_permissions_on(saved: &Path, bytes: &[u8], file: &Path) -> io::Result<()> {
+    let (Some(parent), Some(name)) = (file.parent(), file.file_name()) else {
+        return Err(io::Error::other("it has no folder"));
+    };
+    let for_this_name = saved_permissions_for(bytes, &name.to_string_lossy())
+        .ok_or_else(|| io::Error::other("what was kept could not be read"))?;
+    let renamed = saved.with_extension(RENAMED_PERMISSIONS_SUFFIX);
+    fs::write(&renamed, for_this_name)?;
+    let output = hidden_command(ICACLS)
+        .arg(parent)
+        .arg("/restore")
+        .arg(&renamed)
+        .output();
+    let _ = fs::remove_file(&renamed);
+    let output = output?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(
+        String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+    ))
 }
 
 /// The backup there is for a file, if any.
@@ -1137,6 +1220,59 @@ pub(crate) fn has_no_journal(folder: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_was_kept_of_a_files_permissions_can_go_back_under_another_name() {
+        let saved: Vec<u8> = "private file.txt\r\nD:AI(A;;FR;;;AU)\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let renamed = saved_permissions_for(&saved, "private file.txt.before-install");
+        let expected: Vec<u8> = "private file.txt.before-install\r\nD:AI(A;;FR;;;AU)\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(renamed, Some(expected));
+        assert_eq!(saved_permissions_for(&[0x00, 0xD8], "x"), None);
+    }
+
+    /// As a backup from another drive goes, with no second drive needed: what is on the file goes
+    /// with it. Putting permissions back takes rights only an elevated install has, so without them
+    /// this gets as far as seeing that a file is left as it was.
+    #[test]
+    fn a_file_put_back_has_its_own_permissions_and_not_its_folders() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let private = work.path().join("private file.txt");
+        fs::write(&private, b"x")?;
+        let granted = hidden_command(ICACLS)
+            .arg(&private)
+            .args(["/grant", "*S-1-5-11:(R)"])
+            .output()?;
+        assert!(granted.status.success(), "{granted:?}");
+        let backup = work.path().join("00000001.copied");
+        save_permissions(&private, &backup.with_extension(PERMISSIONS_SUFFIX))?;
+        fs::remove_file(&private)?;
+
+        let back = work.path().join("private file.txt.before-install");
+        fs::write(&back, b"x")?;
+        put_permissions_back(&backup, &back);
+        assert!(
+            !backup.with_extension(PERMISSIONS_SUFFIX).exists(),
+            "they are let go of"
+        );
+        if is_elevated() {
+            let kept = work.path().join("kept");
+            save_permissions(&back, &kept)?;
+            let text = String::from_utf16_lossy(
+                &fs::read(&kept)?
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect::<Vec<_>>(),
+            );
+            assert!(text.contains(";AU)"), "{text}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn a_location_is_only_on_record_if_a_record_of_another_install_says_so() -> Result<()> {

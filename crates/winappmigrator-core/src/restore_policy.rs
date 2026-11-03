@@ -2714,11 +2714,28 @@ pub fn task_refusal(
         return Some("it names no program to run".to_owned());
     }
     definition.commands.iter().find_map(|command| {
-        let expanded = expand(command);
-        let path = expanded.trim().trim_matches('"');
-        (!map.is_restored_file(Path::new(path)))
+        let path = path_as_read_here(command, expand);
+        (!map.is_restored_file(Path::new(&path)))
             .then(|| format!("it runs something this package does not install: {path}"))
     })
+}
+
+/// A path without `.\` steps, which go nowhere and are the same file to whoever reads it.
+pub(crate) fn without_current_folder_steps(text: &str) -> String {
+    let mut said = text.replace('/', "\\");
+    while said.contains(r"\.\") {
+        said = said.replace(r"\.\", r"\");
+    }
+    said
+}
+
+/// A path as what reads it here will take it: variables filled in, no quotes around it, and no steps
+/// that go nowhere. Whatever is asked of a path that something will run goes by this, so that the rule
+/// that lets it through and the one that asks what relies on a file agree on which file it is. Case
+/// is for whatever compares them.
+pub(crate) fn path_as_read_here(text: &str, expand: &dyn Fn(&str) -> String) -> String {
+    let expanded = expand(text);
+    without_current_folder_steps(expanded.trim().trim_matches('"'))
 }
 
 /// Why a task already on this PC must not be replaced, if so: one of its programs is

@@ -57,9 +57,10 @@ use crate::restore_policy::{
     COM_SERVER_KEYS, EVENT_LOG_PREFIX, Registration, SERVICES_PREFIX, ServiceAccount,
     com_class_key, com_server_refusal, existing_service_refusal, existing_task_refusal,
     firewall_fingerprint, firewall_identity, is_autostart_entry, is_uninstall_entry_key,
-    netsh_add_rule_arguments, paths_equal, program_placement_refusal, registration_of,
-    registration_unit_of, restored_value_bytes, restored_value_name, restored_value_text,
-    service_image_path_value, stored_firewall_rule_matches,
+    netsh_add_rule_arguments, path_as_read_here, paths_equal, program_placement_refusal,
+    registration_of, registration_unit_of, restored_value_bytes, restored_value_name,
+    restored_value_text, service_image_path_value, stored_firewall_rule_matches,
+    without_current_folder_steps,
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
@@ -68,7 +69,7 @@ use crate::restore_review::{
 };
 use crate::rollback::{
     interrupted_installs, put_back_backup, query_shows_running, query_shows_stopped,
-    recover_interrupted_installs, roll_back, stop_service,
+    recover_interrupted_installs, roll_back, service_is_running, stop_service,
 };
 use crate::service_scan::DELAYED_AUTOMATIC_START_LABEL;
 use crate::task_scan::live_task_xml;
@@ -428,6 +429,7 @@ pub fn restore_package_monitored(
         data_folders_already_here: Vec::new(),
         cancelled: false,
         stopped_services: Vec::new(),
+        services_set_up: Vec::new(),
         app_name: &app_name,
         manifest: &manifest,
         package_files,
@@ -444,6 +446,7 @@ pub fn restore_package_monitored(
         mut errors,
         refused,
         stopped_services,
+        services_set_up,
         ..
     } = run;
     let mut changes_logged = changes.in_order();
@@ -481,6 +484,7 @@ pub fn restore_package_monitored(
             // that is for a person to know about and not a reason to take all of it back out.
             let started = start_what_starts_by_itself(
                 &review.services,
+                &services_set_up,
                 &stopped_services,
                 monitor,
                 &run_sc_start,
@@ -493,17 +497,6 @@ pub fn restore_package_monitored(
                 "install failed, putting back what it changed"
             );
             rollback = Some(roll_back(journal, monitor));
-            // What this stopped is as it was again, and was running then.
-            for name in &stopped_services {
-                if run_sc_start(name) != StartAnswer::Running {
-                    warnings.push(Warning::new(
-                        SERVICE_NOT_STARTED_CODE,
-                        WarningSeverity::Warning,
-                        format!("The service {name} was running, and did not start again."),
-                        Some(name.clone()),
-                    ));
-                }
-            }
         }
     }
 
@@ -522,15 +515,6 @@ pub fn restore_package_monitored(
     Ok(result)
 }
 
-/// A path without `.\` steps, which go nowhere and are the same file to whoever reads it.
-fn without_current_folder_steps(text: &str) -> String {
-    let mut said = text.replace('/', "\\");
-    while said.contains(r"\.\") {
-        said = said.replace(r"\.\", r"\");
-    }
-    said
-}
-
 /// Whether a command line names this file. In quotes a path goes on to the closing quote, so
 /// `"C:\App\my file.txt"` does not name `C:\App\my`, as the same words with no quotes would.
 fn text_names_file(text: &str, file: &Path) -> bool {
@@ -539,15 +523,34 @@ fn text_names_file(text: &str, file: &Path) -> bool {
         if index % 2 == 0 {
             unquoted.push_str(part);
             unquoted.push(' ');
-        } else if paths_equal(Path::new(part), file)
-            || part
-                .rsplit_once('=')
-                .is_some_and(|(_, value)| paths_equal(Path::new(value), file))
-        {
+        } else if quoted_text_names_file(part, file) {
             return true;
         }
     }
     text_mentions_path(&unquoted, file, true)
+}
+
+/// Whether what is in one pair of quotes names this file: all of it, one of a list, or after the name
+/// of an option, as in `--plugin=C:\App\a.dll` and `/plugin:C:\App\a.dll`.
+fn quoted_text_names_file(quoted: &str, file: &Path) -> bool {
+    quoted.split([';', ',']).any(|piece| {
+        let piece = piece.trim();
+        paths_equal(Path::new(piece), file)
+            || path_after_an_option(piece).is_some_and(|path| paths_equal(Path::new(path), file))
+    })
+}
+
+fn path_after_an_option(text: &str) -> Option<&str> {
+    if let Some((_, value)) = text.rsplit_once('=') {
+        return Some(value);
+    }
+    let bytes = text.as_bytes();
+    let drive = (1..bytes.len().saturating_sub(2)).find(|&index| {
+        bytes[index].is_ascii_alphabetic()
+            && bytes[index + 1] == b':'
+            && matches!(bytes[index + 2], b'\\' | b'/')
+    })?;
+    text.get(drive..)
 }
 
 /// What a package sets up that would run or rely on this file, if anything. Going by what it says as
@@ -555,7 +558,10 @@ fn text_names_file(text: &str, file: &Path) -> bool {
 fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
     let is_it = |path: &Path| {
         paths_equal(
-            Path::new(&without_current_folder_steps(&path.to_string_lossy())),
+            Path::new(&path_as_read_here(
+                &path.to_string_lossy(),
+                &expand_env_vars,
+            )),
             file,
         )
     };
@@ -580,7 +586,7 @@ fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
     if let Some(task) = review.tasks.iter().find(|task| {
         task.commands
             .iter()
-            .any(|command| is_it(Path::new(command.trim().trim_matches('"'))))
+            .any(|command| is_it(Path::new(command)))
             || task.arguments.iter().any(|arguments| names_it(arguments))
     }) {
         return Some(format!("the scheduled task {}", task.entry.task_name));
@@ -629,6 +635,7 @@ fn starts_by_itself(service: &ReviewedService<'_>) -> bool {
 /// will say what it makes of it.
 fn in_order_to_start<'a>(
     services: &'a [ReviewedService<'a>],
+    set_up: &[String],
     were_running: &[String],
 ) -> Vec<&'a ReviewedService<'a>> {
     fn visit<'a>(
@@ -650,8 +657,16 @@ fn in_order_to_start<'a>(
         }
         order.push(service);
     }
+    let named_in = |names: &[String], service: &ReviewedService<'_>| {
+        names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&service.entry.service_name))
+    };
+    // A service a review allowed can still be left out when it comes to it, and what is under that name
+    // is then not this install's to start.
     let chosen: Vec<&ReviewedService<'_>> = services
         .iter()
+        .filter(|service| named_in(set_up, service))
         .filter(|service| {
             starts_by_itself(service)
                 || were_running
@@ -669,7 +684,7 @@ fn in_order_to_start<'a>(
 
 /// How one service answered being asked to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum StartAnswer {
+pub(crate) enum StartAnswer {
     Running,
     StillStarting,
     Failed(String),
@@ -677,12 +692,13 @@ enum StartAnswer {
 
 fn start_what_starts_by_itself(
     services: &[ReviewedService<'_>],
+    set_up: &[String],
     were_running: &[String],
     monitor: &InstallMonitor,
     start: &dyn Fn(&str) -> StartAnswer,
 ) -> Started {
     let mut result = Started::default();
-    let order = in_order_to_start(services, were_running);
+    let order = in_order_to_start(services, set_up, were_running);
     for (done, service) in order.iter().enumerate() {
         monitor.report(InstallStep::new(InstallPhase::Services, done, order.len()));
         let name = &service.entry.service_name;
@@ -712,7 +728,7 @@ fn start_what_starts_by_itself(
 }
 
 /// Ask Windows to start a service, and wait for it to say how that went.
-fn run_sc_start(name: &str) -> StartAnswer {
+pub(crate) fn run_sc_start(name: &str) -> StartAnswer {
     let asked = hidden_command(SC_EXE).args(["start", name]).output();
     let said = match asked {
         Ok(output) if output.status.success() => None,
@@ -975,6 +991,8 @@ struct Run<'a, 'p> {
     cancelled: bool,
     /// Services of an earlier install here that this stopped, to replace what they run.
     stopped_services: Vec<String>,
+    /// Services this really set up, as a review's list can still lose one when it comes to it.
+    services_set_up: Vec<String>,
     /// How the package's own files are checked.
     package_files: PackageFiles<'a>,
 }
@@ -1024,6 +1042,22 @@ impl Run<'_, '_> {
             });
             if !is_ours {
                 continue;
+            }
+            // On record before it is stopped, so that an install cut off here still starts it again.
+            if service_is_running(name) {
+                let noted = self
+                    .journal
+                    .as_mut()
+                    .map(|journal| journal.note(Change::ServiceStopped { name: name.clone() }));
+                if let Some(Err(error)) = noted {
+                    self.record_failure(Warning::new(
+                        "journal_write_failed",
+                        WarningSeverity::Error,
+                        error.to_string(),
+                        Some(name.clone()),
+                    ));
+                    return;
+                }
             }
             match stop_service(name) {
                 Ok(true) => self.stopped_services.push(name.clone()),
@@ -1607,7 +1641,11 @@ impl Run<'_, '_> {
                 self.options.force,
                 &mut self.warnings,
             ) {
-                Ok(messages) => self.changes.services.extend(messages),
+                Ok(messages) => {
+                    self.changes.services.extend(messages);
+                    self.services_set_up
+                        .push(service.entry.service_name.clone());
+                }
                 Err(warning) => {
                     self.record_failure(warning);
                     continue;
@@ -5425,11 +5463,150 @@ mod tests {
             service_starting("Other", "automatic", &[]),
         ];
         let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
-        let order: Vec<&str> = in_order_to_start(&services, &[])
+        let order: Vec<&str> = in_order_to_start(&services, &every_name(&services), &[])
             .iter()
             .map(|service| service.entry.service_name.as_str())
             .collect();
         assert_eq!(order, ["Back", "Middle", "Front", "Other"]);
+    }
+
+    fn every_name(services: &[ReviewedService<'_>]) -> Vec<String> {
+        services
+            .iter()
+            .map(|service| service.entry.service_name.clone())
+            .collect()
+    }
+
+    /// `--force` on another app's folder lets a review through, and the service under that name is
+    /// then left alone, as another app's. Starting it would run whatever the install just replaced.
+    #[test]
+    fn what_was_not_set_up_when_it_came_to_it_is_not_started() {
+        let entries = [
+            service_starting("OtherAppsService", "automatic", &[]),
+            service_starting("Ours", "automatic", &[]),
+        ];
+        let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let result = start_what_starts_by_itself(
+            &services,
+            &["Ours".to_owned()],
+            &[],
+            &InstallMonitor::default(),
+            &|name| {
+                asked.borrow_mut().push(name.to_owned());
+                StartAnswer::Running
+            },
+        );
+        assert_eq!(*asked.borrow(), ["Ours"]);
+        assert_eq!(result.started, ["started service Ours"]);
+    }
+
+    fn manifest_with_a_task_running(command: &str, data_file: &str) -> Result<PackageManifest> {
+        let mut manifest: PackageManifest = serde_json::from_str(
+            r#"{
+                "schema_version": "",
+                "source_computer_name": null,
+                "source_windows_version": null,
+                "scan_timestamp_utc": "",
+                "main_executable_path": "C:\\Program Files\\Acme\\acme.exe",
+                "application_metadata": null,
+                "file_inventory": [],
+                "registry_keys_exported": [],
+                "services_detected": [],
+                "scheduled_tasks_detected": [],
+                "shortcuts_detected": [],
+                "environment_variables_detected": [],
+                "runtime_prerequisites": [],
+                "warnings": [],
+                "items_intentionally_excluded": []
+            }"#,
+        )?;
+        let entry = |path: &str, relative: &str, classification| FileEntry {
+            path: PathBuf::from(path),
+            original_path: PathBuf::from(path),
+            package_relative_path: Some(PathBuf::from(relative)),
+            size_bytes: Some(1),
+            hash_sha256: Some("00".repeat(32)),
+            classification,
+            should_copy: true,
+            reason: String::new(),
+            user_folder: None,
+        };
+        manifest.file_inventory = vec![
+            entry(
+                r"C:\Program Files\Acme\acme.exe",
+                r"files\acme.exe",
+                FileClassification::AppOwned,
+            ),
+            entry(
+                data_file,
+                r"files\_external\ProgramData\Acme\helper.exe",
+                FileClassification::MachineAppData,
+            ),
+        ];
+        manifest.scheduled_tasks_detected = vec![crate::models::ScheduledTaskEntry {
+            task_name: "Helper".to_owned(),
+            task_path: r"\Acme\".to_owned(),
+            action_command: PathBuf::new(),
+            arguments: None,
+            working_directory: None,
+            trigger_summary: None,
+            run_level: None,
+            account: None,
+            requires_admin: false,
+            restore_instructions: String::new(),
+            definition_xml: Some(format!(
+                r#"<Task><Principals><Principal><UserId>S-1-5-18</UserId></Principal></Principals><Actions><Exec><Command>{command}</Command></Exec></Actions></Task>"#
+            )),
+        }];
+        Ok(manifest)
+    }
+
+    /// A file left alone is one someone else may have put there, and whatever runs it runs theirs.
+    /// However the command is written, it is the one file the task will run as SYSTEM.
+    #[test]
+    fn what_would_run_a_file_left_alone_is_seen_however_it_is_written() -> Result<()> {
+        let data = r"C:\ProgramData\Acme\helper.exe";
+        let file = Path::new(data);
+        for command in [
+            data,
+            r"%ProgramData%\Acme\helper.exe",
+            r"C:\ProgramData\.\Acme\helper.exe",
+            r"C:\PROGRAMDATA\ACME\HELPER.EXE",
+            r#""%ProgramData%\Acme\.\helper.exe""#,
+        ] {
+            let manifest = manifest_with_a_task_running(command, data)?;
+            let review = ReviewedPackage::new(&manifest, Path::new(r"D:\Apps\Acme"), true, false)?;
+            assert_eq!(review.tasks.len(), 1, "{command}: {:?}", review.refused);
+            assert_eq!(
+                what_would_run(&review, file).as_deref(),
+                Some("the scheduled task Helper"),
+                "{command}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_quoted_argument_names_a_file_whatever_comes_before_it() {
+        let file = Path::new(r"C:\ProgramData\Acme\plugin.dll");
+        for text in [
+            r#"--plugin "C:\ProgramData\Acme\plugin.dll""#,
+            r#""--plugin=C:\ProgramData\Acme\plugin.dll""#,
+            r"--plugin:C:\ProgramData\Acme\plugin.dll",
+            r#""/plugin:C:\ProgramData\Acme\plugin.dll""#,
+            r#""--plugins=C:\a.dll;C:\ProgramData\Acme\plugin.dll""#,
+            r#""--plugin=C:\ProgramData\Acme\plugin.dll" --fast"#,
+        ] {
+            assert!(text_names_file(text, file), "{text}");
+        }
+        for text in [
+            r#""C:\ProgramData\Acme\plugin.dll.bak""#,
+            r#""C:\ProgramData\Acme\plugin.dll and more""#,
+            r#""--plugin=C:\ProgramData\Other\plugin.dll""#,
+        ] {
+            assert!(!text_names_file(text, file), "{text}");
+        }
     }
 
     #[test]
@@ -5439,7 +5616,10 @@ mod tests {
             service_starting("B", "automatic", &["A"]),
         ];
         let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
-        assert_eq!(in_order_to_start(&services, &[]).len(), 2);
+        assert_eq!(
+            in_order_to_start(&services, &every_name(&services), &[]).len(),
+            2
+        );
     }
 
     /// It is set up to run as LocalService, so it can be started like any other.
@@ -5447,7 +5627,10 @@ mod tests {
     fn one_recorded_with_an_account_of_its_own_is_started_too() {
         let entries = [service_starting("Custom", "automatic", &[])];
         let services = [reviewed(&entries[0], Some(r".\someone"))];
-        assert_eq!(in_order_to_start(&services, &[]).len(), 1);
+        assert_eq!(
+            in_order_to_start(&services, &every_name(&services), &[]).len(),
+            1
+        );
     }
 
     #[test]
@@ -5457,7 +5640,7 @@ mod tests {
             service_starting("Other", "manual", &[]),
         ];
         let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
-        let order = in_order_to_start(&services, &["asked".to_owned()]);
+        let order = in_order_to_start(&services, &every_name(&services), &["asked".to_owned()]);
         assert_eq!(order.len(), 1);
         assert_eq!(order[0].entry.service_name, "Asked");
     }
@@ -5470,14 +5653,17 @@ mod tests {
             service_starting("Good", "automatic", &[]),
         ];
         let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
-        let result =
-            start_what_starts_by_itself(&services, &[], &InstallMonitor::default(), &|name| {
-                match name {
-                    "Bad" => StartAnswer::Failed("it would not".to_owned()),
-                    "Slow" => StartAnswer::StillStarting,
-                    _ => StartAnswer::Running,
-                }
-            });
+        let result = start_what_starts_by_itself(
+            &services,
+            &every_name(&services),
+            &[],
+            &InstallMonitor::default(),
+            &|name| match name {
+                "Bad" => StartAnswer::Failed("it would not".to_owned()),
+                "Slow" => StartAnswer::StillStarting,
+                _ => StartAnswer::Running,
+            },
+        );
         assert_eq!(result.started, ["started service Good"]);
         assert_eq!(result.warnings.len(), 2);
         assert!(result.warnings[0].message.contains("Bad"));
