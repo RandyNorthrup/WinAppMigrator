@@ -166,9 +166,13 @@ function Remove-Preinstalled($App) {
         if (-not (Wait-Until { @(Uninstall-Entries $App.name).Count -eq 0 } 60)) {
             throw "$($App.name) would not uninstall"
         }
-        if ($entry.InstallLocation) {
-            Wait-Until { -not (Test-Path -LiteralPath $entry.InstallLocation) } 60 | Out-Null
-        }
+    }
+    # An uninstaller can leave a file or two, and one that deletes itself takes its time. A PC that never
+    # had the app has none of that, and an install would stop at it, so what is left goes too, and is said.
+    if ((Test-Path -LiteralPath $App.installed_at) -and -not (Wait-Until { -not (Test-Path -LiteralPath $App.installed_at) } 60)) {
+        $left = @(Get-ChildItem -LiteralPath $App.installed_at -Recurse -Force -File | ForEach-Object Name)
+        Write-Host "  its uninstaller left $($left.Count) files, which go now: $($left -join ', ')"
+        Remove-Item -LiteralPath $App.installed_at -Recurse -Force
     }
 }
 
