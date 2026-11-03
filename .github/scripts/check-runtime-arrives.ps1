@@ -129,6 +129,13 @@ foreach ($file in $RuntimeFiles) {
 foreach ($key in $RuntimeKeys) {
     [Microsoft.Win32.Registry]::LocalMachine.DeleteSubKeyTree($key, $false)
 }
+# What Visual Studio's own copy leaves to say it is there, which the redistributable goes by.
+$dependencies = 'SOFTWARE\Classes\Installer\Dependencies'
+$dependencyKeys = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($dependencies)
+foreach ($name in @($dependencyKeys.GetSubKeyNames() | Where-Object { $_ -match '(?i)VC.*(Runtime|Redist).*(amd64|x64)' })) {
+    Write-Host "  $dependencies\$name goes"
+    [Microsoft.Win32.Registry]::LocalMachine.DeleteSubKeyTree("$dependencies\$name", $false)
+}
 Runtime-State
 
 $without = Exit-Code-Of $broker '--help'
@@ -158,6 +165,13 @@ Write-Host "exit $($run.Code)"
 Write-Host $run.Output
 Check 'the installer exits with 0' ($run.Code -eq 0) $run.Output
 if ($run.Code -ne 0) {
+    # What the redistributable itself has to say of it, which it keeps in the temp folder.
+    foreach ($place in $env:TEMP, "$env:SystemRoot\Temp") {
+        foreach ($log in @(Get-ChildItem -LiteralPath $place -Filter 'dd_vcredist*' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 2)) {
+            Write-Host "`n--- $($log.FullName)"
+            Get-Content -LiteralPath $log.FullName | Select-Object -Last 40 | ForEach-Object { Write-Host "  $_" }
+        }
+    }
     # Nothing after this could be anything but a consequence of it.
     Write-Host "`nSummary: $($script:failures.Count) failures."
     exit 1
