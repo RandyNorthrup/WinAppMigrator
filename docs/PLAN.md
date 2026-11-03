@@ -61,8 +61,9 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   `uninstall.log`, App Paths, plus a Program Files/ProgramData/AppData walk), PE/delay-import/SxS/.NET analysis, runtime-prerequisite
   detection, and authoritative file counts.
 - What an account keeps for an app in the registry goes by the User data option, shown on real apps with marks searched for
-  through a whole package. An app's empty folders are made again.
-- A PC with no Visual C++ runtime, tried for real, and real windows opened on runners with no graphics card, with what a person is
+  through a whole package, and with it off, a package says nothing of who built it but what the app needs to work, and a build
+  looks through what it wrote for anything that does. An app's empty folders are made again.
+- A PC with no Visual C++ runtime, tried for real, and real windows opened on runners that use a software renderer, with what a person is
   told when graphics cannot start. Each window fits the screen it opens on, and goes by one rule for light and dark.
 - Optional per-user/ProgramData data backup and optional license detection/
   backup (opt-in; never decrypts, bypasses activation, or emulates dongles).
@@ -72,7 +73,7 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   headless UI tests drive the real screens of the app and the installer.
 - Elevated round trip (`crates/winappmigrator-installer/tests/elevated_round_trip.rs`), run only by
   its own CI job on GitHub's throwaway runner: scan, package, remove, and reinstall a fake app, then
-  check the machine with Windows' own tools, and undo it every way that can happen. Its sibling
+  check the machine with Windows' own tools, and undo it by an uninstall, a late failure, and being killed part-way. Its sibling
   (`elevated_offline_and_profiles.rs`) does the same from a real NTFS drive made hostile on purpose,
   with real second accounts, and against every real scheduled task. See
   [CONTRIBUTING](../CONTRIBUTING.md).
@@ -116,10 +117,15 @@ From the audit of 2026-11-01. Items are removed from this list as they are fixed
 
 1. **An unsigned package still cannot be authenticated.** Restore rules limit what a package
    can ask for, but it can run its own files with full rights, and its hashes travel with it.
-   Only signing a finished installer proves origin. An install location outside a protected
-   folder also stays writable by other programs on the PC, which can race the link checks and
-   change installed files afterward. A program already on the PC can swap a running installer's
-   file in the moment before it opens it, which a handle to the running image would close.
+   Only signing a finished installer proves origin. This is what a self-extracting package is, and no fix is planned.
+2. **Close the two races without lifting the `unsafe` ban,** after `0.5.0`. A program already on the PC can race the link checks
+   in an install location outside a protected folder, and can swap a running installer's file in the moment before it opens it.
+   Each comes from acting by a path, and closing them means acting through a handle: to the folder, relative to it and
+   following no link, and to the running image. Look for a safe crate that does this, such as `cap-std`, before reaching for
+   `unsafe`. [Known gaps](../SECURITY.md#known-gaps) says what each can do until then.
+
+An install location outside a protected folder also stays writable by other programs on the PC after an install, which a person can
+avoid and code cannot: see [Known gaps](../SECURITY.md#known-gaps).
 
 ## Not in scope for this release line
 

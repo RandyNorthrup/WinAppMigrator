@@ -362,8 +362,8 @@ impl DocumentEdits {
 }
 
 /// A task's definition as any PC could take it. Who wrote it, who a trigger waits for, and who it runs
-/// as were someone on the PC it came from: there they are that person, on another they are nobody, and
-/// registering the task fails. So it runs as whoever installs it, as does one run for a group of theirs,
+/// as were someone on the PC it came from: there they are that person, and on another they are
+/// nobody. So it runs as whoever installs it, as does one run for a group of theirs,
 /// and a password nobody has comes to running when they are signed in. Anything that
 /// will not parse stays as it is, and a restore refuses it. Says whether it came to running as anyone.
 pub(crate) fn task_for_whoever_installs_it(xml: &str) -> Option<(String, bool)> {

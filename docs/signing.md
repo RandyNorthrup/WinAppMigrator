@@ -23,7 +23,8 @@ The certificate profile is shared with other projects, so revoking it would hit 
 
 Three independent layers stop this:
 
-1. **The release workflow** fails if the stub carries a signature, and signs only the app.
+1. **The release workflow** fails if the stub carries a signature, and signs only the app. It also fails unless the app
+   holds that stub byte for byte, and building an app for release fails with no stub to embed.
 2. **Building refuses a signed stub** (`refuse_signed_stub` in `archive.rs`).
 3. **The stub only trusts a package a signature would cover.** It reads the package, or the
    footer that vouches for a data file, from directly before the certificate table, never from
@@ -42,7 +43,8 @@ az login
 
 The script's defaults are this project's account, and work only for someone holding the
 Signer role on it. Anyone else passes their own `-Endpoint`, `-Account`, and
-`-CertificateProfile`.
+`-CertificateProfile`. It needs the .NET 8 runtime, and installs the `ArtifactSigning` PowerShell
+module for the current user if it is missing.
 
 Sign only installers you built from software you are entitled to redistribute, because your
 name goes on them. Do not offer signing as a service to others.
@@ -96,8 +98,10 @@ Signing uses [Azure Artifact Signing][signing] with no stored password or certif
 - **GitHub environment `release`:** deployable from `v*` tags only. It holds the
   `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` secrets, which identify but do not authenticate.
 
-Cut a release by pushing a `v*` tag. To retry a run that failed before publishing, start the
-workflow from that tag. If the release already exists, delete it first.
+Cut a release by pushing a `v*` tag of three parts that matches the version in `Cargo.toml`, or the run stops at its
+first check: see [Cutting a release](../CONTRIBUTING.md#cutting-a-release). To retry a run that failed before publishing, start the
+workflow from that tag. If the release already exists, delete it first. Releases before `v0.5.0` were not signed, so this
+path first runs at that tag.
 
 Check the exe or the zip:
 
@@ -121,9 +125,10 @@ name, so both executables also:
 - take nothing about how a window is drawn from the environment. wgpu would otherwise go by
   `WGPU_DX12_AGILITY_SDK_PATH`, and have Direct3D run `D3D12Core.dll` from any folder the user names,
   past the restriction above. `check-real-windows.ps1` plants a stand-in to show that it does not;
-- start PowerShell with a fixed list of environment variables, and its module path and tools from
-  the Windows folder. It is a .NET program, and the user's environment could otherwise load a
-  runtime or DLL into it, or replace the commands it runs;
+- start every tool with a fixed list of environment variables, with its `Path` and `TEMP` from the Windows folder, and
+  a runtime's setup program, DISM, or winget with a `TEMP` of its own only administrators can write to. PowerShell is a .NET program,
+  and the user's environment could otherwise load a runtime or DLL into it, or replace the commands it runs, and its module path
+  and tools come from the Windows folder too;
 - ask `whoami` for elevation, which is not a .NET program, and treat not being able to tell as a
   failure rather than as not elevated;
 - check that a prerequisite's installer is validly signed by Microsoft when it is downloaded

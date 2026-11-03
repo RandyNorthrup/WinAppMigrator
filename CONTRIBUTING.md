@@ -30,6 +30,12 @@ cargo audit
 cargo deny check
 ```
 
+Rust comes through rustup, which picks the version pinned in `rust-toolchain.toml`. The last two need
+`cargo install cargo-audit cargo-deny --locked`. `cargo quality` and `cargo typecheck` are short for the tests and
+for `cargo check --workspace --all-targets --all-features`. The stub is built first because the app carries it, and
+`cargo build --workspace` alone can leave an app holding the build before's, so CI checks the app for its exact bytes with
+`.github/scripts/check-stub-embedded.ps1`.
+
 From a normal shell, the end-to-end test skips its reinstall step, because the installer demands
 elevation. From an elevated shell it stops at a preview, because an install writes to `ProgramData`
 and to Settings. It installs for real only on GitHub's runner.
@@ -82,7 +88,7 @@ the machine by `sc.exe`, `schtasks.exe`, and `Get-FileHash`, then it is uninstal
 
 `elevated_move.rs` and `.github/scripts/check-moved-app.ps1` are a real move between two PCs. One job builds
 installers of a fake app and uploads them, unsigned and kept for a day, and others download them onto runners that
-have never seen it, each on a Windows of its own, which build nothing and check out only that script. They install
+have never seen it, each on a Windows of its own, which build nothing and check out only the scripts. They install
 them there and look with Windows' own tools, and say what differed.
 
 `elevated_real_apps.rs`, `.github/scripts/real-apps.json`, and the `real-app` scripts beside it do that with real apps.
@@ -109,9 +115,10 @@ builds Mosquitto with its runtime in it, and `check-runtime-arrives.ps1` takes t
 cannot start, then installs with `TEMP` set to a folder nothing may use, and has it serve a client. `Elevated packaging` runs the
 app's own code and a real install with `TEMP`, `ProgramData`, `ProgramFiles`, and `SystemRoot` all set wrong, shows that a plain child
 goes by them, and that nothing here does. `Real windows` opens the app, an installer and an uninstaller on each kind of runner,
-and looks at what is on the screen, without clicking anything. Each has to fit in what Windows says a window can use, at the
+and looks at what is on the screen, without clicking anything. An uninstaller there has no install to undo, so what it shows is
+that it has no record of one. Each has to fit in what Windows says a window can use, at the
 runner's 1024x768, and be in the mode Windows is in, set both ways, or the one chosen in the app. It does the same again with
-graphics that cannot start, and with the environment naming a folder of Direct3D's code, where it plants a stand-in built from
+graphics that cannot start, which it forces with `WGPU_BACKEND`, and with the environment naming a folder of Direct3D's code, where it plants a stand-in built from
 `planted-d3d12core.rs` that only says it ran, and none of it may. A copy of Windows' own would not do: Direct3D only loads one
 newer than its own, and does not keep it loaded, so a list of what is loaded misses it. Its pictures are kept for a day, of the test app and of the runner's own list of what it has installed.
 
@@ -141,6 +148,12 @@ installer of a real app on this PC, and says how long each step took, how much i
 count, and the most it had on disk. It reads the app, writes only in the work folder, removes that folder afterward,
 and never installs anything. Use a folder of your own for that, and read `README.md` on what a package can hold.
 
+## Trying a scan or a build by hand
+
+`cargo run --release -p winappmigrator-core --example wam_pkg -- <source_exe> <stub_exe> <out_dir> <app_name>` builds an installer
+from one executable, as the app would, and `... --example offline_scan -- <volume_root> [output_file]` lists the apps on a mounted
+disk. That one needs an elevated shell, as it loads copies of the disk's registry hives. Neither installs anything.
+
 ## Seeing what near matches would offer
 
 `cargo run --release -p winappmigrator-core --example wam_near_matches -- <out.txt> [--scan "<app name>"]...` says what would
@@ -160,3 +173,21 @@ cargo test -p winappmigrator-gui -p winappmigrator-installer --lib -- --test-thr
 ```
 
 See [docs/gui.md](docs/gui.md) for the conventions.
+
+## Cutting a release
+
+Versions and tags have three parts, as in `v0.5.0`. The two four-part tags from before that stay as they are.
+
+1. In `Cargo.toml`, set the workspace `version` and the two path dependencies under `[workspace.dependencies]`, and let
+   `Cargo.lock` follow with a `cargo build`.
+2. In `CHANGELOG.md`, make `## Unreleased` into `## X.Y.Z — YYYY-MM-DD`.
+3. Run `cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md` from the repository's root. A release generates its own
+   for the zip, and this keeps the one in the repository the same.
+4. Run the checks above, push `main`, and wait for CI to pass on that commit.
+5. Tag that commit and push the tag: `git tag vX.Y.Z`, then `git push origin vX.Y.Z`.
+
+`.github/workflows/release.yml` then runs. It stops unless the tag is `v` and the version in `Cargo.toml`, runs clippy and the
+tests, stops if the stub has a signature or the app does not hold the stub byte for byte, signs the app, checks that signature,
+records where the downloads were built, and publishes them. Only a `v*` tag can reach the signing, in the `release` environment. To
+retry a run that failed before publishing, start the workflow from that tag. If the release already exists, delete it first. See
+[docs/signing.md](docs/signing.md) for how signing is set up, which a fork does not have.

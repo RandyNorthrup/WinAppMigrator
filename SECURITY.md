@@ -6,6 +6,24 @@ Please report privately through
 [GitHub's security advisories](https://github.com/RandyNorthrup/WinAppMigrator/security/advisories/new)
 rather than in a public issue. Include the version and the steps to reproduce it.
 
+## Which versions get fixes
+
+Only the latest release. There is no support for older ones, and a fix is not backported.
+
+**If you have an installer built by a version before `0.5.0`, treat it as private, and do not post it or pass it on.** With or
+without the User data option, those can hold:
+
+- the name of the PC it was built on, and the account that built it, in what the installer shows and in the files inside it;
+- what apps remember in their part of the registry, such as the files and folders 7-Zip last opened, and the hosts PuTTY has
+  been to, and any saved sessions;
+- the names and paths of data files that were not even going in it;
+- a serial typed into a setup, with the License option off, and who an app was registered to;
+- all of your `Path`, and what else other variables listed;
+- personal shortcuts with their arguments, and what a scheduled task says of who wrote it.
+
+Nothing can take those out of an installer that has already been built. Build it again with `0.5.0` or later if you want one to
+share, and see [what still applies](#an-installer-can-contain-secrets).
+
 ## What to know before you run an installer
 
 An installer built with WinAppMigrator runs **elevated** and reinstalls what its package
@@ -29,7 +47,9 @@ installer is about to trust, and an honest package reaching too far:
   write is refused, and so are services, shortcuts, scheduled tasks, and autostart values that run
   anything other than a file the package installs. It cannot install to a system folder or take
   over a service, task, or COM class already on the PC. Which installer runs for a runtime, and how,
-  is compiled in, and the file must be signed by Microsoft. What is refused is listed. The lists are
+  is compiled in, and a file the package brings for that must be signed by Microsoft. If there is no such file, because it
+  could not be downloaded when the package was built, winget is used if it is there: its own signature is checked, and what it then
+  fetches is winget's to check. What is refused is listed. The lists are
   of what is known to be dangerous, so a package can still do something they do not name. So values it
   writes outside the app's own keys and the kinds on the list show as one row of their own, for a second
   look. What counts as the app's own goes by what the package calls itself, and Windows' own keys never do.
@@ -38,7 +58,9 @@ installer is about to trust, and an honest package reaching too far:
 - **What it says it will do is what it does.** The list a person agrees to and the install go through one
   review, with the same options, and a file from a data folder that is not going back to one can arrive
   under the install location, but nothing is set up to run it. Who a scheduled task runs as is its principal,
-  and asking for the highest rights it can have is marked as high rights.
+  and asking for the highest rights it can have is marked as high rights. What depends on what is on this PC cannot be known until
+  the install gets there, such as a service or a driver of that name already being another app's. Those are on the list as asked
+  for, are then left alone, and are said to have been.
 - **Nothing a package names is connected to before anyone has agreed.** A share in a path, however it is
   written, is told by how it is written, without going there.
 - **What ties an app into Windows has rules of its own,** in one place. What makes a class, interface, type
@@ -60,7 +82,8 @@ installer is about to trust, and an honest package reaching too far:
     can only run what its command says: `IsolatedCommand` is held to the same rule, and `CommandStore` is refused.
   - A firewall rule is for one program the package installs, never for all, and cannot override other rules or let
     traffic in through NAT. It is set through `netsh`, and an uninstall takes out a rule of that name, way, program,
-    protocol, and ports, if it is still as it was added. One that says something else by now stays, and it says so.
+    protocol, and ports, if it is still as it was added. One that says something else by now stays, and it says so. A scan
+    does not carry a rule with a `TTK` condition or two `App`s, as it would let in more or read as another program's.
   - An event log source is only a new one, whose messages come from files the package installs. Nothing about a log
     itself can be changed, and no source is added to the Security log.
   - An ODBC driver's files have to be the package's, and a source's driver has to be the package's or Windows', with
@@ -86,13 +109,14 @@ installer is about to trust, and an honest package reaching too far:
     runs, the next start of that service runs the package's, which no rule above sees. So only use `--force` for a folder
     you know is this app's. Without it, a command line is told what the installer's window is: a folder with files in it is
     not used unless a record says an install was there, whether or not any would be replaced, and the window looks again
-    when Install is clicked. Outside the install location, without such a record, no program goes in a folder of a data location that
-    was already there, new or replacing, with `--force` or not, and that goes for a license store's files too. That is by
-    kind of file, with what a program is told to load by, such as `.exe.config`, among them. A data file there is replaced,
-    by the window as well, since restoring a person's data is what that is for. On uninstall it comes back, or if the file
-    that replaced it has changed since, goes beside that as `name.before-install`, so an uninstall never loses it. A
-    setting can decide what an app runs, so a package could use that to change what another app does, and that is not on
-    the list.
+    when Install is clicked. Outside the install location, without such a record, no program goes in a folder of a data
+    location that was already there, new or replacing, with `--force` or not, and that goes for a license store's files too.
+    That is by kind of file, with what a program is told to load by, such as `.exe.config`, among them. If what the package
+    sets up would run or rely on a file left alone like that, nothing is installed, since it would run what was already
+    there. A data file there is replaced, by the window as well, since restoring a person's data is what that is for. On
+    uninstall it comes back, or if the file that replaced it has changed since, goes beside that as `name.before-install`,
+    so an uninstall never loses it. A setting can decide what an app runs, so a package could use that to change what
+    another app does, and that is not on the list.
 - **The rules do not make a package safe.** A package may still run its own files, as a service
   with full rights if it asks to. That is what installing an app is. Before anything happens, the
   installer's window lists the services, drivers, scheduled tasks, autostart entries, shortcuts,
@@ -102,13 +126,16 @@ installer is about to trust, and an honest package reaching too far:
   Each of them is journaled first, so a rollback and an uninstall take it back out.
 - **While it runs,** its staging folder is writable only by administrators, and a drive that cannot
   keep that, such as FAT32 or exFAT, is not used for it. It is made inside the admin-only folder where
-  installs keep their records whenever it can be, so nothing else can ever have opened it. Elsewhere it is
-  closed just after it is made, in a folder where only administrators have the rights to go on controlling
-  what is made there, so a program of the account running this cannot keep a hold on it from the moment it
-  appears. On a PC whose policy makes an administrator's own account the owner of what they make, in place
-  of Administrators, that goes only for the admin-only folder, and any other place is open to it for that
-  moment. What is unpacked is hashed again as it is copied into place, and the list of what to do comes
-  from the package held open since it was checked, so changing what was unpacked gets nowhere. That
+  installs keep their records if that is on the install location's drive, so nothing else can ever have opened
+  it. For an install on another drive, it goes on that drive if only administrators have the rights to go on
+  controlling what is made there, as it is closed just after it is made and a program of the account running
+  this must not be able to keep a hold on it from the moment it appears. Otherwise it goes in the admin-only
+  folder, then beside the installer or in the system's temp folder if either passes that same test, which they rarely do, and if
+  nowhere will do, the install does not go ahead. On a PC whose policy makes an administrator's
+  own account the owner of what they make, in place of Administrators, that goes only for the admin-only
+  folder, and any other place is open to it for that moment. No test races this: it is reasoned from what each
+  place lets a program do. What is unpacked is hashed again as it is copied into place, and the list of what to
+  do comes from the package held open since it was checked, so changing what was unpacked gets nowhere. That
   folder and the install location cannot be renamed and replaced, and it will not write through a link at or
   below the install location. From the moment it opens its own file, and a data file if it has one, those
   cannot be changed or swapped.
@@ -182,8 +209,8 @@ controlled. So:
   that way, a name that is not text, or one this Windows would open as a device, is not read. A path a value records is
   first read as Windows would read it, so that it is the real name that is asked about.
 - **There are limits on what a drive can make this do.** A hive is copied by reading it, or in backup mode if that is denied, where
-  how much room it takes is watched, since that brings streams a size says nothing of. Either way that is up to 4 GiB, and 32 GiB for
-  all of a run's. There are limits on a program, an install log, an AppX manifest, a task, how many tasks an app keeps,
+  how much room it takes is watched, since that brings streams a size says nothing of, though that route has not been run on a really
+  denied hive. Either way that is up to 4 GiB, and 32 GiB for all of a run's. There are limits on a program, an install log, an AppX manifest, a task, how many tasks an app keeps,
   how many accounts are listed, and how much of the registry is captured. How much of an app's own files can be read
   into a package is checked against the room there is, by what the listing says of each, and a file can only hold as
   much as was read.
@@ -234,7 +261,8 @@ its own registry, and its own shortcuts. So what these say does not count for mu
 - A scheduled task that runs as anyone but the account being read or one of Windows' own is left out, with a warning.
   Task principals are usually SIDs. A name that cannot be told from a person's counts as one. One that says it runs as
   Windows, on this PC, has to be a file only administrators can change, since tasks are read from files and any account
-  can make a file in that folder, which the Task Scheduler would never run but a package would register.
+  can make a file in that folder, which the Task Scheduler would never run but a package would register. One that ran as
+  the account being read goes with no one named in it, and runs as whoever installs it, as a group of theirs does.
 
 **On this PC, a share is not looked at** either, since a value in any account's registry could name one, and looking
 would connect as the administrator running this, including when the app starts. Anything that is written as not on a disk
@@ -300,7 +328,8 @@ may be able to write to.
 - **Only what it did.** An uninstall, and undoing an install that never finished, delete a file only if it is
   still what the install wrote, and put back a value only if it still holds what the install wrote. They
   remove only the entries added to `Path`, a key or folder only if it is empty, and a service or task only if
-  it still runs what was installed. The package's own say-so about how to remove it, such as
+  it still runs what was installed. A file an install replaced comes back, or beside what has changed since, and if that
+  cannot be done the record stays, with the file in it. The package's own say-so about how to remove it, such as
   `UninstallString`, is dropped when installing. Only one install or uninstall runs at a time.
 - **The uninstaller is never in the install folder,** where non-admins may be able to replace it. Settings
   runs it elevated, so it is in the admin-only folder, where anyone can start it and find out it needs
@@ -328,21 +357,29 @@ overwrite what the other PC has, and you may have to enter them again.
 With the License option off, the same goes for license files, values, variables, and options, by the same rules
 that find them when it is on. With it on, licenses come along and credentials still do not.
 
-With the User data option off, what an account keeps for an app in its part of the registry stays behind too: recent files
-and folders, saved sessions, the hosts it has been to. All of it goes but what Windows itself looks in for an app, such as
+**With the User data option off, what an account keeps for an app in its part of the registry stays behind too:** recent
+files and folders, saved sessions, the hosts it has been to. All of it goes but what Windows itself looks in for an app, such as
 file types, COM classes, App Paths, Run values, its entry in Settings, and what that entry in Default apps points at, and a
-plainly named value in the app's own key, no more than two below `Software`, whose whole data is a path in the app's own
-folder. This goes by where a value is, so nothing that finds one can get round it, and it says how many went from
-which app's key and nothing below that, since a host can be what a key is called. So does what a scan finds of an app's data with the option off, which only the screen is told of: a package says nothing of those
-files, what they are called, or a credential among them, and a folder of an account's that you left out is named without its path. What says a folder is an account's is mostly that it is under one called `Users`, so an account's folders somewhere else, as
-an administrator can arrange, can be named in a warning or in what you left out, unless that is the folder of the account being
-scanned or building, which is known. With the option off, a build looks through all it wrote for those last, in each form a value can
-be held in, and says on the done screen where it found any, but it does not change them, and it does not look in the app's own files. An
-account's environment variables only go if all they say is where the app is. A service that ran as someone is said to have run as
-an account of its PC, and is set up as `LocalService` as before. What stays can still say something: an
-ODBC source can name a server and a user, and a plainly named value in an app's own key that points in its folder could be called
-anything. With the License option on as well, a license value in an account's key goes where it was,
-so its key's name goes with it, and so does the path of a license file in an account's folders.
+plainly named value in the app's own key whose whole data is a path in the app's own folder. That value has to be no more than two
+below `Software`, or three if it is called what an installer calls where it installed. This goes by where a value is, so nothing
+that finds one can get round it. It says how many went from which app's key and nothing below that, since a host can be what a key
+is called.
+
+So does what a scan finds of an app's data with the option off, which only the screen is told of: a package says nothing of
+those files, what they are called, or a credential among them, and a folder of an account's that you left out is named without
+its path. What says a folder is an account's is mostly that it is under one called `Users`, so an account's folders somewhere else,
+as an administrator can arrange, can be named in a warning or in what you left out, unless that is the folder of the account being
+scanned or building, which is known.
+
+An account's environment variables only go if all they say is where the app is. A service that ran as someone is said to have run
+as an account of its PC, and is set up as `LocalService` as before. A scheduled task goes without who it was for, and a shortcut in
+an account's folders only if it just opens the app.
+
+With the option off, a build looks through all it wrote for those last, in each form a value can be held in, and says on the done
+screen where it found any. It does not change them, and it does not look in the app's own files. What stays can still say something:
+an ODBC source can name a server and a user, and a plainly named value in an app's own key that points in its folder could be called
+anything. With the License option on as well, a license value in an account's key goes where it was, so its key's name goes with
+it, and so does the path of a license file in an account's folders.
 
 **What this cannot catch.** This goes by names and a few shapes of text, and a heuristic cannot find every secret:
 
@@ -353,10 +390,10 @@ so its key's name goes with it, and so does the path of a license file in an acc
 - Rules that catch more would break more apps, so `TokenizerPath` and `PasswordPolicyVersion` are kept, and a file
   called `tokens.txt` is too. A `.key` in binary is known by its shape alone, so one of a kind of its own is not, and a `.crt`
   is only read up to 1 MiB, so a private key in one bigger than that is not found.
-- With the User data option on, an installer says which PC it came from. With it off or on, what it holds can say more. Some of what a setup keeps of who ran it stays
-  behind: an Inno Setup app's uninstall log, `unins000.dat`, which names the PC and the account and can hold paths in
-  that account's folders, the account, name, and organization in its entry in Settings, and where a Windows Installer setup
-  was run from. A serial typed into a setup is a license like any other, so it stays behind with the License option off, and
+- With the User data option on, an installer says which PC it came from. With it off or on, what it holds can say more. Some of
+  what a setup keeps of who ran it stays behind: an Inno Setup app's uninstall log, `unins000.dat`, which names the PC and the
+  account and can hold paths in that account's folders, the account, name, and organization in its entry in Settings, and where a
+  Windows Installer setup was run from. A serial typed into a setup is a license like any other, so it stays behind with the License option off, and
   with it on, one for a machine-wide app is only reported. An app installed for one account has that account's folders in
   the paths a package records. A shortcut in an account's own folders with the option off goes only if all it does is open the
   app, and is said with no account in it, but a shortcut of any app can name the account in where it points.
@@ -377,10 +414,16 @@ Both executables run elevated and the app is signed, which makes them targets fo
 else's code under their name. [docs/signing.md](docs/signing.md) covers the protections, and why
 the installer stub must never be signed.
 
+An elevated program takes its environment from what its account has set, by how Windows builds it, and that takes no rights to
+change. So what draws a window takes nothing from there, the tools these start get a fixed environment, and Windows' own folders
+are read from the registry. CI sets those variables on the process itself to show that, and has not gone through a real
+`HKEY_CURRENT_USER\Environment` and a real UAC prompt. An account's own folders can still be read from there, such as where the
+chosen light or dark mode is kept, which holds one of two words.
+
 ## Known gaps
 
-[docs/PLAN.md](docs/PLAN.md#open-issues-most-important-first) lists open issues. These are the ones
-that matter most for deciding whether to run an installer:
+These are the ones that matter most for deciding whether to run an installer. [docs/PLAN.md](docs/PLAN.md#open-issues-most-important-first)
+tracks what is planned for them.
 
 - An install location outside a protected folder, such as `D:\Apps`, stays writable by other
   programs on the PC, which can change the installed files afterward. Choose a location under
@@ -410,6 +453,9 @@ that matter most for deciding whether to run an installer:
 - A package that may run its own files can also run them as a Microsoft-signed runtime installer's
   neighbor, since that installer loads DLLs from its folder. This adds nothing to what such a package
   can already do with its own files.
+- The app writes the light or dark mode you choose under `%LOCALAPPDATA%`, by a new file renamed into place, and writes nothing
+  if a link is in the way of that folder. A program of that account could turn the folder into a link between that look and
+  the write. The most that can do is put a file holding `dark` or `light` somewhere an administrator can write.
 
 ## Licensing data
 

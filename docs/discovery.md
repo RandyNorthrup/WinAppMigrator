@@ -147,7 +147,22 @@ to count.
 `app_paths_roots` reads
 `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\<exe>` (64- and 32-bit
 views) for the registered launcher path and the `Path` DLL search directories.
-Used for every method.
+Used for every method. The key has to say it is this program before anything it lists counts, as a program of the same
+file name is not the app.
+
+### The uninstaller
+
+The folder an app's uninstaller is in is a root only if it is the app's (`uninstaller_folder_is_the_apps`): it says so by its name,
+or it is inside where the app's entry says the app is, or with no such place said, it is in `Program Files`. Anywhere else that
+file comes by itself, so a setup run from `D:\Downloads` does not bring all of `D:\Downloads`.
+
+### What every record's folder is asked
+
+Each folder something on record names, other than where the app itself is, is asked by `root_refusal` whether it may be read, is
+written as it is really called, holds what is shared or is Windows', or holds another app's folder. Microsoft's own apps are in
+`Program Files` under the names that say a folder is everyone's, so those names do not count there for them. A folder known only
+because an uninstaller is there is also refused if it is in another app's folder. What a record names of a folder that fails still
+goes, file by file, and the folder is said to be left out, by `folder_left_out_of_the_app`.
 
 ### Install roots from recorded files
 
@@ -246,7 +261,7 @@ file inventory plus a `FootprintLocation` summary. Roots come from:
 
 - The install location and executable directory.
 - `extra_roots` passed by `scan.rs`: service binary dirs, scheduled-task action
-  dirs, app shortcut targets, the uninstaller directory, App Paths dirs, and the
+  dirs, app shortcut targets, the uninstaller's folder if that is the app's, App Paths dirs, and the
   roots from layer 2 (MSI, Inno, NSIS, Squirrel, MSIX).
 - Directories named for the product under `Program Files`, `Program Files (x86)`,
   `ProgramW6432`, `ProgramData`, the `AppData\{Roaming,Local,LocalLow}` of the account being
@@ -382,6 +397,8 @@ copyable_bytes, included }` groups the inventory by root for the report.
 Exact names are what keep a scan from taking another product, and they leave things behind. `near_match.rs`
 finds what is close and says why, for a person to tick. None of it is taken by itself.
 
+At most 200 are offered, since a drive could have any number of folders.
+
 **A folder** directly in `Program Files`, `ProgramData`, or the scanned account's `AppData`, or one level down, is close when
 (`ProductNames::near_match`, all by whole words):
 
@@ -484,13 +501,15 @@ What these rules cannot tell, all of it from a person ticking something that sta
   UTF-16, with or without a byte order mark, and UTF-8. A task with two programs is one task. One whose
   principal is anyone but the account being read or one of Windows' own is left out, with
   `scheduled_task_left_out`, and so is one that says it runs as Windows, on this PC, whose file others than
-  administrators can change, because any account can make a file in that folder.
+  administrators can change, because any account can make a file in that folder. Whoever a task was written by, ran as, or waited for
+  is someone on that PC, so `task_for_whoever_installs_it` takes them out. A package says `WinAppMigrator-whoever-installs-it`, and a
+  restore puts in the SID of whoever is signed in, or refuses if that cannot be told.
 - `shortcut_scan.rs` captures the Start Menu and Desktop shortcuts of the account being scanned and
   of everyone. On this PC, WScript.Shell reads them. On a drive, the `.lnk` files are parsed directly,
   since COM would resolve what it found against this PC.
-- `env_scan.rs` captures environment variables whose value contains the app's path. Of a `Path`, only the app's
-  entries are captured, since the rest is what else is on that PC. It is merged on restore: only entries under the
-  install location are added to the target's value, which is otherwise left alone.
+- `env_scan.rs` captures environment variables whose value contains the app's path, expanding what it says first. Of a `Path`, or any
+  list of folders such as `PYTHONPATH`, only the app's entries are captured, since the rest is what else is on that PC. It is merged
+  on restore: only entries under the install location are added to the target's value, which is otherwise left alone.
 - An app's entry in Settings goes, with its uninstall string replaced by this project's uninstaller, less what is only true
   where it was installed: `InstallSource`, `ModifyPath`, and `WindowsInstaller`, because Windows Installer has never heard of
   the app on another PC, and Inno Setup's `Inno Setup: User`, `User Info: Name`, and `User Info: Organization`, because they
@@ -518,7 +537,7 @@ led to the host's files, and per-user classes are read from `UsrClass.dat`.
 | **`OpenWithProgids`, `OpenWithList`** | Only the app's own line in a list that is the type's, not the rest of it |
 | **Shell extensions** | `shellex` handlers, icon overlays, the `Approved` list, and Explorer namespaces, that name a class of the app's |
 | **`RegisteredApplications`, `Clients`** | Its capabilities have an icon of the app's or open a type of the app's, or what a client opens or shows as its icon is the app |
-| **Firewall rule** | Its program is a file of the app |
+| **Firewall rule** | Its program is a file of the app. One with a `TTK` condition or two `App`s is not carried, as it would let in more or read as another program's |
 | **Font** | Registered by a path to a file of the app. One in `C:\Windows\Fonts` only if a machine-wide install record names it, which is then copied under the install location and never into Windows' folder. One with the app's name that nothing says is its own is reported |
 | **ODBC driver** | Its `Driver` or `Setup` is a file of the app |
 | **ODBC source** | It uses a driver of the app's, or has the app's exact name. One using Windows' driver under another name says nothing of whose it is, so it is missed, on purpose. Its password is left out like any |
@@ -574,6 +593,14 @@ This cannot catch everything. See [SECURITY.md](../SECURITY.md#an-installer-can-
   than two below `Software`, or three if it is called what an installer calls that, whose whole data is a path in one of the app's
   folders. It runs after `license_scan`, so a license value goes by the
   License option either way, and before anything names what it finds, since a key's name can be what was being kept.
+- With it false, `account_traces.rs` takes out the rest of what says whose PC this was, by what each thing is, when a scan is asked for
+  none of an account's data and again when a person has left all of that out of one that was. A shortcut in an account's own folders
+  goes only if it just opens the app, and is said with no account in it, unless the app was installed for that account. A task goes
+  without what else it runs in someone's folders, and goes whole if it was told to work on something there. A variable of an account's
+  goes only if all it says is where the app is. A service that ran as someone says an account of its PC. A DLL found through an account's
+  `Path` is known by its name, and gets a warning in any case, as it may not be on the other PC. What is only read, such as warnings and
+  what is left out, says `<an account>` and the like (`say_nothing_of_who_it_was`). `what_a_package_still_says` then looks through all that
+  was written for the account, profile, PC, and SID, and names on the done screen where it found any, changing nothing.
 - `ScanOptions.include_hashes` — SHA-256 of copyable files during a scan. It dominates scan
   time for large apps. Packaging leaves it off and hashes each file from what it reads into
   the package, so the hash describes what is in the package, including files read in backup
@@ -584,7 +611,8 @@ This cannot catch everything. See [SECURITY.md](../SECURITY.md#an-installer-can-
 `runtime_detection.rs` reads what an app needs from all of its programs, and `prerequisites.rs` resolves each
 to a concrete on-target plan (bundled installer, winget, or a Windows optional feature), verified by a registry probe
 where one exists. A package records which kind and build it needs and any payload it bundled. Everything that decides
-what runs comes from the specs compiled into `prerequisites.rs`, and a payload must be signed by Microsoft.
+what runs comes from the specs compiled into `prerequisites.rs`, and a payload must be signed by Microsoft. What winget fetches is
+winget's to check, and only its own signature is checked here.
 
 **Which programs.** Each of the app's programs counts for its own build, shallowest first, with the DLLs they import from their
 own folders, up to 64 programs, 512 files, and 2 GiB read, and a warning if that was reached. What exists to install or support an
@@ -685,6 +713,9 @@ folder open with no sharing, for as long as it lives. `sweep_leaked_hive_mounts`
 before anything is mounted: it unloads what has no lease held, removes those folders, leaves another run's
 alone, and only touches a key named the way this app names one.
 
+A hive that a plain read is denied is copied in backup mode, where the room it takes is watched and a cancel reaches it, since that brings
+streams its size says nothing of. That route has only been run in tests that do not deny a real hive.
+
 Prerequisite *presence* on the source is left unknown offline (the `is_present` probe reads the live
 registry).
 
@@ -736,18 +767,19 @@ anything happens.
 Safety: ProgramData (and other machine-wide protected roots) require elevation on apply —
 `privilege::destination_requires_admin` gates this; a re-anchored destination's path cannot
 leave its base, and `ensure_within_root` refuses a link anywhere below that base just before
-writing; without `--force`, a headless restore stops before changing anything if any file
-it would write already exists, while the installer's window always overwrites and warns first if the install
-folder has files; and the built-in verification runs with the same user-data setting so it
-checks the real locations.
+writing; without `--force`, a headless restore stops before changing anything if the folder has files
+and no install on record, or if any file it would write already exists; the installer's window refuses a folder with files
+unless an install is on record there, and then warns and replaces; and the built-in verification runs with the same
+user-data setting so it checks the real locations.
 
 ## What a restore refuses
 
 A package is not authenticated, and it directs an elevated process, so scanning conservatively
 is not enough. `restore_policy.rs` holds the rules, as pure functions, and `restore_review.rs`
 applies them to a whole package. Restoring, verification, and the installer's window all work
-from the same review, so verification expects exactly what was allowed. What is refused goes
-in `RestoreResult.refused`, and the rest of the install goes ahead.
+from the same review, with the same options, so verification expects exactly what was allowed. What is refused goes
+in `RestoreResult.refused`, and the rest of the install goes ahead. A list of refusals can never be complete, so values outside
+the app's own keys and the kinds on the list show as a row of their own, `SystemChangeKind::OtherSettings`.
 
 Any rule added for a new kind of capture belongs there too.
 
@@ -771,8 +803,8 @@ app's row in Settings, which is left alone if it is there at all, and the instal
 do not go by this when `--force` is asked for on a command line, but the installer's window will not use a folder with files in
 it without such a record. Outside the install location, without one, no program goes in a folder of a data location that was
 there before the install began, new or replacing, and each file of a license store goes by that too. A data file is replaced.
-What is left out goes in `RestoreResult.refused` by where it would have gone. A service or anything else that names such a file
-is still set up, and runs what was already there, or finds nothing.
+What is left out goes in `RestoreResult.refused` by where it would have gone. If a service or anything else the package sets up would
+run or rely on such a file, the install stops and nothing is installed (`what_would_run`), since it would run what was already there.
 
 An install record that names a key is not taken at its word for a file type's lists and verbs, which have other apps' lines in
 them, so `integration_scan.rs` goes through those. A verb that runs another app's program does not come along with its type, and
@@ -784,8 +816,8 @@ by nothing but their profile or addresses are taken for one, so only the first i
 
 ## Known limitations
 
-Full list, with the planned fixes, in [PLAN.md](PLAN.md#open-issues-most-important-first).
-The ones that most affect what gets captured:
+These are the ones that most affect what gets captured. Open issues are in
+[PLAN.md](PLAN.md#open-issues-most-important-first).
 
 - **Exact names can miss data.** A folder or key the app uses under another name is left
   behind unless an install record names it, a value points at the install folder, or it is close enough
@@ -810,3 +842,5 @@ The ones that most affect what gets captured:
 - **A secret can be missed.** The rules go by names and a few shapes of text. See
   [What is not captured at all](#what-is-not-captured-at-all).
 - **At most 10,000 empty folders come along.** More than that is said, and the rest are not made.
+- **The registry is captured up to a limit:** 1 MiB for a value, and 512 keys and 8 levels for what is under one key, with 100,000 values
+  and a limit on how much it can hold in memory for an app. Reaching one is a warning, and the rest stays behind.

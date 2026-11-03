@@ -26,6 +26,9 @@ the app and the produced installer render identically:
   (`paint_logo`, `paint_icon`).
 - `winappmigrator-ui/src/hardening.rs` — `restrict_dll_search`, called first in both
   executables' `main`. See [signing.md](signing.md).
+- `winappmigrator-ui/src/lib.rs` — `window_options`, which every window opens with, so that how one is drawn takes
+  nothing from the environment. `WGPU_BACKEND` is the only thing it reads, and that can only turn Direct3D 12 off, which is
+  how CI sees what a person is told when graphics cannot start.
 - `winappmigrator-gui/src/lib.rs`: `WinAppMigratorApp` state and the background workers (the
   installed-app inventory, the scan of the selected app, what goes with a choice, how much room a
   drive has, and the build pipeline) over `mpsc` channels and threads.
@@ -97,9 +100,9 @@ if its hash check failed.
 The installer stub is **embedded inside WinAppMigrator** at build time (see
 `winappmigrator-gui/build.rs`, which stages `winappmigrator-installer(.exe)` for
 `include_bytes!`), so the app is a single portable executable. The stub's bytes are
-written straight into the installer, never through a temp file. If the app was compiled
-without an embedded stub (a bootstrap build) it falls back to a sibling
-`winappmigrator-installer.exe`.
+written straight into the installer, never through a temp file. A release build with no stub
+to embed fails, and never looks beside itself for one. Only a development build falls back to a
+sibling `winappmigrator-installer.exe`.
 
 ## What goes in
 
@@ -188,15 +191,20 @@ as it takes to read it) goes in a randomly named folder on the **same drive as t
 folder**, not `%TEMP%`, removed when the build ends. The chosen folder still receives only the
 installer, and its data file if it has one, written beside where it goes under a name of its own and
 renamed when finished. The installer is **named after the application** (`safe_file_stem`), e.g.
-`YAMAHA_DIAGNOSTIC_SYSTEM2_installer.exe`, not after the output folder. Each produced
-installer extracts its package onto the **install destination's drive**, if that has room for it and
-for what gets installed, falling back to the installer's own drive, then the system temp drive.
+`YAMAHA_DIAGNOSTIC_SYSTEM2_installer.exe`, not after the output folder.
+
+Each produced installer unpacks its package somewhere nobody else can have a hold on it
+(`cleanup::create_staging_dir`), in this order: the admin-only folder where installs keep their records, if that is on the
+install destination's drive; the destination's drive, if only administrators can go on controlling what is made there and it
+has room for the package and for what gets installed; that admin-only folder on another drive; and beside the installer or in the
+system's temp folder, which usually fail the same test. If nowhere passes, the install does not go ahead.
 
 Elevated code reads from both folders, so `privilege::ProtectedFolder` restricts them to
 Administrators and SYSTEM before anything is written there, and the work stops if that fails.
 It also holds the folder open with no delete sharing, because an access list does not stop
 whoever controls its parent from renaming it and putting another in its place. The access list
-is skipped without elevation, where there is no boundary to protect.
+is skipped without elevation, where there is no boundary to protect. An install also takes what to
+do from the package it has held open since checking it, and hashes each file again as it copies it into place.
 
 ## The produced installer (`winappmigrator-installer`)
 
@@ -210,15 +218,20 @@ why. Then it reads only the manifest, straight out of the package, and shows the
 **License** options (shown only when `PackageManifest.included_user_data` or `included_program_data`, and
 `included_license_data`, are set), and a **Dependencies** list.
 
-Before anything is installed, a card lists what the package sets up beyond files: services,
-drivers, scheduled tasks, autostart entries, shortcuts, and `Path` changes, from
-`restore_review::system_changes`, which uses the same review as the install. It also lists what
+Before anything is installed, a card lists what the package sets up beyond files, from
+`restore_review::system_changes_restoring`, which goes through the same review as the install, with the same options, so a list is
+kept for each state of the boxes. That is every `SystemChangeKind`: services, drivers, scheduled tasks, autostart entries, shortcuts,
+`Path` changes, environment variables, shell extensions, menu commands, link types, file types, COM, firewall rules, event log
+sources, fonts, ODBC drivers and sources, compatibility settings, Default apps, program names, and other settings, which is what is outside the
+app's own keys and all of those. It also lists what
 was refused, and when it matters, whose folders and settings per-user data goes to, and where
 Documents or Saved Games go if they are somewhere it will not write. The window says whether the
 installer itself is signed and by whom, or "Not signed: publisher unknown". A package's own publisher
 name is not evidence of that, so the two are separate.
 The package also suggests the install location, so **Install** stays disabled while it is a whole
-drive, the Windows folder, or a folder such as `Program Files` that holds other things side by side.
+drive, the Windows folder, a folder such as `Program Files` that holds other things side by side, or a folder with files
+in it and no install on record, which is looked at again when it is clicked. Nothing a package names is touched to work
+this out if it could be on the network.
 
 **Install** and **Preview changes** check that there is room, then unpack the package on a worker
 thread only at that point, hashing each file as it comes out, then run `restore_package_monitored`.
@@ -277,7 +290,8 @@ Do **not** drive the live window with scripted mouse clicks or `SendKeys` (it is
 and disrupts the desktop). Instead:
 
 - `cargo fmt`, `clippy -D warnings`, and the tests. `egui_kittest` drives the real
-  screens of both the app and the installer headlessly, and needs no elevation or GPU.
+  screens of both the app and the installer headlessly, and needs no elevation. Writing previews draws them with
+  wgpu, which needs Direct3D 12 and takes a software renderer if there is no GPU.
 - Nearly all of those tests give the window a scan or a build of its own. One,
   `a_person_who_picks_an_app_and_clicks_create_gets_an_installer`, has it do both for real, by clicking,
   as far as an installer on disk, because a build from the window once failed every time with all the rest
@@ -292,7 +306,17 @@ and disrupts the desktop). Instead:
   ```
 
 - The README's screenshots in `docs/images` are copies of those previews, in both themes,
-  so regenerate them when a screen changes.
+  so regenerate them when a screen changes. Each comes in `-dark` and `-light`:
+
+  | Preview | README image |
+  | --- | --- |
+  | `footprint-` | `app-pick-` |
+  | `footprint-left-out-folder-` | `app-choose-` |
+  | `done-` | `app-done-` |
+  | `installer-ready-` | `installer-` |
+
+  They tell one story, of an app built with both options off, so the sample data has to agree with itself and with what a real
+  scan of that would say.
 - Launch the app and take a single screenshot. Setting `__COMPAT_LAYER=RunAsInvoker`
   starts it without the UAC prompt, for a visual check only.
 

@@ -19,7 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The version comes from rust-toolchain.toml.
+      # Has to be the version in rust-toolchain.toml, which is what cargo goes by.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -113,7 +113,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The version comes from rust-toolchain.toml.
+      # Has to be the version in rust-toolchain.toml, which is what cargo goes by.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -126,7 +126,7 @@ jobs:
         shell: pwsh
         run: cargo test --locked -p winappmigrator-installer --test elevated_round_trip -- --nocapture --test-threads=1
 
-  # A real drive from another PC, real second accounts, and every real scheduled task, on a runner
+  # A VHD built here and made to look like another PC's drive, real second accounts, and every real scheduled task, on a runner
   # of its own, so that none of it can lean on what the round trip left behind.
   elevated-offline-and-profiles:
     name: Elevated offline and profiles
@@ -139,7 +139,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The version comes from rust-toolchain.toml.
+      # Has to be the version in rust-toolchain.toml, which is what cargo goes by.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -165,7 +165,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The version comes from rust-toolchain.toml.
+      # Has to be the version in rust-toolchain.toml, which is what cargo goes by.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -191,7 +191,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The version comes from rust-toolchain.toml.
+      # Has to be the version in rust-toolchain.toml, which is what cargo goes by.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -217,7 +217,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The version comes from rust-toolchain.toml.
+      # Has to be the version in rust-toolchain.toml, which is what cargo goes by.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -243,7 +243,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The version comes from rust-toolchain.toml.
+      # Has to be the version in rust-toolchain.toml, which is what cargo goes by.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -267,7 +267,7 @@ jobs:
           if-no-files-found: error
 
   # The second half, on runners that have never seen it, which build nothing and run nothing of this
-  # project's but those files and one script, and look with Windows' own tools. Each is its own PC, on
+  # project's but those files and two scripts, and look with Windows' own tools. Each is its own PC, on
   # a Windows of its own.
   move-install:
     name: Move between PCs, install on ${{ matrix.os }}
@@ -319,7 +319,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # The version comes from rust-toolchain.toml.
+      # Has to be the version in rust-toolchain.toml, which is what cargo goes by.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -407,7 +407,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # The version comes from rust-toolchain.toml.
+      # Has to be the version in rust-toolchain.toml, which is what cargo goes by.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:

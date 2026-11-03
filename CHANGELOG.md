@@ -4,244 +4,319 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
-- **With the User data option off, far less says who a package came from.** A real look through what is written found the
-  PC and account in a scheduled task's definition, what a warning quoted, a DLL found through someone's own `Path`, a variable's
-  other folders, a service's account, a certificate from an account's own store, and who an app was registered to. Shortcuts in an account's own folders went whole, with their arguments. All of it now goes through
-  one function, which runs when a scan is asked and again at a build, since a person can untick all of a scan's data. What is
-  only read says `<an account>` and the like, in one place, so that a warning added later is covered.
-- **A build takes a last look.** After writing a package with none of an account's data, it goes through the manifest and
-  what it wrote, in each form a value can be held in, for the account, profile, PC, and SID. It names on the done screen
-  where it found any, and never what. That changes nothing and stops nothing: it can be what makes the app work, such as an
-  app of one account's in that account's folders. Every leak so far was a route nobody had thought of.
-- **A scheduled task that ran as a person runs as whoever installs it.** On another PC they are nobody, and registering it for
-  them failed, so such a task never moved. Who wrote it and who a trigger waited for go too, a password nobody has comes to
-  running while they are signed in, and one run for a group of theirs runs as whoever installs it as well, and not as everyone
-  on the PC. This is whichever way the option is. What
-  else it runs from someone's folders goes with the option off, and one that is told to work on something there goes whole.
-- **A shortcut in an account's own folders goes only if it just opens the app.** One with arguments is theirs, and goes with
-  User data. An app of one account's keeps its own, which can have arguments. Where one goes is said with no account in it,
-  and it goes to the Desktop or Start Menu of whoever installs it.
-- **A folder is not the app's for having its uninstaller in it.** A setup run from `D:\Downloads` brought all of `D:\Downloads`,
-  with both options off. Now it brings that file, unless the folder says by its name that it is the app's. App Paths has to say it
-  is this program before anything it lists counts. Every folder a record names goes through the rules near matches do, unless it
-  is where the app itself is, and one that fails is said to be left out. Micro Focus is no longer Microsoft's vendor.
-- **What a walk leaves out is said.** A link in an app's folder was dropped with nothing said, though the docs said otherwise,
-  and a folder 24 levels down was neither walked nor said to be, and was recorded as empty. It goes as deep as every other walk
-  now, 64 levels, and both are named in a warning.
-- **Tools started elevated get a fixed environment, not just PowerShell.** An elevated process gets what its account has set,
-  and DISM and older setup programs load what they have unpacked from `TEMP`. Every tool now gets its `Path` from the Windows
-  folder, `TEMP` from there as well, and the account's folders from what the registry says of that account, and a setup program or DISM gets a folder of its own only administrators can write to,
-  which goes when it has finished. If there is no such place, it does not run. Windows' own folders are read from the registry,
-  not from `SystemRoot`, `ProgramData`, or `ProgramFiles`, everywhere they are asked for.
-- **A runtime older than the one a package brings gets that one.** Every Visual C++ 2015 and later says it is `14.0` by its key's
-  name, so a stale one read as there, and a program that needed a later one did not start. Windows Installer's own check still
-  has the last word. Winget is told which build to get, and is only used from where Windows keeps its own packages.
-- **A hive that can only be read in backup mode is held to the same limits.** A size says nothing of the streams that copy brings
-  too, so it watches how much room it is taking and stops there. A cancel reaches it as well.
-- **A damaged program is one file's problem.** A version resource that says it is longer than it is made the parser panic and the
-  whole scan fail, and an odd optional header was undefined behaviour. Those are now that file's warning, and a test tries
-  hundreds of damaged programs each time. A managed image's metadata is found by its headers, not by the first thing in the file
-  that looks like it, and a .NET program packed into one file says so.
-- **Smaller ones.** One unreadable installed file is one failed check and not a verification that could not run. A firewall rule
-  with a `TTK` condition or two `App`s is not carried, as it would let in more or read as another program's. A runtime config goes by
-  its own program's architecture, and can start with a byte order mark. `.\` in a path is the same file to what relies on it, and a
-  quoted name goes on to its closing quote. A file whose name holds a colon is not read as a drive. Why the folder of records would
-  not do is what an install says when nothing else will either. A cancel reaches near matches and a long install record.
+This is a large release: almost all of what the app and its installers do has changed.
 
-- **Nothing about how a window is drawn comes from the environment.** A program running as the account that started these could
-  set `WGPU_DX12_AGILITY_SDK_PATH` and its version, which elevating keeps, and Direct3D then ran `D3D12Core.dll` from that
-  folder with full rights, past the restriction of DLLs to System32. A check plants a stand-in and sees that none of it
-  runs, in the app, an installer and an uninstaller, on each kind of runner. Without this fix it ran on all of them.
-- **What an installer says it will do is what it does.** Its list was worked out as if user data were coming, and the install
-  then ran with the box as it was. A package could have the list say a file and what runs it were left out, and have them
-  accepted, with the file under the install location. Unticking the box did the same on an honest package. The list and the
-  install now go through one review with the same options, the list changes as the boxes do, and nothing is set up to run a
-  file from a data folder that is not going back to one.
-- **An installer connects to nothing a package names before anyone has agreed to it.** A package names where its app was,
-  and the window asked a share there how much room it had just by opening, which hands the far end the name and password
-  hash of whoever is looking. One check of how a path is written now decides this everywhere, and it knows `//host/share`,
-  `\\?\UNC\`, and `\??\UNC\`, which got past the checks of icons and working folders.
-- **More of what Windows acts on is refused, and what else a package writes is on the list.** Compatibility telemetry's command,
-  .NET's `InstallRoot`, accessibility tools, Control Panel items, Group Policy's startup scripts, `Internet Settings`, Office
-  test, WSMAN plugins, font drivers, PowerShell's execution policy, security notifications, and Internet Explorer extensions.
-  A list of refusals can never be complete, so values outside the app's own keys and what the list has words for now show as
-  one row, "N settings outside the app's own keys", marked for a second look. It can be left out in the app.
-- **A scheduled task says who it really runs as.** That was the first account named anywhere in its definition, including by
-  a trigger, so one running as an administrator could read as a guest's. It now goes by its principal, says when it asks
-  for the highest rights it can have, and marks that for a second look.
-- **An uninstall never loses what an install replaced.** A default uninstall kept a data file an install had put over
-  someone's own, said it had finished, and deleted the only copy of the original with the install's record. So did one for a
-  file changed since. What was replaced now comes back if the file over it is as it was installed, and otherwise goes
-  beside it as `name.before-install`. If that cannot be done, the record stays, with the original in it.
-- **Each file of a license store is held to the rule for where it lands.** Only the store's own folder was checked, so a store could
-  put a `.url` in the Startup folder, or a template where Word or Excel load them, which a license file could not.
-- **A package is unpacked where nobody else can have a hold on it.** It was unpacked beside where it was going and closed to
-  everyone a moment after the folder appeared. In an account's own folders, a program of that account could open it in that
-  moment, keep the right to change its permissions, and open it up again to replace what an install was about to read. It now
-  goes in the admin-only folder where installs keep their records whenever it can, anywhere else has to give nobody that
-  right, and if there is nowhere like that the install does not go ahead. What to do comes from the package held open since
-  it was checked, each file is hashed as it is copied into place, and a copy does not follow a link.
-- **Smaller routes the same review found are closed.** Without `--force`, a script is told the same as the window about a folder with
-  files and no install on record, including when nothing would be replaced, as a DLL added beside another app's programs is
-  loaded by them. Install looks at the folder again when clicked. A link anywhere on the way to the install location is
-  seen. A state folder someone got into first is not taken up by a later run. And rewriting a value has a real limit on what
-  it can cost: a package could make it take many seconds on load, before anyone had agreed to anything.
-- **What an install set to start by itself is started.** A service set to start automatically was only set up, so an app that
-  relies on one looked broken until the next restart. It now starts once what was installed has been read back, each after
-  what it needs. One that will not start is a warning and not a failed install, what starts only when asked stays stopped, and
-  the row for a service says so.
-- **An uninstaller says when its window cannot open.** It only printed to stderr, so Uninstall from Settings seemed to do nothing. It now
-  shows a dialog with the command that does the same without a window.
-- **Sizes read the same on every screen.** The installer said `356.0 GiB` where the app said `356.0 GB`, of the same number worked out the
-  same way. Screens say KB, MB, and GB, by 1024, as Windows Explorer does.
-- **A release is held to carrying the stub it was built from.** It only checked that the app was bigger than the stub, which it is
-  with no stub in it. The new check finds the stub's exact bytes in the app, on every push as well as in a release, and
-  it found an app holding the previous build's stub, of the same size, since `cargo build --workspace` builds the two side by
-  side. So the stub is built first, a release build fails with none to embed, and a release never takes one from beside it.
-- **The installer's window route is run for real.** Everything that installed went by the route for scripts. A test now works a real
-  package through the window, and an elevated one installs through it.
+### Highlights
 
-- **Counts read as counts everywhere, and a tooltip only appears when it has something to add.** `1380` is `1,380`, on all three
-  windows. The list of apps and the install location only offer all of a name or a path when some of it is cut.
-- **A package's reports say what its manifest says.** They were written before anything was copied, so a file that could not be
-  read was still listed as going in, and what the build found to say was missing from them. They are written last now.
-- **Empty folders are capped by what is left.** The limit on how many are made again was applied by the scan, so folders a
-  person went on to leave out counted toward it, and some that were staying were lost. A build applies it now.
-- **Choosing light or dark cannot be made to write somewhere else.** The app runs elevated, and remembers the mode in a folder
-  the account it was started from can change, so a link put there could have had it overwrite any file an administrator can.
-  Now it puts a new file in place, and writes nothing if a link is in the way of the folder. What it reads back is at most a few
-  bytes of a real file.
-- **Windows fit the screen they open on.** At 1024x768 the app hung off the right edge with its close button out of reach, and
-  an installer ran under the taskbar. On a laptop at 125% or 150% scaling there is less room still. A window that would not
-  fit now opens maximized, and can be made as small as the screen is. CI opens all three and has Windows check.
-- **All three windows go by one rule for light and dark, where they run.** An installer used to open in whatever mode the app
-  happened to be in on the PC it was built on, carried in the package, and the uninstaller took it from the installer. So on
-  one PC the app could be light and the installer dark. That is out of the package now. Each window is in the mode you chose in
-  the app, if you are on an account that has, or else the one Windows is in.
-- **A package only says what PC it came from with the User data option on.** Every package said what the PC was called, and
-  the installer showed it, in a file meant to be handed to someone. An account's name already went by that option, and now
-  this does too. A real package is searched for the runner's name on every push. An app can keep the name in its own files
-  and machine-wide settings, which go as they are.
-- **What an account keeps for an app now goes by the User data option.** An app's key under `HKEY_CURRENT_USER` is where it
-  remembers things: 7-Zip the folders and archives it last opened, PuTTY the hosts it has been to and who as. An installer
-  built with the option off used to carry all of that, because none of it is called what it is, so the rules for credentials
-  did not see it. Now, with the option off, all that goes of an account's is what Windows itself looks in for an app, and a
-  value that says where the app's own folder is. The rest goes only with the option on, for the account chosen, and the
-  rules for credentials still apply. The screen and the installer say how much was left out of which app's key, and no more
-  than that, since a host can be what a key is called. A real 7-Zip and PuTTY show this on every push, with marks left in
-  those keys that are searched for through the whole of a package, in every form a value is written in.
-- **A package says nothing of data that is not going in it.** A scan looks at an app's data whichever way the options are, so
-  the screen can say what there is to bring, and every file of that went on to be listed in the manifest and the report in
-  the package, by name, with the account's folders in its path. Now it is only on the screen. A credential among it is not named
-  either, and with the License option off too, a license in an account's folders is named by the file alone.
-- **An app's empty folders come along.** A package went by files, so a folder with nothing in it was not on the other PC,
-  such as windows_exporter's `textfile_inputs`. It is made again now, by the same rules as a file going there, if the rest
-  of what is around it is going, and it is listed for the installer to check. An uninstall takes it away if it is still
-  empty, and says so if not.
-- **A PC with no Visual C++ runtime is tried for real.** Every runner has that runtime, so nothing showed that one without
-  it works. A job now builds Mosquitto the way the app builds things, takes the 64-bit runtime it uses off a runner, shows the broker
-  cannot start, installs, shows the runtime came from what was in the package, and has the broker serve a real client.
-- **Real windows are opened for real.** Every other test of the screens draws them with no window. A job opens the app and
-  an installer on Windows Server 2022 and 2025 and Windows 11 on Arm, on runners with no graphics card, and looks at
-  what is on the screen, and does the same with graphics that cannot start. The message then says what the program needs,
-  and an installer's says how to install without a window. The app's log says which graphics adapter it picked.
-- **What those windows found.** With Windows in light mode, the app opened dark with a white search box and white tooltips,
-  whatever you had chosen, since a style was only set for whichever mode egui thought Windows was in. And the first time it
-  ran it was always dark, as Windows' mode cannot be known before there is a window. Now a window stays in its theme, and until you
-  choose one, that is the one Windows is in.
-- **More credentials are known for what they are.** `.ovpn` profiles, `passwords.txt` and the like, what SQLite keeps beside a
-  store of passwords such as `Login Data-journal`, a key in binary in a `.key` file, a `.pem` or `.key` written in UTF-16,
-  and a `.crt` or `.cer` with a private key in it. A `.crt` with only a certificate in it still goes, even if it cannot be read
-  to tell.
-- **Two smaller things from a review.** A task that runs a program in a folder with a space in its name, such as `plugins
-  Extra`, went when `plugins` was left out, because its path was read as ending at the space. And a near match holding
-  something named like FlexLM's own files made all of `ProgramData\FLEXlm` count as the app's licenses. It now takes that
-  in the app's own folder.
-- **Real apps are moved between PCs on every push.** 7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter, and Git LFS, from
-  their publishers at exact versions and hashes, go through custom, MSI, NSIS, and Inno Setup installers into real
-  installers on one runner, and on to fresh runners on Windows Server 2022 and 2025 and Windows 11 on Arm, where each was
-  and in a folder of another name. Windows is then asked to use what was restored: 7-Zip packs and unpacks, its shell
-  extension is activated by CLSID from the new folder, a `.ppk` opens with Pageant, shortcuts start their programs,
-  Windows finds a program by name, a new prompt finds what `Path` adds, and two services start, answer a real client over a
-  socket, and stop. Every check has to fail with the app not there, before the install and after the uninstall, which
-  runs the string each entry recorded, and the machine is compared with how it was. The publishers' own installers are
-  asked the same first. See [CONTRIBUTING](CONTRIBUTING.md#tests-must-not-change-the-machine).
-- **What real apps found.** A COM class's DLL path with a space in it was read as stopping there, as `C:\Program`, so a class
-  in a folder you left out still went, pointing at nothing. Every package named the account it was built by, even with the
-  User data option off. A shortcut with no icon of its own was given one of `,0`. An Inno Setup app's entry in Settings
-  took along the account that ran its setup and what was typed as a name and organization, and a serial typed into
-  a setup went even with the License option off. Its uninstall log, which names the PC and the account and lists where things
-  were on that PC, went too, and now stays behind. A Windows Installer app's entry took along where its setup was run from,
-  usually someone's Downloads, and said Windows Installer has it, which on another PC it does not. A captured `Path` held the
-  whole of the variable, which is all of what else is on the PC, when only the app's entries are ever used. An app with a
-  32-bit setup and 64-bit programs was listed as x86.
-- **A build from the app itself failed, every time, and now does not.** Only for a while, and never in a release: a build goes by a
-  scan made earlier, which is told of nowhere to write, and it wrote its reports by what the scan had been told. So it looked for a
-  `reports` folder wherever the app happened to be running, and stopped there. Every test of this gave a scan or a build of its
-  own, and so did every job on CI. One now goes the way the window does, and so do the real apps.
-- **You see what goes in an installer before you build it.** Selecting an app looks at it in the background, and the
-  screen says how big the installer can be and whether it fits, what it holds, in plain groups and in the words the
-  installer's own list uses, and what is left out and why, with credentials, licenses, and certificates by name. Picking
-  another app stops the last look, and the window stays usable throughout. A build goes by that look rather than taking
-  another, and each file is still hashed from what is read of it then, so one that changed is right and one that has
-  gone is said to have. Changing the License or User data option, whose data, or where apps are read from looks again,
-  and keeps what you chose.
+- **You see what goes in an installer before you build it,** how big it can be, and whether it fits, and you can leave things
+  out and add what looks related.
+- **Real apps are moved between PCs on every push,** and Windows is asked to use what was restored. That found bugs no fake
+  app had, and they are fixed.
+- **An install can be undone.** Any failure or cancel puts back what it did, and says if anything could not be, and it has its own
+  entry in Settings that removes it, with anything it replaced coming back.
+- **An installer says what it will do before it does anything,** and the list and the install go by one review: services, tasks, autostart
+  entries, file types, COM classes, firewall rules, and the rest, by rules applied when it installs and not only when it was built.
+- **With the User data option off, far less says who built it.** Your PC's name, your account, what apps remember in the
+  registry, and the names of files that were not even going in, were all in every package. See
+  [what to do about installers you already have](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/SECURITY.md#which-versions-get-fixes).
+- **Builds are much faster,** nearly ten times on the largest app measured, and past the 4 GiB Windows can start, an installer is
+  now a small `.exe` and a data file.
+- **A connected drive is not trusted,** and building from one is tested on a VHD made hostile on purpose.
+- **The app is signed,** and every release says where it was built. The installer stub stays unsigned on purpose.
+
+### What changes for scripts
+
+Run from a script, an installer does more than it did, and refuses more:
+
+- **`--apply` no longer needs `--target-root`.** It uses where the app was, if the checks the window makes allow that.
+- **Without `--force`, a folder with files in it and no install on record stops the install,** whether or not any file would be
+  replaced, and so does an existing file. With it, services, tasks, and what ties an app into Windows still stay another
+  app's.
+- **More fails an install.** A step the package asked for that fails now means the install failed and is put back, including
+  registry values, tasks, and licenses, which used to be listed and left. The only exceptions are a service's description, a
+  shortcut anywhere but a Startup folder, and a service that will not start, which is a warning. What the rules refuse is
+  left out and fails nothing, unless what the package sets up relies on it, and then nothing is installed.
+- **More stops an install before it starts:** an app that cannot run on this PC, not enough room on any drive it writes to, a
+  network share or anything under a link as the location, a part of a location Windows would read differently, a whole drive
+  or a folder of Windows', and nowhere private to unpack.
+- **A service set to start automatically is started** once what was installed has been read back. One that starts only when
+  asked stays stopped. Rollback and uninstall stop what they remove.
+- **What it prints has grown:** how much room it needs on each drive, what it sets up, each warning and error and what it is
+  about, what it refused, the install's id, and where the log is. An installer is a windowed program, so pipe it, for example
+  to `Out-String`, to read that and to have `$LASTEXITCODE` set.
+- **An uninstall has its own command line:** `--uninstall <ID>`, with `--quiet` for no window, `--remove-user-data`, and with
+  `--quiet`, `--log <FILE>`. Its entry in Settings has it as `QuietUninstallString`.
+- **`--log <FILE>`** adds a file of your own to the log in `%ProgramData%\WinAppMigrator\logs`, and must not exist yet.
+- **An installer past 4 GiB is two files,** `.exe` and `.wamdata`, which have to stay together with those names. Copy both.
+
+### What goes in an installer
+
+- **You see it first.** Selecting an app looks at it in the background, and the screen says how big the installer can be and
+  whether it fits, what it holds, in plain groups and in the words the installer's own list uses, and what is left out and why,
+  with credentials, licenses, and certificates by name. Picking another app stops the last look, and the window stays usable
+  throughout. A build goes by that look, and each file is still hashed from what is read of it then, so one that changed is
+  right and one that has gone is said to have. Changing the License or User data option, whose data, or where apps are read
+  from looks again, and keeps what you chose.
 - **You can leave things out.** Each folder of the app, each service, task, startup item, and shortcut, and each kind of
   what ties it into Windows, has a box to untick, and the size and the room it needs follow at once. What holds the main
   program, or what it cannot start without, stays. What is left with nothing to run goes too, and the screen says so: a service
-  that runs a file in a folder you left out is not set up on the other PC, and neither is a task told to use one, or a service that
-  needs one you left out. An installer says what its builder
-  left out and added. A license goes by the License option alone, so one in a folder you left out still goes in, and the
-  screen names it.
+  that runs a file in a folder you left out is not set up on the other PC, and neither is a task told to use one, or a service
+  that needs one you left out. An installer says what its builder left out and added. A license goes by the License option
+  alone, so one in a folder you left out still goes in, and the screen names it.
 - **Near matches are offered, not lost.** What exact names leave out and looks related is listed, unticked, each with why:
   a folder whose name starts with or holds the product's, or starts with its publisher's, and an entry hidden from the list
   of apps by the same publisher or beside the app, such as NVIDIA App's `NVIDIA Container`. Ticking one looks at the app
-  again with that as one more root, by the same rules as any other, so what looks like a credential still stays out and a
-  license still goes by its option. A shared folder, another app's, a link, anything that holds one of those, a path by a short
-  name such as `PROGRA~3`, or a hidden entry that calls itself another app is never offered, and a scan takes only what it would
-  offer itself. Run over the 160 apps listed on one real PC, it offered no shared folder and nothing of another listed app's. Some offers are close and still not the app's, such as a portable copy of another product of the same publisher that no list names, which is why each starts unticked and says why. See
-  [the rules](docs/discovery.md#near-matches).
-- **Two things an earlier review found.** What is worked out about a license store's files before an install, for which
-  folders were already there and how much room it takes, went by the path a package said, and the install by that path
-  cleaned. So a file saying `C:\Windows\x.exe` was looked at as being there and written under the store, and a program
-  could go in a data folder that was already there. Both go by the one path now. And `.runtimeconfig.dev.json`, which
-  says what a .NET program loads, counts as a program for that rule, as `.runtimeconfig.json` already did.
-- **A build reads each byte of an app once, and an install reads less.** An app's files used to be copied to a
-  staging folder, hashed there, zipped from there, and hashed again: about five reads of every byte, and up to three
-  times the installer's size on disk. They now go straight from where they are into the installer. What goes in the
-  manifest is the hash of what was read, and what goes in the package is compressed from those same bytes, so a file
-  changing during the build cannot make the two disagree. The finished installer is then read back and checked,
-  entry by entry, against the manifest. An install hashes each file as it unpacks it, and no longer reads them all
-  twice more in staging. It still reads back what it installed, and that is what "Reinstall hashes valid" goes by.
-- **Compression runs on every core, and leaves compressed data alone.** Files are compressed in parallel, in a fixed
-  order, into a standard zip, with memory bounded however big they are. What a sample shows will not compress is
-  stored, whatever it is called, and a mislabeled file is compressed, whatever it is called. See the numbers below.
-- **There has to be room before anything starts.** A build works out the most it could take and checks every drive it
-  writes to, and shows that in the window. An install does the same for the staging folder, the install location, and
-  what it keeps of what it replaces, in the window and from a command line. If there is not room it says how much is
-  needed and how much is free, and nothing is changed. A drive that will not say is said not to have said.
-- **Past 4 GiB, an installer is a small loader and a data file.** Windows cannot start an executable that large, and
-  a build used to stop there. The loader's footer holds the data file's SHA-256, so a signature on the loader covers it:
-  changing one byte of the data file leaves the signature valid and is refused before anything in it is read, and
-  changing the footer breaks the signature. It looks for the data file only beside itself, follows no link to it, and
-  holds it so that it cannot change. The window says the two files have to stay together. A package that fits still
-  comes out as one executable, with room left for a signature.
-- **An app that cannot run on this PC is refused before anything changes.** A package records the Windows and architecture
-  it came from, read from the hives on a drive, and what each of its programs and drivers needs, from their own headers. x64 on
-  32-bit Windows, a driver for another architecture, and a program that says it needs a newer Windows are refused. x64 on
-  Arm64, and a Windows older than the source that the program's headers allow, are in the list you agree to, since
-  they may well work.
-- **What a scan reads came down too.** Only the parts of a large program that are looked at are read, its headers, import
-  tables, resources, and signature, and not its code. On 2,779 real programs that found the same as reading each whole, from 22%
-  of the bytes. The size of a file comes from its folder's listing rather than being asked for again.
-- **A move between two PCs has been run for real.** Installers built on one runner, on Windows Server 2025 (build 26100),
-  are installed on others that have never seen the app, and checked with Windows' own tools. On another Windows Server
-  2025 nothing differs. On Windows Server 2022 (build 20348) it says this Windows is older than the app's, and refuses
-  an app with a file named `aux.h`, which there opens as a device. On Windows 11 on Arm (build 26200) it says the
-  programs run through an emulator, and they start.
+  again with that as one more root, by the same rules as any other. A shared folder, another app's, a link, anything that
+  holds one of those, a path by a short name, or a hidden entry that calls itself another app is never offered. Some offers
+  are close and still not the app's, which is why each starts unticked and says why. See
+  [the rules](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/discovery.md#near-matches).
+- **Footprints match the product, not everything that sounds like it.** Folders and registry keys match the product's whole
+  name, or `Vendor\Product`, never a substring. A publisher or the install folder's parent can only qualify a parent folder.
+  On one test PC, VS Code went from 175,182 files to about 68,900: Visual Studio and the rest of `AppData\Local\Programs` are
+  gone. Firefox no longer takes Thunderbird, NVIDIA App no longer takes `Razer\Installer`, and `Software\Logitech` is no longer
+  part of Git.
+- **A folder is not the app's for having its uninstaller in it.** A setup run from `D:\Downloads` brought all of `D:\Downloads`,
+  with both options off. Now it brings that file, unless the folder says by its name that it is the app's. App Paths has to say it
+  is this program before anything it lists counts. Every folder a record names is asked much the same as a near match is, unless it
+  is where the app itself is. One that fails is said to be left out, and what the record names in it still goes, file by file.
+- **Install records are read properly.** Roots from MSI, Inno Setup, and NSIS records are the deepest folder that holds the
+  recorded files, and never a shared one, and they also name registry keys, which is how `Software\GitForWindows` is found.
+  Inno Setup logs are read by their blocks and length prefixes: Git for Windows went from no paths resolved to 9,220 files, and
+  old ANSI logs work too. A Burn bundle's files come from its hidden MSI packages. The MSI database is read once per scan.
+- **Nothing inside an install folder is skipped,** however it is named. VS Code was losing 1,173 files under `node-compile-cache`.
+- **An app's empty folders come along,** up to 10,000. A package used to go by files alone, so windows_exporter's `textfile_inputs`
+  was not on the other PC. An uninstall takes one away if it is still empty.
+- **What a walk leaves out is said.** A link in an app's folder is named in a warning, and so is what is more than 64 levels down.
+- **The main executable is the application.** Uninstallers, updaters, Windows hosts, and installers' cached copies are
+  rejected, and App Paths and Start Menu shortcuts are consulted. Git was `unins000.exe`, and is now `git-bash.exe`. NVIDIA App
+  was `rundll32.exe`, whose name alone matched 1,258 registry entries. An app with a 32-bit setup and 64-bit programs is listed
+  by its program, not as x86. An entry with no program at all, such as a driver, fails and says why.
+- **The list shows real applications.** Entries marked `SystemComponent=1` are left out, as in Windows' own installed-apps list.
+  They are parts of other products: on one test PC they were 481 of the 641 rows.
+- **What ties an app into Windows comes along.** COM type libraries, interfaces, AppIDs, and ProgIDs, per-user 32-bit classes,
+  URL protocols, `OpenWithProgids`, context menu handlers, icon overlays, the `Shell Extensions\Approved` list, Explorer
+  namespaces, `RegisteredApplications` and `Clients` entries, firewall rules, fonts, ODBC drivers and sources, event log sources,
+  compatibility settings, and 32-bit Run keys. Each is the app's by what it points at, with an exact name only for a data source,
+  so another app's class or file type does not come along. A COM class's DLL path with a space in it is read whole.
+- **Certificates are reported, and never installed.** A package cannot add to a trust store. The ones an app seems to rely on are
+  named for you to decide about.
+- **Runtimes are read from all of an app's programs, as what they are.** A Visual C++ DLL is the version its name says, and
+  Windows' own `msvcrt.dll` no longer counts as one. Every version from 2005 has its own installer, and every .NET version is no
+  longer .NET 8: it comes from `runtimeconfig.json` and the assembly's own metadata, which also tell .NET Framework from modern .NET.
+  .NET 6 to 10 are now embedded when you build, like Visual C++. A runtime with no installer here is named in a warning, and nothing
+  is installed in its place. A Visual C++ runtime older than the one a package brings gets that one. A .NET program packed into one file says so,
+  and a program that cannot be parsed is that file's warning and not a failed scan.
+- **Scheduled tasks are read from their files,** on a live scan too. They went through PowerShell one at a time, and one character
+  that broke the JSON lost all of them. A task with two programs is one task, and a task whose second program is the app's is found.
+- **Fourteen warnings about old folder names are gone.** Every elevated scan warned about `Application Data`, `My Music`, and the
+  junctions like them.
 
-  Building real apps on a 20-thread PC, before and after, by Windows' own count of what the process read, with
-  `wam_measure`:
+### What a package says about who built it
+
+Installers get copied and shared, and they said far more than anyone would expect. With the User data option off:
+
+- **What an account keeps for an app in the registry stays behind.** An app's key under `HKEY_CURRENT_USER` is where it remembers
+  things: 7-Zip the folders and archives it last opened, PuTTY the hosts it has been to and who as. None of that is called what
+  it is, so the rules for credentials did not see it. All that goes of an account's is what Windows itself looks in for an app,
+  and a value that says where the app's own folder is, and the screen says how much was left out of which app's key. So the app
+  should start on the other PC much as it would for someone new, except for what it keeps among its own files and machine-wide settings.
+- **A package says nothing of data that is not going in it.** Every file of an app's data was listed in the manifest and the
+  report, by name, with the account's folders in its path.
+- **The PC's name and the account's are gone,** from every package, including what a scheduled task, a warning, a service's account,
+  or a certificate from an account's own store said. An app can keep the name in its own files and machine-wide settings, which go
+  as they are.
+- **A shortcut in an account's own folders goes only if it just opens the app.** One with arguments is theirs, and goes with User
+  data. An app of one account's keeps its own, and where one goes is said with no account in it.
+- **Environment variables say less.** A list of folders such as `Path` keeps only the app's entries, and an account's variable goes
+  only if all it says is where the app is. A captured `Path` used to hold all of what else was on the PC.
+- **What a setup keeps of who ran it stays behind:** an Inno Setup app's `unins000.dat`, and the account, name, and organization in
+  its entry in Settings, and where a Windows Installer setup was run from. So does what said Windows Installer has the app, which on
+  another PC it does not.
+- **A build takes a last look.** It goes through the manifest and what it wrote, in each form a value can be held in, for the
+  account, profile, PC, and SID. It names on the done screen where it found any, and never what. That changes nothing and stops
+  nothing, since it can be what makes the app work.
+
+Either way:
+
+- **A scheduled task that ran as a person runs as whoever installs it.** On another PC that person is nobody, so who wrote it and who
+  a trigger waited for go too, a password nobody has comes to running while they are signed in, and one run for a group of theirs
+  runs as whoever installs it as well, and not as everyone on the PC. With the option off, what else it runs from someone's folders
+  goes, and one told to work on something there goes whole.
+
+### Credentials and licenses
+
+- **Credentials are left out of a package, and named.** Values, service settings, variables, command-line options, and files that
+  look like passwords, tokens, or private keys are not captured at all, even with the License option on, so a package has nothing to
+  overwrite what the other PC has. That includes `.ovpn` profiles, `passwords.txt`, what SQLite keeps beside a store of passwords,
+  and a private key in a `.pem`, `.key`, `.crt`, or `.cer`, including a `.key` in binary and a `.pem` or `.key` in UTF-16. A `.crt`
+  with only a certificate in it still goes.
+  This goes by names and shapes of text, so it cannot catch everything, and an installer should still be handled as being as
+  sensitive as the PC it came from.
+- **The License option means what it says.** With it off, license files, values, service settings, options, and variables are not
+  captured at all, and only their names are noted, and that includes a serial typed into a setup. A framework's license store and a
+  `*_LICENSE_FILE` variable have to be tied to the app.
+
+### Installing
+
+- **An installer says what it will do.** Before installing, its window lists the services, drivers, scheduled tasks, autostart
+  entries, shortcuts, `Path` changes, and what ties the app into Windows, what the rules left out, and whether the installer is
+  signed and by whom, or "Not signed: publisher unknown". A preview's list leads with those. The list and the install go through one
+  review with the same options, and it changes as the boxes do. What depends on what is on the PC, such as a service of that name
+  already being another app's, can only be seen as it installs, and is then left alone and said.
+- **An installer checks what its package asks for.** A package can come from a hostile or odd source drive and nothing
+  authenticates it, so the rules are applied when restoring, not just when scanning. Registry keys no app install should write are
+  refused, including Image File Execution Options, Winlogon, `AppInit_DLLs`, LSA, Session Manager, KnownDLLs, certificate stores,
+  the file types that start programs, Group Policy's startup scripts, compatibility telemetry's command, and PowerShell's execution
+  policy. Under `SYSTEM`, only the `Parameters` and `Instances` keys of a service the package restores are allowed. Services,
+  shortcuts, tasks, and Run values must run a file the package installs. Environment variables Windows and other programs depend on
+  are refused.
+- **What else a package writes is on the list.** A list of refusals can never be complete, so values outside the app's own keys and
+  what the list has words for show as one row, "N settings outside the app's own keys", marked for a second look when they are in
+  Microsoft's keys. It can be left out in the app.
+- **Being told a folder is the app's does not make it so.** A package suggests its install location, so what names that folder only
+  counts as an earlier install if a record on this PC says one was there. The window does not use a folder with files in it without
+  such a record, and looks again when Install is clicked. Outside the install location no program goes in a folder that was already
+  there without one. A service, task, or COM class already on the PC that belongs to something else is left alone, `--force` or not,
+  and so is anything else there as something else's, including `http`, a class in either view or hive, and an event source in any log.
+- **What ties an app into Windows goes by the rules, in the list, and comes back out.** What it runs or loads has to be a file the package
+  installs. Firewall rules go through `netsh`, for one program, never all. Fonts in `C:\Windows\Fonts` are copied to the install
+  folder only if a machine-wide install record names them. A rollback and an uninstall take each of them back out.
+- **An installer connects to nothing a package names before anyone has agreed to it.** Opening its window could have connected to a
+  share a package named, which hands the far end the name and password hash of whoever is looking. One check of how a path is written
+  now decides this everywhere, and it knows `//host/share`, `\\?\UNC\`, and `\??\UNC\`.
+- **There has to be room before anything starts.** A build works out the most it could take and checks every drive it writes to. An
+  install does the same for where it unpacks, the install location, and what it keeps of what it replaces. If there is not room it says
+  how much is needed and how much is free, and nothing is changed. A drive that will not say is said not to have said.
+- **An app that cannot run on this PC is refused before anything changes.** A package records the Windows and architecture it came
+  from, and what each of its programs and drivers needs, from their own headers. x64 on 32-bit Windows, a driver for another
+  architecture, and a program that says it needs a newer Windows are refused. x64 on Arm64, and a Windows older than the source that the
+  program's headers allow, are in the list you agree to, since they may well work.
+- **What an install set to start by itself is started.** A service set to start automatically was only set up, so an app that relies on
+  one looked broken until the next restart. Now it starts each after what it needs, and one that will not start is a warning.
+- **A package is unpacked where nobody else can have a hold on it.** It goes in the admin-only folder where installs keep their records
+  when it can, anywhere else has to give nobody the right to go on changing what is made there, and if there is nowhere like that the
+  install does not go ahead. A drive that keeps no permissions, such as FAT32 or exFAT, is not used for it. What to do comes from the
+  package held open since it was checked, and each file is hashed as it is copied into place.
+- **An installer checks its whole package first.** A SHA-256 of the package is checked before anything is parsed, so a truncated copy or
+  an edited manifest is refused at once. Every copied file is hashed as it goes into the package, a file with no hash fails verification,
+  and driver images and license store files are checked too. While the installer runs, its own file cannot be changed or replaced.
+- **An install location is judged by where it really is.** `C:\.\Windows\x`, `\\?\C:\Windows\x`, a short name, and a link could all pass
+  for somewhere else. A network share is refused, and so is a location under a link, since whoever can write beside the link can
+  change where it leads. A volume mounted on a folder is allowed if Windows gives that folder as where it is. A Startup folder, or any
+  folder that belongs to Windows or whose contents run by themselves, is refused as a location.
+- **Writes cannot be carried somewhere else.** Each file is written with the way there held, beside its destination, and renamed into
+  place, so a hard link there is replaced rather than written through, and making a write wait does not lead it anywhere else.
+- **Services come back as they were.** A service's path is stored quoted, so that `C:\My Apps\Foo Bar\svc.exe` cannot be hijacked by
+  `C:\My Apps\Foo.exe`. Arguments, the `Parameters` key, the display name, a delayed start, LocalService, and NetworkService are kept.
+  A custom account cannot be restored without its password, so its service is set up as LocalService, with less access rather than
+  more, and the installer says so. Verification compares the binary, arguments, and account exactly.
+- **Drivers are checked before they are registered,** and found wherever they live, including under `Program Files` and by `\??\` paths.
+- **Paths are rewritten exactly.** `C:\App\a.exe` no longer becomes `C:\App22\a.exe` for a target of `C:\App2`, and a rule for
+  `C:\Program Files\Git` no longer touches `C:\Program Files\GitHub CLI`. A list of paths in a `REG_MULTI_SZ` value follows too.
+- **Registry links are refused,** and so are names Windows opens as devices, such as `CON`. A file named like one with an extension, such
+  as `aux.h`, stops an install before Windows 11 with a clear message. It reached the device, which threw its data away and reported a
+  failed hash check. This has been run on Windows Server 2022, build 20348, and not on Windows 10 itself.
+- **Documents and Saved Games go to the real folders,** wherever the registry says they are, including moved by OneDrive. A folder of
+  either outside your profile is not written to: those files go under the install folder, and the installer says so before it starts.
+  Files in PowerShell's profile folders are refused, as a Startup folder is, because PowerShell runs them.
+- **Shortcuts only land in this PC's own Desktop and Start Menu folders,** so `C:\Users\alice\Desktop` is no longer created on a PC
+  with no alice. Each file of a license store is held to the rule for where it lands, so it cannot put something in a Startup folder.
+- **`Path` is merged, never replaced.** Only the app's own entries are added, and `PSModulePath` the same way.
+- **The installer's window opens at once** however large the package is, and shows the hash check. It unpacks after you click, reading
+  the package in place, shows progress for each step, can be cancelled, and offers Close and Open install folder when done.
+
+### Undoing an install
+
+- **An install keeps a journal,** in an admin-only folder of its own under `%ProgramData%\WinAppMigrator\installs`, recording what each
+  change replaces before making it. Any failure, a cancel, and the check after installing put it back in reverse order and
+  say what could not be, keeping the record to try again. An install killed or cut off by a power cut is found and undone by the next one. Without the record being
+  safe to keep, an install does not start, and only one install or uninstall runs at a time. Runtimes it installed stay.
+- **An app installed this way has an uninstaller.** Its entry in Settings runs a bare copy of the stub kept in that same folder, never in
+  the install folder. It undoes only what the journal says that install did: a file or value that has changed since is kept and
+  reported, only added `Path` entries come out, what you added stays, and so do user data and licenses unless you ask. A file that what it
+  kept still uses stays with it. It stops a service before deleting it. It can be run again if it could not finish, and removes itself after it
+  exits. If part of it is on a drive that is not connected, it says so, and its entry stays to finish from. The source PC's uninstall
+  strings do not survive.
+- **An uninstall never loses what an install replaced.** What was replaced comes back if the file over it is as it was installed, and
+  otherwise goes beside it as `name.before-install`. If that cannot be done, the record stays, with the original in it.
+- **An uninstaller says when its window cannot open,** with the command that does the same without a window.
+
+### Connected drives and other accounts
+
+- **Building from a connected drive works.** It compared the registry's `C:\` paths with `E:\` paths, so COM classes, file associations,
+  Run keys, App Paths, and environment variables never matched. They are compared as the source PC called them now, per-user classes come
+  from `UsrClass.dat`, and shortcuts are parsed from their `.lnk` files. The installer offers the app's location on its PC instead of
+  the drive's letter. CI runs this on a VHD built on the runner and made to look like another PC's, not a real disk from one.
+- **A connected drive is not trusted.** What it says can only be a path on it, and nothing on it can lead a scan to this PC's files or to
+  the network. A rooted, relative, `..`, other-drive, or UNC path is not followed, and neither is any link on the drive, and what was not
+  followed is listed. Everything found on a drive is asked about by name before it is looked at, and there are limits on what a drive can
+  make this read and copy, including hives, logs, and how much of the registry is captured.
+- **The app no longer writes to a connected drive.** Loading a hive where it is can replay its logs into it, so the hives are copied to an
+  administrators-only folder and the copies are loaded. A hive that can only be read in backup mode is held to the same limits. A run
+  that dies with hives loaded is swept when the app next starts.
+- **A share is not looked at on this PC either.** A value in any account's registry could name one, and looking would connect as the
+  administrator running this. A Documents folder on a share is left out, with a warning, and an app on a share cannot be built from.
+- **An installer holds one account's data.** Every profile's data used to collapse into one. A scan reads whoever is signed in, the app's
+  owner if it was installed for one account, or whoever you choose in **Whose data**, which only appears when there is a choice.
+  Another account's folders are left out, however a value came to name them, and so are scheduled tasks that run as someone else.
+- **What an account can write with no rights no longer decides what is packaged.** An uninstall entry in its own registry or a shortcut could
+  name another account's folder, or any folder an administrator can read. An app installed for one account now has to be in that account's
+  profile or owned by it, and gets nothing machine-wide by its name. A machine-wide app does not go by an account's shortcuts to find its
+  program, and its install log is only believed if only administrators can change it. A build asks again around each copy whether a file leads
+  into another account's folders or through a link that is new since the scan.
+- **Another administrator at the UAC prompt no longer gets the data.** Reading and restoring go by whoever is signed in, through
+  `HKEY_USERS\<SID>`, and the installer says so when that is not the account running it. If it cannot be told, it says that, and per-user data
+  and settings are left out rather than guessed at.
+
+### The programs themselves
+
+- **The app is signed.** Releases sign `winappmigrator.exe` with Azure Artifact Signing through GitHub's OIDC token, with no stored secret, and
+  record build provenance. See [signing](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/signing.md). The installer stub deliberately stays unsigned: a signed stub could be given someone
+  else's package hidden in its certificate table while keeping a valid signature (CVE-2013-3900). Building refuses a signed stub, and the stub
+  ignores anything inside a certificate table and refuses anything after it. A finished installer can be signed with `scripts/sign.ps1`.
+- **A release has to be what it says.** Its tag has to match the version in `Cargo.toml`, and it has to carry the stub it was built from, byte for
+  byte, a check CI runs on every push too. A release build fails with no stub to embed, and a release never takes one from beside it.
+- **Nothing about how a window is drawn comes from the environment.** `WGPU_DX12_AGILITY_SDK_PATH` and its version could have Direct3D run
+  `D3D12Core.dll` from any folder, past the restriction of DLLs to System32. A check plants a stand-in and sees that none of it runs, in the app, an
+  installer, and an uninstaller, on each kind of runner. Without this fix it ran on all of them.
+- **Tools started elevated get a fixed environment.** An elevated program gets its environment from what its account has set, by how Windows
+  builds it, and DISM and older setup programs load what they have unpacked from `TEMP`. Every tool now gets its `Path` and `TEMP` from the Windows
+  folder, and a setup program or DISM gets a folder of its own only administrators can write to, or does not run. Windows' own folders are read
+  from the registry, not from `SystemRoot`, `ProgramData`, or `ProgramFiles`. PowerShell's module path and tools come from the Windows folder.
+- **Windows' tools and DLLs are the real ones.** System tools run by absolute path, DLLs load from System32 only, and the C runtime is linked
+  statically, so an installer can start on a clean PC and nothing can be planted for it. The stub is written straight into an installer, never
+  through `%TEMP%`, and winget is found by asking Windows, with its signature checked, not through `PATH`.
+- **A package no longer chooses what runs elevated for a runtime.** The URL, arguments, winget id, Windows feature, and registry probe come from
+  specs compiled into the installer. A payload must be validly signed by Microsoft when it is downloaded and again just before it runs. Downloads
+  are HTTPS only, including on redirects. With no payload, winget is used if it is there, and what it fetches is winget's to check.
+- **Staging folders are locked down.** The installer's and the app's are restricted to Administrators and SYSTEM before anything is written to
+  them, read back to be sure, held open, and the work stops if that fails.
+- **Choosing light or dark cannot be made to write somewhere else.** The app remembers the mode in a folder the account it was started from can
+  change, so a link put there could have had it overwrite any file an administrator can. It now puts a new file in place, and writes nothing if a
+  link is in the way of the folder.
+- **PowerShell escaping covers typographic quotes,** so a crafted file or task name on a scanned drive cannot run as code. Task definitions no longer
+  go through a predictable `%TEMP%` file. Elevation is asked of `whoami`, once, and not knowing is a failure.
+- **Logs are kept,** in `%ProgramData%\WinAppMigrator\logs`, which only administrators can read, with a limit on size and on how many are kept. They
+  hold paths and key names only, and a test pins that.
+- **Dependencies are upgraded:** `zip` to 9.2, `eframe` to 0.37, and `roxmltree` to 0.21, clearing six `cargo audit` advisories.
+
+### Speed and size
+
+- **A build reads each byte of an app once.** An app's files used to be copied to a staging folder, hashed there, zipped from there, and hashed
+  again. They now go straight from where they are into the installer, and what goes in the manifest is the hash of what was read, so a file changing
+  during the build cannot make the two disagree. The finished installer is then read back and checked against the manifest. An install hashes each
+  file as it unpacks it, and reads back what it installed.
+- **Compression runs on every core, and leaves compressed data alone.** Files are compressed in parallel, in a fixed order, into a standard zip,
+  with memory bounded however big they are. What a sample shows will not compress is stored, whatever it is called.
+- **Past 4 GiB, an installer is a small loader and a data file.** The loader's footer holds the data file's SHA-256, so a signature on the loader covers
+  it: changing one byte of the data file is refused before anything in it is read, and changing the footer breaks the signature. A package that fits
+  still comes out as one executable.
+- **A scan reads less.** Only the parts of a large program that are looked at are read. On 2,779 real programs that found the same as reading each
+  whole, from 22% of the bytes.
+- **PowerShell calls no longer search every module.** On CI's Windows Server, a small install went from 6 minutes 33 seconds to 6.4 seconds.
+
+  Building real apps on a 20-thread PC, before and after, by Windows' own count of what the process read, with `wam_measure`. The file cache was not
+  controlled for, so take the times as best cases:
 
   | App | Files | Size | Time | Bytes read, as a share of the app | Most on disk | Installer |
   | --- | --- | --- | --- | --- | --- | --- |
@@ -252,376 +327,71 @@ All notable project changes are tracked here.
   | Ableton Live 11 Lite | 47,023 | 4.3 GiB | 200.5 s, 67.9 s | 4.8x, 3.1x | 7.4 GiB, about 6 GiB | 2.96 GiB, 2.98 GiB |
   | Visual Studio Community 2022 | 53,504 | 11.0 GiB | 857.1 s, 87.7 s | 4.4x, 2.0x | 14.9 GiB, 7.6 GiB | 3.77 GiB, 3.77 GiB |
 
-  What is left after each app's one read is the stub, for a build that reads it from a file, and two reads of the finished
-  package to check it. The last two rows are over 4 GiB before compressing and under it after, so each is also copied once
-  to go after the stub, which is what the most on disk comes from. A scan's own reads are in those figures too.
+  What is left after each app's one read is the stub, for a build that reads it from a file, and two reads of the finished package to check it. The
+  last two rows are over 4 GiB before compressing and under it after, so each is also copied once to go after the stub, which is what the most on disk
+  comes from. A scan's own reads are in those figures too.
 
-- **What ties an app into Windows now comes along.** COM type libraries, interfaces, AppIDs, and ProgIDs, per-user
-  32-bit classes, URL protocols, `OpenWithProgids`, context menu handlers, icon overlays, the `Shell Extensions\Approved` list,
-  Explorer namespaces, `RegisteredApplications` and `Clients` entries, firewall rules, fonts, ODBC drivers and sources,
-  event log sources, compatibility settings, and 32-bit Run keys. Each is the app's by what it points at, with an exact name
-  only for a data source, so another app's class or file type does not come along, on this PC or a connected drive.
-- **All of that goes by the rules, in the list you agree to, and comes back out.** What it runs or loads has to be a file the
-  package installs. Firewall rules go through `netsh`, for one program, never all. Anything the PC already has as something
-  else's stays, `--force` or not, including `http`, a class in either view or hive, and an event source in any log. A rollback
-  and an uninstall take each of them back out. Fonts in `C:\Windows\Fonts` are copied to the install folder only if a
-  machine-wide install record names them, and otherwise reported.
-- **Being told a folder is the app's does not make it so.** A package suggests its install location, so what names that
-  folder only counts as an earlier install if a record on this PC says one was there. The installer's window no longer
-  uses a folder with files in it without such a record, a command line still can with `--force`, and outside the install
-  location no program goes in a folder that was already there without one. An app's row in Settings stays that app's, and
-  the install gets its own.
-- **Certificates are reported, and never installed.** A package cannot add to a trust store. The ones an app seems to rely on are
-  named for you to decide about.
-- **Credentials are left out of a package, and named.** Values, service settings, variables, command-line options, and files that
-  look like passwords, tokens, or private keys are not captured at all, even with the License option on, so a package has
-  nothing to overwrite what the other PC has. This goes by names and shapes of text, so it cannot catch everything, and an installer
-  should still be handled as being as sensitive as the PC it came from.
-- **The License option now means what it says.** With it off, license files, values, service settings, options, and variables are not
-  captured at all, and only their names are noted. Before, a license file in the install folder and every value under an app's keys
-  came along anyway, and a variable's value was recorded. A framework's license store and a `*_LICENSE_FILE` variable also have to be tied
-  to the app now.
-- **Runtimes are read from all of an app's programs, as what they are.** A Visual C++ DLL is the version its name says, and Windows' own
-  `msvcrt.dll` no longer counts as one. Every version from 2005 has its own installer, and every .NET version is no longer .NET 8:
-  it comes from `runtimeconfig.json` and the assembly's own metadata, which also tell .NET Framework from modern .NET. .NET 6 to 10 are
-  now embedded when you build, like Visual C++. A runtime with no installer here is named in a warning, and nothing is installed in its place.
-- **The installer prints what it will set up before it starts,** when run from a script, and what each warning and error is about.
-- **Building from a connected drive works, and has been run for real.** It compared the registry's `C:\` paths
-  with `E:\` paths, so COM classes, file associations, Run keys, App Paths, and environment variables never
-  matched, and it had never been tried on a real drive. They are compared as the source PC called them now, so
-  all of that comes along. So do per-user classes, from `UsrClass.dat`, and shortcuts, whose `.lnk` files are
-  parsed. A service or scheduled task from a drive used to be refused for running a file the package did not
-  install, because the two were called different things, and that is fixed too. The installer offers the app's
-  location on its PC instead of the drive's letter, and the manifest gives that PC's name and Windows version.
-- **A connected drive is not trusted.** What it says can only be a path on it, and nothing on it can lead a scan
-  to this PC's files or to the network. A rooted, relative, `..`, other-drive, or UNC path is not followed, and
-  neither is any link on the drive. This also closes reading an uninstall string as it was, which opened a file on
-  this PC or on any server it named. What was not followed is listed.
-- **A drive cannot make this connect to anything by what its names are.** Looking through a link to a share is enough
-  to connect to it, and a real folder `x.` opens the link `x` beside it, so everything found on a drive is asked about by
-  name before it is looked at, and folders are not opened until then. There are limits on what a drive can make this read
-  and copy, including hives, logs, and how much of the registry is captured.
-- **A share is not looked at on this PC either.** A value in any account's registry could name one, and looking would
-  connect as the administrator running this, including when the app starts. A Documents folder on a share is left out, with
-  a warning, and an app on a share cannot be built from.
-- **The app no longer writes to a connected drive.** Loading a hive where it is can replay its logs into it, so the
-  hives are copied to an administrators-only folder and the copies are loaded. The same is done for an account on
-  this PC that is not signed in. A run that dies with hives loaded is swept when the app next starts, and only what
-  this app named and no other run is using.
-- **Documents and Saved Games go to the real folders,** wherever the registry says they are, including moved by
-  OneDrive, and uninstalling and rolling back cover them. A folder of either outside your profile is not written
-  to: those files go under the install folder, and the installer says so before it starts. Files in PowerShell's
-  profile folders in Documents are refused, as a Startup folder is, because PowerShell runs them.
-- **An installer holds one account's data.** Every profile's data used to collapse into one. A scan reads whoever is
-  signed in, the app's owner if it was installed for one account, or whoever you choose in **Whose data**, which only
-  appears when there is a choice. Another account's folders are left out, however a value came to name them, and so are
-  scheduled tasks that run as someone else.
-- **What an account can write with no rights no longer decides what is packaged.** An uninstall entry in its own registry
-  or a shortcut could name another account's folder, or any folder an administrator can read, and it would be packaged as
-  the app. An app installed for one account now has to be in that account's profile or owned by it, and gets nothing
-  machine-wide by its name, in files or the registry. A machine-wide app does not go by an account's shortcuts to find its
-  program. Only a machine-wide record can place an app in someone's profile, and its install log is only believed if only
-  administrators can change it. What is found by an app's name in an account's own folders has to be that account's. A
-  folder in `ProgramData` or Public Documents that is a link is not followed, license stores included. A build asks again
-  before and after each copy whether a file leads into another account's folders or through a link that is new since the
-  scan. A task that says it runs as Windows is only taken if only administrators can change its file.
-- **Another administrator at the UAC prompt no longer gets the data.** Reading and restoring used that account's
-  `%APPDATA%` and `HKEY_CURRENT_USER`, not those of the person at the PC. Both now go by whoever is signed in, through
-  `HKEY_USERS\<SID>`, and the installer says so when that is not the account running it. If it cannot be told, it
-  says that, and per-user data and settings are left out rather than guessed at.
-- **Scheduled tasks are read from their files, on a live scan too.** They went through PowerShell one at a time, and
-  one character that broke the JSON lost all of them. A task that cannot be read now costs a warning for that task.
-  A task whose second program is the app's is found, where only the first used to be looked at on a drive.
-- **Fourteen warnings about old folder names are gone.** Every elevated scan warned about `Application Data`, `My
-  Music`, and the junctions like them, and every installer repeated it. A folder that really cannot be read is still
-  reported.
-- **An install can be undone.** It keeps a journal, in an admin-only folder of its own under
-  `%ProgramData%\WinAppMigrator\installs`, recording what each change replaces before making it, with files
-  it overwrites kept as backups.
-  - Any failure puts everything back in reverse order and says what could not be. So does cancelling, and
-    so does the check after installing. An install killed or cut off by a power cut is found and undone by
-    the next one, which is safe however far the last attempt got. A preview only mentions it.
-  - **What fails an install has changed.** A step the package asked for that fails now means the install
-    failed, including registry values, tasks, and licenses, which used to be listed and left. The only
-    exceptions are a service's description, and a shortcut anywhere but a Startup folder. What the rules
-    refuse is still left out and does not fail anything, including a task or COM class that belongs to
-    something else, which they can only refuse at the moment it would be done.
-  - Runtimes it installed stay, and are reported as left behind.
-  - Without the record being safe to keep, an install no longer starts, and only one install or uninstall
-    runs at a time.
-  - An install on a drive that is no longer connected does not stop the next install. The rest of it is undone
-    right away, and what is on that drive when it is back.
-- **An app installed this way has an uninstaller.** Its entry in Settings runs a bare copy of the stub kept
-  in that same folder, never in the install folder, and with `QuietUninstallString`, no window. It undoes
-  only what the journal says that install did: a file or value that has changed since is kept and reported,
-  overwritten files come back, only added `Path` entries come out, what you added stays, and so do user
-  data and licenses unless you ask. It stops a service before deleting it. It can be run again if it could
-  not finish, and removes itself after it exits. If part of it is on a drive that is not connected, it says
-  so, and its entry stays to finish from. A service that will not stop is removed when the PC restarts. The
-  source PC's `UninstallString`, `QuietUninstallString`, `ModifyPath`, and `WindowsInstaller` no longer
-  survive. A package with no entry gets one.
-- **An install location is judged by where it really is.** `C:\.\Windows\x`, `\\?\C:\Windows\x`, a short name,
-  and a link could all pass for somewhere else. **A network share is now refused,** since it can be this PC's
-  own drive by another name, and so is a part Windows would read differently, such as one ending in a dot.
-  **A location under a link is now refused too,** where it used to be a warning, since whoever can write
-  beside the link can change where it leads while an install is running. Use the place it leads to. A volume
-  mounted on a folder is still allowed if Windows gives that folder as where it is, which has not been run on a
-  real one. With a data folder under a link, an app that has things to restore there is refused before
-  anything of this install changes, and so is one with a Startup shortcut in a Start Menu under a link. Any
-  other shortcut in a Desktop or Start Menu under a link is only lost, with a warning. A Startup folder, or
-  any folder that belongs to Windows or whose contents run by themselves, is refused as a location as well.
-- **Writing a file can no longer be led somewhere else by making it wait.** Each file is written with the
-  way there held, and with something held open in the last folder, so that none of them can become a link.
-- **A COM class that belongs to something else is now left alone whole,** in the 32-bit registry and in a
-  package's license data as well. A value beside a refused server, such as `ThreadingModel`, could still be
-  written over it. Each server is compared with what the package has for that server, so installing an app
-  again over itself is not refused because of another of its servers, or `ole32.dll` as a handler.
-- **An uninstall keeps a file that what it kept still uses.** A service, task, or value that has changed since
-  is kept, and a file it names now stays with it, instead of leaving it set to run a file that has gone.
-- **A source PC's `DisplayIcon` on a network share is dropped however it is written,** with quotes, leading
-  spaces, or forward slashes.
-- **Logs are kept,** in `%ProgramData%\WinAppMigrator\logs`, which only administrators can read, with a limit
-  on size and on how many are kept. They hold paths and key names only, and a test pins that. `--log <FILE>`
-  adds a file of your own. Both windows say where the log is when something fails. Warnings that used to
-  vanish, and errors a windowed program could not print, now go there.
-- **An installer's window shows its progress,** for unpacking and each step, and can be cancelled.
-- **`--apply` no longer needs `--target-root`.** It defaults to where the app was, if the checks the window
-  makes allow that.
-- **A service set to start automatically but delayed keeps that.** It came back as plain automatic.
-- **A file named like a device, such as `aux.h`, now stops an install before Windows 11 with a clear
-  message.** It reached the device, which threw its data away and reported a failed hash check, or could hang
-  on a real serial port. This has been run on Windows Server 2022, build 20348, where the name did open as a device,
-  and not on Windows 10 itself.
-- **PowerShell calls no longer search every module.** A call that had to find a command took 23
-  seconds on Windows Server with no module cache, so a small app took more than 6 minutes to install
-  there. Scripts now import what they use by name. On CI's Windows Server, a preview went from 23
-  seconds to under half a second, a small install from 6 minutes 33 seconds to 6.4 seconds, and the
-  elevated CI job from 34 minutes to 3.
-- **The code that changes a PC has now run for real.** A CI job on GitHub's throwaway Windows runner
-  sets up a harmless app, builds an installer from it with the real code, removes it, installs it,
-  and checks the machine with `sc.exe`, `reg.exe`, `schtasks.exe`, and the shell. It starts the
-  restored services and a task, to see what Windows really runs and as whom, and it covers packages
-  asking for what the rules refuse, links planted at the install location, and a real download and
-  install of the Visual C++ runtime. The test does nothing anywhere else. It found these, now fixed:
-  - An installer crashed on a file name with a character across its third byte, such as
-    `Größe.txt`, because of a bug in the zip library's name check.
-  - That check also refused a name such as `aux.h`, which a scan copies, so one such file stopped the
-    whole install.
-  - On a drive that keeps no permissions, such as FAT32 or exFAT, a staging folder was called
-    protected while it stayed open to everyone, because `icacls` reports success there. Its
-    permissions are now read back, and the folder is not used unless they came out as asked. The
-    installer stages elsewhere, and the app, which may be building to a USB stick, uses the system's
-    temp folder.
-  - When the folder above holds its permissions in an older form, the account that made a staging
-    folder stayed on it after inheritance was cut off.
-  - A list of paths in a `REG_MULTI_SZ` value kept pointing at the old location.
-  - A scan lost a scheduled task whose command is quoted, and listed one with two programs twice, so
-    that the second copy failed against the first.
-- **An installer's command line now prints its warnings and errors.** They were only in logs in the
-  staging folder, which is gone by the time it exits.
-- **The installer says what it will do.** Before installing, its window lists the services, drivers,
-  scheduled tasks, autostart entries, shortcuts, and `Path` changes the package sets up, what the
-  rules left out, and whether the installer is signed and by whom, or "Not signed: publisher
-  unknown". A preview's list leads with those instead of showing them after thousands of files.
-- **An installer now checks what its package asks for.** A package can come from a hostile or
-  odd source drive and nothing authenticates it, so the rules are applied when restoring, not
-  just when scanning. What fails is left out, listed, and does not stop the rest of the install.
-  - Registry: keys no app install should write are refused, including Image File Execution Options,
-    Winlogon, `AppInit_DLLs`, LSA, SecurityProviders, Session Manager, KnownDLLs, certificate
-    stores, and the file types that start programs. Under `SYSTEM`, only the `Parameters` and
-    `Instances` keys of a service the package restores are allowed. Registry links are refused.
-  - Run, RunOnce, and similar values, and App Paths, are allowed only when they run a file the
-    package installs. An app's own `Run` value keeps working.
-  - A COM class already registered to something outside the install location is not taken over.
-  - Services and shortcuts must run a file the package installs, with no fallback to the path the
-    manifest named. Scheduled tasks are checked by the commands in their XML, which is what Windows
-    acts on, and must not replace one of Windows' own or another program's. Tasks that run as
-    SYSTEM are flagged.
-  - Shortcuts only land in this PC's own Desktop and Start Menu folders, so
-    `C:\Users\alice\Desktop` is no longer created on a PC with no alice. One in a Startup folder
-    counts as autostart.
-  - A service, task, or COM class already on the PC that belongs to something outside the install
-    location is left alone, and the package cannot install to a whole drive, the Windows folder, or a
-    folder such as `Program Files` itself, even though it suggests the location.
-  - License files only go under the install location or a known data folder. License values for
-    the whole machine are never written, as was always the stated rule.
-  - User data cannot land in a Startup folder or in Windows' own folders under AppData and
-    ProgramData, such as `Microsoft\WindowsApps`.
-  - Environment variables Windows and other programs depend on, such as `ComSpec` or the .NET
-    profiler settings, are refused, and `PSModulePath` is merged like `Path` instead of replaced.
-  - Task definitions no longer go through a predictable `%TEMP%` file, and are read as UTF-8, so a
-    non-ASCII task name survives.
-- **Hash checks no longer pass by default.** Every copied file is hashed as it goes into the
-  package, including files a scan could not read itself, and a file with no hash now fails
-  verification. Driver images and each file of a license store are checked too, both in the package
-  and once installed. Only those hashes are computed at build time, so this adds no read.
-- **An installer checks its whole package first.** The footer now holds a SHA-256 of the package,
-  checked before anything is parsed, so a truncated copy or an edited manifest is refused at
-  once with a clear message. The window opens straight away and shows the check. While the installer
-  runs, its own file cannot be changed or replaced, so a file swapped in behind a running window is
-  not what gets installed.
-- **Drivers are checked before they are registered.** An image whose hash is wrong is not placed,
-  and an existing `.sys` is no longer overwritten before the `--force` check. A driver already on
-  the PC that loads from outside the install location is left alone.
-- **A package no longer chooses what runs elevated for a prerequisite.** The URL, arguments,
-  winget id, Windows feature, and registry probe come from specs compiled into the installer, looked
-  up by the prerequisite's kind. A manifest can only say which kind and build, and supply the
-  payload's path, which must be `prerequisites\<the spec's file name>`, and its hash.
-- **Prerequisite installers are checked by signature.** A payload must be validly signed by Microsoft
-  when it is downloaded and again just before it runs, and one that fails is not run and is
-  reported as an error. Downloads are HTTPS only, including on redirects, with at most five redirects.
-- **winget is no longer found through `PATH`.** The folder holding its shortcut is one the user can
-  write to, so a planted `winget.exe` would have run elevated. The installer now asks Windows where
-  winget is installed, and checks that file's signature before running it.
-- **Elevated PowerShell gets a fixed environment.** The user's module folders, profilers, or
-  `COMPLUS_InstallRoot` could otherwise have replaced the commands it runs, the signature check among
-  them, or loaded a DLL into it. Its output is now read as UTF-8, so a path or task name that is not
-  ASCII no longer fails verification.
-- **Services come back as they were.** A service's path is now stored quoted, so that
-  `C:\My Apps\Foo Bar\svc.exe` cannot be hijacked by `C:\My Apps\Foo.exe`. A code comment
-  claimed the quoting was handled, but what reached `sc.exe` was unquoted. Arguments are kept, and
-  so are the `Parameters` key and the display name. LocalService and NetworkService stay what they were,
-  where they used to become LocalSystem. A custom account cannot be restored without its
-  password, so its service is set up as LocalService, with less access rather than more, and
-  the installer says so. A service already on the PC that runs from outside the install
-  location is left alone, even with `--force`. Verification compares the binary, arguments, and
-  account exactly: it used to pass any `ImagePath` that merely contained the path.
-- **Drivers are found wherever they live.** `\??\` paths are understood and an unquoted path no
-  longer stops at its first space, so drivers under `Program Files` are no longer missed.
-- **Paths are rewritten exactly.** `C:\App\a.exe` no longer becomes `C:\App22\a.exe` for a
-  target of `C:\App2`, `C:\Application Data` is left alone, and a rule for
-  `C:\Program Files\Git` no longer touches `C:\Program Files\GitHub CLI`. Verification used
-  the same flawed function, so it had been passing these. Text is walked once and a path counts
-  only as a whole. Restore and verification now share one implementation, and a scheduled task
-  whose path or target holds `&` stays valid XML. Rewriting costs a few hash lookups per path
-  instead of a loop over every file: about 1.5 microseconds per value at 100,000 files, measured
-  by a test in a development build. It was about 110 milliseconds.
-- **Staging folders are locked down while elevated.** The installer's extraction folder and
-  the app's build folder are restricted to Administrators and SYSTEM before anything is
-  written to them, and the work stops if that fails. A process that is not elevated could
-  otherwise change what elevated code was about to read. Those folders and the install location
-  are also held open, because permissions do not stop whoever controls a parent folder from
-  renaming one and putting another in its place. An installer no longer deletes an
-  extraction folder newer than an hour, which could belong to another running installer, and
-  no longer follows a link given that folder's name.
-- **Writes cannot be carried somewhere else by a link.** A link anywhere from the install
-  location down to a file is refused, including at the install location itself, and each
-  file is written beside its destination and renamed into place, so a hard link there is
-  replaced rather than written through. Names Windows opens as devices, such as `CON`, are left
-  out of packages and refused when restoring. `.. .` can no longer pass for an ordinary name.
-  Without `--force`, an existing file now stops an install before anything changes. Going on
-  would have registered services against whatever was at those paths.
-- **The manifest is read once per install,** so the install acts on what its hash check saw.
-- **Elevation is asked about once, and from `whoami`.** PowerShell took about a second to answer,
-  was asked repeatedly inside per-item loops, and could be made to fail, which read as not elevated.
-  Not knowing is now a failure.
-- **The app is now signed.** Releases sign `winappmigrator.exe` with Azure Artifact
-  Signing through GitHub's OIDC token, with no stored secret, and record build
-  provenance. See `docs/signing.md`. The installer stub deliberately stays unsigned:
-  a signed stub could be given someone else's package hidden in its certificate table
-  while keeping a valid signature (CVE-2013-3900). Building refuses a signed stub, and
-  the stub ignores anything inside a certificate table and refuses anything after it. A finished installer
-  can be signed with `scripts/sign.ps1`, which previously made it report "no package".
-- **Redesigned interface.** The app is now a master-detail screen: the list fills the
-  left, and the selected app, options, build, and result sit on the right, with no
-  nested scrolling. Native Segoe UI with a real semibold weight, plus Korean, Japanese,
-  and Chinese fallback fonts when an app or publisher name needs them. Painter-drawn icons, a window
-  and file icon, and file details for Explorer and the UAC prompt. All colors meet WCAG
-  AA contrast, enforced by a test. Sortable columns that sort versions by number,
-  arrow-key navigation, Ctrl+F, screen-reader support, and the theme is remembered and
-  follows Windows on first run.
-- **The list shows real applications.** Entries marked `SystemComponent=1` are left out,
-  as in Windows' own installed-apps list. They are parts of other products: on one test
-  PC they were 481 of the 641 rows.
-- **Footprints match the product, not everything that sounds like it.** Folders and registry
-  keys now match the product's whole name, or `Vendor\Product`, never a substring. A publisher
-  or the install folder's parent can only qualify a parent folder, and selects nothing by
-  itself. On one test PC, VS Code went from 175,182 files and 46.83 GB to about 68,900 files
-  and 10.40 GB, most of it its own user data: Visual Studio and the rest of
-  `AppData\Local\Programs` are gone. Firefox no longer takes Thunderbird or `ms-playwright`,
-  NVIDIA App no longer takes `Razer\Installer`, PowerShell no longer takes Store packages, and
-  `Software\Logitech` is no longer part of Git.
-  - Roots from MSI, Inno Setup, and NSIS records are now the deepest folder that holds the
-    recorded files, and never a shared one. Cocos Dashboard no longer takes all 10.67 GB of
-    `C:\ProgramData\Microsoft`, and its files in `C:\CocosDashboard` are no longer lost for
-    being directly on the drive. An `InstallLocation` that is itself a shared folder is ignored.
-  - Install records now also name registry keys, which is how `Software\GitForWindows` is
-    still found. Matching covers `WOW6432Node`, looks one level under a vendor's key, and
-    ignores versions, so `7-Zip 25.01 (x64)` finds its own key. A key that records the
-    install folder in a value like `InstallDir` counts whatever its name.
-  - A Burn bundle's files now come from its hidden MSI packages. The .NET SDK, the Windows SDK,
-    Ableton Live, and Moonlight are bundles, and they used to rely on name matching or lose
-    everything but their bootstrapper.
-  - Nothing inside an install folder is skipped any more, however it is named. VS Code was
-    losing 1,173 files under `node-compile-cache`.
-  - Across all 160 apps on the test PC, the 142 that scan successfully have 424,319 files in
-    their install folders, and none are missing from the inventory.
-- **The main executable is the application.** Uninstallers, updaters, Windows hosts, and
-  installers' cached copies are rejected, and App Paths and Start Menu shortcuts are consulted.
-  Git was `unins000.exe`, an x86 file for an x64 app. It is now `git-bash.exe`. NVIDIA App was
-  `rundll32.exe`, whose name alone matched 1,258 registry entries including `Classes\htmlfile`.
-  It is now `NVIDIA App.exe`, with 102 entries. A bare file name no longer matches anything.
-  Chrome no longer fails with "no main executable": its MSI records no files, so only App Paths
-  knows where it is. A scan that finds nothing better warns when an uninstaller stands in, and
-  an entry with no program at all, such as a driver, fails and says why.
-- **Inno Setup logs parse properly.** The reader now follows the log's blocks and length
-  prefixes instead of scanning for path text, which a path's trailing bytes defeated. Git for
-  Windows went from no paths resolved to 9,220 files, and old ANSI logs work too.
-- **The MSI database is read once per scan,** not up to three times.
-- **Build progress and cancel.** Builds report each step with a progress bar and elapsed
-  time, and can be cancelled. The window stays light while a build runs, because it no
-  longer repaints continuously or touches the disk on every frame.
-- **The installer opens instantly.** It reads only the manifest at startup and unpacks
-  after you click, reading the package in place. Previously it read the whole package
-  into memory twice before showing a window, and left it on disk while the window sat
-  idle. It also warns before replacing files in a folder that has some, lists planned
-  changes in a preview, and offers Close and Open install folder when done.
-- **Security.**
-  - PowerShell escaping now covers typographic quotes, which PowerShell also treats as
-    string delimiters. A crafted file name or task name on a scanned drive could
-    otherwise run as code in the elevated app.
-  - System tools run by absolute path, and DLLs load from System32 only. A planted
-    `sc.exe` or `dwmapi.dll` beside an elevated executable would otherwise run instead.
-  - The C runtime is linked statically, so an installer can start on a clean PC.
-  - The embedded stub is written straight into the installer, never through a
-    predictable folder in `%TEMP%`, and staging folders have random names.
-  - Upgraded `zip` to 9.2, `eframe` to 0.37, and `roxmltree` to 0.21, clearing the six
-    `cargo audit` advisories. The zip advisories were not reachable from this code,
-    which writes symlink entries as plain files.
-- **Fixes.**
-  - Restoring a captured `Path` no longer replaces the target machine's `Path`. Only the
-    app's own entries are added.
-  - A package is hash-checked before anything is written, so a damaged copy is refused
-    instead of partly installing.
-  - Clicking another app during a build no longer starts a second build that deleted the
-    first one's staging folder.
-  - A build that lost files no longer reads as a clean success, and one that fails its
-    hash check says not to use the installer.
-  - An installer of 4 GiB or more fails the build with a clear reason. Windows cannot
-    start one, and it previously reported success.
-  - A single file over 4 GiB no longer fails the build at the very end.
-  - A failed build no longer destroys the installer from an earlier run.
-  - An empty or relative install location is refused, and headless `--apply` without
-    `--target-root` now fails instead of doing nothing and exiting 0.
-  - A registry value whose bytes do not fit its type no longer panics the scan.
-  - Text that merely starts like the install path no longer matches it: `C:\Program Files\Git`
-    is not `C:\Program Files\GitHub CLI`. Registry values, environment variables, services,
-    tasks, and shortcuts all compare whole paths now, ignoring case.
-  - Restoring rewrites paths from the install location and not the executable's folder, so an
-    app whose executable is in a subfolder keeps its layout in rewritten values.
-  - `cargo test --workspace` now works without elevation. The executables' tests could
-    not start under their `requireAdministrator` manifests, so the logic moved to
-    libraries.
-- **Tests.** The app and installer screens now have headless tests that drive the real
-  UI (`egui_kittest`). Set `WAM_UI_PREVIEW_DIR` to also write PNGs of the main states. The
-  end-to-end test can no longer skip its reinstall step on CI.
-- **Documentation.** Rewrote the README with badges and theme-aware screenshots, added
-  `SECURITY.md`, `CONTRIBUTING.md`, and `docs/signing.md`, and put the audit's open issues
-  in `docs/PLAN.md`. Corrected claims that were not true: that no secrets are collected,
-  that hives are mounted read-only, that shortcuts are recreated after a build from a
-  connected drive, that the GUI has a hash toggle, that the Inno Setup reader is robust,
-  and that folder matching is one-directional. The app's own text about offline
-  shortcuts, driver handling, and restoring was corrected too.
+### Windows and screens
+
+- **Redesigned interface.** The app is a master-detail screen: the list fills the left, and the selected app, options, build, and result sit on the
+  right. Native Segoe UI with a real semibold weight, plus Korean, Japanese, and Chinese fallback fonts when a name needs them. Painter-drawn icons, a
+  window and file icon, and file details for Explorer and the UAC prompt. All colors meet WCAG AA contrast, enforced by a test. Sortable columns
+  that sort versions by number, arrow-key navigation, Ctrl+F, and screen-reader support.
+- **Build progress and cancel.** Builds report each step with a progress bar and elapsed time, and can be cancelled. The window stays light while a
+  build runs. A build that lost files no longer reads as a clean success, and one that fails its hash check says not to use the installer.
+- **The windows need Direct3D 12.** There is nothing else to draw with now, which makes every installer smaller and means fewer DLLs are ever searched for. Each says
+  so if it cannot start, and an installer's and an uninstaller's say how to run without a window.
+- **Windows fit the screen they open on.** At 1024x768 the app hung off the right edge with its close button out of reach, and an installer ran under
+  the taskbar. A window that would not fit now opens maximized, and can be made as small as the screen is.
+- **All three windows go by one rule for light and dark, where they run.** An installer used to open in whatever mode the app happened to be in on the
+  PC it was built on. That is out of the package now. Each window is in the mode you chose in the app, on that account, or else the one Windows is
+  in. A window stays in its theme, so the white search box and tooltips in light mode are gone.
+- **Sizes and counts read the same everywhere.** `1380` is `1,380`, and screens say KB, MB, and GB, by 1024, as Windows Explorer does. The list of apps and
+  the install location only offer all of a name or a path when some of it is cut.
+
+### How it is tested
+
+- **The code that changes a PC runs for real, on throwaway runners.** A CI job sets up a harmless app, builds an installer from it with the real code,
+  removes it, installs it, and checks the machine with `sc.exe`, `reg.exe`, `schtasks.exe`, and the shell. It starts the restored services and a task, to see
+  what Windows really runs and as whom, and covers packages asking for what the rules refuse, links planted at the install location, and undoing an
+  install by an uninstall, a failure late in it, and an installer killed part-way. Others do the same from a VHD made hostile on purpose, with a real second account, with packages past 4 GiB, and with
+  what a person leaves out and adds. The tests do nothing anywhere else.
+- **Real apps are moved between PCs on every push to `main`.** 7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter, and Git LFS, from their publishers at
+  exact versions and hashes, go through custom, MSI, NSIS, and Inno Setup installers into real installers on one runner, and on to fresh runners on
+  Windows Server 2022 and 2025 and Windows 11 on Arm, where each was and in a folder of another name. Windows is then asked to use what was restored: 7-Zip
+  packs and unpacks, its shell extension is activated by CLSID from the new folder, a `.ppk` opens with Pageant, shortcuts start their programs, a new prompt
+  finds what `Path` adds, and two services run and answer a real client over a socket. Every check has to fail with the app not there, before the install and
+  after the uninstall, which runs the string each entry recorded. See [CONTRIBUTING](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/CONTRIBUTING.md#tests-must-not-change-the-machine). On a Windows older than
+  the app's it says so, and on Arm that its programs run through an emulator.
+- **A PC with no Visual C++ runtime is tried for real.** A job builds Mosquitto the way the app builds things, takes the 64-bit runtime it uses off a runner,
+  shows the broker cannot start, installs, shows the runtime came from what was in the package, and has the broker serve a real client.
+- **Real windows are opened for real.** Every other test of the screens draws them with no window. A job opens the app, an installer, and an uninstaller on
+  Windows Server 2022 and 2025 and Windows 11 on Arm, on runners whose logs show a software renderer, and looks at what is on the screen, and has Windows check that each fits.
+  It does the same with graphics made unable to start, to see what a person is told.
+- **Both windows' routes are run.** Nearly all of the tests give a window a scan or a build of its own. One clicks through the app as far as an installer on
+  disk, and others work a real package through the installer's window, and on a runner install through it.
+- **`cargo test --workspace` works without elevation.** The executables' logic moved to libraries, and their screens have headless tests that drive the real
+  UI (`egui_kittest`). Set `WAM_UI_PREVIEW_DIR` to also write PNGs of the main states.
+
+### Other fixes
+
+- A package's reports say what its manifest says. They were written before anything was copied, so a file that could not be read was still listed as going in.
+- A report's figures for each folder count each file once, in the innermost place that holds it.
+- A file name with a character across its third byte, such as `Größe.txt`, no longer crashes an installer, a bug in the zip library's name check.
+- A shortcut with no icon of its own no longer gets one of `,0`.
+- Clicking another app during a build no longer starts a second build that deleted the first one's staging folder.
+- A single file over 4 GiB no longer fails the build at the very end, and a failed build no longer destroys the installer from an earlier run.
+- A registry value whose bytes do not fit its type no longer panics the scan.
+- Restoring rewrites paths from the install location and not the executable's folder, so an app whose executable is in a subfolder keeps its layout in rewritten values.
+- A task definition with a non-ASCII name survives, a path or task name that is not ASCII no longer fails verification, and a quoted task command is no longer lost.
+- One unreadable installed file is one failed check, and not a verification that could not run.
+- A firewall rule with a `TTK` condition or two `App`s is not carried, as it would let in more or read as another program's.
+
+### Documentation
+
+- The README is rewritten with badges, theme-aware screenshots, and what it has been tried on, and `SECURITY.md`, `CONTRIBUTING.md`, and `docs/signing.md`
+  are new. Claims that were not true are corrected: that no secrets are collected, that hives are mounted read-only, that the GUI has a hash toggle, and
+  others, in the app's own text as well.
 
 ## 0.4.2.1 — 2026-07-02
 

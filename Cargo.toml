@@ -45,8 +45,8 @@ winappmigrator-ui = { version = "0.4.2", path = "crates/winappmigrator-ui" }
 embed-manifest = "1.5.1"
 winresource = { version = "0.1.34", default-features = false }
 egui_kittest = { version = "0.37.0", features = ["snapshot", "wgpu"] }
-# Direct3D 12 only. Windows 10/11 always has it, including a software fallback on
-# machines without a usable GPU, and leaving out Vulkan and OpenGL makes every
+# Direct3D 12 only. Windows 10/11 come with it, including a software fallback on
+# machines without a usable GPU, as CI's runners use, and leaving out Vulkan and OpenGL makes every
 # installer smaller and means fewer DLLs are ever searched for.
 wgpu = { version = "30.0.1", default-features = false, features = ["dx12", "wgsl"] }
 
