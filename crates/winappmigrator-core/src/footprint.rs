@@ -1407,6 +1407,7 @@ pub fn apply_choices(
         chosen
             .file_inventory
             .iter()
+            .chain(&chosen.empty_folders)
             .any(|file| file.should_copy && file.classification == classification)
     };
     // What an account keeps for the app makes this a package holding that account's data, even with
@@ -1917,6 +1918,24 @@ mod tests {
             .map(|folder| folder.original_path.display().to_string())
             .collect();
         assert_eq!(kept, [format!(r"{INSTALL}\bin\inputs")]);
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_folder_of_data_makes_a_package_hold_data() -> Result<()> {
+        let mut report = report();
+        let flags = ScanFlags {
+            include_user_data: true,
+            ..FLAGS
+        };
+        report.empty_folders = vec![FileEntry {
+            classification: FileClassification::UserData,
+            size_bytes: None,
+            ..file("saves", 0)
+        }];
+        let footprint = Footprint::of(&report, flags)?;
+        let chosen = apply_choices(&report, &footprint, &FootprintChoices::default())?;
+        assert!(chosen.has_user_data);
         Ok(())
     }
 

@@ -569,8 +569,9 @@ This cannot catch everything. See [SECURITY.md](../SECURITY.md#an-installer-can-
   machine-wide `ProgramData` separately from per-user data. The app drives it from the
   same option.
 - With `include_user_data` false, `account_settings.rs` also takes out of the captured registry what an account keeps for the
-  app. It goes by where a value is: of `HKEY_CURRENT_USER`, what stays is what `is_where_windows_looks_for_an_app` knows, and a
-  text value whose whole data is a path in one of the app's folders. It runs after `license_scan`, so a license value goes by the
+  app. It goes by where a value is: of `HKEY_CURRENT_USER`, what stays is what `is_where_windows_looks_for_an_app` knows, what an
+  entry in Default apps points at if it is called `Capabilities`, and a plainly named text value in the app's own key, no more
+  than two below `Software`, whose whole data is a path in one of the app's folders. It runs after `license_scan`, so a license value goes by the
   License option either way, and before anything names what it finds, since a key's name can be what was being kept.
 - `ScanOptions.include_hashes` — SHA-256 of copyable files during a scan. It dominates scan
   time for large apps. Packaging leaves it off and hashes each file from what it reads into

@@ -1,5 +1,6 @@
-# What a PC with no Visual C++ runtime does with an installer built the way the app builds one. Every
-# runner has that runtime, so nothing else shows this. elevated_real_apps.rs has built Mosquitto with the
+# What a PC with none of the 64-bit Visual C++ 2015+ runtime does with an installer built the way the app
+# builds one. Every runner has that runtime, so nothing else shows this. Other versions and the 32-bit one
+# stay, as the broker does not use them. elevated_real_apps.rs has built Mosquitto with the
 # runtime in it, from the publisher's copy on this runner. This shows the broker working, takes the
 # runtime off the runner with its own uninstallers and then whatever of it is left, shows the broker
 # cannot start, removes the publisher's copy, installs what was built, and shows that the runtime came
@@ -88,12 +89,17 @@ foreach ($entry in @(Uninstall-Entries 'Microsoft Visual C++')) {
     if ($entry.DisplayName -notmatch '(2015|2017|2019|2022).*(x64)') { continue }
     Write-Host "  $($entry.DisplayName): $($entry.Uninstall)"
     if ($entry.Uninstall -match '(?i)msiexec.*(\{[0-9a-f-]+\})') {
-        $process = Start-Process msiexec.exe -ArgumentList '/x', $Matches[1], '/qn', '/norestart' -Wait -PassThru
+        $process = Start-Process msiexec.exe -ArgumentList '/x', $Matches[1], '/qn', '/norestart' -PassThru
     } else {
         $command = Split-CommandLine $entry.Uninstall
-        $process = Start-Process $command.Program -ArgumentList (@($command.Arguments) + '/quiet', '/norestart') -Wait -PassThru
+        $process = Start-Process $command.Program -ArgumentList (@($command.Arguments) + '/quiet', '/norestart') -PassThru
     }
-    Write-Host "    it exited with $($process.ExitCode)"
+    if ($process.WaitForExit(300000)) {
+        Write-Host "    it exited with $($process.ExitCode)"
+    } else {
+        Write-Host '    it was still going after five minutes, and was stopped'
+        $process.Kill()
+    }
 }
 Runtime-State
 

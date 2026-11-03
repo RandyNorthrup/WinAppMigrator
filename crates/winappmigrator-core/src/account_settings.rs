@@ -13,7 +13,9 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
-use crate::models::{RegistryEntry, RegistryHive, RegistryValueKind, Warning};
+use crate::models::{
+    LicenseArtifact, LicenseArtifactKind, RegistryEntry, RegistryHive, RegistryValueKind, Warning,
+};
 use crate::path_utils::path_is_within;
 use crate::restore_policy::{
     default_apps_capabilities_of, is_where_windows_looks_for_an_app, key_is_within, normalized_key,
@@ -27,6 +29,12 @@ const MICROSOFT: &str = "Microsoft";
 /// What cannot be in a path, so a value holding one is holding more than a path. Each is what would
 /// let a list or a command line that starts inside the app's folder count as being in it.
 const NOT_IN_A_PATH: &[char] = &['"', '*', '?', '<', '>', '|', ';', '\t', '\r', '\n', '\0'];
+/// How far below `Software` an app's own key is: `Software\7-Zip`, or `Software\Vendor\App`. A value
+/// further down is in something the app keeps, whose name can be what it was keeping.
+const MOST_KEYS_BELOW_SOFTWARE: usize = 2;
+/// What says a key is an entry in Default apps' list of what an app can do, as it is by convention.
+const CAPABILITIES_KEY: &str = "capabilities";
+const REGISTRY_HIVE_PREFIX: &str = r"HKCU\";
 /// What capturing the registry says when it stops short of a key or a value, which it names.
 const CAPTURE_WARNINGS: [&str; 3] = [
     "registry_capture_truncated",
@@ -41,25 +49,54 @@ pub(crate) fn is_account_setting(entry: &RegistryEntry) -> bool {
 
 /// Whether a value says where something in one of the app's own folders is. All of it has to be that
 /// one path: a path at the start of a command line, or a list that has one in it, can hold anything.
-fn says_where_the_app_is(entry: &RegistryEntry, app_folders: &[PathBuf]) -> bool {
-    if !matches!(
-        entry.value_kind,
-        Some(RegistryValueKind::String | RegistryValueKind::ExpandString)
-    ) {
-        return false;
-    }
+/// And it has to be called what such a value is called, in the app's own key, or what goes with it
+/// is the name of what it is in, which can be a host, or the file a list of recent ones is by.
+fn says_where_the_app_is(
+    entry: &RegistryEntry,
+    app_folders: &[PathBuf],
+    expand: &dyn Fn(&str) -> String,
+) -> bool {
+    let needs_expanding = match entry.value_kind {
+        Some(RegistryValueKind::String) => false,
+        Some(RegistryValueKind::ExpandString) => true,
+        _ => return false,
+    };
     let Some(data) = entry.value_data.as_deref() else {
         return false;
     };
+    if !is_in_the_apps_own_key(&entry.key_path)
+        || !entry.value_name.as_deref().is_some_and(is_a_plain_name)
+    {
+        return false;
+    }
     let path = data.trim();
     let path = path
         .strip_prefix('"')
         .and_then(|rest| rest.strip_suffix('"'))
         .unwrap_or(path);
+    let expanded = needs_expanding.then(|| expand(path));
+    let path = expanded.as_deref().unwrap_or(path);
     is_one_plain_path(path)
         && app_folders
             .iter()
             .any(|folder| path_is_within(Path::new(path), folder))
+}
+
+fn is_in_the_apps_own_key(key_path: &str) -> bool {
+    let mut parts = key_path
+        .split('\\')
+        .filter(|part| !part.is_empty() && !part.eq_ignore_ascii_case(WOW6432_NODE));
+    parts
+        .next()
+        .is_some_and(|first| first.eq_ignore_ascii_case(SOFTWARE))
+        && parts.count() <= MOST_KEYS_BELOW_SOFTWARE
+}
+
+/// What a setting is called, rather than a path, a host, or anything else a list goes by.
+fn is_a_plain_name(name: &str) -> bool {
+    name.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, ' ' | '_' | '-' | '(' | ')')
+    })
 }
 
 fn is_one_plain_path(text: &str) -> bool {
@@ -99,13 +136,16 @@ fn key_of_the_app(key_path: &str) -> String {
 pub(crate) fn take_account_settings(
     entries: &mut Vec<RegistryEntry>,
     app_folders: &[PathBuf],
+    expand: &dyn Fn(&str) -> String,
     left_out: &mut LeftOut,
 ) {
-    // An entry in Default apps is no use without what it points at, and a restore refuses it.
+    // An entry in Default apps is no use without what it points at, and a restore refuses it. It can
+    // point anywhere, and only what it points at by that name is what it is for.
     let capabilities: Vec<String> = entries
         .iter()
         .filter(|entry| entry.hive == RegistryHive::CurrentUser)
         .filter_map(default_apps_capabilities_of)
+        .filter(|key| key.rsplit('\\').next() == Some(CAPABILITIES_KEY))
         .collect();
     let is_for_default_apps = |entry: &RegistryEntry| {
         let key = normalized_key(&entry.key_path);
@@ -117,10 +157,10 @@ pub(crate) fn take_account_settings(
     let mut gone: BTreeMap<String, (String, usize)> = BTreeMap::new();
     entries.retain(|entry| {
         let goes = is_account_setting(entry)
-            && !says_where_the_app_is(entry, app_folders)
+            && !says_where_the_app_is(entry, app_folders, expand)
             && !is_for_default_apps(entry);
         if goes {
-            let key = format!(r"HKCU\{}", key_of_the_app(&entry.key_path));
+            let key = format!("{REGISTRY_HIVE_PREFIX}{}", key_of_the_app(&entry.key_path));
             gone.entry(key.to_ascii_lowercase())
                 .or_insert_with(|| (key, 0))
                 .1 += 1;
@@ -144,10 +184,44 @@ pub(crate) fn say_no_more_than_the_apps_key(warnings: &mut [Warning]) {
     }
 }
 
+/// With both options off: nothing of a license is going, and all there is of one in an account's
+/// keys is said no further down than the app's. With the License option on, it has to say where a
+/// value goes.
+pub(crate) fn say_no_more_of_licenses_than_the_apps_key(
+    artifacts: &mut [LicenseArtifact],
+    left_out: &mut LeftOut,
+) {
+    let of_an_account = |location: &str| -> Option<String> {
+        location
+            .strip_prefix(REGISTRY_HIVE_PREFIX)
+            .map(|key| format!("{REGISTRY_HIVE_PREFIX}{}", key_of_the_app(key)))
+    };
+    for artifact in artifacts
+        .iter_mut()
+        .filter(|artifact| artifact.kind == LicenseArtifactKind::RegistryValue)
+    {
+        if let Some(said) = artifact
+            .registry_location
+            .as_deref()
+            .and_then(of_an_account)
+        {
+            artifact.registry_location = Some(said);
+            "Registry value suggests licensing data".clone_into(&mut artifact.detail);
+        }
+    }
+    for item in &mut left_out.licenses {
+        if let Some(said) = of_an_account(&item.name) {
+            item.name = said;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{MatchConfidence, WarningSeverity};
+    use crate::models::{
+        LeftOutItem, LicenseFramework, MatchConfidence, TransferableHint, WarningSeverity,
+    };
 
     const INSTALL: &str = r"C:\Program Files\7-Zip";
 
@@ -171,7 +245,12 @@ mod tests {
     fn after_taking(entries: Vec<RegistryEntry>) -> (Vec<RegistryEntry>, LeftOut) {
         let mut entries = entries;
         let mut left_out = LeftOut::default();
-        take_account_settings(&mut entries, &[PathBuf::from(INSTALL)], &mut left_out);
+        take_account_settings(
+            &mut entries,
+            &[PathBuf::from(INSTALL)],
+            &|text| text.replace("%ProgramFiles%", r"C:\Program Files"),
+            &mut left_out,
+        );
         (entries, left_out)
     }
 
@@ -382,6 +461,104 @@ mod tests {
     }
 
     #[test]
+    fn a_value_goes_with_the_name_of_what_it_is_in_so_it_has_to_be_the_apps_own_key() {
+        const IN_THE_FOLDER: &str = r"C:\Program Files\7-Zip\key.ppk";
+        for (key, name) in [
+            (
+                r"Software\SimonTatham\PuTTY\Sessions\the-secret-host",
+                "PublicKeyFile",
+            ),
+            (r"Software\7-Zip\Recent\the-secret-host", "File"),
+            (r"Software\7-Zip", r"C:\Users\alice\secret.7z"),
+            (r"Software\7-Zip", "ssh-ed25519@22:the-secret-host"),
+            (r"Control Panel\7-Zip", "Path"),
+        ] {
+            let (kept, _) = after_taking(vec![text(key, name, IN_THE_FOLDER)]);
+            assert!(kept.is_empty(), "{key} {name}");
+        }
+        for (key, name) in [
+            (r"Software\7-Zip", "Path64"),
+            (r"Software\7-Zip", "(Default)"),
+            (r"Software\Igor Pavlov\7-Zip", "Install Dir"),
+            (r"Software\WOW6432Node\Igor Pavlov\7-Zip", "install_dir"),
+        ] {
+            let (kept, _) = after_taking(vec![text(key, name, IN_THE_FOLDER)]);
+            assert_eq!(kept.len(), 1, "{key} {name}");
+        }
+    }
+
+    #[test]
+    fn a_value_to_be_expanded_goes_by_where_it_expands_to() {
+        let expanding = |data: &str| {
+            setting(
+                r"Software\7-Zip",
+                "Where",
+                RegistryValueKind::ExpandString,
+                data,
+            )
+        };
+        let (kept, _) = after_taking(vec![expanding(r"%ProgramFiles%\7-Zip")]);
+        assert_eq!(kept.len(), 1, "it says where the app is");
+        let (kept, _) = after_taking(vec![expanding(r"%ProgramFiles%\Other")]);
+        assert!(kept.is_empty());
+        let (kept, _) = after_taking(vec![expanding(r"%Unknown%\7-Zip")]);
+        assert!(kept.is_empty());
+        // Only one of this kind means that. In any other, it is just what it says.
+        let (kept, _) = after_taking(vec![text(
+            r"Software\7-Zip",
+            "Where",
+            r"%ProgramFiles%\7-Zip",
+        )]);
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn nothing_says_more_of_a_license_in_an_accounts_keys_than_whose_it_is() {
+        let mut artifacts = vec![LicenseArtifact {
+            kind: LicenseArtifactKind::RegistryValue,
+            framework: LicenseFramework::RegistryBased,
+            path: None,
+            registry_location: Some(
+                r"HKCU\Software\Acme\Sessions\the-secret-host\LicenseKey".to_owned(),
+            ),
+            detail: "Registry key suggests licensing data: the-secret-host".to_owned(),
+            machine_bound: false,
+            requires_admin: false,
+            transferable: TransferableHint::Unknown,
+            should_copy: false,
+            package_relative_path: None,
+            size_bytes: None,
+            hash_sha256: None,
+            store_files: Vec::new(),
+        }];
+        let mut left_out = LeftOut {
+            licenses: vec![
+                LeftOutItem {
+                    name: r"HKCU\Software\Acme\Sessions\the-secret-host\LicenseKey".to_owned(),
+                    why: "the License option is off".to_owned(),
+                },
+                LeftOutItem {
+                    name: r"C:\Program Files\Acme\license.lic".to_owned(),
+                    why: "the License option is off".to_owned(),
+                },
+            ],
+            ..LeftOut::default()
+        };
+        say_no_more_of_licenses_than_the_apps_key(&mut artifacts, &mut left_out);
+        let said = format!("{artifacts:?} {:?}", left_out.licenses);
+        assert!(!said.contains("the-secret-host"), "{said}");
+        assert_eq!(
+            artifacts[0].registry_location.as_deref(),
+            Some(r"HKCU\Software\Acme")
+        );
+        assert_eq!(left_out.licenses[0].name, r"HKCU\Software\Acme");
+        assert_eq!(
+            left_out.licenses[1].name,
+            r"C:\Program Files\Acme\license.lic"
+        );
+    }
+
+    #[test]
     fn what_an_entry_in_default_apps_points_at_stays_with_it() {
         let (kept, left_out) = after_taking(vec![
             text(
@@ -404,6 +581,16 @@ mod tests {
             "and nothing that is only called that"
         );
         assert_eq!(left_out.settings.len(), 2);
+        // One pointing at what is kept for someone keeps none of it.
+        let (kept, _) = after_taking(vec![
+            text(
+                r"Software\RegisteredApplications",
+                "7-Zip",
+                r"Software\7-Zip\FM",
+            ),
+            text(r"Software\7-Zip\FM", "PanelPath0", r"D:\Taxes"),
+        ]);
+        assert_eq!(kept_names(&kept), ["7-Zip"]);
     }
 
     #[test]
@@ -455,7 +642,7 @@ mod tests {
     fn a_setting_with_no_folder_to_point_at_goes() {
         let mut entries = vec![text(r"Software\7-Zip", "Path", INSTALL)];
         let mut left_out = LeftOut::default();
-        take_account_settings(&mut entries, &[], &mut left_out);
+        take_account_settings(&mut entries, &[], &|text| text.to_owned(), &mut left_out);
         assert!(entries.is_empty());
     }
 }

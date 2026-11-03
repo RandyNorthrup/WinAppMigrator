@@ -179,6 +179,7 @@ pub(crate) fn harness_sized(
         .build_ui_state(
             |ui, app: &mut WinAppMigratorApp| {
                 // What a frame of the real window does before it draws.
+                app.take_up_the_theme_of_windows(ui.ctx());
                 app.poll_workers();
                 app.keep_scan_current();
                 // The harness adds a margin around its UI. The real window has none.
@@ -406,6 +407,20 @@ fn a_build_needs_a_full_output_path() {
     );
     let button = harness.get_by_label("Create installer");
     assert!(button.accesskit_node().is_disabled());
+}
+
+#[test]
+fn the_first_time_it_takes_the_theme_windows_is_in_and_a_choice_stays() {
+    let mut first = harness_with(ThemeMode::Dark, |app| app.follows_windows_theme = true);
+    first.input_mut().system_theme = Some(egui::Theme::Light);
+    first.run_steps(2);
+    assert_eq!(first.state().theme.mode, ThemeMode::Light);
+    assert!(!first.state().follows_windows_theme);
+
+    let mut chosen = harness_with(ThemeMode::Dark, |_| {});
+    chosen.input_mut().system_theme = Some(egui::Theme::Light);
+    chosen.run_steps(2);
+    assert_eq!(chosen.state().theme.mode, ThemeMode::Dark);
 }
 
 #[test]

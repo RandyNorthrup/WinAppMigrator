@@ -40,6 +40,22 @@ public static class WamWindow {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr window, IntPtr device, uint flags);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+
+    delegate bool EachWindow(IntPtr window, IntPtr unused);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr window, EachWindow each, IntPtr unused);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr window, System.Text.StringBuilder text, int most);
+
+    // What the windows in this one say, which is what a plain message box's text is.
+    public static string TextIn(IntPtr window) {
+        var all = new System.Text.StringBuilder();
+        EnumChildWindows(window, (child, unused) => {
+            var text = new System.Text.StringBuilder(4096);
+            GetWindowTextW(child, text, text.Capacity);
+            all.AppendLine(text.ToString());
+            return true;
+        }, IntPtr.Zero);
+        return all.ToString();
+    }
 }
 '@
 
@@ -51,9 +67,10 @@ function Picture-Asked([IntPtr]$Window, $Rect) {
     $picture = [Drawing.Bitmap]::new($Rect.Right - $Rect.Left, $Rect.Bottom - $Rect.Top)
     $graphics = [Drawing.Graphics]::FromImage($picture)
     $device = $graphics.GetHdc()
-    [WamWindow]::PrintWindow($Window, $device, $PrintFullContent) | Out-Null
+    $drawn = [WamWindow]::PrintWindow($Window, $device, $PrintFullContent)
     $graphics.ReleaseHdc($device)
     $graphics.Dispose()
+    if (-not $drawn) { throw 'the window would not draw itself' }
     return $picture
 }
 
@@ -120,7 +137,9 @@ function Open-And-Look([string]$Program, [string]$Name, [string]$WindowTitle, [i
     Check "$Name`: it has a place on the screen" ([WamWindow]::GetWindowRect($state.Window, [ref]$rect)) ''
     $width = $rect.Right - $rect.Left
     $height = $rect.Bottom - $rect.Top
-    Write-Host "  it is $width by $height, at $($rect.Left), $($rect.Top), and $(if ([WamWindow]::GetForegroundWindow() -eq $state.Window) { 'in front' } else { 'not in front' })"
+    # What is on the screen where it is, is only of it if nothing is in front of it.
+    $inFront = [WamWindow]::GetForegroundWindow() -eq $state.Window
+    Write-Host "  it is $width by $height, at $($rect.Left), $($rect.Top), and $(if ($inFront) { 'in front' } else { 'not in front' })"
     Check "$Name`: it is big enough to be a window" ($width -ge 300 -and $height -ge 150) "$width by $height"
 
     $seen = @{}
@@ -132,13 +151,14 @@ function Open-And-Look([string]$Program, [string]$Name, [string]$WindowTitle, [i
             $file = Join-Path $Pictures "$Name, $way.png"
             $picture.Save($file, [Drawing.Imaging.ImageFormat]::Png)
             $picture.Dispose()
-            $seen[$way] = Is-Drawn $colors $MinimumColors
+            $seen[$way] = (Is-Drawn $colors $MinimumColors) -and ($way -ne 'on the screen' -or $inFront)
         } catch {
             Write-Host "  $way`: could not be taken: $($_.Exception.Message)"
             $seen[$way] = $false
         }
     }
     Check "$Name`: what it drew is not blank" ($seen['on the screen'] -or $seen['asked of the window']) ''
+    $script:LastWindow = $state.Window
     return $process
 }
 
@@ -186,7 +206,8 @@ if ($opened) {
 
 Write-Host "`n=== An installer of the test app, waiting at its first screen"
 $before = Test-Path -LiteralPath "C:\Program Files\$($expected.app.name)"
-$opened = Open-And-Look $installer 'The installer' 'WinAppMigrator Installer' 32 15
+# Called what it is installing, once it has read that.
+$opened = Open-And-Look $installer 'The installer' "Install $($expected.app.name)" 32 15
 if ($opened) { Ask-To-Close $opened 'The installer' 0 }
 Check 'The installer: it installed nothing' ((Test-Path -LiteralPath "C:\Program Files\$($expected.app.name)") -eq $before) ''
 
@@ -194,12 +215,19 @@ Write-Host "`n=== With graphics that cannot start, what a person is told"
 # wgpu goes by this, and these programs have no renderer but Direct3D 12.
 $env:WGPU_BACKEND = 'vulkan'
 foreach ($case in @(
-        @{ Program = $App; Name = 'The app, with no graphics'; Title = 'WinAppMigrator' },
-        @{ Program = $installer; Name = 'The installer, with no graphics'; Title = 'WinAppMigrator Installer' }
+        @{ Program = $App; Name = 'The app, with no graphics'; Title = 'WinAppMigrator'; Says = @('Direct3D 12') },
+        @{ Program = $installer; Name = 'The installer, with no graphics'; Title = 'WinAppMigrator Installer'; Says = @('Direct3D 12', '--apply', '--target-root') }
     )) {
     # A dialog is small and plain, so it has few colors, and text is what makes up what it has.
     $opened = Open-And-Look $case.Program $case.Name $case.Title 2 3
-    if ($opened) { Ask-To-Close $opened $case.Name 1 }
+    if ($opened) {
+        $text = [WamWindow]::TextIn($script:LastWindow)
+        Write-Host "  what its window says:`n$text"
+        foreach ($words in $case.Says) {
+            Check "$($case.Name): it says [$words]" ($text -match [regex]::Escape($words)) $text
+        }
+        Ask-To-Close $opened $case.Name 1
+    }
 }
 Remove-Item Env:WGPU_BACKEND
 

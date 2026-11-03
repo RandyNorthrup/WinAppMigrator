@@ -61,7 +61,7 @@ foreach ($app in $apps) {
     $baseline[$app.id] = $results
 }
 # As they would be on a PC in use, so that a build has to read what is running.
-foreach ($name in 'mosquitto', 'windows_exporter') {
+foreach ($name in @('mosquitto', 'windows_exporter' | Where-Object { $_ -in $apps.id })) {
     Start-Service -Name $name -ErrorAction SilentlyContinue
     Write-Host "  $name is $((Get-Service -Name $name).Status), $((Get-Service -Name $name).StartType)"
 }

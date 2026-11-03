@@ -304,10 +304,12 @@ that find them when it is on. With it on, licenses come along and credentials st
 
 With the User data option off, what an account keeps for an app in its part of the registry stays behind too: recent files
 and folders, saved sessions, the hosts it has been to. All of it goes but what Windows itself looks in for an app, such as
-file types, COM classes, App Paths, Run values, and its entry in Settings, and a value whose whole data is a path in the
-app's own folder. This goes by where a value is, so nothing that finds one can get round it, and it says how many went from
+file types, COM classes, App Paths, Run values, its entry in Settings, and what that entry in Default apps points at, and a
+plainly named value in the app's own key, no more than two below `Software`, whose whole data is a path in the app's own
+folder. This goes by where a value is, so nothing that finds one can get round it, and it says how many went from
 which app's key and nothing below that, since a host can be what a key is called. What stays can still say something: an
-ODBC source can name a server and a user, and a value pointing in the app's folder goes with the name of the key it is in.
+ODBC source can name a server and a user. With the License option on as well, a license value in an account's key goes where it was,
+so its key's name goes with it.
 
 **What this cannot catch.** This goes by names and a few shapes of text, and a heuristic cannot find every secret:
 

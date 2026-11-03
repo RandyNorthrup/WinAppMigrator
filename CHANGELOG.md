@@ -17,12 +17,16 @@ All notable project changes are tracked here.
   of what is around it is going, and it is listed for the installer to check. An uninstall takes it away if it is still
   empty, and says so if not.
 - **A PC with no Visual C++ runtime is tried for real.** Every runner has that runtime, so nothing showed that one without
-  it works. A job now builds Mosquitto the way the app builds things, takes the runtime off a runner, shows the broker
+  it works. A job now builds Mosquitto the way the app builds things, takes the 64-bit runtime it uses off a runner, shows the broker
   cannot start, installs, shows the runtime came from what was in the package, and has the broker serve a real client.
 - **Real windows are opened for real.** Every other test of the screens draws them with no window. A job opens the app and
   an installer on Windows Server 2022 and 2025 and Windows 11 on Arm, on runners with no graphics card, and looks at
   what is on the screen, and does the same with graphics that cannot start. The message then says what the program needs,
   and an installer's says how to install without a window. The app's log says which graphics adapter it picked.
+- **What those windows found.** With Windows in light mode, the app opened dark with a white search box and white tooltips,
+  whatever you had chosen, since a style was only set for whichever mode egui thought Windows was in. And the first time it
+  ran it was always dark, as Windows' mode cannot be known before there is a window. Now a window stays in its theme, and until you
+  choose one, that is the one Windows is in.
 - **More credentials are known for what they are.** `.ovpn` profiles, `passwords.txt` and the like, what SQLite keeps beside a
   store of passwords such as `Login Data-journal`, a key in binary in a `.key` file, a `.pem` or `.key` written in UTF-16,
   and a `.crt` or `.cer` with a private key in it. A `.crt` with only a certificate in it still goes, even if it cannot be read

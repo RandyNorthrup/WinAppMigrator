@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::account_settings::{say_no_more_than_the_apps_key, take_account_settings};
+use crate::account_settings::{
+    say_no_more_of_licenses_than_the_apps_key, say_no_more_than_the_apps_key, take_account_settings,
+};
 use crate::dll_resolver::{
     DllResolutionContext, VisualCppRuntime, find_app_local_dlls, resolve_imports,
 };
@@ -547,7 +549,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     take_secret_files(&mut file_inventory, &system, &mut left_out);
     let left_inno_logs_out = take_inno_setup_logs(&mut file_inventory);
     monitor.checkpoint()?;
-    let (license_artifacts, mut license_registry_entries, license_warnings) =
+    let (mut license_artifacts, mut license_registry_entries, license_warnings) =
         scan_license_artifacts(
             &LicenseScanContext {
                 publisher: source_app.as_ref().and_then(|app| app.publisher.as_deref()),
@@ -576,9 +578,13 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         take_account_settings(
             &mut registry_artifacts.entries,
             &registry_context.folders_of_the_app(),
+            &|text| system.expand_source_variables(text),
             &mut left_out,
         );
         say_no_more_than_the_apps_key(&mut registry_artifacts.warnings);
+        if !options.include_license_data {
+            say_no_more_of_licenses_than_the_apps_key(&mut license_artifacts, &mut left_out);
+        }
     }
     if !options.include_license_data {
         environment_variables.retain(|variable| {

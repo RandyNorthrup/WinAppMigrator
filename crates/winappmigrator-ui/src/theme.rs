@@ -35,7 +35,7 @@ pub const CONTROL_HEIGHT: f32 = 34.0;
 const SEMIBOLD_FAMILY: &str = "semibold";
 
 /// The two presentation modes the application supports.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
     Dark,
     Light,
@@ -362,7 +362,12 @@ impl Theme {
         );
         style.text_styles = text_styles;
 
-        ctx.set_global_style(style);
+        // egui keeps a style for each mode Windows can be in, and goes by the one it is in. A window
+        // here has one look, so with only one of these set, Windows in light mode gave a dark window
+        // a white search box and white tooltips.
+        let style = std::sync::Arc::new(style);
+        ctx.set_style_of(egui::Theme::Dark, std::sync::Arc::clone(&style));
+        ctx.set_style_of(egui::Theme::Light, style);
     }
 }
 
@@ -378,10 +383,36 @@ pub enum Role {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color32, Theme, ThemeMode, alpha, fallback_font_file};
+    use super::{Color32, Theme, ThemeMode, alpha, egui, fallback_font_file};
 
     /// WCAG AA minimum for normal-size text.
     const AA_TEXT: f32 = 4.5;
+
+    #[test]
+    fn a_window_stays_in_its_theme_whichever_mode_windows_is_in() {
+        for (mode, windows) in [
+            (ThemeMode::Dark, egui::Theme::Light),
+            (ThemeMode::Light, egui::Theme::Dark),
+            (ThemeMode::Dark, egui::Theme::Dark),
+            (ThemeMode::Light, egui::Theme::Light),
+        ] {
+            let ctx = egui::Context::default();
+            let theme = Theme::new(mode);
+            theme.apply(&ctx);
+            // Which of its styles egui is going by, which is otherwise by what Windows says.
+            ctx.set_theme(windows);
+            assert_eq!(
+                ctx.global_style().visuals.text_edit_bg_color,
+                Some(theme.field_bg),
+                "a text box in {windows:?}"
+            );
+            assert_eq!(
+                ctx.global_style().visuals.window_fill,
+                theme.surface,
+                "a tooltip in {windows:?}"
+            );
+        }
+    }
 
     fn luminance(color: Color32) -> f32 {
         let channel = |value: u8| {

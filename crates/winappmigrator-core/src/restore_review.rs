@@ -313,12 +313,18 @@ impl<'a> ReviewedPackage<'a> {
                 None,
             ));
         }
-        self.empty_folders
-            .extend(manifest.empty_folders.iter().filter(|folder| {
-                self.map
-                    .folder_destination_of(&folder.original_path)
-                    .is_some()
-            }));
+        // However many times a package lists the one folder, the same as however many it lists.
+        self.empty_folders.extend(
+            manifest
+                .empty_folders
+                .iter()
+                .take(MAX_EMPTY_FOLDERS)
+                .filter(|folder| {
+                    self.map
+                        .folder_destination_of(&folder.original_path)
+                        .is_some()
+                }),
+        );
     }
 
     /// Say where what should go in Documents or Saved Games goes instead, when those folders are
@@ -2834,22 +2840,28 @@ mod tests {
                 folder
             })
             .collect();
-        let review = ReviewedPackage::with_folders(
-            &manifest,
-            Path::new(TARGET),
-            false,
-            true,
-            &folders(),
-            &|text| text.to_owned(),
-            &|_| Ok(None),
-        )?;
-        assert_eq!(review.empty_folders.len(), MAX_EMPTY_FOLDERS);
-        assert!(
-            review
-                .warnings
-                .iter()
-                .any(|warning| warning.code == "restore_too_many_empty_folders")
-        );
+        let how_many_and_said = |manifest: &PackageManifest| -> Result<(usize, bool)> {
+            let review = ReviewedPackage::with_folders(
+                manifest,
+                Path::new(TARGET),
+                false,
+                true,
+                &folders(),
+                &|text| text.to_owned(),
+                &|_| Ok(None),
+            )?;
+            Ok((
+                review.empty_folders.len(),
+                review
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.code == "restore_too_many_empty_folders"),
+            ))
+        };
+        assert_eq!(how_many_and_said(&manifest)?, (MAX_EMPTY_FOLDERS, true));
+        // The one folder, any number of times over, gets no further.
+        manifest.empty_folders = vec![manifest.empty_folders[0].clone(); MAX_EMPTY_FOLDERS + 5];
+        assert_eq!(how_many_and_said(&manifest)?, (MAX_EMPTY_FOLDERS, true));
         Ok(())
     }
 

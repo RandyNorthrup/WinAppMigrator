@@ -53,7 +53,7 @@ const BUSY_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 pub fn run() -> eframe::Result {
     logging::install("app");
     // Setting up the folder runs other programs, and nothing should wait for that.
-    thread::spawn(logging::open_machine_log);
+    let opening_the_log = thread::spawn(logging::open_machine_log);
     // A run that died can have left another PC's registry loaded. And who is signed in takes a
     // moment to find out, and the app is about to want to know.
     thread::spawn(|| {
@@ -75,16 +75,18 @@ pub fn run() -> eframe::Result {
     eframe::run_native(
         WINDOW_TITLE,
         native_options,
-        Box::new(|cc| {
-            tracing::info!(
-                adapter = %winappmigrator_ui::graphics_adapter_of(cc),
-                "graphics adapter"
-            );
+        Box::new(move |cc| {
+            let adapter = winappmigrator_ui::graphics_adapter_of(cc);
+            // What is logged before there is a file goes nowhere.
+            thread::spawn(move || {
+                let _ = opening_the_log.join();
+                tracing::info!(%adapter, "graphics adapter");
+            });
             theme::install_fonts(&cc.egui_ctx, &fonts_dir());
-            let mode = saved_theme_mode()
-                .or_else(|| system_theme_mode(&cc.egui_ctx))
-                .unwrap_or(ThemeMode::Dark);
-            let mut app = WinAppMigratorApp::new(cc.egui_ctx.clone(), mode);
+            let saved = saved_theme_mode();
+            let mut app =
+                WinAppMigratorApp::new(cc.egui_ctx.clone(), saved.unwrap_or(ThemeMode::Dark));
+            app.follows_windows_theme = saved.is_none();
             app.theme.apply(&cc.egui_ctx);
             // Remove a stub temp directory left behind by an older version.
             sweep_legacy_stub_temp_dirs();
@@ -285,6 +287,9 @@ pub(crate) enum ListGroup {
 pub struct WinAppMigratorApp {
     ctx: egui::Context,
     theme: Theme,
+    /// Until a person chooses a theme, it is whichever mode Windows is in, which egui only knows
+    /// once there is a window.
+    follows_windows_theme: bool,
     inventory_state: InventoryState,
     inventory_receiver: Option<Receiver<InventoryMessage>>,
     apps: Vec<InstalledApp>,
@@ -388,6 +393,7 @@ impl WinAppMigratorApp {
         Self {
             ctx,
             theme: Theme::new(mode),
+            follows_windows_theme: false,
             inventory_state: InventoryState::Loading,
             inventory_receiver: None,
             apps: Vec::new(),
@@ -1147,7 +1153,22 @@ impl WinAppMigratorApp {
         self.scroll_details_to_top = true;
     }
 
+    fn take_up_the_theme_of_windows(&mut self, ctx: &egui::Context) {
+        if !self.follows_windows_theme {
+            return;
+        }
+        let Some(mode) = system_theme_mode(ctx) else {
+            return;
+        };
+        self.follows_windows_theme = false;
+        if mode != self.theme.mode {
+            self.theme = Theme::new(mode);
+            self.theme.apply(ctx);
+        }
+    }
+
     fn toggle_theme(&mut self) {
+        self.follows_windows_theme = false;
         let mode = self.theme.mode.toggled();
         self.theme = Theme::new(mode);
         self.theme.apply(&self.ctx);
@@ -1160,7 +1181,8 @@ impl eframe::App for WinAppMigratorApp {
         self.theme.bg.to_normalized_gamma_f32()
     }
 
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.take_up_the_theme_of_windows(ctx);
         self.poll_workers();
         self.keep_scan_current();
     }
