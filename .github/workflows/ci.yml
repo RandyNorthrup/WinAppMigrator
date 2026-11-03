@@ -144,6 +144,32 @@ jobs:
         shell: pwsh
         run: cargo test --locked -p winappmigrator-installer --test elevated_packaging -- --nocapture --test-threads=1
 
+  # What a person chooses before a build, on a runner of its own: what is left out, what is added,
+  # and what must never be offered.
+  elevated-footprint:
+    name: Elevated footprint
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      WAM_ELEVATED_E2E: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The version comes from rust-toolchain.toml.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Cache build output
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Choosing what goes in
+        shell: pwsh
+        run: cargo test --locked -p winappmigrator-installer --test elevated_footprint -- --nocapture --test-threads=1
+
   # A real package past what Windows can start as one executable, with a real file of over 4 GiB in
   # it, so it needs a runner with the room to itself.
   elevated-big-package:
