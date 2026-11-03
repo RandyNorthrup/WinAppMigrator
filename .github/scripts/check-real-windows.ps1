@@ -6,13 +6,14 @@
 # Each has to fit in the part of the screen a window can use, so that what has to be clicked can be, and be
 # in the mode Windows is in, which this sets both ways. It then opens each with graphics that cannot start,
 # to see what a person is told, and with the environment naming a folder of Direct3D's code to run instead,
-# which must not be taken up.
+# which must not be run.
 #
 # Run only by the job that downloads these, on a runner that is thrown away afterward.
 param(
     [Parameter(Mandatory)][string]$App,
     [Parameter(Mandatory)][string]$Installers,
-    [Parameter(Mandatory)][string]$Pictures
+    [Parameter(Mandatory)][string]$Pictures,
+    [Parameter(Mandatory)][string]$Planted
 )
 
 $ErrorActionPreference = 'Stop'
@@ -74,20 +75,6 @@ public static class WamWindow {
         }, IntPtr.Zero);
         return biggest;
     }
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr LoadLibraryExW(string file, IntPtr unused, uint flags);
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] static extern IntPtr GetProcAddress(IntPtr module, string name);
-    [DllImport("kernel32.dll")] static extern bool FreeLibrary(IntPtr module);
-
-    // What D3D12Core.dll says its version is. 1 is DONT_RESOLVE_DLL_REFERENCES, so that nothing of it runs here.
-    public static int SdkVersionOf(string file) {
-        IntPtr module = LoadLibraryExW(file, IntPtr.Zero, 1);
-        if (module == IntPtr.Zero) { return 0; }
-        IntPtr version = GetProcAddress(module, "D3D12SDKVersion");
-        int found = version == IntPtr.Zero ? 0 : Marshal.ReadInt32(version);
-        FreeLibrary(module);
-        return found;
-    }
-
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr most, System.Text.StringBuilder text, uint flags, uint milliseconds, out IntPtr result);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr window, System.Text.StringBuilder text, int most);
@@ -375,59 +362,41 @@ Remove-Item Env:WGPU_BACKEND
 
 Write-Host "`n=== With the environment naming a folder of Direct3D's code for these to run"
 # A program that runs as the account these are started from can set these for it, and elevating keeps
-# them. So what is in this folder would run with full rights, under this project's signature.
-$systemCore = Join-Path $env:SystemRoot 'System32\D3D12Core.dll'
-if (-not (Test-Path -LiteralPath $systemCore)) {
-    Write-Host '  This Windows has no D3D12Core.dll to copy, so there is nothing for this to ask.'
-} else {
-    $plantedFolder = Join-Path $env:RUNNER_TEMP 'wam-planted-d3d'
-    New-Item -ItemType Directory -Force -Path $plantedFolder | Out-Null
-    $planted = Join-Path $plantedFolder 'D3D12Core.dll'
-    Copy-Item -LiteralPath $systemCore -Destination $planted -Force
-    $version = [WamWindow]::SdkVersionOf($planted)
-    if ($version -le 0) { $version = 616 }
-    Write-Host "  the copy says it is version $version"
-    $env:WGPU_DX12_AGILITY_SDK_PATH = $plantedFolder
-    $env:WGPU_DX12_AGILITY_SDK_VERSION = "$version"
-    foreach ($case in @(
-            @{ Program = $App; Name = 'The app, told to run another D3D12Core'; Title = 'WinAppMigrator'; Settle = 20; Colors = 32; Arguments = @() },
-            @{ Program = $installer; Name = 'The installer, told to run another D3D12Core'; Title = "Install $($expected.app.name)"; Settle = 15; Colors = 32; Arguments = @() },
-            @{ Program = $installer; Name = 'The uninstaller, told to run another D3D12Core'; Title = 'Uninstall'; Settle = 8; Colors = 8; Arguments = @('--uninstall', 'no-such-install') }
-        )) {
-        $opened = Open-And-Look $case.Program $case.Name $case.Title $case.Colors $case.Settle -Arguments $case.Arguments
-        if ($opened) {
-            # Listing another program's modules can fail where it runs under emulation, so what Windows
-            # will not let go of is asked as well: a file it has mapped as code cannot be deleted.
-            $listed = @()
-            $couldList = $true
-            try {
-                $listed = @($opened.Modules | ForEach-Object { $_.FileName })
-            } catch {
-                $couldList = $false
-                Write-Host "  its modules could not be listed: $($_.Exception.Message)"
-            }
-            if ($couldList) {
-                Write-Host "  it has $($listed.Count) modules loaded"
-                $fromThere = @($listed | Where-Object { $_ -like "$plantedFolder*" })
-                Check "$($case.Name): none of what it loaded is from that folder" ($fromThere.Count -eq 0) ($fromThere -join ', ')
-                $d3dCore = @($listed | Where-Object { $_ -match 'D3D12Core' })
-                Write-Host "  its D3D12Core: $($d3dCore -join ', ')"
-            }
-            $stillLoadable = $true
-            try {
-                [IO.File]::Delete($planted)
-            } catch {
-                $stillLoadable = $false
-                Write-Host "  the copy could not be deleted: $($_.Exception.Message)"
-            }
-            Check "$($case.Name): the copy is not held by anything" $stillLoadable 'Windows would not delete it'
-            Ask-To-Close $opened $case.Name 0
-            Copy-Item -LiteralPath $systemCore -Destination $planted -Force
+# them. Direct3D loads D3D12Core.dll from there if asked for a newer version than Windows has, so what
+# is in that folder would run with full rights, under this project's signature. What is planted here is
+# a stand-in that only says it ran. It is not left loaded for long, so a list of what is loaded would miss it.
+$plantedFolder = Join-Path $env:RUNNER_TEMP 'wam-planted-d3d'
+New-Item -ItemType Directory -Force -Path $plantedFolder | Out-Null
+Copy-Item -LiteralPath (Join-Path $Planted 'D3D12Core.dll') -Destination (Join-Path $plantedFolder 'D3D12Core.dll') -Force
+$marker = Join-Path $env:RUNNER_TEMP 'wam-planted-ran.txt'
+$env:WAM_PLANTED_MARKER = $marker
+$env:WGPU_DX12_AGILITY_SDK_PATH = $plantedFolder
+$env:WGPU_DX12_AGILITY_SDK_VERSION = '999'
+foreach ($case in @(
+        @{ Program = $App; Name = 'The app, told to run planted code'; Title = 'WinAppMigrator'; Settle = 20; Colors = 32; Arguments = @() },
+        @{ Program = $installer; Name = 'The installer, told to run planted code'; Title = "Install $($expected.app.name)"; Settle = 15; Colors = 32; Arguments = @() },
+        @{ Program = $installer; Name = 'The uninstaller, told to run planted code'; Title = 'Uninstall'; Settle = 8; Colors = 8; Arguments = @('--uninstall', 'no-such-install') }
+    )) {
+    Remove-Item -LiteralPath $marker -ErrorAction SilentlyContinue
+    $opened = Open-And-Look $case.Program $case.Name $case.Title $case.Colors $case.Settle -Arguments $case.Arguments
+    $ran = if (Test-Path -LiteralPath $marker) { Get-Content -Raw -LiteralPath $marker } else { '' }
+    Check "$($case.Name): none of it ran" ($ran -eq '') $ran
+    if ($opened) {
+        # Listing another program's modules can fail where it runs under emulation.
+        try {
+            $listed = @($opened.Modules | ForEach-Object { $_.FileName })
+            Write-Host "  it has $($listed.Count) modules loaded, and its D3D12Core is: $(@($listed | Where-Object { $_ -match 'D3D12Core' }) -join ', ')"
+            $fromThere = @($listed | Where-Object { $_ -like "$plantedFolder*" })
+            Check "$($case.Name): none of what it has loaded is from that folder" ($fromThere.Count -eq 0) ($fromThere -join ', ')
+        } catch {
+            Write-Host "  its modules could not be listed: $($_.Exception.Message)"
         }
+        Ask-To-Close $opened $case.Name 0
     }
-    Remove-Item Env:WGPU_DX12_AGILITY_SDK_PATH
-    Remove-Item Env:WGPU_DX12_AGILITY_SDK_VERSION
 }
+Remove-Item Env:WGPU_DX12_AGILITY_SDK_PATH
+Remove-Item Env:WGPU_DX12_AGILITY_SDK_VERSION
+Remove-Item Env:WAM_PLANTED_MARKER
 
 Write-Host "`nSummary: $($script:failures.Count) failures."
 if ($script:failures.Count -gt 0) {

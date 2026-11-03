@@ -65,6 +65,21 @@ jobs:
         shell: pwsh
         run: cargo build --locked --workspace --release
 
+      # What the job that opens it plants for it not to run. It only says that it ran.
+      - name: Build a stand-in for planted code
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path target/planted | Out-Null
+          rustc --edition 2024 --crate-type cdylib --crate-name D3D12Core -C panic=abort -C target-feature=+crt-static -C opt-level=1 -o target/planted/D3D12Core.dll .github/scripts/planted-d3d12core.rs
+
+      - name: Hand on the stand-in
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wam-planted
+          path: target\planted\D3D12Core.dll
+          retention-days: 1
+          if-no-files-found: error
+
       # For the jobs that open it. Unsigned, as every build here is, and gone in a day.
       - name: Hand on the app
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -440,9 +455,15 @@ jobs:
           name: wam-move-installers
           path: ${{ runner.temp }}\wam-move
 
+      - name: Take what is planted
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wam-planted
+          path: ${{ runner.temp }}\wam-planted
+
       - name: Open them, and look at what is on the screen
         shell: pwsh
-        run: .github/scripts/check-real-windows.ps1 -App "${{ runner.temp }}\wam-app\winappmigrator.exe" -Installers "${{ runner.temp }}\wam-move" -Pictures "${{ runner.temp }}\wam-pictures"
+        run: .github/scripts/check-real-windows.ps1 -App "${{ runner.temp }}\wam-app\winappmigrator.exe" -Installers "${{ runner.temp }}\wam-move" -Pictures "${{ runner.temp }}\wam-pictures" -Planted "${{ runner.temp }}\wam-planted"
 
       # Of the test app, and of the runner's own list of what it has installed.
       - name: Keep the pictures
