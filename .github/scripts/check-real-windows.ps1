@@ -345,10 +345,11 @@ Write-Host "`n=== With graphics that cannot start, what a person is told"
 $env:WGPU_BACKEND = 'vulkan'
 foreach ($case in @(
         @{ Program = $App; Name = 'The app, with no graphics'; Title = 'WinAppMigrator'; Says = @('Direct3D 12') },
-        @{ Program = $installer; Name = 'The installer, with no graphics'; Title = 'WinAppMigrator Installer'; Says = @('Direct3D 12', '--apply', '--target-root') }
+        @{ Program = $installer; Name = 'The installer, with no graphics'; Title = 'WinAppMigrator Installer'; Says = @('Direct3D 12', '--apply', '--target-root'); Arguments = @() },
+        @{ Program = $installer; Name = 'The uninstaller, with no graphics'; Title = 'WinAppMigrator Uninstaller'; Says = @('Direct3D 12', '--uninstall no-such-install --quiet'); Arguments = @('--uninstall', 'no-such-install') }
     )) {
     # A dialog is small and plain, so it has few colors, and text is what makes up what it has.
-    $opened = Open-And-Look $case.Program $case.Name $case.Title 2 3
+    $opened = Open-And-Look $case.Program $case.Name $case.Title 2 3 -Arguments $(if ($case.Arguments) { $case.Arguments } else { @() })
     if ($opened) {
         $text = [WamWindow]::TextIn($script:LastWindow)
         Write-Host "  what its window says:`n$text"

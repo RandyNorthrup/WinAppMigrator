@@ -59,11 +59,18 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
     logging::install("uninstall");
     let cli = UninstallCli::parse_from(args);
     if !cli.quiet {
+        let id = cli.id.clone();
         return match crate::uninstall_gui::run(cli) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 tracing::error!(%error, "the uninstaller's window could not open");
                 eprintln!("error: {error}");
+                // Started from Settings there is nowhere that would show. It would seem to do nothing.
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Error)
+                    .set_title("WinAppMigrator Uninstaller")
+                    .set_description(no_window_text(&error.to_string(), &id))
+                    .show();
                 ExitCode::FAILURE
             }
         };
@@ -77,6 +84,19 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// What a person is told when the window cannot open: what would do the same without one.
+fn no_window_text(error: &str, id: &str) -> String {
+    let this_program = std::env::current_exe().map_or_else(
+        |_| "this program".to_owned(),
+        |path| format!("\"{}\"", path.display()),
+    );
+    format!(
+        "The uninstaller's window could not open: {error}\n\n{}\n\nIt can still uninstall without \
+         one, from an administrator's command prompt:\n\n{this_program} {UNINSTALL_FLAG} {id} --quiet",
+        winappmigrator_ui::NEEDS_DIRECT3D_12_TEXT
+    )
 }
 
 /// Uninstall with no window. `Ok(false)` means something could not be undone.
