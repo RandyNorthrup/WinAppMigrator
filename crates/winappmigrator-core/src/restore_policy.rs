@@ -26,8 +26,8 @@ use crate::models::{
 };
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
-    is_drive_root, path_has_extension, path_is_strictly_inside, path_is_within, sanitize_filename,
-    trim_icon_suffix,
+    is_drive_root, is_network_path, path_has_extension, path_is_strictly_inside, path_is_within,
+    sanitize_filename, trim_icon_suffix,
 };
 use crate::registry_target::hex_decode;
 use crate::service_scan::parse_image_path;
@@ -479,7 +479,6 @@ const TEXT_ONLY_VALUES: &[&str] = &[
     "tracedll",
     "translationdll",
 ];
-const NETWORK_PATH_START: &str = r"\\";
 const APP_ID_ACCESS_VALUES: &[&str] = &[
     "accesspermission",
     "authenticationlevel",
@@ -683,7 +682,6 @@ const SOURCE_UNINSTALL_VALUES: &[&str] = &[
     "systemcomponent",
 ];
 const DISPLAY_ICON_VALUE: &str = "displayicon";
-const UNC_PREFIX: &str = r"\\";
 /// Windows' own scheduled tasks, which run with high rights and are expected to be there.
 const WINDOWS_TASK_FOLDER: &str = r"\microsoft\windows\";
 const SYSTEM_ACCOUNTS: &[&str] = &["s-1-5-18", "system", "localsystem"];
@@ -774,11 +772,7 @@ pub fn is_source_uninstall_value(entry: &RegistryEntry) -> bool {
                 // Settings opens an icon just by showing it, so one on a network share would
                 // hand that server the name and password hash of whoever looks at the list.
                 || (name == DISPLAY_ICON_VALUE
-                    && entry.value_data.as_deref().is_some_and(|data| {
-                        data.trim_start_matches(['"', ' '])
-                            .replace('/', "\\")
-                            .starts_with(UNC_PREFIX)
-                    }))
+                    && entry.value_data.as_deref().is_some_and(is_network_path))
         })
 }
 
@@ -1775,12 +1769,7 @@ pub fn registered_value_refusal(
             return Some("what it holds is not the text it would be read as".to_owned());
         }
         // Windows opens an icon just by showing it, which hands a server who is looking.
-        if is_text
-            && default_text()
-                .trim_start_matches(['"', ' ', '@'])
-                .replace('/', "\\")
-                .starts_with(NETWORK_PATH_START)
-        {
+        if is_text && is_network_path(&default_text()) {
             return Some("it names a place on the network".to_owned());
         }
     }

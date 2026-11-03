@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use winappmigrator_core::journal::STAGING_PREFIX;
+use winappmigrator_core::path_utils::is_network_path;
 use winappmigrator_core::privilege::ProtectedFolder;
 use winappmigrator_core::space::volume_stats_at;
 
@@ -90,8 +91,9 @@ pub fn create_staging_dir(
 ) -> std::io::Result<ProtectedFolder> {
     // The nearest existing ancestor of the install location sits on the
     // destination drive.
-    let destination =
-        target_root.and_then(|target| target.ancestors().find(|ancestor| is_real_folder(ancestor)));
+    let destination = target_root
+        .filter(|target| !is_network_path(&target.to_string_lossy()))
+        .and_then(|target| target.ancestors().find(|ancestor| is_real_folder(ancestor)));
     let beside_installer = executable.parent();
     let has_room = |place: &Path, needed: u64| {
         volume_stats_at(place).is_none_or(|stats| stats.free_bytes >= needed)

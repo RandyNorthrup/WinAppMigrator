@@ -30,9 +30,9 @@ use crate::models::{
 };
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
-    SignedInUser, current_user_sid, expand_env_vars, path_is_within, resolved_location,
-    signed_in_user, strip_prefix_ignore_case, system_root, windows_architecture_name,
-    windows_build, windows_version_numbers,
+    SignedInUser, current_user_sid, expand_env_vars, is_network_path, path_is_within,
+    resolved_location, signed_in_user, strip_prefix_ignore_case, system_root,
+    windows_architecture_name, windows_build, windows_version_numbers,
 };
 use crate::registry_target::{app_path_entries, is_path_variable, service_image_path};
 use crate::restore_policy::{
@@ -61,7 +61,6 @@ const PARAMETERS_SUBKEY: &str = "parameters";
 const REFUSED_CODE: &str = "restore_refused";
 const DISPLAY_NAME_VALUE: &str = "DisplayName";
 pub(crate) const STATE_ROOT_REFUSAL: &str = "it is where installs keep their records";
-const UNC_PREFIX: &str = r"\\";
 /// A stand-in target, for describing a package before an install location is chosen.
 pub(crate) const NO_TARGET_YET: &str = r"C:\WinAppMigrator install location";
 
@@ -781,7 +780,7 @@ impl<'a> ReviewedPackage<'a> {
             // would hand that server the name and password hash of whoever looks at it.
             let local_path = |path: &PathBuf| {
                 Some(self.map.rewrite(&path.to_string_lossy()))
-                    .filter(|path| !path.starts_with(UNC_PREFIX))
+                    .filter(|path| !is_network_path(path))
             };
             let working_directory = shortcut.working_directory.as_ref().and_then(local_path);
             let icon = shortcut.icon_path.as_ref().and_then(local_path);
@@ -2621,13 +2620,21 @@ mod tests {
             r"C:\Users\alice\Desktop\Acme.lnk",
             r"C:\Program Files\Acme\acme.exe",
         );
-        remote.icon_path = Some(PathBuf::from(r"\\evil.example\share\a.ico,0"));
-        remote.working_directory = Some(PathBuf::from(r"\\evil.example\share"));
-        manifest.shortcuts_detected = vec![remote];
-        let reviewed = review(&manifest)?;
-        assert_eq!(reviewed.shortcuts.len(), 1);
-        assert_eq!(reviewed.shortcuts[0].icon, None);
-        assert_eq!(reviewed.shortcuts[0].working_directory, None);
+        for share in [
+            r"\\evil.example\share\a.ico,0",
+            "//evil.example/share/a.ico,0",
+            r"\/evil.example/share\a.ico,0",
+            r"\\?\UNC\evil.example\share\a.ico,0",
+            r"\??\UNC\evil.example\share\a.ico,0",
+        ] {
+            remote.icon_path = Some(PathBuf::from(share));
+            remote.working_directory = Some(PathBuf::from(share));
+            manifest.shortcuts_detected = vec![remote.clone()];
+            let reviewed = review(&manifest)?;
+            assert_eq!(reviewed.shortcuts.len(), 1);
+            assert_eq!(reviewed.shortcuts[0].icon, None, "{share}");
+            assert_eq!(reviewed.shortcuts[0].working_directory, None, "{share}");
+        }
         Ok(())
     }
 

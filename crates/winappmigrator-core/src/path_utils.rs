@@ -750,6 +750,20 @@ pub fn is_on_a_local_disk(path: &Path) -> bool {
     }
 }
 
+/// Whether a path written this way could send Windows to the network for it, which connects as
+/// whoever is asking, and hands the far end the account's name and password hash. This goes by how
+/// it is written and touches nothing. A share can be `\\server\share` or `//server/share`, or a
+/// mix of the two, or `\\?\UNC\`, `\??\UNC\` or `\\?\GLOBALROOT\`, or a `file:` address, and rather
+/// than say which of the rest can get there, only a plain drive or a relative path counts as
+/// staying here. What a value holds can start with a quote, or an `@`, as a resource does.
+pub fn is_network_path(text: &str) -> bool {
+    let text = text.trim_start_matches(['"', ' ', '@']);
+    let is_an_address = text
+        .get(..5)
+        .is_some_and(|start| start.eq_ignore_ascii_case("file:"));
+    is_an_address || !is_on_a_local_disk(Path::new(text))
+}
+
 /// Whether [`resolved_location`] can say where a path really is. Being missing is not a problem,
 /// since nothing is there. Anything else is: it can be listed through a link to a place with no
 /// name to give, such as a shadow copy or a volume with no letter, which would read as being wherever
@@ -1211,6 +1225,40 @@ mod tests {
         assert!(location_can_be_told(&work.path().join(r"not there\x.txt")));
         assert!(location_can_be_told(work.path()));
         Ok(())
+    }
+
+    #[test]
+    fn however_a_share_is_written_it_is_a_network_path() {
+        for share in [
+            r"\\server\share\a.ico",
+            "//server/share/a.ico",
+            r"\/server/share\a.ico",
+            r"/\server\share\a.ico",
+            r"\\?\UNC\server\share\a.ico",
+            r"\\?/UNC/server/share/a.ico",
+            r"\??\UNC\server\share\a.ico",
+            r"\\.\UNC\server\share\a.ico",
+            r"\\?\GLOBALROOT\Device\Mup\server\share\a.ico",
+            r"\Device\Mup\server\share\a.ico",
+            r#""\\server\share\a.ico",0"#,
+            r"@\\server\share\a.dll,-1",
+            r"file://server/share/a.ico",
+            r"FILE:\\server\share\a.ico",
+        ] {
+            assert!(is_network_path(share), "{share}");
+        }
+        for here in [
+            r"C:\Program Files\Acme\a.ico,0",
+            "C:/Program Files/Acme/a.ico",
+            r#""C:\Program Files\Acme\a.ico",0"#,
+            r"\\?\C:\Program Files\Acme\a.ico",
+            r"@C:\Acme\a.dll,-1",
+            r"%SystemRoot%\system32\a.dll",
+            "a.ico",
+            "",
+        ] {
+            assert!(!is_network_path(here), "{here}");
+        }
     }
 
     #[test]

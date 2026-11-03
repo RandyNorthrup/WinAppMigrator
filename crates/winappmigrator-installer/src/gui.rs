@@ -22,7 +22,7 @@ use winappmigrator_core::archive::has_certificate_table;
 use winappmigrator_core::authenticode::read_signature;
 use winappmigrator_core::journal::{install_on_record_at, machine_state_root};
 use winappmigrator_core::logging;
-use winappmigrator_core::path_utils::system_root;
+use winappmigrator_core::path_utils::{is_network_path, system_root};
 use winappmigrator_core::prerequisites::spec_for_bundle;
 use winappmigrator_core::rollback::interrupted_installs;
 use winappmigrator_core::space::PlaceNeed;
@@ -385,7 +385,13 @@ impl InstallerApp {
     /// looks at the disk, so it is only asked again once the text has changed.
     fn room_for_target(&self) -> Option<RoomCheck> {
         let text = self.target_root.trim();
-        if text.is_empty() || self.unpacked_bytes == 0 || !Path::new(text).is_absolute() {
+        // A package suggests this before anyone has agreed to anything, and asking a share how much
+        // room it has connects to it as whoever is looking.
+        if text.is_empty()
+            || self.unpacked_bytes == 0
+            || !Path::new(text).is_absolute()
+            || is_network_path(text)
+        {
             return None;
         }
         let mut checked = self.checked_room.borrow_mut();
@@ -1748,6 +1754,29 @@ mod tests {
         manifest.included_program_data = true;
         assert_eq!(keys(&changes_for_every_choice(&manifest)?).len(), 4);
         Ok(())
+    }
+
+    /// A package names where its app was, so this is what a hostile one can make a window ask.
+    #[test]
+    fn the_window_does_not_ask_a_share_how_much_room_it_has() {
+        for share in [
+            r"\\evil.example\share\app",
+            r"\\?\UNC\evil.example\share\app",
+            "//evil.example/share/app",
+            r"\\localhost\c$\Windows",
+        ] {
+            let mut app = sample_installer(ThemeMode::Dark);
+            app.unpacked_bytes = 1;
+            app.target_root = share.to_owned();
+            app.checked_room = std::cell::RefCell::new(None);
+            assert!(app.room_for_target().is_none(), "{share}");
+            assert!(app.checked_room.borrow().is_none(), "{share}");
+            assert!(app.target_problem().is_some(), "{share}");
+        }
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.unpacked_bytes = 1;
+        app.target_root = r"C:\Program Files\App".to_owned();
+        assert!(app.room_for_target().is_some());
     }
 
     fn harness_for(app: InstallerApp) -> Harness<'static, InstallerApp> {
