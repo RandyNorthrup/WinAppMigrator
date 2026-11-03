@@ -382,8 +382,9 @@ fn local_path_in_link_info(info: &[u8]) -> Option<PathBuf> {
     }
     let header_size = read_u32(info, LNK_INFO_HEADER_SIZE_OFFSET)?;
     if header_size >= LNK_INFO_UNICODE_HEADER_SIZE
-        && let Some(base) =
-            read_u32(info, LNK_INFO_UNICODE_BASE_OFFSET).and_then(|at| utf16_string(info, at))
+        && let Some(base) = read_u32(info, LNK_INFO_UNICODE_BASE_OFFSET)
+            .and_then(|at| utf16_string(info, at))
+            .filter(|base| !base.is_empty())
     {
         let suffix = read_u32(info, LNK_INFO_UNICODE_SUFFIX_OFFSET)
             .and_then(|at| utf16_string(info, at))
@@ -625,6 +626,136 @@ mod tests {
         for cut in 0..whole.len() {
             let _ = lnk_target_path(&whole[..cut]);
         }
+    }
+
+    #[test]
+    fn a_shortcut_that_says_more_than_it_holds_gives_nothing_and_does_not_panic() {
+        // A list of items said to go on past the end of the file.
+        let mut data = lnk_bytes(r"C:\App\app.exe", "", true, &[9, 9]);
+        let list_size_at = LNK_HEADER_SIZE as usize;
+        data[list_size_at..list_size_at + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(lnk_target_path(&data), None);
+
+        // Where its path is said to be, past the end of the file.
+        let info_at = LNK_HEADER_SIZE as usize;
+        let mut data = lnk_bytes(r"C:\App\app.exe", "", false, &[]);
+        data[info_at + LNK_INFO_BASE_OFFSET..info_at + LNK_INFO_BASE_OFFSET + 4]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(lnk_target_path(&data), None);
+    }
+
+    #[test]
+    fn a_shortcut_goes_by_its_ansi_path_when_the_unicode_one_is_not_there_or_is_empty() {
+        let info_at = LNK_HEADER_SIZE as usize;
+        let unicode_at = info_at + LNK_INFO_UNICODE_BASE_OFFSET;
+        let want = Some(PathBuf::from(r"C:\App\app.exe"));
+
+        let mut past_the_end = lnk_bytes(r"C:\App\app.exe", "", true, &[]);
+        past_the_end[unicode_at..unicode_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(lnk_target_path(&past_the_end), want);
+
+        // Pointing at the two zero bytes that end the Unicode suffix, which is an empty string.
+        let mut empty = lnk_bytes(r"C:\App\app.exe", "", true, &[]);
+        let suffix_at = u32::from_le_bytes([
+            empty[info_at + LNK_INFO_UNICODE_SUFFIX_OFFSET],
+            empty[info_at + LNK_INFO_UNICODE_SUFFIX_OFFSET + 1],
+            empty[info_at + LNK_INFO_UNICODE_SUFFIX_OFFSET + 2],
+            empty[info_at + LNK_INFO_UNICODE_SUFFIX_OFFSET + 3],
+        ]);
+        empty[unicode_at..unicode_at + 4].copy_from_slice(&suffix_at.to_le_bytes());
+        assert_eq!(lnk_target_path(&empty), want);
+    }
+
+    #[test]
+    fn a_shortcut_with_an_empty_path_has_no_target() {
+        for unicode in [false, true] {
+            assert_eq!(lnk_target_path(&lnk_bytes("", "", unicode, &[])), None);
+        }
+    }
+
+    /// A path that is not in the code page this PC reads shortcuts in comes out different, and then
+    /// matches nothing. See [`ansi_string`].
+    #[test]
+    fn an_ansi_path_is_read_a_byte_at_a_time() {
+        let mut data = lnk_bytes("C:\\App\\gr?e.exe", "", false, &[]);
+        let at = data
+            .iter()
+            .position(|&byte| byte == b'?')
+            .unwrap_or_default();
+        data[at] = 0xFC;
+        assert_eq!(
+            lnk_target_path(&data),
+            Some(PathBuf::from("C:\\App\\gr\u{fc}e.exe"))
+        );
+    }
+
+    /// [`lnk_bytes`], with these strings after it.
+    fn lnk_with_strings(flags: u32, strings: &[&str], icon_index: i32) -> Vec<u8> {
+        let mut data = lnk_bytes(r"C:\App\app.exe", "", true, &[]);
+        let all = LNK_HAS_LINK_INFO | LNK_IS_UNICODE | flags;
+        data[LNK_FLAGS_OFFSET..LNK_FLAGS_OFFSET + 4].copy_from_slice(&all.to_le_bytes());
+        data[LNK_ICON_INDEX_OFFSET..LNK_ICON_INDEX_OFFSET + 4]
+            .copy_from_slice(&icon_index.to_le_bytes());
+        for text in strings {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            data.extend_from_slice(&(units.len() as u16).to_le_bytes());
+            data.extend(units.iter().flat_map(|unit| unit.to_le_bytes()));
+        }
+        data
+    }
+
+    #[test]
+    fn an_icon_says_which_one_in_its_file_even_counting_from_the_end() {
+        let data = lnk_with_strings(LNK_HAS_ICON_LOCATION, &[r"C:\App\icons.dll"], -3);
+        assert_eq!(
+            read_lnk(&data).and_then(|link| link.icon_location),
+            Some(PathBuf::from(r"C:\App\icons.dll,-3"))
+        );
+    }
+
+    #[test]
+    fn a_string_cut_short_is_not_there_and_neither_is_what_comes_after_it() {
+        let flags = LNK_HAS_WORKING_DIR | LNK_HAS_ARGUMENTS | LNK_HAS_ICON_LOCATION;
+        let whole = lnk_with_strings(flags, &[r"C:\App", "--run", r"C:\App\a.ico"], 0);
+        let Some(link) = read_lnk(&whole) else {
+            panic!("the whole of it reads");
+        };
+        assert_eq!(link.arguments.as_deref(), Some("--run"));
+        let tail = (2 + r"C:\App\a.ico".len() * 2) + 2 + "--run".len() * 2 - 2;
+
+        let Some(cut) = read_lnk(&whole[..whole.len() - tail]) else {
+            panic!("its target is before all of this");
+        };
+        assert_eq!(cut.target, link.target);
+        assert_eq!(cut.working_directory, link.working_directory);
+        assert_eq!(cut.arguments, None);
+        assert_eq!(cut.icon_location, None);
+    }
+
+    #[test]
+    fn a_shortcut_with_strings_does_not_panic_wherever_it_is_cut() {
+        let flags = LNK_HAS_NAME
+            | LNK_HAS_RELATIVE_PATH
+            | LNK_HAS_WORKING_DIR
+            | LNK_HAS_ARGUMENTS
+            | LNK_HAS_ICON_LOCATION;
+        let whole = lnk_with_strings(flags, &["n", "r", "w", "a", "i"], 1);
+        for cut in 0..whole.len() {
+            let _ = read_lnk(&whole[..cut]);
+        }
+    }
+
+    #[test]
+    fn a_folder_a_person_added_is_the_apps_like_its_own() {
+        let mut context = context_at(r"C:\Tools\acme.exe", None);
+        let added = Path::new(r"D:\Acme Extra\tool.exe");
+        assert!(!path_matches(&context, added));
+        context.also_the_apps.push(PathBuf::from(r"D:\Acme Extra"));
+        assert!(path_matches(&context, added));
+        assert!(!path_matches(
+            &context,
+            Path::new(r"D:\Acme Extra2\tool.exe")
+        ));
     }
 
     #[test]

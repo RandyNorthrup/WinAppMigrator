@@ -553,6 +553,121 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_extension_is_known_in_any_case_and_followed_by_any_space() {
+        assert_eq!(
+            parsed(r"C:\APP\SVC.EXE /RUN"),
+            (r"C:\APP\SVC.EXE".to_owned(), Some("/RUN".to_owned()))
+        );
+        assert_eq!(
+            parsed("C:\\App\\run.BaT\t--now"),
+            (r"C:\App\run.BaT".to_owned(), Some("--now".to_owned()))
+        );
+        assert_eq!(parsed(r"C:\App\tool.Com"), path_only(r"C:\App\tool.Com"));
+    }
+
+    /// The way Windows itself tries an unquoted path: as far as the first thing that could be a program.
+    #[test]
+    fn the_first_word_that_ends_in_an_extension_ends_the_path() {
+        assert_eq!(
+            parsed(r"C:\a.exe b\svc.exe -x"),
+            (r"C:\a.exe".to_owned(), Some(r"b\svc.exe -x".to_owned()))
+        );
+        assert_eq!(
+            parsed(r"C:\Vendor\svc.exe C:\Vendor\plugin.dll"),
+            (
+                r"C:\Vendor\svc.exe".to_owned(),
+                Some(r"C:\Vendor\plugin.dll".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn with_no_extension_or_quotes_only_the_first_word_can_be_said_to_be_the_path() {
+        assert_eq!(
+            parsed(r"C:\App\svc --run"),
+            (r"C:\App\svc".to_owned(), Some("--run".to_owned()))
+        );
+        assert_eq!(
+            parsed(r"C:\Program Files\App\svc"),
+            (r"C:\Program".to_owned(), Some(r"Files\App\svc".to_owned()))
+        );
+    }
+
+    #[test]
+    fn what_is_around_a_command_line_is_not_part_of_it() {
+        assert_eq!(
+            parsed("  \"C:\\App\\svc.exe\"   -x  "),
+            (r"C:\App\svc.exe".to_owned(), Some("-x".to_owned()))
+        );
+        assert_eq!(parsed("  C:\\App\\svc.exe  "), path_only(r"C:\App\svc.exe"));
+        assert_eq!(
+            parsed(r#"" C:\App\svc.exe ""#),
+            path_only(r"C:\App\svc.exe")
+        );
+        assert_eq!(parsed(r#""""#), path_only(""));
+    }
+
+    #[test]
+    fn every_way_of_saying_the_kernels_namespace_or_the_windows_folder_is_known_in_any_case() {
+        assert_eq!(
+            parsed(r"\GLOBAL??\C:\App\flt.sys"),
+            path_only(r"C:\App\flt.sys")
+        );
+        assert_eq!(
+            parsed(r"\global??\C:\App\flt.sys"),
+            path_only(r"C:\App\flt.sys")
+        );
+        assert_eq!(
+            parsed(r"\dosdevices\C:\App\flt.sys"),
+            path_only(r"C:\App\flt.sys")
+        );
+        for raw in [r"\SYSTEMROOT\x.sys", r"%WINDIR%\x.sys", r"systemroot\x.sys"] {
+            assert_eq!(parsed(raw), path_only(r"C:\Windows\x.sys"), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_variable_means_what_it_meant_on_the_pc_this_came_from() {
+        let on_that_pc = |text: &str| text.replace("%ProgramFiles%", r"D:\PF");
+        let windows = Path::new(r"D:\Windows");
+        for (raw, arguments) in [
+            (r"%ProgramFiles%\App\svc.exe -x", Some("-x")),
+            (r#""%ProgramFiles%\App\svc.exe" -x"#, Some("-x")),
+            (r"%ProgramFiles%\App\svc.exe", None),
+        ] {
+            let image = parse_image_path_with(raw, windows, &on_that_pc);
+            assert_eq!(image.path, Path::new(r"D:\PF\App\svc.exe"), "{raw}");
+            assert_eq!(image.arguments.as_deref(), arguments, "{raw}");
+        }
+        // What is still relative once it has been expanded is relative to that PC's Windows folder.
+        let image = parse_image_path_with(r"%Nothing%\x.sys", windows, &|text| {
+            text.replace("%Nothing%", "drivers")
+        });
+        assert_eq!(image.path, Path::new(r"D:\Windows\drivers\x.sys"));
+    }
+
+    #[test]
+    fn a_prefix_is_not_looked_for_across_part_of_a_letter() {
+        // These all cut a letter of more than one byte in two, where a prefix would end.
+        for raw in ["ééé", "éééééééé", r"\é\x.sys", "%é%é%\\x.sys"] {
+            let _ = parsed(raw);
+        }
+    }
+
+    #[test]
+    fn a_folder_a_person_added_is_the_apps_like_its_own() {
+        let mut context = context_of(r"C:\Tools\acme.exe", Some(r"C:\Program Files\Acme"));
+        let added = Path::new(r"D:\Acme Extra\svc.exe");
+        assert!(!path_matches(&context, added));
+        context.also_the_apps.push(PathBuf::from(r"D:\Acme Extra"));
+        assert!(path_matches(&context, added));
+        assert!(
+            !path_matches(&context, Path::new(r"D:\Acme Extra More\svc.exe")),
+            "only what is in it"
+        );
+    }
+
     fn context_of(executable: &str, location: Option<&str>) -> ServiceScanContext {
         ServiceScanContext {
             executable_path: PathBuf::from(executable),
