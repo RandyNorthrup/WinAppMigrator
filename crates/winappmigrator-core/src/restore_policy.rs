@@ -685,6 +685,7 @@ const DISPLAY_ICON_VALUE: &str = "displayicon";
 /// Windows' own scheduled tasks, which run with high rights and are expected to be there.
 const WINDOWS_TASK_FOLDER: &str = r"\microsoft\windows\";
 const SYSTEM_ACCOUNTS: &[&str] = &["s-1-5-18", "system", "localsystem"];
+const HIGHEST_AVAILABLE_RUN_LEVEL: &str = "HighestAvailable";
 /// In a user's Documents. PowerShell runs what is in these whenever it starts, as a Startup folder
 /// is run at sign-in, and they mean nothing anywhere else.
 const REFUSED_DOCUMENTS_FOLDERS: &[&str] = &[r"windowspowershell\", r"powershell\"];
@@ -2538,8 +2539,10 @@ pub struct TaskDefinition {
     /// An action that is not a program, such as a COM handler, which no path can vouch for.
     pub has_other_actions: bool,
     pub runs_as_system: bool,
-    /// The account it says it runs as.
+    /// The account it says it runs as: that of the principal its actions run under.
     pub account: Option<String>,
+    /// Asks for the highest rights its account can have, which for an administrator is full rights.
+    pub highest_available: bool,
 }
 
 /// All of an element's text. A comment splits it, and the Task Scheduler reads straight
@@ -2566,32 +2569,56 @@ pub(crate) fn is_system_account(account: &str) -> bool {
 pub fn read_task_definition(xml: &str) -> std::result::Result<TaskDefinition, String> {
     let document = roxmltree::Document::parse(xml).map_err(|error| error.to_string())?;
     let mut definition = TaskDefinition::default();
+    let mut runs_under = None;
     for node in document.descendants().filter(roxmltree::Node::is_element) {
-        match node.tag_name().name() {
-            "Actions" => {
-                for action in node.children().filter(roxmltree::Node::is_element) {
-                    if action.tag_name().name() != "Exec" {
-                        definition.has_other_actions = true;
-                    }
-                    definition.commands.extend(
-                        action
-                            .descendants()
-                            .filter(|child| child.tag_name().name() == "Command")
-                            .map(node_text),
-                    );
+        if node.tag_name().name() == "Actions" {
+            runs_under = runs_under.or(node.attribute("Context"));
+            for action in node.children().filter(roxmltree::Node::is_element) {
+                if action.tag_name().name() != "Exec" {
+                    definition.has_other_actions = true;
                 }
+                definition.commands.extend(
+                    action
+                        .descendants()
+                        .filter(|child| child.tag_name().name() == "Command")
+                        .map(node_text),
+                );
             }
-            "UserId" | "GroupId" => {
-                let account = node_text(node);
-                definition.runs_as_system |= is_system_account(&account);
-                if !account.is_empty() {
-                    definition.account.get_or_insert(account);
-                }
-            }
-            _ => {}
         }
     }
+    // What a trigger names is who it waits for. Who a task runs as is only ever its principal, and
+    // what any principal could run as is taken for what it does, in case there are more than one.
+    let principals: Vec<_> = document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "Principal")
+        .collect();
+    for principal in &principals {
+        let account = principal_account(*principal);
+        definition.runs_as_system |= account.as_deref().is_some_and(is_system_account);
+        definition.highest_available |= child_text(*principal, "RunLevel")
+            .is_some_and(|level| level.eq_ignore_ascii_case(HIGHEST_AVAILABLE_RUN_LEVEL));
+    }
+    let its_own = principals
+        .iter()
+        .find(|principal| runs_under.is_some() && principal.attribute("id") == runs_under)
+        .or(principals.first());
+    definition.account = its_own.and_then(|principal| principal_account(*principal));
     Ok(definition)
+}
+
+/// What a principal runs as. An element can be empty, which says nothing.
+fn principal_account(principal: roxmltree::Node<'_, '_>) -> Option<String> {
+    ["UserId", "GroupId"]
+        .into_iter()
+        .find_map(|name| child_text(principal, name))
+}
+
+fn child_text(parent: roxmltree::Node<'_, '_>, name: &str) -> Option<String> {
+    parent
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == name)
+        .map(node_text)
+        .filter(|text| !text.is_empty())
 }
 
 /// Why a scheduled task must not be restored, if so. `xml` has already been rewritten for

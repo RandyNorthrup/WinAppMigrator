@@ -90,6 +90,8 @@ pub(crate) struct ReviewedTask<'a> {
     pub runs_as_system: bool,
     /// The account its definition names, which is what it will run as.
     pub account: Option<String>,
+    /// Asks for the highest rights that account can have.
+    pub highest_available: bool,
 }
 
 /// A shortcut that is allowed, with its paths rewritten for the target.
@@ -750,6 +752,7 @@ impl<'a> ReviewedPackage<'a> {
                 xml,
                 commands: definition.commands,
                 runs_as_system: definition.runs_as_system,
+                highest_available: definition.highest_available,
                 account: definition.account,
             });
         }
@@ -1331,8 +1334,12 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>, target_root: &Path) -
             change: SystemChange {
                 kind: SystemChangeKind::ScheduledTask,
                 title: format!("{}{}", task.entry.task_path, task.entry.task_name),
-                detail: format!("Runs as {runs_as}"),
-                high_rights: task.runs_as_system,
+                detail: if task.highest_available {
+                    format!("Runs as {runs_as}, with the highest rights it can have")
+                } else {
+                    format!("Runs as {runs_as}")
+                },
+                high_rights: task.runs_as_system || task.highest_available,
             },
         });
     }
@@ -2700,6 +2707,125 @@ mod tests {
         let reviewed = review(&manifest)?;
         assert_eq!(reviewed.environment.len(), 2);
         assert_eq!(reviewed.refused.len(), 2);
+        Ok(())
+    }
+
+    /// Who a trigger waits for is not who a task runs as, and a package can name anyone there.
+    #[test]
+    fn a_task_runs_as_its_principal_and_what_a_trigger_names_says_nothing() -> Result<()> {
+        let xml = format!(
+            r#"<?xml version="1.0"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><UserId>LOWLY\guest</UserId></LogonTrigger></Triggers><Principals><Principal id="Author"><UserId>S-1-5-21-1-2-3-500</UserId><LogonType>S4U</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Actions Context="Author"><Exec><Command>{SOURCE}\acme.exe</Command></Exec></Actions></Task>"#
+        );
+        let mut manifest = acme_manifest();
+        manifest.scheduled_tasks_detected = vec![task(r"\Acme\", "Updater", Some(xml))];
+        let changes = describe(&review(&manifest)?, Path::new(TARGET));
+        assert_eq!(changes.changes.len(), 1, "{:?}", changes.refused);
+        let row = &changes.changes[0];
+        assert!(row.detail.contains("S-1-5-21-1-2-3-500"), "{}", row.detail);
+        assert!(!row.detail.contains("guest"), "{}", row.detail);
+        assert!(row.detail.contains("highest rights"), "{}", row.detail);
+        assert!(row.high_rights);
+        Ok(())
+    }
+
+    #[test]
+    fn a_trigger_naming_system_does_not_make_a_task_run_as_it() -> Result<()> {
+        let definition = crate::restore_policy::read_task_definition(
+            r#"<Task><Triggers><LogonTrigger><UserId>S-1-5-18</UserId></LogonTrigger></Triggers><Principals><Principal><GroupId>S-1-5-32-545</GroupId></Principal></Principals><Actions><Exec><Command>a.exe</Command></Exec></Actions></Task>"#,
+        )
+        .map_err(WinAppMigratorError::InvalidInput)?;
+        assert!(!definition.runs_as_system);
+        assert_eq!(definition.account.as_deref(), Some("S-1-5-32-545"));
+        assert!(!definition.highest_available);
+        Ok(())
+    }
+
+    #[test]
+    fn with_more_than_one_principal_it_goes_by_the_one_its_actions_name_and_the_worst_of_them()
+    -> Result<()> {
+        let definition = crate::restore_policy::read_task_definition(
+            r#"<Task><Principals><Principal id="A"><UserId>S-1-5-18</UserId></Principal><Principal id="B"><UserId>bob</UserId></Principal></Principals><Actions Context="B"><Exec><Command>a.exe</Command></Exec></Actions></Task>"#,
+        )
+        .map_err(WinAppMigratorError::InvalidInput)?;
+        assert_eq!(definition.account.as_deref(), Some("bob"));
+        assert!(definition.runs_as_system);
+        Ok(())
+    }
+
+    fn other_settings_row(manifest: &PackageManifest) -> Result<Option<SystemChange>> {
+        Ok(describe(&review(manifest)?, Path::new(TARGET))
+            .changes
+            .into_iter()
+            .find(|change| change.kind == SystemChangeKind::OtherSettings))
+    }
+
+    fn acme_app(manifest: &mut PackageManifest) {
+        manifest.application_metadata = Some(crate::models::InstalledApp {
+            display_name: "Acme Widget".to_owned(),
+            publisher: Some("Acme Corporation".to_owned()),
+            version: None,
+            install_location: Some(PathBuf::from(SOURCE)),
+            uninstall_string: None,
+            main_executable: None,
+            registry_source_path: String::new(),
+            architecture: AppArchitecture::X64,
+            install_scope: crate::models::InstallScope::PerMachine,
+            owner_profile: None,
+        });
+    }
+
+    #[test]
+    fn a_value_outside_the_apps_own_keys_is_said_to_be_there() -> Result<()> {
+        let mut manifest = acme_manifest();
+        acme_app(&mut manifest);
+        let setting = |key: &str, name: &str| value(RegistryHive::LocalMachine, key, name, "x");
+        manifest.registry_keys_exported = vec![setting(r"Software\Acme\Widget", "Theme")];
+        assert_eq!(other_settings_row(&manifest)?, None, "its own key");
+
+        manifest.registry_keys_exported = vec![
+            setting(r"Software\Acme\Widget", "Theme"),
+            setting(r"Software\Microsoft\Whatever", "Hook"),
+            setting(r"Software\Fabrikam\Thing", "Hook"),
+        ];
+        let row = other_settings_row(&manifest)?;
+        let row = row.as_ref();
+        assert!(
+            row.is_some_and(|row| row.title.starts_with("2 settings") && row.high_rights),
+            "{row:?}"
+        );
+        assert!(row.is_some_and(|row| row.detail.contains(r"HKLM\Software\Microsoft\Whatever")));
+        Ok(())
+    }
+
+    /// A package says what an app is called, and Windows' own keys are not an app's by any name.
+    #[test]
+    fn calling_itself_microsoft_does_not_make_windows_keys_its_own() -> Result<()> {
+        let mut manifest = acme_manifest();
+        acme_app(&mut manifest);
+        if let Some(app) = manifest.application_metadata.as_mut() {
+            app.display_name = "Windows".to_owned();
+            app.publisher = Some("Microsoft Corporation".to_owned());
+        }
+        manifest.registry_keys_exported = vec![value(
+            RegistryHive::LocalMachine,
+            r"Software\Microsoft\Windows\CurrentVersion\Whatever",
+            "Hook",
+            "cmd.exe",
+        )];
+        assert!(other_settings_row(&manifest)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn what_has_a_kind_of_its_own_is_not_counted_again() -> Result<()> {
+        let mut manifest = acme_manifest();
+        manifest.registry_keys_exported = vec![value(
+            RegistryHive::LocalMachine,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            "Acme",
+            &format!(r"{SOURCE}\acme.exe"),
+        )];
+        assert_eq!(other_settings_row(&manifest)?, None);
         Ok(())
     }
 
