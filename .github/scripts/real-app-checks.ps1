@@ -628,6 +628,12 @@ function Captured-Values([string]$Manifests, $Apps) {
     }
 }
 
+# What someone made of 7-Zip on the PC the installers were built on. See install-real-apps.ps1.
+$script:PersonalTaskPath = '\WAM Personal\'
+$script:PersonalTaskName = 'WAM Personal Task'
+$script:PlainShortcut = 'WAM Plain 7-Zip.lnk'
+$script:PersonalShortcut = 'WAM Personal 7-Zip.lnk'
+
 function Get-MachineState([string]$Manifests, $Apps) {
     $environmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
     $environment = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($environmentKey)
@@ -663,6 +669,23 @@ function Get-MachineState([string]$Manifests, $Apps) {
     return $state
 }
 
+# So that one nobody can account for can be told from the log: what it holds, and who it says it is.
+function What-Key-Holds([string]$Kind, [string]$Item) {
+    if ($Kind -notin 'Classes', 'Software', 'App Paths', 'Services', 'Uninstall' -or $Item -notmatch '^HKEY_') { return '' }
+    $path = "Registry::$Item"
+    if (-not (Test-Path -LiteralPath $path)) { return ' (it is gone by now)' }
+    $parts = [Collections.Generic.List[string]]::new()
+    try {
+        $key = Get-Item -LiteralPath $path
+        foreach ($name in $key.GetValueNames()) { $parts.Add("$(if ($name) { $name } else { '(default)' })=$($key.GetValue($name))") }
+        foreach ($child in 'InprocServer32', 'LocalServer32', 'InProcServer32') {
+            $server = Join-Path $path $child
+            if (Test-Path -LiteralPath $server) { $parts.Add("$child=$((Get-Item -LiteralPath $server).GetValue(''))") }
+        }
+    } catch { $parts.Add("could not read: $($_.Exception.Message)") }
+    return " (holds: $($parts -join '; '))"
+}
+
 function State-Differences($Before, $After) {
     foreach ($kind in ($Before.Keys | Sort-Object)) {
         # What a value holds has to come back exactly. What a thing is called goes by no case, as Windows does.
@@ -675,7 +698,7 @@ function State-Differences($Before, $After) {
             if ($kind -eq 'Firewall' -and $item -match '_8wekyb3d8bbwe') {
                 Write-Host "  (Windows' own, and not counted: $item)"
             } else {
-                "$kind, new: $item"
+                "$kind, new: $item$(What-Key-Holds $kind $item)"
             }
         }
         foreach ($item in $Before[$kind]) { if (-not $now.Contains($item)) { "$kind, gone: $item" } }

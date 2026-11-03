@@ -70,7 +70,47 @@ foreach ($file in @($list.account_files | Where-Object { $_.app -in $apps.id }))
     Write-Host "  in this account's folders: $($file.relative), goes with $($file.goes_with)"
 }
 
-Write-Host "`n=== What the publishers' own installers give, with no reboot"
+Write-Host "`n=== What someone has made of an app here, naming this PC and this account"
+if ('7zip' -in $apps.id) {
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $sevenZip = 'C:\Program Files\7-Zip\7zFM.exe'
+    $mine = "$env:USERPROFILE\wam-personal-tool"
+    New-Item -ItemType Directory -Force -Path $mine | Out-Null
+    Set-Content -LiteralPath "$mine\run.cmd" -Value '@echo off'
+    $definition = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Author>$env:COMPUTERNAME\$env:USERNAME</Author></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>$env:COMPUTERNAME\$env:USERNAME</UserId></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>$($me.User.Value)</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings><Enabled>false</Enabled></Settings>
+  <Actions Context="Author">
+    <Exec><Command>$sevenZip</Command></Exec>
+    <Exec><Command>$mine\run.cmd</Command></Exec>
+  </Actions>
+</Task>
+"@
+    Register-ScheduledTask -TaskPath $script:PersonalTaskPath -TaskName $script:PersonalTaskName -Xml $definition | Out-Null
+    $registered = Export-ScheduledTask -TaskPath $script:PersonalTaskPath -TaskName $script:PersonalTaskName
+    # Or what the build is asked to leave out would not be there to leave out.
+    foreach ($says in $env:COMPUTERNAME, $me.User.Value, 'run.cmd') {
+        if ($registered -notmatch [regex]::Escape($says)) { throw "the task as registered does not say $says" }
+    }
+    Write-Host "  the task $script:PersonalTaskPath$script:PersonalTaskName, by $env:COMPUTERNAME\$env:USERNAME, runs 7-Zip and $mine\run.cmd"
+
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $shell = New-Object -ComObject WScript.Shell
+    $plain = $shell.CreateShortcut((Join-Path $desktop $script:PlainShortcut))
+    $plain.TargetPath = $sevenZip
+    $plain.Save()
+    $personal = $shell.CreateShortcut((Join-Path $desktop $script:PersonalShortcut))
+    $personal.TargetPath = $sevenZip
+    $personal.Arguments = '-personal wam-personal-shortcut-mark'
+    $personal.Save()
+    Write-Host "  on this account's Desktop: $script:PlainShortcut, and $script:PersonalShortcut with arguments"
+}
+
+Write-Host "`n=== What the publishers' own installers give, with no reboot\"
 $baseline = [ordered]@{}
 foreach ($app in $apps) {
     $results = [ordered]@{}
