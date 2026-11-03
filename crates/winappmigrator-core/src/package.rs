@@ -130,12 +130,21 @@ pub fn create_package_from_scan(
         FileClassification::MachineAppData => !options.include_program_data,
         _ => false,
     };
-    if report
+    // What a build goes on to do with a scan goes by what the scan found, so it has to be what this
+    // build was asked for. The window looks again whenever an option changes.
+    let brought_in_what_is_off = report
         .file_inventory
         .iter()
         .chain(&report.empty_folders)
         .any(|file| file.should_copy && is_off(&file.classification))
-    {
+        || (!options.include_user_data && report.user_data_profile.is_some())
+        || (!options.include_license_data
+            && (!report.license_registry_entries.is_empty()
+                || report
+                    .license_artifacts
+                    .iter()
+                    .any(|artifact| artifact.should_copy)));
+    if brought_in_what_is_off {
         return Err(WinAppMigratorError::InvalidInput(
             "this scan brought in data that this build was not asked to, so nothing was built"
                 .to_owned(),
@@ -2153,13 +2162,36 @@ mod tests {
             reason: String::new(),
             user_folder: None,
         });
-        let refused = create_package_from_scan(
-            &options,
-            &report,
-            &FootprintChoices::default(),
-            &BuildMonitor::default(),
-        );
-        assert!(matches!(refused, Err(WinAppMigratorError::InvalidInput(_))));
+        let is_refused = |report: &ScanReport| {
+            matches!(
+                create_package_from_scan(
+                    &options,
+                    report,
+                    &FootprintChoices::default(),
+                    &BuildMonitor::default(),
+                ),
+                Err(WinAppMigratorError::InvalidInput(_))
+            )
+        };
+        assert!(is_refused(&report));
+        report.file_inventory.pop();
+        // Only what an account has in its keys, or only a license, is the same.
+        report.user_data_profile = Some("alice".to_owned());
+        assert!(is_refused(&report));
+        report.user_data_profile = None;
+        report.license_registry_entries = vec![RegistryEntry {
+            hive: RegistryHive::CurrentUser,
+            key_path: r"Software\Acme".to_owned(),
+            value_name: Some("LicenseKey".to_owned()),
+            value_data: Some("x".to_owned()),
+            value_kind: Some(RegistryValueKind::String),
+            value_bytes_hex: None,
+            confidence: crate::models::MatchConfidence::Medium,
+            requires_admin: false,
+        }];
+        assert!(is_refused(&report));
+        report.license_registry_entries.clear();
+        assert!(!is_refused(&report), "and a scan as asked for builds");
         Ok(())
     }
 

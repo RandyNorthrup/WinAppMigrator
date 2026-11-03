@@ -434,15 +434,18 @@ fn a_person_who_picks_an_app_and_clicks_create_gets_an_installer()
     app.install_location = Some(app_folder);
     app.main_executable = Some(program);
     let installers = work.path().join("installers");
-    let output = installers.display().to_string();
     let stub_file = stub.clone();
     let mut harness = harness_with(ThemeMode::Dark, move |window| {
         window.apps = vec![app];
-        window.selected_app_index = Some(0);
-        window.output_dir = output;
         window.set_scan_runner(std::sync::Arc::new(winappmigrator_core::scan_app));
         window.stub_for_tests = Some(winappmigrator_core::InstallerStub::File(stub_file));
     });
+    harness.run_steps(2);
+    harness.get_by_label_contains("WAM Real Build").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().selected_app_index, Some(0));
+    // Where it would go by itself is that person's own folders. This much is typed.
+    harness.state_mut().output_dir = installers.display().to_string();
 
     let started = std::time::Instant::now();
     while harness.state().ready_scan().is_none() {
