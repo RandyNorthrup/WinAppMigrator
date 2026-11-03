@@ -100,9 +100,10 @@ nothing else. The build goes through each package for those marks, in every form
 with the User data option off. A step of that job that uploads nothing builds again with it on, where each has to be there, and
 `check-account-settings.ps1` installs that on the same runner, and shows each value arrive and go. `Real apps, a PC with no runtime`
 builds Mosquitto with its runtime in it, and `check-runtime-arrives.ps1` takes that runtime off the runner and shows the broker
-cannot start, then installs and has it serve a client. `Real windows` opens the app and an installer on each kind of runner,
-and looks at what is on the screen, without clicking anything, and again with graphics that cannot start. Its pictures are kept
-for a day, of the test app and of the runner's own list of what it has installed.
+cannot start, then installs and has it serve a client. `Real windows` opens the app, an installer and an uninstaller on each kind of runner,
+and looks at what is on the screen, without clicking anything. Each has to fit in what Windows says a window can use, at the
+runner's 1024x768, and be in the mode Windows is in, set both ways, or the one chosen in the app. It does the same again with
+graphics that cannot start. Its pictures are kept for a day, of the test app and of the runner's own list of what it has installed.
 
 What those jobs upload is a redistribution of those apps, for a day, to anyone signed in to GitHub, so an app goes
 in the list only if it is open source and its license allows that, and the workflow says which license. They hold no
