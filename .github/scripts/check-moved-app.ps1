@@ -43,13 +43,16 @@ function Uninstaller-Of([string]$Id) { "C:\ProgramData\WinAppMigrator\installs\$
 
 function Check-Files($Files, [string]$Root, [string]$What) {
     foreach ($file in $Files) {
-        $path = Join-Path $Root $file.relative
-        if (-not (Test-Path -LiteralPath $path)) {
+        # By the full form of the path, as PowerShell's own commands will not look at a file named aux.h.
+        $path = '\\?\' + (Join-Path $Root $file.relative)
+        if (-not [IO.File]::Exists($path)) {
             Check "$What`: $($file.relative) is there" $false 'it is not'
             continue
         }
-        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-        Check "Get-FileHash, $What`: $($file.relative)" ($hash -eq $file.sha256) "$hash, expected $($file.sha256)"
+        $stream = [IO.File]::OpenRead($path)
+        $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant()
+        $stream.Dispose()
+        Check ".NET SHA-256, $What`: $($file.relative)" ($hash -eq $file.sha256) "$hash, expected $($file.sha256)"
     }
 }
 

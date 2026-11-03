@@ -110,12 +110,12 @@ fn powershell(script: &str) -> TestResult<String> {
     .into())
 }
 
-/// Each file below a folder with its hash, by `Get-FileHash`, and nothing of this project's.
+/// Each file below a folder with its hash, by .NET, and nothing of this project's. By the full form of
+/// each path, as PowerShell's own commands, `Get-FileHash` among them, will not look at a file named
+/// `aux.h`, even on a Windows where it is a file like any other.
 fn tree_hashes(root: &Path) -> TestResult<Vec<serde_json::Value>> {
     let shown = powershell(&format!(
-        "$root = '{}'; Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object {{ \
-           '{{0}}|{{1}}' -f $_.FullName.Substring($root.Length + 1), \
-             (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }}",
+        "$root = '{}'; $sha = [Security.Cryptography.SHA256]::Create();          Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object {{            $stream = [IO.File]::OpenRead('\\?\' + $_.FullName);            $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '');            $stream.Dispose();            '{{0}}|{{1}}' -f $_.FullName.Substring($root.Length + 1), $hash.ToLowerInvariant() }}",
         root.display()
     ))?;
     let mut files = Vec::new();

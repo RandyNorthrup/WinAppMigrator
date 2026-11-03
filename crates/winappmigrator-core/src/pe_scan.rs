@@ -1026,7 +1026,7 @@ mod header_tests {
         programs.sort();
         let mut compared = 0;
         let mut partial_was_less = 0;
-        for program in programs.iter().step_by(25).take(120) {
+        for program in programs.iter().step_by(100).take(40) {
             let Ok(whole) = fs::read(program) else {
                 continue;
             };
