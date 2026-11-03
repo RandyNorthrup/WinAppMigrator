@@ -46,8 +46,9 @@ const GOES_WITH_LICENSE: &str = "license";
 /// Hash, length, and magic, at the end of an installer, after the package.
 const FOOTER_BYTES: usize = 32 + 8 + 21;
 /// What the runner has of its own that a package must never hold, by what it is set to.
-const RUNNER_VARIABLES: [&str; 7] = [
+const RUNNER_VARIABLES: [&str; 8] = [
     "USERNAME",
+    "COMPUTERNAME",
     "RUNNER_TEMP",
     "RUNNER_WORKSPACE",
     "GITHUB_WORKSPACE",

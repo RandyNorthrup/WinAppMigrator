@@ -3,7 +3,9 @@
 # nothing: it waits for the window, takes a picture of what is on the screen, and asks it to close. An
 # installer given no arguments waits at its first screen, so nothing is installed.
 #
-# It then opens each with graphics that cannot start, to see what a person is told.
+# Each has to fit in the part of the screen a window can use, so that what has to be clicked can be, and be
+# in the mode Windows is in, which this sets both ways. It then opens each with graphics that cannot start,
+# to see what a person is told.
 #
 # Run only by the job that downloads these, on a runner that is thrown away afterward.
 param(
@@ -29,6 +31,7 @@ function Check([string]$Label, [bool]$Passed, [string]$Detail = '') {
 }
 
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -40,6 +43,12 @@ public static class WamWindow {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr window, IntPtr device, uint flags);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    // 9 is DWMWA_EXTENDED_FRAME_BOUNDS: what can be seen of a window, without the borders it only has for
+    // being taken hold of, which GetWindowRect counts and which hang over the edge of a maximized one.
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out WamRect rect, int size);
+    public static bool SeenAt(IntPtr window, out WamRect rect) {
+        return DwmGetWindowAttribute(window, 9, out rect, Marshal.SizeOf(typeof(WamRect))) == 0;
+    }
 
     delegate bool EachWindow(IntPtr window, IntPtr unused);
     [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr window, EachWindow each, IntPtr unused);
@@ -99,13 +108,28 @@ function Colors-Of($Picture) {
     return @($counts.Count, $(if ($total) { [int]($most * 100 / $total) } else { 100 }))
 }
 
+# How bright what is below the title bar is, from 0 to 255, going by a grid of points. The title bar is Windows'.
+function Brightness-Of($Picture) {
+    $sum = 0.0
+    $count = 0
+    for ($y = 48; $y -lt $Picture.Height; $y += 8) {
+        for ($x = 8; $x -lt $Picture.Width; $x += 8) {
+            $sum += $Picture.GetPixel($x, $y).GetBrightness() * 255
+            $count++
+        }
+    }
+    return $(if ($count) { [int]($sum / $count) } else { 0 })
+}
+
 # Whether a picture has anything drawn in it. A blank window is one color, or nearly.
 function Is-Drawn($Colors, [int]$AtLeast) { return $Colors[0] -ge $AtLeast -and $Colors[1] -le 98 }
 
 # Open a program, wait for its window, take a picture, ask it to close, and say what happened.
-function Open-And-Look([string]$Program, [string]$Name, [string]$WindowTitle, [int]$MinimumColors, [int]$Settle) {
-    Write-Host "`n--- $Name`: $Program"
-    $process = Start-Process -FilePath $Program -PassThru
+function Open-And-Look([string]$Program, [string]$Name, [string]$WindowTitle, [int]$MinimumColors, [int]$Settle, [string[]]$Arguments = @(), [switch]$HasToFit) {
+    Write-Host "`n--- $Name`: $Program $Arguments"
+    $starting = @{ FilePath = $Program; PassThru = $true }
+    if ($Arguments.Count -gt 0) { $starting.ArgumentList = $Arguments }
+    $process = Start-Process @starting
     $state = @{ Window = [IntPtr]::Zero }
     $opened = Wait-Until {
         $process.Refresh()
@@ -143,6 +167,14 @@ function Open-And-Look([string]$Program, [string]$Name, [string]$WindowTitle, [i
     $inFront = [WamWindow]::GetForegroundWindow() -eq $state.Window
     Write-Host "  it is $width by $height, at $($rect.Left), $($rect.Top), and $(if ($inFront) { 'in front' } else { 'not in front' })"
     Check "$Name`: it is big enough to be a window" ($width -ge 300 -and $height -ge 150) "$width by $height"
+    if ($HasToFit) {
+        $seenAt = [WamRect]::new()
+        $area = [Windows.Forms.Screen]::FromHandle($state.Window).WorkingArea
+        $known = [WamWindow]::SeenAt($state.Window, [ref]$seenAt)
+        $where = "from $($seenAt.Left), $($seenAt.Top) to $($seenAt.Right), $($seenAt.Bottom), in what a window can use, from $($area.Left), $($area.Top) to $($area.Right), $($area.Bottom)"
+        Write-Host "  what can be seen of it is $where"
+        Check "$Name`: all of it is on the screen, clear of the taskbar" ($known -and $seenAt.Left -ge $area.Left -and $seenAt.Top -ge $area.Top -and $seenAt.Right -le $area.Right -and $seenAt.Bottom -le $area.Bottom) $where
+    }
 
     $seen = @{}
     foreach ($way in 'on the screen', 'asked of the window') {
@@ -150,6 +182,7 @@ function Open-And-Look([string]$Program, [string]$Name, [string]$WindowTitle, [i
             $picture = if ($way -eq 'on the screen') { Picture-On-Screen $rect } else { Picture-Asked $state.Window $rect }
             $colors = Colors-Of $picture
             Write-Host "  $way`: $($colors[0]) colors, the commonest is $($colors[1])% of it"
+            if ($way -eq 'asked of the window') { $script:LastBrightness = Brightness-Of $picture }
             $file = Join-Path $Pictures "$Name, $way.png"
             $picture.Save($file, [Drawing.Imaging.ImageFormat]::Png)
             $picture.Dispose()
@@ -192,9 +225,28 @@ foreach ($display in @(Get-CimInstance Win32_VideoController)) {
 $expected = Get-Content -Raw -LiteralPath (Join-Path $Installers 'expected.json') | ConvertFrom-Json
 $installer = Join-Path $Installers $expected.app.installer
 
+# Windows' own setting for what programs look like, which this runner is thrown away with.
+$Personalize = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+function Set-WindowsMode([string]$Mode) {
+    New-Item -Path $Personalize -Force -ErrorAction SilentlyContinue | Out-Null
+    Set-ItemProperty -Path $Personalize -Name 'AppsUseLightTheme' -Value ([int]($Mode -eq 'light')) -Type DWord
+}
+
+# What is drawn is mostly its background, which is near white in light mode and near black in dark.
+function Check-Mode([string]$Name, [string]$Mode) {
+    $brightness = $script:LastBrightness
+    Write-Host "  below its title bar it is $brightness bright"
+    $is = $(if ($brightness -ge 128) { 'light' } else { 'dark' })
+    Check "$Name`: it is in $Mode mode" ($is -eq $Mode) "it is $brightness bright"
+}
+
+Write-Host "`n=== The mode Windows is in, as this runner has it: $((Get-ItemProperty -Path $Personalize -ErrorAction SilentlyContinue).AppsUseLightTheme)"
+Set-WindowsMode 'light'
+
 Write-Host "`n=== The app, as it is released"
-$opened = Open-And-Look $App 'The app' 'WinAppMigrator' 32 20
+$opened = Open-And-Look $App 'The app' 'WinAppMigrator' 32 20 -HasToFit
 if ($opened) {
+    Check-Mode 'The app' 'light'
     Ask-To-Close $opened 'The app' 0
     $log = Latest-Log 'app'
     if ($log) {
@@ -209,9 +261,45 @@ if ($opened) {
 Write-Host "`n=== An installer of the test app, waiting at its first screen"
 $before = Test-Path -LiteralPath "C:\Program Files\$($expected.app.name)"
 # Called what it is installing, once it has read that.
-$opened = Open-And-Look $installer 'The installer' "Install $($expected.app.name)" 32 15
-if ($opened) { Ask-To-Close $opened 'The installer' 0 }
+$opened = Open-And-Look $installer 'The installer' "Install $($expected.app.name)" 32 15 -HasToFit
+if ($opened) {
+    Check-Mode 'The installer' 'light'
+    Ask-To-Close $opened 'The installer' 0
+}
 Check 'The installer: it installed nothing' ((Test-Path -LiteralPath "C:\Program Files\$($expected.app.name)") -eq $before) ''
+
+Write-Host "`n=== An uninstaller, of an install there is no record of, which only says so"
+$opened = Open-And-Look $installer 'The uninstaller' 'Uninstall' 8 8 -Arguments @('--uninstall', 'no-such-install') -HasToFit
+if ($opened) {
+    Check-Mode 'The uninstaller' 'light'
+    Ask-To-Close $opened 'The uninstaller' 0
+}
+
+Write-Host "`n=== With Windows in dark mode"
+Set-WindowsMode 'dark'
+foreach ($case in @(
+        @{ Program = $App; Name = 'The app, Windows dark'; Title = 'WinAppMigrator'; Settle = 20; Colors = 32; Arguments = @() },
+        @{ Program = $installer; Name = 'The installer, Windows dark'; Title = "Install $($expected.app.name)"; Settle = 15; Colors = 32; Arguments = @() },
+        @{ Program = $installer; Name = 'The uninstaller, Windows dark'; Title = 'Uninstall'; Settle = 8; Colors = 8; Arguments = @('--uninstall', 'no-such-install') }
+    )) {
+    $opened = Open-And-Look $case.Program $case.Name $case.Title $case.Colors $case.Settle -Arguments $case.Arguments -HasToFit
+    if ($opened) {
+        Check-Mode $case.Name 'dark'
+        Ask-To-Close $opened $case.Name 0
+    }
+}
+
+Write-Host "`n=== What a person chose in the app goes ahead of what Windows is in"
+$chosen = Join-Path $env:LOCALAPPDATA 'WinAppMigrator\theme.txt'
+New-Item -ItemType Directory -Force -Path (Split-Path $chosen) | Out-Null
+Set-Content -LiteralPath $chosen -Value 'light' -NoNewline
+$opened = Open-And-Look $App 'The app, chosen light with Windows dark' 'WinAppMigrator' 32 20
+if ($opened) {
+    Check-Mode 'The app, chosen light with Windows dark' 'light'
+    Ask-To-Close $opened 'The app, chosen light with Windows dark' 0
+}
+Remove-Item -LiteralPath $chosen
+Set-WindowsMode 'light'
 
 Write-Host "`n=== With graphics that cannot start, what a person is told"
 # wgpu goes by this, and these programs have no renderer but Direct3D 12.
