@@ -43,6 +43,8 @@ const WINDOWS_DIR_PREFIXES: [&str; 4] = [
 pub struct ServiceScanContext {
     pub executable_path: PathBuf,
     pub install_location: Option<PathBuf>,
+    /// Other folders that are the app's, because a person added them.
+    pub also_the_apps: Vec<PathBuf>,
 }
 
 pub fn scan_services(
@@ -219,6 +221,10 @@ fn path_matches(context: &ServiceScanContext, candidate: &Path) -> bool {
             .install_location
             .as_ref()
             .is_some_and(|root| path_is_strictly_inside(candidate, root))
+        || context
+            .also_the_apps
+            .iter()
+            .any(|root| path_is_strictly_inside(candidate, root))
 }
 
 /// A driver image is application-owned when it lives inside the app's install
@@ -232,8 +238,9 @@ fn is_app_owned_driver(context: &ServiceScanContext, image_path: &Path, file: &P
     }
     let under_install = context
         .install_location
-        .as_ref()
-        .is_some_and(|root| path_is_strictly_inside(image_path, root));
+        .iter()
+        .chain(&context.also_the_apps)
+        .any(|root| path_is_strictly_inside(image_path, root));
     under_install && file.is_file()
 }
 
@@ -555,6 +562,7 @@ mod tests {
         ServiceScanContext {
             executable_path: PathBuf::from(executable),
             install_location: location.map(PathBuf::from),
+            also_the_apps: Vec::new(),
         }
     }
 

@@ -112,6 +112,16 @@ pub fn discover_files(
     context: &FileDiscoveryContext,
     system: &SystemContext,
 ) -> (Vec<FileEntry>, Vec<FootprintLocation>, Vec<Warning>) {
+    discover_files_unless(context, system, &|| false)
+}
+
+/// [`discover_files`], going no further once `is_cancelled` says so, in which case what it found so
+/// far is of no use to anyone. A large app takes as long to walk as anything in a scan.
+pub(crate) fn discover_files_unless(
+    context: &FileDiscoveryContext,
+    system: &SystemContext,
+    is_cancelled: &dyn Fn() -> bool,
+) -> (Vec<FileEntry>, Vec<FootprintLocation>, Vec<Warning>) {
     let mut warnings = Vec::new();
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
@@ -169,6 +179,7 @@ pub fn discover_files(
             context.include_user_data,
             context.include_program_data,
             system,
+            is_cancelled,
             &mut files,
             &mut seen,
             &mut warnings,
@@ -952,7 +963,7 @@ fn left_out_warning(path: &Path) -> Warning {
 
 /// Whether any account can make a folder at the top of this kind of place, and so make it a link to
 /// wherever an administrator can read.
-fn anyone_can_create_in(kind: &FootprintKind) -> bool {
+pub(crate) fn anyone_can_create_in(kind: &FootprintKind) -> bool {
     matches!(
         kind,
         FootprintKind::ProgramData | FootprintKind::PublicDocuments
@@ -962,7 +973,7 @@ fn anyone_can_create_in(kind: &FootprintKind) -> bool {
 /// Whether this kind of place is the account's own to say where it is. A link in its `AppData`, or a
 /// value for where its Documents are, could otherwise take an app's name there to anything an
 /// administrator can read, so what is found there has to really be that account's.
-fn is_of_one_account(kind: &FootprintKind) -> bool {
+pub(crate) fn is_of_one_account(kind: &FootprintKind) -> bool {
     matches!(
         kind,
         FootprintKind::RoamingAppData
@@ -973,7 +984,7 @@ fn is_of_one_account(kind: &FootprintKind) -> bool {
     )
 }
 
-fn is_a_link(path: &Path) -> bool {
+pub(crate) fn is_a_link(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
 }
 
@@ -1485,6 +1496,7 @@ fn discover_tree(
     include_user_data: bool,
     include_program_data: bool,
     system: &SystemContext,
+    is_cancelled: &dyn Fn() -> bool,
     files: &mut Vec<FileEntry>,
     seen: &mut BTreeSet<String>,
     warnings: &mut Vec<Warning>,
@@ -1492,7 +1504,9 @@ fn discover_tree(
     let prune_volatile = holds_disposable_data(&root.kind);
     // Asked about by name before each is looked at. See `walk_asking`.
     let walker = walk_asking(&root.path, MAX_WALK_DEPTH, |path, is_dir| {
-        system.may_read(path) && (!prune_volatile || !is_volatile_dir(path, is_dir))
+        !is_cancelled()
+            && system.may_read(path)
+            && (!prune_volatile || !is_volatile_dir(path, is_dir))
     });
 
     for entry in walker {
@@ -1740,7 +1754,7 @@ fn classify_file(
     }
 }
 
-fn is_volatile_dir(path: &Path, is_dir: bool) -> bool {
+pub(crate) fn is_volatile_dir(path: &Path, is_dir: bool) -> bool {
     if !is_dir {
         return false;
     }
@@ -1755,7 +1769,7 @@ fn is_volatile_dir(path: &Path, is_dir: bool) -> bool {
     VOLATILE_DIR_NAMES.contains(&name.as_str()) || name.ends_with("cache")
 }
 
-fn kind_for_path(path: &Path) -> FootprintKind {
+pub(crate) fn kind_for_path(path: &Path) -> FootprintKind {
     let lower = path.to_string_lossy().to_ascii_lowercase();
     if lower.contains(r"\appdata\roaming") {
         FootprintKind::RoamingAppData
@@ -1821,7 +1835,11 @@ fn is_windows_system_path(path: &Path) -> bool {
 /// itself, is not in the Windows directory, and is not a known base such as
 /// `Program Files` or a user profile. A folder directly on a drive, like
 /// `C:\CocosDashboard`, is a normal install location.
-fn is_walkable_app_dir(path: &Path, known_base_dirs: &[PathBuf], windows_dir: &Path) -> bool {
+pub(crate) fn is_walkable_app_dir(
+    path: &Path,
+    known_base_dirs: &[PathBuf],
+    windows_dir: &Path,
+) -> bool {
     path.is_dir()
         && !is_drive_root(path)
         && !path_is_within(path, windows_dir)
@@ -2936,6 +2954,7 @@ mod tests {
             true,
             true,
             &SystemContext::live(),
+            &|| false,
             &mut files,
             &mut seen,
             &mut warnings,

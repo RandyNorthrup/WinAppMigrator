@@ -44,6 +44,8 @@ const COMMON_START_MENU: &str = r"Microsoft\Windows\Start Menu";
 pub struct ShortcutScanContext {
     pub executable_path: PathBuf,
     pub install_location: Option<PathBuf>,
+    /// Other folders that are the app's, because a person added them.
+    pub also_the_apps: Vec<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,6 +287,10 @@ fn path_matches(context: &ShortcutScanContext, candidate: &Path) -> bool {
             .install_location
             .as_ref()
             .is_some_and(|root| path_is_strictly_inside(candidate, root))
+        || context
+            .also_the_apps
+            .iter()
+            .any(|root| path_is_strictly_inside(candidate, root))
 }
 
 /// The target of a `.lnk` file. See [`read_lnk`].
@@ -565,6 +571,7 @@ mod tests {
         let context = ShortcutScanContext {
             executable_path: PathBuf::from(r"C:\App\app.exe"),
             install_location: Some(PathBuf::from(r"C:\App")),
+            also_the_apps: Vec::new(),
         };
         let desktop = work.path().join("Desktop");
         let elsewhere = work.path().join("elsewhere");
@@ -625,6 +632,7 @@ mod tests {
         let context = ShortcutScanContext {
             executable_path: PathBuf::from(r"C:\Program Files\Git\git-bash.exe"),
             install_location: Some(PathBuf::from(r"C:\Program Files\Git")),
+            also_the_apps: Vec::new(),
         };
         assert!(path_matches(
             &context,
@@ -640,6 +648,7 @@ mod tests {
         ShortcutScanContext {
             executable_path: PathBuf::from(executable),
             install_location: location.map(PathBuf::from),
+            also_the_apps: Vec::new(),
         }
     }
 

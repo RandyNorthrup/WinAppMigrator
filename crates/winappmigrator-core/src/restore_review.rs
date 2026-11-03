@@ -19,6 +19,7 @@ use crate::file_discovery::{
     has_reserved_device_name, known_base_dirs, link_refusal, safe_relative_path,
     split_user_data_relative, user_data_base, user_folder_place,
 };
+use crate::footprint::ChoiceId;
 use crate::journal::machine_state_root;
 use crate::license_scan::is_license_env_var;
 use crate::models::{
@@ -62,7 +63,7 @@ const DISPLAY_NAME_VALUE: &str = "DisplayName";
 pub(crate) const STATE_ROOT_REFUSAL: &str = "it is where installs keep their records";
 const UNC_PREFIX: &str = r"\\";
 /// A stand-in target, for describing a package before an install location is chosen.
-const NO_TARGET_YET: &str = r"C:\WinAppMigrator install location";
+pub(crate) const NO_TARGET_YET: &str = r"C:\WinAppMigrator install location";
 
 /// How to look up a service already on this PC by name.
 type ExistingService<'a> = &'a dyn Fn(&str) -> std::io::Result<Option<String>>;
@@ -94,6 +95,8 @@ pub(crate) struct ReviewedTask<'a> {
 
 /// A shortcut that is allowed, with its paths rewritten for the target.
 pub(crate) struct ReviewedShortcut {
+    /// Where it was on its PC, which is what it goes by.
+    pub original_lnk_path: PathBuf,
     pub placement: ShortcutPlacement,
     pub target: PathBuf,
     pub arguments: Option<String>,
@@ -167,6 +170,25 @@ impl<'a> ReviewedPackage<'a> {
             &current_known_folders(),
             &expand_env_vars,
             &service_image_path,
+        )
+    }
+
+    /// What a package would be allowed, for showing before an install location has been chosen, as
+    /// the installer's window does and as the app does before anything is built. Whether an item is
+    /// allowed does not depend on where the app is installed.
+    pub(crate) fn before_a_location_is_chosen(
+        manifest: &'a PackageManifest,
+        restore_license: bool,
+    ) -> Result<Self> {
+        Self::with_folders(
+            manifest,
+            Path::new(NO_TARGET_YET),
+            true,
+            restore_license,
+            &current_known_folders(),
+            &expand_env_vars,
+            // Whether an existing service may be replaced depends on where it is being installed.
+            &|_| Ok(None),
         )
     }
 
@@ -735,6 +757,7 @@ impl<'a> ReviewedPackage<'a> {
                 .as_deref()
                 .map(|text| self.map.rewrite(text));
             self.shortcuts.push(ReviewedShortcut {
+                original_lnk_path: shortcut.original_lnk_path.clone(),
                 placement,
                 target,
                 arguments,
@@ -791,7 +814,7 @@ fn is_own_parameter(entry: &RegistryEntry, service_name: &str) -> bool {
     lower == parameters || lower.starts_with(&format!("{parameters}\\"))
 }
 
-fn registry_item(entry: &RegistryEntry) -> String {
+pub(crate) fn registry_item(entry: &RegistryEntry) -> String {
     let hive = match entry.hive {
         RegistryHive::LocalMachine => "HKLM",
         RegistryHive::CurrentUser => "HKCU",
@@ -882,7 +905,7 @@ fn package_has_something_per_user(manifest: &PackageManifest) -> bool {
 }
 
 /// What kind of change a package makes beyond its files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SystemChangeKind {
     Service,
     Driver,
@@ -973,18 +996,8 @@ pub fn system_changes_restoring(
     restore_license: bool,
 ) -> Result<SystemChanges> {
     let fit = refuse_what_cannot_run_here(manifest)?;
-    let target = PathBuf::from(NO_TARGET_YET);
-    let review = ReviewedPackage::with_folders(
-        manifest,
-        &target,
-        true,
-        restore_license,
-        &current_known_folders(),
-        &expand_env_vars,
-        // Whether an existing service may be replaced depends on where it is being installed.
-        &|_| Ok(None),
-    )?;
-    let mut changes = describe(&review, &target);
+    let review = ReviewedPackage::before_a_location_is_chosen(manifest, restore_license)?;
+    let mut changes = describe(&review, Path::new(NO_TARGET_YET));
     changes.notes.extend(fit.warnings);
     Ok(changes)
 }
@@ -1088,6 +1101,13 @@ pub fn install_places(
     ))
 }
 
+/// Where a file of a license store goes. What a package says of it is cleaned the way the path it
+/// is written to is, so that what is worked out about it beforehand is about the same place. A
+/// path with a drive in it would otherwise be somewhere else altogether.
+pub(crate) fn store_file_destination(store: &Path, file: &LicenseStoreFile) -> PathBuf {
+    store.join(safe_relative_path(&file.relative_path))
+}
+
 /// How big a file already at a destination is, and nothing is followed to find out.
 fn replaced_bytes(destination: &Path) -> u64 {
     std::fs::symlink_metadata(destination).map_or(0, |metadata| metadata.len())
@@ -1101,13 +1121,6 @@ pub fn refuse_without_room_to_install(needs: &[PlaceNeed]) -> Result<RoomCheck> 
     if shortfalls.is_empty() {
         return Ok(room);
     }
-/// Where a file of a license store goes. What a package says of it is cleaned the way the path it
-/// is written to is, so that what is worked out about it beforehand is about the same place. A
-/// path with a drive in it would otherwise be somewhere else altogether.
-pub(crate) fn store_file_destination(store: &Path, file: &LicenseStoreFile) -> PathBuf {
-    store.join(safe_relative_path(&file.relative_path))
-}
-
     Err(WinAppMigratorError::InvalidInput(format!(
         "there is not enough room for this, so nothing was changed. {}. Free up some space there, \
          or choose an install location on another drive.",
@@ -1157,6 +1170,64 @@ pub(crate) fn overlaps_state_root(target_root: &Path, state_root: &Path) -> bool
 }
 
 fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
+    SystemChanges {
+        changes: described_rows(review, target_root)
+            .into_iter()
+            .map(|row| row.change)
+            .collect(),
+        refused: review
+            .refused
+            .iter()
+            .map(|warning| warning.message.clone())
+            .collect(),
+        notes: notes_of(review),
+    }
+}
+
+/// What a person ought to know of a review, as sentences.
+pub(crate) fn notes_of(review: &ReviewedPackage<'_>) -> Vec<String> {
+    let mut notes: Vec<String> = review
+        .warnings
+        .iter()
+        .filter(|warning| {
+            warning.code == USER_ACCOUNT_NOTE_CODE || warning.code == USER_FOLDER_ELSEWHERE_CODE
+        })
+        .map(|warning| warning.message.clone())
+        .collect();
+    notes.extend(notes_on_what_is_left_out(review.manifest));
+    notes
+}
+
+/// One thing a package sets up, and what a person can leave it out by.
+pub(crate) struct ChangeRow {
+    pub id: ChoiceId,
+    pub change: SystemChange,
+}
+
+/// What a service is known by in a choice.
+pub(crate) fn service_choice(name: &str) -> ChoiceId {
+    ChoiceId::Service(name.to_ascii_lowercase())
+}
+
+pub(crate) fn driver_choice(name: &str) -> ChoiceId {
+    ChoiceId::Driver(name.to_ascii_lowercase())
+}
+
+pub(crate) fn task_choice(task_path: &str, task_name: &str) -> ChoiceId {
+    ChoiceId::Task(format!("{task_path}{task_name}").to_ascii_lowercase())
+}
+
+pub(crate) fn shortcut_choice(original: &Path) -> ChoiceId {
+    ChoiceId::Shortcut(original.to_string_lossy().to_ascii_lowercase())
+}
+
+pub(crate) fn autostart_choice(entry: &RegistryEntry) -> ChoiceId {
+    ChoiceId::Autostart(registry_item(entry).to_ascii_lowercase())
+}
+
+/// The words a package's list of what it sets up uses, with each thing's own way to leave it out.
+/// Everything on that list comes through here, so what the app and an installer say cannot differ.
+pub(crate) fn described_rows(review: &ReviewedPackage<'_>, target_root: &Path) -> Vec<ChangeRow> {
     let mut changes = Vec::new();
     for service in &review.services {
         let starts = service
@@ -1166,21 +1237,24 @@ fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
             .map(|start| format!(", starts {start}"))
             .unwrap_or_default();
         let runs_as = service.account.label();
-        changes.push(SystemChange {
-            kind: SystemChangeKind::Service,
-            title: service
-                .entry
-                .display_name
-                .clone()
-                .unwrap_or_else(|| service.entry.service_name.clone()),
-            detail: format!(
-                "Runs {} as {runs_as}{starts}",
-                file_name_text(&service.binary)
-            ),
-            high_rights: matches!(
-                service.account,
-                ServiceAccount::Unspecified | ServiceAccount::LocalSystem
-            ),
+        changes.push(ChangeRow {
+            id: service_choice(&service.entry.service_name),
+            change: SystemChange {
+                kind: SystemChangeKind::Service,
+                title: service
+                    .entry
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| service.entry.service_name.clone()),
+                detail: format!(
+                    "Runs {} as {runs_as}{starts}",
+                    file_name_text(&service.binary)
+                ),
+                high_rights: matches!(
+                    service.account,
+                    ServiceAccount::Unspecified | ServiceAccount::LocalSystem
+                ),
+            },
         });
     }
     for driver in &review.drivers {
@@ -1190,14 +1264,17 @@ fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
             .as_deref()
             .map(|start| format!(", starts {start}"))
             .unwrap_or_default();
-        changes.push(SystemChange {
-            kind: SystemChangeKind::Driver,
-            title: driver.entry.service_name.clone(),
-            detail: format!(
-                "Loads {} into Windows itself{starts}",
-                file_name_text(&driver.destination)
-            ),
-            high_rights: true,
+        changes.push(ChangeRow {
+            id: driver_choice(&driver.entry.service_name),
+            change: SystemChange {
+                kind: SystemChangeKind::Driver,
+                title: driver.entry.service_name.clone(),
+                detail: format!(
+                    "Loads {} into Windows itself{starts}",
+                    file_name_text(&driver.destination)
+                ),
+                high_rights: true,
+            },
         });
     }
     for task in &review.tasks {
@@ -1208,11 +1285,14 @@ fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
                 .clone()
                 .unwrap_or_else(|| "the user who created it".to_owned())
         };
-        changes.push(SystemChange {
-            kind: SystemChangeKind::ScheduledTask,
-            title: format!("{}{}", task.entry.task_path, task.entry.task_name),
-            detail: format!("Runs as {runs_as}"),
-            high_rights: task.runs_as_system,
+        changes.push(ChangeRow {
+            id: task_choice(&task.entry.task_path, &task.entry.task_name),
+            change: SystemChange {
+                kind: SystemChangeKind::ScheduledTask,
+                title: format!("{}{}", task.entry.task_path, task.entry.task_name),
+                detail: format!("Runs as {runs_as}"),
+                high_rights: task.runs_as_system,
+            },
         });
     }
     for entry in review
@@ -1224,14 +1304,17 @@ fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
             RegistryHive::LocalMachine => "for everyone who signs in",
             RegistryHive::CurrentUser => "when you sign in",
         };
-        changes.push(SystemChange {
-            kind: SystemChangeKind::Autostart,
-            title: entry
-                .value_name
-                .clone()
-                .unwrap_or_else(|| entry.key_path.clone()),
-            detail: format!("Runs {scope}"),
-            high_rights: false,
+        changes.push(ChangeRow {
+            id: autostart_choice(entry),
+            change: SystemChange {
+                kind: SystemChangeKind::Autostart,
+                title: entry
+                    .value_name
+                    .clone()
+                    .unwrap_or_else(|| entry.key_path.clone()),
+                detail: format!("Runs {scope}"),
+                high_rights: false,
+            },
         });
     }
     for shortcut in &review.shortcuts {
@@ -1245,19 +1328,26 @@ fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
         } else {
             "for you"
         };
+        let id = shortcut_choice(&shortcut.original_lnk_path);
         if shortcut.placement.autostart {
-            changes.push(SystemChange {
-                kind: SystemChangeKind::Autostart,
-                title: name,
-                detail: format!("A shortcut in the Startup folder, {place}"),
-                high_rights: false,
+            changes.push(ChangeRow {
+                id,
+                change: SystemChange {
+                    kind: SystemChangeKind::Autostart,
+                    title: name,
+                    detail: format!("A shortcut in the Startup folder, {place}"),
+                    high_rights: false,
+                },
             });
         } else {
-            changes.push(SystemChange {
-                kind: SystemChangeKind::Shortcut,
-                title: name,
-                detail: format!("Opens {}, {place}", file_name_text(&shortcut.target)),
-                high_rights: false,
+            changes.push(ChangeRow {
+                id,
+                change: SystemChange {
+                    kind: SystemChangeKind::Shortcut,
+                    title: name,
+                    detail: format!("Opens {}, {place}", file_name_text(&shortcut.target)),
+                    high_rights: false,
+                },
             });
         }
     }
@@ -1265,51 +1355,76 @@ fn describe(review: &ReviewedPackage<'_>, target_root: &Path) -> SystemChanges {
         if is_path_variable(&variable.name) {
             let rewritten = review.map.rewrite(&variable.value);
             for entry in app_path_entries(&rewritten, target_root) {
-                changes.push(SystemChange {
-                    kind: SystemChangeKind::PathEntry,
-                    title: format!("Adds to {}", variable.name),
-                    detail: strip_prefix_ignore_case(Path::new(&entry), target_root).map_or_else(
-                        || "The install folder".to_owned(),
-                        |relative| {
-                            if relative.as_os_str().is_empty() {
-                                "The install folder".to_owned()
-                            } else {
-                                format!(r"The install folder\{}", relative.display())
-                            }
-                        },
-                    ),
-                    high_rights: false,
+                changes.push(ChangeRow {
+                    id: ChoiceId::Integration(SystemChangeKind::PathEntry),
+                    change: SystemChange {
+                        kind: SystemChangeKind::PathEntry,
+                        title: format!("Adds to {}", variable.name),
+                        detail: strip_prefix_ignore_case(Path::new(&entry), target_root)
+                            .map_or_else(
+                                || "The install folder".to_owned(),
+                                |relative| {
+                                    if relative.as_os_str().is_empty() {
+                                        "The install folder".to_owned()
+                                    } else {
+                                        format!(r"The install folder\{}", relative.display())
+                                    }
+                                },
+                            ),
+                        high_rights: false,
+                    },
                 });
             }
         } else {
-            changes.push(SystemChange {
-                kind: SystemChangeKind::EnvironmentVariable,
-                title: variable.name.clone(),
-                detail: format!("Set to {}", variable.value),
-                high_rights: false,
+            changes.push(ChangeRow {
+                id: ChoiceId::Integration(SystemChangeKind::EnvironmentVariable),
+                change: SystemChange {
+                    kind: SystemChangeKind::EnvironmentVariable,
+                    title: variable.name.clone(),
+                    detail: format!("Set to {}", variable.value),
+                    high_rights: false,
+                },
             });
         }
     }
-    changes.extend(describe_firewall_rules(&review.firewall_rules));
-    changes.extend(describe_registrations(review));
-    let mut notes: Vec<String> = review
-        .warnings
-        .iter()
-        .filter(|warning| {
-            warning.code == USER_ACCOUNT_NOTE_CODE || warning.code == USER_FOLDER_ELSEWHERE_CODE
-        })
-        .map(|warning| warning.message.clone())
-        .collect();
-    notes.extend(notes_on_what_is_left_out(review.manifest));
-    SystemChanges {
-        changes,
-        refused: review
-            .refused
-            .iter()
-            .map(|warning| warning.message.clone())
-            .collect(),
-        notes,
-    }
+    let by_kind = |change: SystemChange| ChangeRow {
+        id: ChoiceId::Integration(change.kind),
+        change,
+    };
+    changes.extend(
+        describe_firewall_rules(&review.firewall_rules)
+            .into_iter()
+            .map(by_kind),
+    );
+    changes.extend(describe_registrations(review).into_iter().map(by_kind));
+    changes
+}
+
+/// Which of the kinds on the list of what is set up a value is part of, if it is part of one. All of
+/// a kind can be left out together.
+pub(crate) fn change_kind_of(entry: &RegistryEntry) -> Option<SystemChangeKind> {
+    Some(match registration_of(entry)? {
+        Registration::ShellExtension { .. } => SystemChangeKind::ShellExtension,
+        Registration::ShellCommand { .. } | Registration::DefaultVerb { .. } => {
+            SystemChangeKind::ShellCommand
+        }
+        Registration::ClientEntry { .. } | Registration::DefaultAppsEntry { .. } => {
+            SystemChangeKind::DefaultApps
+        }
+        Registration::AppIdAccess
+        | Registration::ComClass { .. }
+        | Registration::TypeLibrary
+        | Registration::Interface
+        | Registration::AppId => SystemChangeKind::ComServer,
+        Registration::UrlProtocol { .. } => SystemChangeKind::UrlProtocol,
+        Registration::FileType { .. } => SystemChangeKind::FileType,
+        Registration::EventLogSource { .. } => SystemChangeKind::EventLogSource,
+        Registration::Font { .. } => SystemChangeKind::Font,
+        Registration::OdbcDriver { .. } => SystemChangeKind::OdbcDriver,
+        Registration::OdbcSource { .. } => SystemChangeKind::OdbcSource,
+        Registration::CompatibilitySetting => SystemChangeKind::CompatibilitySetting,
+        Registration::ProgramName { .. } => SystemChangeKind::ProgramName,
+    })
 }
 
 fn describe_firewall_rules(rules: &[ReviewedFirewallRule<'_>]) -> Vec<SystemChange> {
@@ -1549,14 +1664,24 @@ fn names_of_left_out(items: &[LeftOutItem]) -> String {
     some_names(items.iter().map(|item| item.name.clone()).collect())
 }
 
+/// What the app and an installer both call what is left out, so that the two screens agree.
+pub const CREDENTIALS_LEFT_OUT_TEXT: &str =
+    "Not in this installer, because they look like credentials";
+pub const CERTIFICATES_LEFT_OUT_TEXT: &str =
+    "The app seems to rely on certificates that were trusted on its PC, and they are not installed";
+pub const FONTS_LEFT_OUT_TEXT: &str = "These fonts go by the app's name, and nothing says they are its own, so they are not installed";
+const LEFT_OUT_BY_CHOICE_TEXT: &str = "Left out by whoever built this installer";
+const ADDED_BY_CHOICE_TEXT: &str =
+    "Added by whoever built this installer, because they took it to be part of the app";
+
 /// What a person ought to know is not coming, and why. Certificates are only ever this: which to
 /// trust is for them to decide.
 fn notes_on_what_is_left_out(manifest: &PackageManifest) -> Vec<String> {
     let mut notes = Vec::new();
     if !manifest.secrets_left_out.is_empty() {
         notes.push(format!(
-            "Not in this installer, because they look like credentials: {}. What is on this PC \
-             of them stays as it is, and you may have to enter them again.",
+            "{CREDENTIALS_LEFT_OUT_TEXT}: {}. What is on this PC of them stays as it is, and you may \
+             have to enter them again.",
             names_of_left_out(&manifest.secrets_left_out)
         ));
     }
@@ -1568,8 +1693,7 @@ fn notes_on_what_is_left_out(manifest: &PackageManifest) -> Vec<String> {
     }
     if !manifest.certificates_reported.is_empty() {
         notes.push(format!(
-            "The app seems to rely on certificates that were trusted on its PC, and they are not \
-             installed: {}. Whether to trust them here is for you to decide.",
+            "{CERTIFICATES_LEFT_OUT_TEXT}: {}. Whether to trust them here is for you to decide.",
             some_names(
                 manifest
                     .certificates_reported
@@ -1581,15 +1705,26 @@ fn notes_on_what_is_left_out(manifest: &PackageManifest) -> Vec<String> {
     }
     if !manifest.fonts_reported.is_empty() {
         notes.push(format!(
-            "These fonts go by the app's name, and nothing says they are its own, so they are not \
-             installed: {}.",
+            "{FONTS_LEFT_OUT_TEXT}: {}.",
             some_names(manifest.fonts_reported.clone())
+        ));
+    }
+    if !manifest.left_out_by_choice.is_empty() {
+        notes.push(format!(
+            "{LEFT_OUT_BY_CHOICE_TEXT}: {}.",
+            names_of_left_out(&manifest.left_out_by_choice)
+        ));
+    }
+    if !manifest.added_by_choice.is_empty() {
+        notes.push(format!(
+            "{ADDED_BY_CHOICE_TEXT}: {}.",
+            some_names(manifest.added_by_choice.clone())
         ));
     }
     notes
 }
 
-fn certificate_label(certificate: &CertificateEntry) -> String {
+pub(crate) fn certificate_label(certificate: &CertificateEntry) -> String {
     let name = if certificate.subject.is_empty() {
         &certificate.thumbprint
     } else {
@@ -1643,6 +1778,8 @@ mod tests {
             firewall_rules_detected: Vec::new(),
             certificates_reported: Vec::new(),
             fonts_reported: Vec::new(),
+            left_out_by_choice: Vec::new(),
+            added_by_choice: Vec::new(),
             warnings: Vec::new(),
             items_intentionally_excluded: Vec::new(),
             included_user_data: false,
@@ -1692,6 +1829,30 @@ mod tests {
             assert!(
                 install_location_problem(Path::new(&spelled)).is_some(),
                 "{spelled}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_of_a_store_is_where_it_is_written_whatever_a_package_says_of_it() {
+        let store = Path::new(r"C:\ProgramData\Acme\store");
+        for said in [
+            r"C:\Windows\x.exe",
+            r"..\..\Other\x.exe",
+            r"\\server\share\x.exe",
+            r"\Windows\x.exe",
+            r"sub\x.exe",
+        ] {
+            let file = LicenseStoreFile {
+                relative_path: PathBuf::from(said),
+                size_bytes: 1,
+                hash_sha256: String::new(),
+            };
+            let destination = store_file_destination(store, &file);
+            assert!(
+                crate::path_utils::path_is_strictly_inside(&destination, store),
+                "{said} came to {}",
+                destination.display()
             );
         }
     }
@@ -1833,30 +1994,6 @@ mod tests {
             true,
             &folders(),
             &|text| text.to_owned(),
-    #[test]
-    fn a_file_of_a_store_is_where_it_is_written_whatever_a_package_says_of_it() {
-        let store = Path::new(r"C:\ProgramData\Acme\store");
-        for said in [
-            r"C:\Windows\x.exe",
-            r"..\..\Other\x.exe",
-            r"\\server\share\x.exe",
-            r"\Windows\x.exe",
-            r"sub\x.exe",
-        ] {
-            let file = LicenseStoreFile {
-                relative_path: PathBuf::from(said),
-                size_bytes: 1,
-                hash_sha256: String::new(),
-            };
-            let destination = store_file_destination(store, &file);
-            assert!(
-                crate::path_utils::path_is_strictly_inside(&destination, store),
-                "{said} came to {}",
-                destination.display()
-            );
-        }
-    }
-
             &|_| Ok(None),
         )?;
         review.warnings.clear();

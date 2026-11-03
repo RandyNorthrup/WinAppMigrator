@@ -127,6 +127,10 @@ pub struct ScanOptions {
     /// Whose per-user data and settings to read. One account's, whoever else is on the PC.
     #[serde(default)]
     pub user_profile: ProfileChoice,
+    /// The near matches a person ticked, by [`NearMatch::id`]. Only one this scan offers itself
+    /// counts, so this cannot name a folder of its own.
+    #[serde(default)]
+    pub near_matches: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -149,6 +153,7 @@ impl ScanOptions {
             include_license_data: false,
             source: ScanSource::Live,
             user_profile: ProfileChoice::Default,
+            near_matches: Vec::new(),
         }
     }
 }
@@ -229,10 +234,46 @@ pub struct ScanReport {
     /// Only what they are called: they stay behind.
     #[serde(default)]
     pub fonts_reported: Vec<String>,
+    /// What exact names left out and looks related, for a person to choose from. Not kept in what
+    /// goes in a package, since most of it is no part of the app.
+    #[serde(default, skip_serializing)]
+    pub near_matches: Vec<NearMatch>,
     pub warnings: Vec<Warning>,
     pub items_excluded: Vec<String>,
     pub confidence_score: u8,
     pub generated_artifacts: Option<GeneratedArtifacts>,
+}
+
+/// Something a scan's exact names left out that looks related, offered and never taken by itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NearMatch {
+    /// What a choice goes by, which [`ScanOptions::near_matches`] names.
+    pub id: String,
+    pub kind: NearMatchKind,
+    /// What to call it.
+    pub name: String,
+    /// Where it is, as its PC calls it, if it says.
+    pub path: Option<PathBuf>,
+    /// Why it is offered, in a sentence a person can check.
+    pub why: String,
+    /// It is in a data folder, so it comes with the User data option or not at all.
+    pub follows_user_data: bool,
+    /// As far as was looked. Nothing here is more than a guide, since it is counted before any choice.
+    pub file_count: usize,
+    pub total_bytes: u64,
+    /// Whether that is all of it, rather than as far as a limit went.
+    pub measured_all: bool,
+    /// This scan brought it in, because it was asked to.
+    pub picked: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NearMatchKind {
+    /// A folder with a name close to the product's.
+    Folder,
+    /// An entry in the Uninstall key marked as a part of something, which no list of apps shows.
+    HiddenEntry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +392,13 @@ pub struct PackageManifest {
     /// Fonts in the Windows folder that go by the app's name, and that nothing says are its own.
     #[serde(default)]
     pub fonts_reported: Vec<String>,
+    /// What whoever built this chose to leave out, and what went with it. Names only, for the person
+    /// installing to know.
+    #[serde(default)]
+    pub left_out_by_choice: Vec<LeftOutItem>,
+    /// What whoever built this chose to add, beyond what the app's own records and name found.
+    #[serde(default)]
+    pub added_by_choice: Vec<String>,
     pub warnings: Vec<Warning>,
     pub items_intentionally_excluded: Vec<String>,
     /// Whether per-user application data was captured at build time. Drives the

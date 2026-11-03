@@ -6,12 +6,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::space::RoomCheck;
 
+/// What a scan is looking at. A scan looks at each of these in turn, and stops between them, and
+/// part-way through the ones that can take long, when it is cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanStep {
+    /// How the app was installed, from its install record.
+    InstallRecord,
+    /// Its services, drivers, scheduled tasks, shortcuts, and environment variables.
+    SystemItems,
+    /// What else might be the app's, by name.
+    NearMatches,
+    /// Its files and folders.
+    Files,
+    /// What ties it into Windows, in the registry.
+    Registry,
+    /// What it needs to run, and what it holds that must not be copied.
+    Finishing,
+}
+
 /// The step an installer build has reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildStep {
-    /// Reverse-engineering the application's footprint. Not cancellable part-way,
-    /// so a cancel takes effect when this step ends.
+    /// Reverse-engineering the application's footprint, for a build that has not been given a scan.
     Scanning,
+    /// Applying what a person chose to the scan a build was given.
+    Preparing,
     /// How much room this build will need and where, now that it is known. It carries on after
     /// this only if it fits.
     RoomChecked(RoomCheck),
@@ -83,6 +102,8 @@ pub struct Monitor<S> {
 
 /// Follows the building of an installer.
 pub type BuildMonitor = Monitor<BuildStep>;
+/// Follows a scan.
+pub type ScanMonitor = Monitor<ScanStep>;
 /// Follows an install or an uninstall.
 pub type InstallMonitor = Monitor<InstallStep>;
 
@@ -109,6 +130,14 @@ impl<S> Monitor<S> {
         Self {
             observer: Some(Arc::new(observer)),
             cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// One that says nothing to anyone, and is cancelled when this is.
+    pub(crate) fn sharing_cancel<T>(&self) -> Monitor<T> {
+        Monitor {
+            observer: None,
+            cancelled: Arc::clone(&self.cancelled),
         }
     }
 
@@ -154,6 +183,15 @@ mod tests {
             monitor.checkpoint(),
             Err(WinAppMigratorError::Cancelled)
         ));
+    }
+
+    #[test]
+    fn a_monitor_sharing_a_cancel_is_cancelled_with_it() {
+        let monitor = BuildMonitor::default();
+        let scan: ScanMonitor = monitor.sharing_cancel();
+        assert!(!scan.is_cancelled());
+        monitor.cancel();
+        assert!(scan.is_cancelled());
     }
 
     #[test]

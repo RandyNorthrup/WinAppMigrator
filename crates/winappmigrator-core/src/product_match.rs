@@ -8,6 +8,9 @@
 //!
 //! A publisher never selects anything on its own. It can only qualify the parent folder
 //! of a product match, as in `Mozilla\Firefox`.
+//!
+//! [`ProductNames::near_match`] says what is close to a name without being it. That takes nothing
+//! by itself: it is only ever offered, and goes by the same rules as anything else once it is ticked.
 
 use crate::path_utils::normalize_name_for_match;
 
@@ -20,6 +23,14 @@ const MIN_USER_FOLDER_NAME_LEN: usize = 4;
 const MIN_VENDOR_PREFIX_LEN: usize = 4;
 /// A multi-word product name this long is specific enough to match under any parent.
 const MIN_ANY_PARENT_NAME_LEN: usize = 6;
+/// An executable's or folder's one-word name this short is a word anyone could use, as `Code` is, so
+/// a folder with that word in its name is nothing like the product.
+const MIN_NEAR_ALIAS_LEN: usize = 5;
+/// .NET keeps a program's settings in a folder named `<Company>\<Program>.exe_Url_<hash>`, with
+/// nothing about the company to go by.
+const DOT_NET_SETTINGS_WORD: &str = "exe";
+/// Publishers with so much on a PC that being theirs says nothing. Windows itself is one.
+const PUBLISHERS_OF_EVERYTHING: &[&str] = &["microsoft", "windows"];
 
 /// Names too generic to identify an application: a folder or executable called this says
 /// nothing about which product it belongs to.
@@ -152,6 +163,22 @@ pub(crate) struct ProductNames {
     aliases: Vec<String>,
     /// What the vendor's folders are called. Only ever a qualifier.
     vendors: Vec<String>,
+    /// The product's names as words, for what is close to one without being it.
+    near_names: Vec<Vec<String>>,
+    /// What the publisher is called, as words, without what adds nothing to a vendor's name.
+    publisher_words: Vec<String>,
+}
+
+/// What makes a folder's name close to a product's without being it. In the order of how much that
+/// says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NearName {
+    /// `Stream Deck Plugins` for `Stream Deck`.
+    StartsWithProduct,
+    /// `Elgato Stream Deck` for `Stream Deck`.
+    HasProductInIt,
+    /// `Mozilla-1de4eec8` for a Mozilla app, with the publisher's name as it is written there.
+    StartsWithPublisher(String),
 }
 
 impl ProductNames {
@@ -163,6 +190,7 @@ impl ProductNames {
     ) -> Self {
         let mut names = Self::default();
         if let Some(publisher) = publisher {
+            names.publisher_words = vendor_words(publisher);
             push_unique(&mut names.vendors, normalize_name_for_match(publisher));
             if let Some(word) = significant_words(publisher).next() {
                 push_unique(&mut names.vendors, word);
@@ -178,12 +206,23 @@ impl ProductNames {
             names.add_display_name(display_name);
         }
         for alias in aliases {
-            let normalized = normalize_name_for_match(&primary_name(alias));
+            let primary = primary_name(alias);
+            let normalized = normalize_name_for_match(&primary);
             if is_usable_name(&normalized) {
-                push_unique(&mut names.aliases, normalized);
+                push_unique(&mut names.aliases, normalized.clone());
+                let words = camel_case_words(&primary);
+                if words.len() > 1 || normalized.len() >= MIN_NEAR_ALIAS_LEN {
+                    names.add_near_name(words);
+                }
             }
         }
         names
+    }
+
+    fn add_near_name(&mut self, words: Vec<String>) {
+        if !words.is_empty() && !self.near_names.contains(&words) {
+            self.near_names.push(words);
+        }
     }
 
     fn add_display_name(&mut self, display_name: &str) {
@@ -195,6 +234,7 @@ impl ProductNames {
                 self.any_parent.push(normalized.clone());
             }
             self.full.push(normalized);
+            self.add_near_name(camel_case_words(&primary));
         }
         let with_version =
             normalize_name_for_match(display_name.split('(').next().unwrap_or(display_name));
@@ -207,6 +247,10 @@ impl ProductNames {
         {
             let short = normalize_name_for_match(&rest.join(" "));
             if is_usable_name(&short) {
+                // One word by itself is a word anyone could use: `Studio` from `OBS Studio`.
+                if rest.len() > 1 {
+                    self.add_near_name(camel_case_words(&rest.join(" ")));
+                }
                 self.short.push(short);
             }
         }
@@ -293,6 +337,95 @@ impl ProductNames {
             && words.all(|word| CORPORATE_WORDS.contains(&word.as_str()))
     }
 
+    /// Whether a folder's name is close to this product's without being it, and how. That is by
+    /// whole words, so `Git` is near `Git LFS` and not `GitHub`, and only ever a reason to ask. A
+    /// publisher's name only counts directly in a folder that holds programs or data, all of it, and
+    /// for a publisher that is not on everything. See [`PUBLISHERS_OF_EVERYTHING`].
+    pub(crate) fn near_match(&self, parent: Option<&str>, folder: &str) -> Option<NearName> {
+        if is_generic_name(folder) || self.is_exactly(parent, folder) {
+            return None;
+        }
+        let plain = plain_words(folder);
+        let camel_case = camel_case_words(folder);
+        // What is under some other folder is that folder's, unless that folder is nothing more than
+        // a place to keep things, or the rest of what it is called says more.
+        let parent_says_nothing =
+            parent.is_none_or(|parent| self.is_vendor_name(parent) || is_container_folder(parent));
+        for name in &self.near_names {
+            let words = if name.len() > 1 { &camel_case } else { &plain };
+            if words.len() > name.len()
+                && words.starts_with(name)
+                && (parent_says_nothing
+                    || name.len() > 1
+                    || words
+                        .get(name.len())
+                        .is_some_and(|next| next == DOT_NET_SETTINGS_WORD))
+            {
+                return Some(NearName::StartsWithProduct);
+            }
+        }
+        if parent_says_nothing {
+            for name in &self.near_names {
+                let words = if name.len() > 1 { &camel_case } else { &plain };
+                let is_specific = name.len() > 1
+                    || name
+                        .first()
+                        .is_some_and(|word| word.len() >= MIN_ANY_PARENT_NAME_LEN);
+                if is_specific && words.windows(name.len()).any(|run| run == name.as_slice()) {
+                    return Some(NearName::HasProductInIt);
+                }
+            }
+        }
+        let publisher = &self.publisher_words;
+        let first = publisher.first()?;
+        (parent.is_none()
+            && first.len() >= MIN_VENDOR_PREFIX_LEN
+            && !is_publisher_of_everything(first)
+            && plain.len() > publisher.len()
+            && plain.starts_with(publisher))
+        .then(|| {
+            let written: Vec<&str> = folder
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .take(publisher.len())
+                .collect();
+            NearName::StartsWithPublisher(written.join(" "))
+        })
+    }
+
+    fn is_exactly(&self, parent: Option<&str>, folder: &str) -> bool {
+        self.matches_top_level(folder, MatchScope::ProgramFolders)
+            || parent.is_some_and(|parent| {
+                self.matches_nested(parent, folder, MatchScope::ProgramFolders)
+            })
+    }
+
+    /// True for a folder named for the publisher and nothing else, by its whole words, unlike
+    /// [`Self::is_vendor_only_folder`], which has to allow for how a registry key is written.
+    /// `Mozilla-1de4eec8` is not, and `NVIDIA Corporation` is.
+    pub(crate) fn is_named_only_for_publisher(&self, folder: &str) -> bool {
+        if self.vendors.contains(&normalize_name_for_match(folder)) {
+            return true;
+        }
+        let words = vendor_words(folder);
+        match words.as_slice() {
+            [] => false,
+            [one] => self.is_vendor_word(one),
+            _ => words == self.publisher_words,
+        }
+    }
+
+    /// Whether this is who published something, by all of what they are called, and whether that is
+    /// a publisher to go by at all.
+    pub(crate) fn has_publisher_like(&self, publisher: &str) -> bool {
+        let Some(first) = self.publisher_words.first() else {
+            return false;
+        };
+        first.len() >= MIN_VENDOR_PREFIX_LEN
+            && !is_publisher_of_everything(first)
+            && vendor_words(publisher) == self.publisher_words
+    }
+
     fn is_vendor_name(&self, folder: &str) -> bool {
         self.vendors.contains(&normalize_name_for_match(folder))
             || significant_words(folder)
@@ -360,8 +493,54 @@ fn is_usable_name(normalized: &str) -> bool {
 }
 
 /// True for a name that says nothing about which product owns it, such as `bin`.
-fn is_generic_name(name: &str) -> bool {
+pub(crate) fn is_generic_name(name: &str) -> bool {
     GENERIC_NAMES.contains(&normalize_name_for_match(name).as_str())
+}
+
+/// What a vendor is called, as words, without the ones that add nothing to its name.
+fn vendor_words(name: &str) -> Vec<String> {
+    plain_words(name)
+        .into_iter()
+        .filter(|word| {
+            !CORPORATE_WORDS.contains(&word.as_str())
+                && !PUBLISHER_NOISE_WORDS.contains(&word.as_str())
+        })
+        .collect()
+}
+
+fn is_publisher_of_everything(word: &str) -> bool {
+    PUBLISHERS_OF_EVERYTHING
+        .iter()
+        .any(|publisher| word.starts_with(publisher))
+}
+
+/// A name's words, split where something other than a letter or a digit is, lowercase.
+fn plain_words(name: &str) -> Vec<String> {
+    name.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// A name's words, split where [`plain_words`] does and also where a capital starts one, so
+/// `StreamDeck` is two words. Only for a name of more than one word: `GitHub` is not `Git`.
+fn camel_case_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    for word in name.split(|c: char| !c.is_alphanumeric()) {
+        let mut current = String::new();
+        let mut last_was_lower = false;
+        for character in word.chars() {
+            if character.is_uppercase() && last_was_lower {
+                words.push(std::mem::take(&mut current));
+            }
+            last_was_lower = character.is_lowercase() || character.is_numeric();
+            current.extend(character.to_lowercase());
+        }
+        if !current.is_empty() {
+            words.push(current);
+        }
+    }
+    words
 }
 
 fn is_container_folder(folder: &str) -> bool {
@@ -667,6 +846,165 @@ mod tests {
             !inkscape.is_vendor_only_folder("Inkscape"),
             "a folder named for both vendor and product is the product's"
         );
+    }
+
+    #[test]
+    fn a_near_match_goes_by_whole_words_and_is_never_an_exact_one() {
+        let deck = ProductNames::new(Some("Stream Deck"), Some("Corsair Memory, Inc."), &[], &[]);
+        assert_eq!(
+            deck.near_match(None, "Stream Deck Plugins"),
+            Some(NearName::StartsWithProduct)
+        );
+        assert_eq!(
+            deck.near_match(None, "StreamDeckPlugins"),
+            Some(NearName::StartsWithProduct),
+            "words can be told by their capitals, for a name of more than one"
+        );
+        assert_eq!(
+            deck.near_match(None, "Elgato Stream Deck"),
+            Some(NearName::HasProductInIt)
+        );
+        assert_eq!(
+            deck.near_match(None, "StreamDeck"),
+            None,
+            "that one is exact"
+        );
+        assert_eq!(deck.near_match(None, "Stream Decks"), None);
+        assert_eq!(deck.near_match(None, "Streaming"), None);
+
+        let git = ProductNames::new(Some("Git"), Some("The Git Development Community"), &[], &[]);
+        assert_eq!(
+            git.near_match(None, "Git LFS"),
+            Some(NearName::StartsWithProduct)
+        );
+        for other in ["GitHub", "GitHubDesktop", "Gitleaks", "legit", "Logitech"] {
+            assert_eq!(git.near_match(None, other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn what_is_under_some_other_folder_is_that_folders() {
+        let chrome = ProductNames::new(Some("Google Chrome"), Some("Google LLC"), &["chrome"], &[]);
+        assert_eq!(chrome.near_match(Some("muse-shell"), "chrome-prof"), None);
+        assert_eq!(
+            chrome.near_match(Some("Google"), "Chrome for Testing"),
+            Some(NearName::StartsWithProduct)
+        );
+        assert_eq!(
+            chrome.near_match(None, "chrome-devtools"),
+            Some(NearName::StartsWithProduct)
+        );
+        let tools = ProductNames::new(Some("Build Kit"), Some("Fabrikam"), &["BuildTools"], &[]);
+        assert_eq!(
+            tools.near_match(Some("Elsewhere"), "Microsoft.Windows.SDK.BuildTools"),
+            None
+        );
+        let vpn = ProductNames::new(Some("IPVanish"), Some("IPVanish"), &[], &[]);
+        assert_eq!(
+            vpn.near_match(Some("Mudhook_Marketing"), "IPVanish.exe_Url_jky3g1v0"),
+            Some(NearName::StartsWithProduct),
+            "where .NET keeps a program's settings"
+        );
+    }
+
+    #[test]
+    fn a_word_anyone_could_use_is_not_near_anything() {
+        let code = vs_code();
+        for other in ["Muse Spark Code", "cloud-code", "Code Stuff", "Codecs"] {
+            assert_eq!(code.near_match(None, other), None, "{other}");
+        }
+        assert_eq!(
+            code.near_match(None, "Microsoft Visual Studio Code Insiders"),
+            Some(NearName::StartsWithProduct)
+        );
+    }
+
+    #[test]
+    fn a_publisher_of_everything_says_nothing() {
+        let code = vs_code();
+        for other in ["Microsoft Office", "Microsoft SDKs", "Microsoft.NET"] {
+            assert_eq!(code.near_match(None, other), None, "{other}");
+        }
+        assert_eq!(code.near_match(Some("Microsoft"), "EdgeUpdate"), None);
+        assert!(!code.has_publisher_like("Microsoft Corporation"));
+    }
+
+    #[test]
+    fn one_word_of_a_name_is_not_near_anything() {
+        let obs = ProductNames::new(Some("OBS Studio"), Some("OBS Project"), &[], &[]);
+        for other in ["LM Studio", "Android Studio", "Studio One"] {
+            assert_eq!(obs.near_match(None, other), None, "{other}");
+        }
+        assert_eq!(
+            obs.near_match(None, "OBS Studio Plugins"),
+            Some(NearName::StartsWithProduct)
+        );
+    }
+
+    #[test]
+    fn a_publisher_counts_by_all_of_what_it_is_called() {
+        let windows = ProductNames::new(
+            Some("Open the Windows"),
+            Some("Open The Windows contributors"),
+            &[],
+            &[],
+        );
+        assert_eq!(windows.near_match(None, "Open XML SDK"), None);
+
+        let instruments = ProductNames::new(Some("Traktor"), Some("Native Instruments"), &[], &[]);
+        assert_eq!(
+            instruments.near_match(None, "Native Instruments Extras"),
+            Some(NearName::StartsWithPublisher(
+                "Native Instruments".to_owned()
+            ))
+        );
+        assert_eq!(instruments.near_match(None, "Native Sounds"), None);
+        assert!(instruments.is_named_only_for_publisher("Native Instruments GmbH"));
+        assert!(instruments.is_named_only_for_publisher("Native Instruments"));
+        assert!(!instruments.is_named_only_for_publisher("Native Instruments Extras"));
+        assert!(instruments.has_publisher_like("Native Instruments GmbH"));
+        assert!(!instruments.has_publisher_like("Native Sounds"));
+
+        let firefox = firefox();
+        assert!(!firefox.is_named_only_for_publisher("Mozilla-1de4eec8-1241"));
+        assert!(firefox.is_named_only_for_publisher("Mozilla"));
+    }
+
+    #[test]
+    fn a_publishers_name_is_offered_with_what_it_is_called_and_a_folder_of_theirs_is_not() {
+        let firefox = firefox();
+        assert_eq!(
+            firefox.near_match(None, "Mozilla-1de4eec8-1241-4177-a864-e594e8d1fb38"),
+            Some(NearName::StartsWithPublisher("Mozilla".to_owned()))
+        );
+        assert_eq!(
+            firefox.near_match(None, "Mozilla Maintenance Service"),
+            Some(NearName::StartsWithPublisher("Mozilla".to_owned()))
+        );
+        assert_eq!(firefox.near_match(None, "Mozilla"), None);
+        assert_eq!(firefox.near_match(None, "Mozillian Stuff"), None);
+
+        let nvidia = ProductNames::new(
+            Some("NVIDIA App 11.0.4.526"),
+            Some("NVIDIA Corporation"),
+            &[],
+            &[],
+        );
+        assert_eq!(
+            nvidia.near_match(Some("NVIDIA Corporation"), "NvContainer"),
+            None,
+            "being in a publisher's folder says nothing. A hidden entry can say more"
+        );
+        assert_eq!(
+            nvidia.near_match(Some("NVIDIA Corporation"), "NVIDIA app"),
+            None,
+            "that one is exact"
+        );
+        assert_eq!(
+            nvidia.near_match(Some("NVIDIA Corporation"), "NVIDIA App Helper"),
+            Some(NearName::StartsWithProduct)
+        );
+        assert_eq!(nvidia.near_match(Some("NVIDIA Corporation"), "bin"), None);
     }
 
     #[test]

@@ -201,6 +201,52 @@ pub fn on_same_volume(left: &Path, right: &Path) -> bool {
     }
 }
 
+/// Where a build writes, and how much it writes there at the most.
+pub fn build_places(
+    staging: &Path,
+    installer: Option<&Path>,
+    inputs: &BuildInputs,
+) -> Vec<PlaceNeed> {
+    let needs = build_needs(inputs);
+    match installer {
+        Some(installer) => vec![
+            PlaceNeed {
+                place: staging.to_path_buf(),
+                bytes: needs.staging_bytes,
+                what: "what a build works with",
+            },
+            PlaceNeed {
+                place: installer.to_path_buf(),
+                bytes: needs.output_bytes,
+                what: "the installer",
+            },
+        ],
+        // A package that stays a folder is all in that folder, and is the size of what is read.
+        None => vec![PlaceNeed {
+            place: staging.to_path_buf(),
+            bytes: needs.staging_bytes.saturating_add(inputs.payload_bytes),
+            what: "the package",
+        }],
+    }
+}
+
+/// How much room a build of this would need before it starts, given what a drive said it has, which
+/// is the check a build makes again when it starts. It works in and writes to the output folder.
+pub fn room_before_a_build(
+    inputs: &BuildInputs,
+    output_folder: &Path,
+    stats: Option<VolumeStats>,
+) -> RoomCheck {
+    RoomCheck::of(
+        &build_places(
+            &output_folder.join("staging"),
+            Some(&output_folder.join("installer")),
+            inputs,
+        ),
+        &|_| stats,
+    )
+}
+
 /// How a volume answers for how big it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VolumeStats {

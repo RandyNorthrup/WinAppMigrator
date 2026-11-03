@@ -127,6 +127,8 @@ fn manifest_for(files: Vec<FileEntry>) -> PackageManifest {
             why: "it is named for it".to_owned(),
         }],
         fonts_reported: Vec::new(),
+        left_out_by_choice: Vec::new(),
+        added_by_choice: Vec::new(),
         warnings: Vec::new(),
         items_intentionally_excluded: Vec::new(),
         included_user_data: false,

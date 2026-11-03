@@ -577,6 +577,8 @@ mod tests {
             firewall_rules_detected: Vec::new(),
             certificates_reported: Vec::new(),
             fonts_reported: Vec::new(),
+            left_out_by_choice: Vec::new(),
+            added_by_choice: Vec::new(),
             warnings: Vec::new(),
             items_intentionally_excluded: Vec::new(),
             included_user_data: false,

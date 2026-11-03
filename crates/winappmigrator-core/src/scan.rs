@@ -10,9 +10,11 @@ use crate::dll_resolver::{
 };
 use crate::env_scan::{EnvironmentScanContext, scan_environment};
 use crate::errors::{Result, WinAppMigratorError};
-use crate::file_discovery::{FileDiscoveryContext, discover_files, package_relative_path};
+use crate::file_discovery::{
+    FileDiscoveryContext, discover_files_unless, names_of_app, package_relative_path,
+};
 use crate::install_source::{
-    InstallSource, add_app_paths_roots, detect_install_source, is_usable_main_executable,
+    InstallSource, add_app_paths_roots, detect_install_source_unless, is_usable_main_executable,
     primary_executable, resolve_install_location, squirrel_current_executable,
 };
 use crate::integration_scan::{IntegrationInputs, OwnedFiles};
@@ -25,10 +27,12 @@ use crate::models::{
     RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport, ScheduledTaskEntry,
     ServiceEntry, ShortcutEntry, SourcePlatform, Warning, WarningSeverity,
 };
+use crate::near_match::{AppBeingScanned, NearMatchLook, Picks, look_for_near_matches};
 use crate::path_utils::{
     is_drive_root, is_really_within, looks_like_executable, path_is_within, resolved_location,
 };
 use crate::pe_scan::{read_program_need, scan_pe};
+use crate::progress::{ScanMonitor, ScanStep};
 use crate::registry_scan::{
     RegistryScanContext, context_product_names, recorded_keys_of_one_account,
     scan_registry_artifacts,
@@ -143,6 +147,20 @@ fn read_program_needs_of(
 }
 
 pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
+    let report = scan_app(options, &ScanMonitor::default())?;
+    write_scan_reports(&report, &options.output_dir)?;
+    Ok(report)
+}
+
+/// Find out everything about an app that a build goes by, and write nothing anywhere. It stops with
+/// [`WinAppMigratorError::Cancelled`] between steps, and part-way through going over its files and
+/// its install record, if `monitor` is cancelled.
+///
+/// A report says how the PC was when it was looked at. On a connected drive it holds what can be
+/// read without its hives, which do not stay loaded after this.
+pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanReport> {
+    let is_cancelled = || monitor.is_cancelled();
+    monitor.report(ScanStep::InstallRecord);
     // The single seam every scanner reads through: the live OS, or a mounted
     // offline volume from another PC. Held for the whole scan so offline hive
     // mounts stay live until every scanner has run. It reads one account, so another's cannot
@@ -172,7 +190,8 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     // once, here, and everything that needs the result is passed it.
     let mut install_source = source_app
         .as_ref()
-        .map(|app| detect_install_source(app, &system));
+        .map(|app| detect_install_source_unless(app, &system, &is_cancelled));
+    monitor.checkpoint()?;
     let executable_path = selected_executable_path(options, install_source.as_ref(), &system)?;
     let executable_path = install_source
         .as_ref()
@@ -303,10 +322,38 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         .as_deref()
         .map(|location| system.logical_path(location));
 
+    // What exact names leave out, and what a person ticked of that, by the rules a scan goes by
+    // from here on. Before anything is read by where the app is, since this adds to that.
+    monitor.report(ScanStep::NearMatches);
+    let near_names = names_of_app(
+        Some(&executable_path),
+        install_location.as_deref(),
+        app_name.as_deref(),
+        publisher.as_deref(),
+    );
+    let (near_look, mut picks) = match source_app.as_ref() {
+        Some(app) => {
+            let scan = AppBeingScanned {
+                app,
+                install_location: install_location.as_deref(),
+                names: &near_names,
+                installed_for_one_account,
+            };
+            let look = look_for_near_matches(&scan, &system, &is_cancelled);
+            let picks = look.pick(&options.near_matches, &scan, &system, &is_cancelled);
+            (look, picks)
+        }
+        None => (NearMatchLook::default(), Picks::default()),
+    };
+    monitor.checkpoint()?;
+    let also_the_apps = std::mem::take(&mut picks.also_the_apps);
+
+    monitor.report(ScanStep::SystemItems);
     let (mut services, service_warnings) = scan_services(
         &ServiceScanContext {
             executable_path: logical_executable.clone(),
             install_location: logical_location.clone(),
+            also_the_apps: also_the_apps.clone(),
         },
         &system,
     );
@@ -314,6 +361,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         &ServiceScanContext {
             executable_path: logical_executable.clone(),
             install_location: logical_location.clone(),
+            also_the_apps: also_the_apps.clone(),
         },
         &system,
     );
@@ -321,13 +369,16 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         &TaskScanContext {
             executable_path: logical_executable.clone(),
             install_location: logical_location.clone(),
+            also_the_apps: also_the_apps.clone(),
         },
         &system,
     );
+    monitor.checkpoint()?;
     let (mut shortcuts, shortcut_warnings) = scan_shortcuts(
         &ShortcutScanContext {
             executable_path: logical_executable.clone(),
             install_location: logical_location.clone(),
+            also_the_apps: also_the_apps.clone(),
         },
         &system,
     );
@@ -335,9 +386,11 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         &EnvironmentScanContext {
             executable_path: logical_executable.clone(),
             install_location: logical_location.clone(),
+            also_the_apps: also_the_apps.clone(),
         },
         &system,
     );
+    monitor.checkpoint()?;
 
     // Fold concrete locations referenced by Windows integrations into the
     // footprint discovery so split installs (Program Files plus a service
@@ -368,7 +421,9 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         }
         extra_roots.extend(source.roots.iter().cloned());
     }
-    let (mut file_inventory, footprint_locations, file_warnings) = discover_files(
+    extra_roots.append(&mut picks.roots);
+    monitor.report(ScanStep::Files);
+    let (mut file_inventory, footprint_locations, file_warnings) = discover_files_unless(
         &FileDiscoveryContext {
             executable_path: executable_path.clone(),
             install_location: install_location.clone(),
@@ -382,10 +437,16 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
             extra_files: install_source
                 .as_ref()
                 .map(|source| source.loose_files.clone())
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .into_iter()
+                .chain(std::mem::take(&mut picks.loose_files))
+                .collect(),
         },
         &system,
+        &is_cancelled,
     );
+    monitor.checkpoint()?;
+    let near_matches = near_look.rows(&footprint_locations, &picks, &system);
 
     // What an entry in the registry points at says whose it is, so this comes after what the app has
     // is known. As its PC calls them, which is what those values say.
@@ -405,9 +466,15 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
                     keys
                 }
             })
-            .unwrap_or_default(),
+            .unwrap_or_default()
+            .into_iter()
+            .chain(std::mem::take(&mut picks.recorded_keys))
+            .collect(),
         installed_for_one_account,
+        also_the_apps,
+        also_named: std::mem::take(&mut picks.also_named),
     };
+    monitor.report(ScanStep::Registry);
     let names = context_product_names(&registry_context);
     let windows_dir = system.logical_path(&system.windows_dir());
     let owned_files = OwnedFiles::new(
@@ -439,6 +506,8 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         },
         &system,
     );
+    monitor.checkpoint()?;
+    monitor.report(ScanStep::Finishing);
     // A font in the Windows folder the app's install record names is copied like any of its files.
     for mut font in std::mem::take(&mut registry_artifacts.font_files) {
         font.package_relative_path = Some(package_relative_path(
@@ -514,6 +583,7 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     take_secrets_from_settings(&mut settings, &mut left_out);
     take_secrets_from_license_values(&mut license_registry_entries, &mut left_out);
     let mut warnings = system.warnings();
+    warnings.append(&mut picks.warnings);
     warnings.extend(pe_scan.warnings);
     warnings.extend(resolver_warnings);
     warnings.extend(file_warnings);
@@ -624,11 +694,12 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
         firewall_rules: registry_artifacts.firewall_rules,
         certificates: registry_artifacts.certificates,
         fonts_reported: registry_artifacts.fonts_reported,
+        near_matches,
         warnings,
         items_excluded: vec![
             "Windows directory, System32, and SysWOW64 files are reported but not copied."
                 .to_owned(),
-            "Shared runtimes are reported as prerequisites, not copied. Folders outside the install records are matched by the product's exact name, so a folder the app uses under another name is missed."
+            "Shared runtimes are reported as prerequisites, not copied. Folders outside the install records are matched by the product's exact name, so a folder the app uses under another name is only there if it was ticked when this was built."
                 .to_owned(),
             "Registry, services, scheduled tasks, and shortcuts are archived for restore; apply mode remains explicit and privilege-gated."
                 .to_owned(),
@@ -640,7 +711,6 @@ pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
     };
 
     use_what_the_source_pc_calls_things(&mut report, &system);
-    write_scan_reports(&report, &options.output_dir)?;
     Ok(report)
 }
 

@@ -86,6 +86,7 @@ impl Marks {
 fn step_label(step: &BuildStep) -> &'static str {
     match step {
         BuildStep::Scanning => "scan",
+        BuildStep::Preparing => "prepare",
         BuildStep::RoomChecked(_) => "room",
         BuildStep::Bundling => "bundle",
         BuildStep::Packing { .. } => "pack",

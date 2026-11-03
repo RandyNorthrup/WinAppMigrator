@@ -17,12 +17,13 @@ use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
     has_reserved_device_name, package_destination_path, safe_relative_path,
 };
+use crate::footprint::{Footprint, FootprintChoices, ScanFlags, apply_choices};
 use crate::hashing::{hex_lower, sha256_file};
 use crate::models::{
-    AppArchitecture, DriverEntry, FileEntry, InstallerStub, LicenseArtifact, LicenseStoreFile,
-    PACKAGE_SCHEMA_VERSION, PackageManifest, PackageOptions, PackageResult, RegistryEntry,
-    RegistryHive, RegistryValueKind, RuntimePrerequisite, ScanOptions, ScanReport,
-    ScheduledTaskEntry, Warning, WarningSeverity,
+    AppArchitecture, AppSelection, DriverEntry, FileClassification, FileEntry, InstallerStub,
+    LeftOutItem, LicenseArtifact, LicenseStoreFile, PACKAGE_SCHEMA_VERSION, PackageManifest,
+    PackageOptions, PackageResult, RegistryEntry, RegistryHive, RegistryValueKind,
+    RuntimePrerequisite, ScanOptions, ScanReport, ScheduledTaskEntry, Warning, WarningSeverity,
 };
 use crate::packer::{PackItem, PackOutcome, PackedFile, Packer, SourceRules};
 use crate::path_utils::{
@@ -31,8 +32,9 @@ use crate::path_utils::{
 use crate::prerequisites::PREREQUISITES_DIR;
 use crate::privilege::ProtectedFolder;
 use crate::progress::{BuildMonitor, BuildStep};
-use crate::scan::scan_and_write_reports;
-use crate::space::{BuildInputs, PlaceNeed, RoomCheck, build_needs};
+use crate::reporting::write_scan_reports;
+use crate::scan::scan_app;
+use crate::space::{BuildInputs, RoomCheck, build_needs, build_places};
 use crate::system_context::{OtherAccountsFolders, VolumeMap};
 
 const FILES_DIR: &str = "files";
@@ -61,6 +63,9 @@ const ENVIRONMENT_FILE: &str = "environment_variables.json";
 /// Where a file only a backup-mode copy can read goes while it is read, in the protected folder.
 const SPOOL_DIR: &str = ".spool";
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
+/// A file a package does not have, for one reason or the other.
+const FILE_COPY_FAILED_CODE: &str = "file_copy_failed";
+const FILE_GONE_CODE: &str = "file_gone_since_it_was_looked_at";
 /// How often to look at whether a backup-mode copy has finished, or the build was cancelled.
 const BACKUP_COPY_FIRST_LOOK: std::time::Duration = std::time::Duration::from_millis(1);
 const BACKUP_COPY_LONGEST_LOOK: std::time::Duration = std::time::Duration::from_millis(50);
@@ -69,24 +74,11 @@ pub fn create_package(options: &PackageOptions) -> Result<PackageResult> {
     create_package_monitored(options, &BuildMonitor::default())
 }
 
-/// [`create_package`], reporting progress to `monitor` and stopping with
-/// [`WinAppMigratorError::Cancelled`] if it is cancelled.
-///
-/// With an installer to build, an app's files go straight from where they are into the package:
-/// each is read once, and hashed and compressed from what that read returned. Only what has to be
-/// looked at or kept as a file is put in the staging folder first. Without one, the same files are
-/// copied to the staging folder, hashed as they go, and that folder is the package.
-pub fn create_package_monitored(
-    options: &PackageOptions,
-    monitor: &BuildMonitor,
-) -> Result<PackageResult> {
-    create_package_dirs(&options.output_dir)?;
-    monitor.report(BuildStep::Scanning);
-
-    let reports_dir = options.output_dir.join(REPORTS_DIR);
-    let scan_options = ScanOptions {
+/// What a package scan has to be asked, for what goes in it to be what a build goes on to read.
+pub fn scan_options_for(options: &PackageOptions) -> ScanOptions {
+    ScanOptions {
         selection: options.selection.clone(),
-        output_dir: reports_dir.clone(),
+        output_dir: options.output_dir.join(REPORTS_DIR),
         current_directory: options.current_directory.clone(),
         recursive_dependencies: true,
         // What goes in the package is hashed as it is read below. A hash of the original
@@ -98,9 +90,135 @@ pub fn create_package_monitored(
         include_license_data: options.include_license_data,
         source: options.source.clone(),
         user_profile: options.user_profile.clone(),
-    };
-    let report = scan_and_write_reports(&scan_options)?;
+        near_matches: Vec::new(),
+    }
+}
+
+/// [`create_package`], reporting progress to `monitor` and stopping with
+/// [`WinAppMigratorError::Cancelled`] if it is cancelled. It scans first, and takes all of what
+/// that finds. [`create_package_from_scan`] is for a person who has seen it and chosen.
+pub fn create_package_monitored(
+    options: &PackageOptions,
+    monitor: &BuildMonitor,
+) -> Result<PackageResult> {
+    create_package_dirs(&options.output_dir)?;
+    monitor.report(BuildStep::Scanning);
+    let report = scan_app(&scan_options_for(options), &monitor.sharing_cancel())?;
     monitor.checkpoint()?;
+    build_package(options, &report, &WhatWasChosen::default(), monitor)
+}
+
+/// Build a package from a scan made earlier, with what a person chose applied. Nothing is scanned
+/// again: what goes in is what the scan found less what they left out, each file is hashed from what
+/// is read of it now, and what has gone since is said to have. The scan has to be of what `options`
+/// selects, so a build cannot go by another app's by accident.
+pub fn create_package_from_scan(
+    options: &PackageOptions,
+    report: &ScanReport,
+    choices: &FootprintChoices,
+    monitor: &BuildMonitor,
+) -> Result<PackageResult> {
+    monitor.report(BuildStep::Preparing);
+    if !is_scan_of(report, &options.selection) {
+        return Err(WinAppMigratorError::InvalidInput(
+            "this scan is of another app than the one being built, so nothing was built".to_owned(),
+        ));
+    }
+    refuse_a_scan_whose_program_is_gone(report)?;
+    let adds_something = report.near_matches.iter().any(|near| near.picked);
+    if choices.is_empty() && !adds_something {
+        create_package_dirs(&options.output_dir)?;
+        return build_package(options, report, &WhatWasChosen::default(), monitor);
+    }
+    let flags = ScanFlags {
+        include_user_data: options.include_user_data,
+        include_program_data: options.include_program_data,
+        include_license_data: options.include_license_data,
+    };
+    let footprint = Footprint::of(report, flags)?;
+    let chosen = apply_choices(report, &footprint, choices)?;
+    monitor.checkpoint()?;
+    let had = |classification: FileClassification| {
+        report
+            .file_inventory
+            .iter()
+            .any(|file| file.should_copy && file.classification == classification)
+    };
+    // A package with nothing of the kind left has nothing to ask about it, or to be named for.
+    let adjusted = PackageOptions {
+        include_user_data: options.include_user_data
+            && (chosen.has_user_data || !had(FileClassification::UserData)),
+        include_program_data: options.include_program_data
+            && (chosen.has_program_data || !had(FileClassification::MachineAppData)),
+        ..options.clone()
+    };
+    create_package_dirs(&adjusted.output_dir)?;
+    build_package(
+        &adjusted,
+        &chosen.report,
+        &WhatWasChosen {
+            left_out: chosen.left_out,
+            added: chosen.added,
+        },
+        monitor,
+    )
+}
+
+/// What a person chose, as a package says it to whoever installs it.
+#[derive(Default)]
+struct WhatWasChosen {
+    left_out: Vec<LeftOutItem>,
+    added: Vec<String>,
+}
+
+fn is_scan_of(report: &ScanReport, selection: &AppSelection) -> bool {
+    match (selection, report.source_app.as_ref()) {
+        (AppSelection::InstalledApp(selected), Some(scanned)) => {
+            selected
+                .registry_source_path
+                .eq_ignore_ascii_case(&scanned.registry_source_path)
+                && selected.display_name == scanned.display_name
+                && selected.owner_profile == scanned.owner_profile
+        }
+        (AppSelection::ExecutablePath(path), None) => {
+            path.as_path() == report.main_executable.path.as_path()
+        }
+        _ => false,
+    }
+}
+
+/// An app can be uninstalled, or its drive taken away, while a scan sits on a screen. A package of
+/// whatever is left would not run, so that is said before anything is read.
+fn refuse_a_scan_whose_program_is_gone(report: &ScanReport) -> Result<()> {
+    let main = report.main_executable.path.as_path();
+    let readable = report
+        .file_inventory
+        .iter()
+        .find(|file| file.original_path.as_path() == main)
+        .map_or(main, |file| file.path.as_path());
+    let reader = SourceReader::new(report);
+    if reader.check(readable).is_ok() && fs::metadata(readable).is_ok() {
+        return Ok(());
+    }
+    Err(WinAppMigratorError::InvalidInput(format!(
+        "{} is not there any more, so nothing was built. Look at the app again.",
+        main.display()
+    )))
+}
+
+/// The package itself, from what a scan said. With an installer to build, an app's files go straight
+/// from where they are into the package: each is read once, and hashed and compressed from what that
+/// read returned. Only what has to be looked at or kept as a file is put in the staging folder first.
+/// Without one, the same files are copied to the staging folder, hashed as they go, and that folder
+/// is the package.
+fn build_package(
+    options: &PackageOptions,
+    report: &ScanReport,
+    what_was_chosen: &WhatWasChosen,
+    monitor: &BuildMonitor,
+) -> Result<PackageResult> {
+    let reports_dir = options.output_dir.join(REPORTS_DIR);
+    write_scan_reports(report, &reports_dir)?;
     let mut warnings = report.warnings.clone();
 
     let stub = if options.create_self_extracting_archive {
@@ -115,8 +233,8 @@ pub fn create_package_monitored(
     let installer_path = stub.map(|_| installer_output_path(options));
     // The scan looked before anything was read, and this looks again just before, as anything
     // read from here on goes in the package.
-    let reader = SourceReader::new(&report);
-    let inputs = build_inputs(options, &report, stub, &reader)?;
+    let reader = SourceReader::new(report);
+    let inputs = build_inputs(options, report, stub, &reader)?;
     let needs = build_needs(&inputs);
     let room = RoomCheck::on_this_pc(&build_places(
         &options.output_dir,
@@ -155,7 +273,7 @@ pub fn create_package_monitored(
         package_drivers(&options.output_dir, &report.drivers, &reader, &mut warnings);
     monitor.checkpoint()?;
 
-    let (items, not_packable) = files_to_pack(options, &report, &mut warnings)?;
+    let (items, not_packable) = files_to_pack(options, report, &mut warnings)?;
     let spool = options.output_dir.join(SPOOL_DIR);
     let mut building = None;
     let outcomes = match (stub, installer_path.as_deref()) {
@@ -195,13 +313,26 @@ pub fn create_package_monitored(
                 files_copied += 1;
             }
             Err(error) => {
-                // Nothing goes into a package without a hash to check it by.
-                warnings.push(Warning::new(
-                    "file_copy_failed",
-                    WarningSeverity::Warning,
-                    format!("Could not copy file into package: {error}"),
-                    Some(file.original_path.display().to_string()),
-                ));
+                // Nothing goes into a package without a hash to check it by. A scan can be some
+                // time ago, so it says when a file is simply not there any more.
+                let is_gone =
+                    reader.check(&file.path).is_ok() && fs::symlink_metadata(&file.path).is_err();
+                warnings.push(if is_gone {
+                    Warning::new(
+                        FILE_GONE_CODE,
+                        WarningSeverity::Warning,
+                        "This was there when the app was looked at and is gone now, so it is not \
+                         in the installer.",
+                        Some(file.original_path.display().to_string()),
+                    )
+                } else {
+                    Warning::new(
+                        FILE_COPY_FAILED_CODE,
+                        WarningSeverity::Warning,
+                        format!("Could not copy file into package: {error}"),
+                        Some(file.original_path.display().to_string()),
+                    )
+                });
                 failed_copies.insert(file.original_path.clone());
             }
         }
@@ -225,40 +356,25 @@ pub fn create_package_monitored(
         })
         .collect();
 
-    let manifest = PackageManifest {
-        schema_version: PACKAGE_SCHEMA_VERSION.to_owned(),
-        source_computer_name: report.source_computer_name.clone(),
-        source_windows_version: report.source_windows_version.clone(),
-        source_platform: report.source_platform.clone(),
-        program_needs: report.program_needs.clone(),
-        scan_timestamp_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,
-        main_executable_path: report.main_executable.path.clone(),
-        application_metadata: report.source_app.clone(),
-        file_inventory: packaged_inventory,
-        registry_keys_exported: report.registry_entries.clone(),
-        com_registrations_detected: report.com_registrations.clone(),
-        file_associations_detected: report.file_associations.clone(),
-        services_detected: report.services.clone(),
-        drivers_detected,
-        scheduled_tasks_detected: report.scheduled_tasks.clone(),
-        shortcuts_detected: report.shortcuts.clone(),
-        environment_variables_detected: report.environment_variables.clone(),
+    let mut manifest = manifest_of(
+        report,
+        ScanFlags {
+            include_user_data: options.include_user_data,
+            include_program_data: options.include_program_data,
+            include_license_data: options.include_license_data,
+        },
+        packaged_inventory,
         runtime_prerequisites,
         license_artifacts_detected,
-        license_registry_entries: report.license_registry_entries.clone(),
-        secrets_left_out: report.secrets_left_out.clone(),
-        licenses_left_out: report.licenses_left_out.clone(),
-        firewall_rules_detected: report.firewall_rules.clone(),
-        certificates_reported: report.certificates.clone(),
-        fonts_reported: report.fonts_reported.clone(),
-        warnings: warnings.clone(),
-        items_intentionally_excluded: report.items_excluded.clone(),
-        included_user_data: options.include_user_data,
-        included_program_data: options.include_program_data,
-        included_license_data: options.include_license_data,
-        ui_theme: options.ui_theme.clone(),
-        user_data_profile: report.user_data_profile.clone(),
-    };
+        drivers_detected,
+    );
+    manifest.scan_timestamp_utc = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    manifest.warnings.clone_from(&warnings);
+    manifest.ui_theme.clone_from(&options.ui_theme);
+    manifest
+        .left_out_by_choice
+        .clone_from(&what_was_chosen.left_out);
+    manifest.added_by_choice.clone_from(&what_was_chosen.added);
 
     let manifest_path = options.output_dir.join(MANIFEST_FILE);
     write_json(&manifest_path, &manifest)?;
@@ -306,6 +422,136 @@ pub fn create_package_monitored(
         self_extracting_archive_path,
         data_file_path,
     })
+}
+
+/// A manifest of what a scan said, with the parts a build works out for itself given.
+fn manifest_of(
+    report: &ScanReport,
+    flags: ScanFlags,
+    file_inventory: Vec<FileEntry>,
+    runtime_prerequisites: Vec<RuntimePrerequisite>,
+    license_artifacts_detected: Vec<LicenseArtifact>,
+    drivers_detected: Vec<DriverEntry>,
+) -> PackageManifest {
+    PackageManifest {
+        schema_version: PACKAGE_SCHEMA_VERSION.to_owned(),
+        source_computer_name: report.source_computer_name.clone(),
+        source_windows_version: report.source_windows_version.clone(),
+        source_platform: report.source_platform.clone(),
+        program_needs: report.program_needs.clone(),
+        scan_timestamp_utc: String::new(),
+        main_executable_path: report.main_executable.path.clone(),
+        application_metadata: report.source_app.clone(),
+        file_inventory,
+        registry_keys_exported: report.registry_entries.clone(),
+        com_registrations_detected: report.com_registrations.clone(),
+        file_associations_detected: report.file_associations.clone(),
+        services_detected: report.services.clone(),
+        drivers_detected,
+        scheduled_tasks_detected: report.scheduled_tasks.clone(),
+        shortcuts_detected: report.shortcuts.clone(),
+        environment_variables_detected: report.environment_variables.clone(),
+        runtime_prerequisites,
+        license_artifacts_detected,
+        license_registry_entries: report.license_registry_entries.clone(),
+        secrets_left_out: report.secrets_left_out.clone(),
+        licenses_left_out: report.licenses_left_out.clone(),
+        firewall_rules_detected: report.firewall_rules.clone(),
+        certificates_reported: report.certificates.clone(),
+        fonts_reported: report.fonts_reported.clone(),
+        left_out_by_choice: Vec::new(),
+        added_by_choice: Vec::new(),
+        warnings: Vec::new(),
+        items_intentionally_excluded: report.items_excluded.clone(),
+        included_user_data: flags.include_user_data,
+        included_program_data: flags.include_program_data,
+        included_license_data: flags.include_license_data,
+        ui_theme: None,
+        user_data_profile: report.user_data_profile.clone(),
+    }
+}
+
+/// A manifest as a package of this scan would have it, for going by the rules before anything has
+/// been read, with what a build would bundle said to be bundled. Without the files a choice left out.
+pub(crate) fn manifest_for_review(
+    report: &ScanReport,
+    flags: ScanFlags,
+    keep_file: &dyn Fn(&FileEntry) -> bool,
+) -> PackageManifest {
+    // What nothing goes by, for what can come to a good many of them.
+    let inventory = report
+        .file_inventory
+        .iter()
+        .filter(|file| file.should_copy && keep_file(file))
+        .cloned()
+        .map(|mut file| {
+            file.reason = String::new();
+            file
+        })
+        .collect();
+    let hash_to_come = || Some(String::new());
+    let drivers = report
+        .drivers
+        .iter()
+        .cloned()
+        .map(|mut driver| {
+            if driver.app_owned {
+                driver.package_relative_path = Some(driver_package_path(&driver));
+                driver.hash_sha256 = hash_to_come();
+            }
+            driver
+        })
+        .collect();
+    let licenses = report
+        .license_artifacts
+        .iter()
+        .cloned()
+        .map(|mut artifact| {
+            if artifact.should_copy
+                && let Some(logical) = artifact.path.as_deref()
+            {
+                artifact.package_relative_path = Some(license_package_path(logical));
+                artifact.hash_sha256 = hash_to_come();
+            }
+            artifact
+        })
+        .collect();
+    manifest_of(
+        report,
+        flags,
+        inventory,
+        report.runtime_prerequisites.clone(),
+        licenses,
+        drivers,
+    )
+}
+
+/// How big a driver a package would bundle is, or nothing for one it would not.
+pub(crate) fn driver_image_bytes(report: &ScanReport, driver: &DriverEntry) -> u64 {
+    if !driver.app_owned {
+        return 0;
+    }
+    SourceReader::new(report)
+        .locate(&driver.image_path)
+        .ok()
+        .and_then(|image| fs::metadata(image).ok())
+        .map_or(0, |metadata| metadata.len())
+}
+
+/// Where a package keeps a driver it bundles. By the service's name too, so two with the same file
+/// name, as `x64\flt.sys` and `x86\flt.sys` are, do not collide.
+fn driver_package_path(driver: &DriverEntry) -> PathBuf {
+    let leaf = driver
+        .image_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "driver.sys".to_owned());
+    let unique = format!("{}_{}", sanitize_artifact_name(&driver.service_name), leaf);
+    PathBuf::from(DRIVERS_DIR).join(safe_relative_path(Path::new(&unique)))
+}
+
+fn license_package_path(logical: &Path) -> PathBuf {
+    PathBuf::from(LICENSE_DIR).join(safe_relative_path(logical))
 }
 
 /// An installer on its way out, with the package going into it. In this order, so that the file is
@@ -371,31 +617,6 @@ fn build_inputs(
         stub_bytes,
         connected_drive: report.source_volume.is_some(),
     })
-}
-
-/// Where a build writes, and how much it writes there at the most.
-fn build_places(staging: &Path, installer: Option<&Path>, inputs: &BuildInputs) -> Vec<PlaceNeed> {
-    let needs = build_needs(inputs);
-    match installer {
-        Some(installer) => vec![
-            PlaceNeed {
-                place: staging.to_path_buf(),
-                bytes: needs.staging_bytes,
-                what: "what a build works with",
-            },
-            PlaceNeed {
-                place: installer.to_path_buf(),
-                bytes: needs.output_bytes,
-                what: "the installer",
-            },
-        ],
-        // A package that stays a folder is all in that folder, and is the size of what is read.
-        None => vec![PlaceNeed {
-            place: staging.to_path_buf(),
-            bytes: needs.staging_bytes.saturating_add(inputs.payload_bytes),
-            what: "the package",
-        }],
-    }
 }
 
 fn refuse_without_room(room: &RoomCheck) -> Result<()> {
@@ -742,15 +963,7 @@ fn package_drivers(
             .ok()
             .filter(|image| image.is_file());
         if let Some(image) = image.as_deref().filter(|_| driver.app_owned) {
-            let leaf = driver
-                .image_path
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| "driver.sys".to_owned());
-            // Prefix with the service name so two app-owned drivers sharing a .sys
-            // leaf name (e.g. x64\flt.sys and x86\flt.sys) cannot collide.
-            let unique = format!("{}_{}", sanitize_artifact_name(&driver.service_name), leaf);
-            let relative = PathBuf::from(DRIVERS_DIR).join(safe_relative_path(Path::new(&unique)));
+            let relative = driver_package_path(&driver);
             match package_destination_path(output_dir, &relative).and_then(|destination| {
                 let copied = copy_hashing_into_package(image, &destination).and_then(|copied| {
                     reader.check_after_copying(image)?;
@@ -830,7 +1043,7 @@ fn package_one_license_artifact(
     let Some(logical) = artifact.path.clone() else {
         return false;
     };
-    let relative = PathBuf::from(LICENSE_DIR).join(safe_relative_path(&logical));
+    let relative = license_package_path(&logical);
     let Ok(destination) = package_destination_path(output_dir, &relative) else {
         return false;
     };
@@ -1343,6 +1556,8 @@ pub fn read_embedded_manifest(package: &EmbeddedPackage) -> Result<PackageManife
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::footprint::ChoiceId;
+    use crate::progress::{ScanMonitor, ScanStep};
     use crate::restore_review::ReviewedPackage;
 
     #[test]
@@ -1676,6 +1891,342 @@ mod tests {
             copied[0].hash_sha256,
             sha256_file(&root.path().join(r"stage\a.lic"))?
         );
+        Ok(())
+    }
+
+    /// A scan of what `app_in` makes, as a window would ask for it.
+    fn scan_of(options: &PackageOptions) -> Result<ScanReport> {
+        scan_app(&scan_options_for(options), &ScanMonitor::default())
+    }
+
+    fn data_folder_id(exe: &Path) -> Result<ChoiceId> {
+        let folder = exe
+            .parent()
+            .ok_or_else(|| WinAppMigratorError::Archive("no folder".to_owned()))?
+            .join("data");
+        Ok(ChoiceId::Folder(crate::path_utils::comparable_path(
+            &folder,
+        )))
+    }
+
+    const NO_FLAGS: ScanFlags = ScanFlags {
+        include_user_data: false,
+        include_program_data: false,
+        include_license_data: false,
+    };
+
+    #[test]
+    fn a_scan_writes_nothing_and_a_build_from_it_does_not_scan_again() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let report = scan_of(&options)?;
+        assert!(!options.output_dir.exists(), "a scan writes nowhere");
+
+        let late = exe
+            .parent()
+            .ok_or_else(|| WinAppMigratorError::Archive("no folder".to_owned()))?
+            .join(r"data\added since.txt");
+        fs::write(&late, "new").map_err(|error| WinAppMigratorError::io(&late, error))?;
+
+        let result = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+        let installer = result
+            .self_extracting_archive_path
+            .ok_or_else(|| WinAppMigratorError::Archive("no installer".to_owned()))?;
+        let package = EmbeddedPackage::open(&installer)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        let manifest = read_embedded_manifest(&package)?;
+        assert!(
+            !manifest
+                .file_inventory
+                .iter()
+                .any(|file| file.original_path == late),
+            "it goes by what the scan found"
+        );
+        assert!(manifest.left_out_by_choice.is_empty());
+        assert!(manifest.added_by_choice.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn what_is_left_out_is_not_in_the_package_or_its_manifest_and_the_rest_is() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let report = scan_of(&options)?;
+        let mut choices = FootprintChoices::default();
+        choices.set_included(&data_folder_id(&exe)?, false);
+
+        let result =
+            create_package_from_scan(&options, &report, &choices, &BuildMonitor::default())?;
+        let installer = result
+            .self_extracting_archive_path
+            .ok_or_else(|| WinAppMigratorError::Archive("no installer".to_owned()))?;
+        let package = EmbeddedPackage::open(&installer)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        let manifest = read_embedded_manifest(&package)?;
+        let digests = package.digests(&|| false)?;
+        assert!(
+            !manifest
+                .file_inventory
+                .iter()
+                .any(|file| file.original_path.to_string_lossy().contains(r"\data\")),
+            "{:?}",
+            manifest.file_inventory
+        );
+        assert!(digests.get(Path::new(r"files\data\a.txt")).is_none());
+        assert!(digests.get(Path::new(r"files\fixture.exe")).is_some());
+        assert!(
+            manifest
+                .left_out_by_choice
+                .iter()
+                .any(|item| item.name.ends_with("data")),
+            "{:?}",
+            manifest.left_out_by_choice
+        );
+        assert_eq!(result.files_copied, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn what_the_screen_adds_up_is_what_a_build_goes_by() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let report = scan_of(&options)?;
+        let footprint = Footprint::of(&report, NO_FLAGS)?;
+        let stub_bytes = fs::metadata(&stub)
+            .map_err(|error| WinAppMigratorError::io(&stub, error))?
+            .len();
+
+        let reader = SourceReader::new(&report);
+        let installer_stub = options.self_extracting_stub.as_ref();
+        assert_eq!(
+            footprint.build_inputs(&FootprintChoices::default(), &[], stub_bytes, false),
+            build_inputs(&options, &report, installer_stub, &reader)?
+        );
+
+        let mut choices = FootprintChoices::default();
+        choices.set_included(&data_folder_id(&exe)?, false);
+        let chosen = apply_choices(&report, &footprint, &choices)?;
+        assert_eq!(
+            footprint.build_inputs(&choices, &chosen.also, stub_bytes, false),
+            build_inputs(&options, &chosen.report, installer_stub, &reader)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_changed_since_the_scan_goes_in_as_it_is_and_one_gone_is_said_to_be() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let folder = exe
+            .parent()
+            .ok_or_else(|| WinAppMigratorError::Archive("no folder".to_owned()))?
+            .to_path_buf();
+        let gone = folder.join(r"data\gone.txt");
+        fs::write(&gone, "here for now").map_err(|error| WinAppMigratorError::io(&gone, error))?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let report = scan_of(&options)?;
+
+        fs::remove_file(&gone).map_err(|error| WinAppMigratorError::io(&gone, error))?;
+        let changed = folder.join(r"data\a.txt");
+        fs::write(&changed, "something else, and a different length")
+            .map_err(|error| WinAppMigratorError::io(&changed, error))?;
+
+        let result = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.code == FILE_GONE_CODE
+                    && warning
+                        .source
+                        .as_deref()
+                        .is_some_and(|source| source.ends_with("gone.txt"))),
+            "{:?}",
+            result.warnings
+        );
+        let installer = result
+            .self_extracting_archive_path
+            .clone()
+            .ok_or_else(|| WinAppMigratorError::Archive("no installer".to_owned()))?;
+        let package = EmbeddedPackage::open(&installer)?
+            .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
+        let manifest = read_embedded_manifest(&package)?;
+        let digests = package.digests(&|| false)?;
+        let entry = manifest
+            .file_inventory
+            .iter()
+            .find(|file| file.original_path == changed)
+            .ok_or_else(|| WinAppMigratorError::Archive("the changed file".to_owned()))?;
+        assert_eq!(entry.hash_sha256, Some(sha256_file(&changed)?));
+        assert_eq!(
+            digests
+                .get(Path::new(r"files\data\a.txt"))
+                .map(|seen| &seen.sha256),
+            entry.hash_sha256.as_ref()
+        );
+        assert!(digests.get(Path::new(r"files\data\gone.txt")).is_none());
+        assert!(
+            manifest
+                .file_inventory
+                .iter()
+                .any(|file| file.original_path == gone && !file.should_copy),
+            "the manifest does not say it is there"
+        );
+        let report = crate::verify::verify_installer(&installer, &BuildMonitor::default())?;
+        assert!(report.package_valid, "{:?}", report.errors);
+        Ok(())
+    }
+
+    #[test]
+    fn a_scan_whose_program_has_gone_builds_nothing() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let report = scan_of(&options)?;
+        fs::remove_file(&exe).map_err(|error| WinAppMigratorError::io(&exe, error))?;
+
+        let built = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        );
+        assert!(
+            matches!(&built, Err(WinAppMigratorError::InvalidInput(message))
+                if message.contains("not there any more")),
+            "{built:?}"
+        );
+        assert!(!root.path().join("out").exists(), "and wrote nothing");
+        Ok(())
+    }
+
+    #[test]
+    fn a_scan_of_something_else_cannot_be_built_from() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let report = scan_of(&options)?;
+
+        let other = root.path().join(r"other\fixture.exe");
+        let elsewhere = PackageOptions {
+            selection: AppSelection::ExecutablePath(other),
+            ..options
+        };
+        let built = create_package_from_scan(
+            &elsewhere,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        );
+        assert!(
+            matches!(&built, Err(WinAppMigratorError::InvalidInput(message))
+                if message.contains("another app")),
+            "{built:?}"
+        );
+
+        let installed = |name: &str, path: &str| {
+            AppSelection::InstalledApp(Box::new(crate::models::InstalledApp {
+                display_name: name.to_owned(),
+                publisher: None,
+                version: None,
+                install_location: None,
+                uninstall_string: None,
+                main_executable: None,
+                registry_source_path: path.to_owned(),
+                architecture: AppArchitecture::X64,
+                install_scope: crate::models::InstallScope::PerMachine,
+                owner_profile: None,
+            }))
+        };
+        let mut scanned = report.clone();
+        scanned.source_app = Some(crate::models::InstalledApp {
+            display_name: "One".to_owned(),
+            publisher: None,
+            version: None,
+            install_location: None,
+            uninstall_string: None,
+            main_executable: None,
+            registry_source_path: r"HKLM\One".to_owned(),
+            architecture: AppArchitecture::X64,
+            install_scope: crate::models::InstallScope::PerMachine,
+            owner_profile: None,
+        });
+        assert!(is_scan_of(&scanned, &installed("One", r"hklm\one")));
+        assert!(!is_scan_of(&scanned, &installed("Two", r"HKLM\One")));
+        assert!(!is_scan_of(&scanned, &installed("One", r"HKLM\Two")));
+        assert!(!is_scan_of(&scanned, &AppSelection::ExecutablePath(exe)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_scan_can_be_stopped_before_it_starts() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let monitor = ScanMonitor::default();
+        monitor.cancel();
+        let scanned = scan_app(&scan_options_for(&options), &monitor);
+        assert!(
+            matches!(scanned, Err(WinAppMigratorError::Cancelled)),
+            "{scanned:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_scan_stopped_part_way_goes_no_further_than_the_step_it_was_on() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<ScanStep>>> = std::sync::Arc::default();
+        let slot: std::sync::Arc<std::sync::Mutex<Option<ScanMonitor>>> = std::sync::Arc::default();
+        let (sink, canceller) = (std::sync::Arc::clone(&seen), std::sync::Arc::clone(&slot));
+        let monitor = ScanMonitor::new(move |step| {
+            if let Ok(mut steps) = sink.lock() {
+                steps.push(step);
+            }
+            if step == ScanStep::Files
+                && let Ok(canceller) = canceller.lock()
+                && let Some(monitor) = canceller.as_ref()
+            {
+                monitor.cancel();
+            }
+        });
+        *slot
+            .lock()
+            .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))? =
+            Some(monitor.clone());
+        let scanned = scan_app(&scan_options_for(&options), &monitor);
+        assert!(
+            matches!(scanned, Err(WinAppMigratorError::Cancelled)),
+            "{scanned:?}"
+        );
+        let steps = seen
+            .lock()
+            .map_err(|error| WinAppMigratorError::InvalidInput(error.to_string()))?;
+        assert_eq!(steps.last(), Some(&ScanStep::Files), "{steps:?}");
+        assert!(!steps.contains(&ScanStep::Registry), "{steps:?}");
         Ok(())
     }
 

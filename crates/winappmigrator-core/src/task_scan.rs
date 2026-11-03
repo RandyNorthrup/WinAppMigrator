@@ -53,6 +53,8 @@ pub(crate) fn live_task_xml(task_path: &str, task_name: &str) -> std::io::Result
 pub struct TaskScanContext {
     pub executable_path: PathBuf,
     pub install_location: Option<PathBuf>,
+    /// Other folders that are the app's, because a person added them.
+    pub also_the_apps: Vec<PathBuf>,
 }
 
 /// One task's file, read.
@@ -406,6 +408,10 @@ fn path_matches(context: &TaskScanContext, candidate: &Path) -> bool {
             .install_location
             .as_ref()
             .is_some_and(|root| path_is_strictly_inside(candidate, root))
+        || context
+            .also_the_apps
+            .iter()
+            .any(|root| path_is_strictly_inside(candidate, root))
 }
 
 #[cfg(test)]
@@ -416,6 +422,7 @@ mod tests {
         TaskScanContext {
             executable_path: PathBuf::from(r"C:\Program Files\Demo\demo.exe"),
             install_location: Some(PathBuf::from(r"C:\Program Files\Demo")),
+            also_the_apps: Vec::new(),
         }
     }
 

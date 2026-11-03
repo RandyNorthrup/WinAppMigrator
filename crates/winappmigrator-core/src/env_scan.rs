@@ -19,6 +19,8 @@ const HKLM_ENVIRONMENT: &str = r"SYSTEM\CurrentControlSet\Control\Session Manage
 pub struct EnvironmentScanContext {
     pub executable_path: PathBuf,
     pub install_location: Option<PathBuf>,
+    /// Other folders that are the app's, because a person added them.
+    pub also_the_apps: Vec<PathBuf>,
 }
 
 pub fn scan_environment(
@@ -83,8 +85,9 @@ fn value_matches_context(context: &EnvironmentScanContext, value: &str) -> bool 
     text_mentions_path(value, &context.executable_path, true)
         || context
             .install_location
-            .as_ref()
-            .is_some_and(|path| text_mentions_path(value, path, false))
+            .iter()
+            .chain(&context.also_the_apps)
+            .any(|path| text_mentions_path(value, path, false))
 }
 
 fn environment_value_kind(value: &RegValue<'_>) -> RegistryValueKind {
@@ -106,6 +109,7 @@ mod tests {
         let context = EnvironmentScanContext {
             executable_path: PathBuf::from(r"C:\App\App.exe"),
             install_location: Some(PathBuf::from(r"C:\App")),
+            also_the_apps: Vec::new(),
         };
 
         assert!(value_matches_context(&context, r"C:\Tools;C:\App\bin"));

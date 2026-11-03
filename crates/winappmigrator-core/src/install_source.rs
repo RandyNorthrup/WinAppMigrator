@@ -136,6 +136,16 @@ struct MsiComponentPaths {
 }
 
 pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> InstallSource {
+    detect_install_source_unless(app, system, &|| false)
+}
+
+/// [`detect_install_source`], stopping where it is once `is_cancelled` says so, in which case what it
+/// found so far is of no use to anyone. The MSI database can take several seconds to go through.
+pub(crate) fn detect_install_source_unless(
+    app: &InstalledApp,
+    system: &SystemContext,
+    is_cancelled: &dyn Fn() -> bool,
+) -> InstallSource {
     let product_code = extract_product_code(app);
     let method = classify_method(app, product_code.as_deref(), system);
     let names = app_product_names(app);
@@ -166,7 +176,7 @@ pub fn detect_install_source(app: &InstalledApp, system: &SystemContext) -> Inst
                     products.len() - 1
                 ));
             }
-            if let Some(paths) = msi_component_paths(&products, system) {
+            if let Some(paths) = msi_component_paths(&products, system, is_cancelled) {
                 authoritative_file_count = paths.files.len();
                 evidence.push(format!(
                     "Windows Installer database: {} component key paths",
@@ -327,7 +337,7 @@ pub(crate) fn is_usable_main_executable(path: &Path, system: &SystemContext) -> 
         && !is_windows_or_installer_cache_path(path, system)
 }
 
-fn is_windows_or_installer_cache_path(path: &Path, system: &SystemContext) -> bool {
+pub(crate) fn is_windows_or_installer_cache_path(path: &Path, system: &SystemContext) -> bool {
     if path_is_within(path, &system.windows_dir()) {
         return true;
     }
@@ -1544,7 +1554,7 @@ fn msi_products_of(
 }
 
 /// True for a package that is a shared runtime the app did not set out to be.
-fn is_chained_runtime(package_name: &str, app_name: &str) -> bool {
+pub(crate) fn is_chained_runtime(package_name: &str, app_name: &str) -> bool {
     let package = package_name.to_ascii_lowercase();
     let app = app_name.to_ascii_lowercase();
     SHARED_RUNTIME_MARKERS
@@ -1556,6 +1566,7 @@ fn is_chained_runtime(package_name: &str, app_name: &str) -> bool {
 fn msi_component_paths(
     product_codes: &[String],
     system: &SystemContext,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Option<MsiComponentPaths> {
     let squished_products: BTreeSet<String> = product_codes
         .iter()
@@ -1585,6 +1596,9 @@ fn msi_component_paths(
             continue;
         };
         for component in components.enum_keys().flatten() {
+            if is_cancelled() {
+                return None;
+            }
             let Ok(component_key) =
                 components.open_subkey_with_flags(&component, KEY_READ | KEY_WOW64_64KEY)
             else {
@@ -1883,7 +1897,7 @@ fn is_shared_segments(segments: &[String]) -> bool {
 }
 
 /// True for a path that holds unrelated things side by side, or the drive itself.
-fn is_shared_folder(path: &Path) -> bool {
+pub(crate) fn is_shared_folder(path: &Path) -> bool {
     let segments: Vec<String> = path
         .to_string_lossy()
         .trim_end_matches('\\')

@@ -7,7 +7,9 @@ use winreg::enums::{KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{holds_a_known_base_dir, known_base_dirs};
-use crate::install_source::{ExecutableHints, is_usable_main_executable};
+use crate::install_source::{
+    ExecutableHints, is_usable_main_executable, is_windows_or_installer_cache_path,
+};
 use crate::models::{AppArchitecture, InstallScope, InstalledApp};
 use crate::path_utils::{
     is_auxiliary_executable, is_drive_root, looks_like_executable, normalize_name_for_match,
@@ -62,6 +64,146 @@ impl InventoryContext {
             machine_hints: ExecutableHints::read_machine_wide(system),
             known_base_dirs: known_base_dirs(system),
         }
+    }
+}
+
+/// One entry of the Uninstall key, hidden or not, with no looking for what it runs. For telling
+/// what might be part of an app from what is someone else's, which only takes where each says it is.
+#[derive(Debug, Clone)]
+pub struct UninstallRecord {
+    pub display_name: String,
+    pub publisher: Option<String>,
+    pub version: Option<String>,
+    pub uninstall_string: Option<String>,
+    pub registry_source_path: String,
+    pub architecture: AppArchitecture,
+    pub install_scope: InstallScope,
+    pub owner_profile: Option<String>,
+    /// Marked as a part of something else, so no list of apps shows it.
+    pub hidden: bool,
+    /// Where it says it is installed, if that is a folder of its own, as it can be read now.
+    pub install_location: Option<PathBuf>,
+    /// The folders of its icon and its uninstaller, as it can be read now, if those are its own.
+    pub program_folders: Vec<PathBuf>,
+}
+
+impl UninstallRecord {
+    /// What [`crate::install_source::detect_install_source`] goes by for it.
+    pub(crate) fn as_installed_app(&self) -> InstalledApp {
+        InstalledApp {
+            display_name: self.display_name.clone(),
+            publisher: self.publisher.clone(),
+            version: self.version.clone(),
+            install_location: self.install_location.clone(),
+            uninstall_string: self.uninstall_string.clone(),
+            main_executable: None,
+            registry_source_path: self.registry_source_path.clone(),
+            architecture: self.architecture.clone(),
+            install_scope: self.install_scope.clone(),
+            owner_profile: self.owner_profile.clone(),
+        }
+    }
+}
+
+/// Every entry of the Uninstall key on the system `system` points at, the machine's and the
+/// account's, with the hidden ones. Reads no folders but to ask whether each may be read.
+pub fn read_uninstall_records(system: &SystemContext) -> Vec<UninstallRecord> {
+    let known_bases = known_base_dirs(system);
+    let mut records = Vec::new();
+    for (subkey, architecture, flags) in [
+        (
+            HKLM_UNINSTALL,
+            AppArchitecture::X64,
+            KEY_READ | KEY_WOW64_64KEY,
+        ),
+        (
+            HKLM_WOW6432_UNINSTALL,
+            AppArchitecture::X86,
+            KEY_READ | KEY_WOW64_32KEY,
+        ),
+    ] {
+        if let Ok(key) = system.open_hklm(subkey, flags) {
+            collect_uninstall_records(
+                system,
+                &known_bases,
+                &key,
+                flags,
+                &format!(r"HKLM\{subkey}"),
+                &architecture,
+                &InstallScope::PerMachine,
+                None,
+                &mut records,
+            );
+        }
+    }
+    for user in system.user_hives() {
+        if let Ok(key) = user.open(HKCU_UNINSTALL, KEY_READ) {
+            collect_uninstall_records(
+                system,
+                &known_bases,
+                &key,
+                KEY_READ,
+                &format!(r"HKCU\{HKCU_UNINSTALL}"),
+                &AppArchitecture::Unknown,
+                &InstallScope::PerUser,
+                Some(&user.id),
+                &mut records,
+            );
+        }
+    }
+    records
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_uninstall_records(
+    system: &SystemContext,
+    known_bases: &[PathBuf],
+    uninstall_key: &RegKey,
+    flags: u32,
+    prefix: &str,
+    architecture: &AppArchitecture,
+    install_scope: &InstallScope,
+    owner_profile: Option<&str>,
+    records: &mut Vec<UninstallRecord>,
+) {
+    for key_name in uninstall_key.enum_keys().flatten() {
+        let Ok(child) = uninstall_key.open_subkey_with_flags(&key_name, flags) else {
+            continue;
+        };
+        let raw = read_raw_entry(&child);
+        let Some(display_name) = raw.display_name.clone() else {
+            continue;
+        };
+        let its_own_folder = |value: &Option<String>| {
+            value
+                .as_deref()
+                .and_then(split_command_executable_path)
+                .and_then(|path| system.resolve_source_path(&path))
+                .filter(|path| !is_windows_or_installer_cache_path(path, system))
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+                .and_then(|folder| usable_install_location(folder, known_bases, system))
+        };
+        records.push(UninstallRecord {
+            display_name,
+            publisher: raw.publisher.clone(),
+            version: raw.version.clone(),
+            uninstall_string: raw.uninstall_string.clone(),
+            registry_source_path: format!(r"{prefix}\{key_name}"),
+            architecture: architecture.clone(),
+            install_scope: install_scope.clone(),
+            owner_profile: owner_profile.map(ToOwned::to_owned),
+            hidden: raw.system_component,
+            install_location: raw
+                .install_location
+                .as_ref()
+                .map(PathBuf::from)
+                .and_then(|path| system.resolve_source_path(&path))
+                .and_then(|path| usable_install_location(path, known_bases, system)),
+            program_folders: [&raw.display_icon, &raw.uninstall_string]
+                .into_iter()
+                .filter_map(its_own_folder)
+                .collect(),
+        });
     }
 }
 
@@ -237,7 +379,7 @@ pub fn parse_uninstall_entry(
         .as_ref()
         .map(PathBuf::from)
         .and_then(|path| system.resolve_source_path(&path))
-        .and_then(|path| usable_install_location(path, inventory, system));
+        .and_then(|path| usable_install_location(path, &inventory.known_base_dirs, system));
     // A folder can be listed with no look at what is in it, so what is found there may be a link.
     let main_executable = guess_main_executable(
         system,
@@ -271,7 +413,7 @@ pub fn parse_uninstall_entry(
 /// word, that would make every app in it part of this one.
 fn usable_install_location(
     path: PathBuf,
-    inventory: &InventoryContext,
+    known_base_dirs: &[PathBuf],
     system: &SystemContext,
 ) -> Option<PathBuf> {
     let text = path.to_string_lossy();
@@ -290,9 +432,7 @@ fn usable_install_location(
         && ["System32", "SysWOW64"]
             .iter()
             .any(|name| path_is_within(&windows_dir.join(name), &path));
-    if is_drive_root(&path)
-        || holds_a_known_base_dir(&path, &inventory.known_base_dirs)
-        || is_windows_host_dir
+    if is_drive_root(&path) || holds_a_known_base_dir(&path, known_base_dirs) || is_windows_host_dir
     {
         warn!(location = %path.display(), "ignoring an install location that is a shared folder");
         return None;

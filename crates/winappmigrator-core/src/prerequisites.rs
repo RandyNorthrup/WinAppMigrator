@@ -190,6 +190,40 @@ pub fn bundle_record(
 }
 
 /// The compiled spec for a prerequisite that has a bundle record.
+/// How a runtime an app needs is to be provided, in the words an installer's list of them uses, for
+/// showing before anything has been downloaded. The second part says whether that needs a person
+/// to do something.
+pub fn handling_before_a_build(
+    prerequisite: &crate::models::RuntimePrerequisite,
+    app_architecture: &AppArchitecture,
+) -> (String, bool) {
+    let architecture = prerequisite
+        .architecture
+        .as_ref()
+        .unwrap_or(app_architecture);
+    if matches!(
+        prerequisite.kind,
+        RuntimePrerequisiteKind::DotNetFramework4x
+    ) {
+        return ("Built into Windows".to_owned(), false);
+    }
+    if !prerequisite.install_manually {
+        return ("Ships with the app".to_owned(), false);
+    }
+    let found = spec(&prerequisite.kind, architecture);
+    let found = found.as_ref();
+    if let Some(feature) = found.and_then(|spec| spec.windows_feature.as_deref()) {
+        return (format!("Windows feature: {feature}"), false);
+    }
+    if found.is_some_and(|spec| spec.bundleable) {
+        return ("Included".to_owned(), false);
+    }
+    if let Some(id) = found.and_then(|spec| spec.winget_id.as_deref()) {
+        return (format!("Installed with winget: {id}"), false);
+    }
+    ("Install manually".to_owned(), true)
+}
+
 pub fn spec_for_bundle(
     kind: &RuntimePrerequisiteKind,
     bundle: &PrerequisiteBundle,

@@ -5,6 +5,7 @@ pub mod dll_resolver;
 pub mod env_scan;
 pub mod errors;
 pub mod file_discovery;
+pub mod footprint;
 pub mod hashing;
 pub mod install_source;
 mod integration_scan;
@@ -12,6 +13,7 @@ pub mod journal;
 pub mod license_scan;
 pub mod logging;
 pub mod models;
+pub mod near_match;
 pub mod package;
 mod packer;
 pub mod path_rewrite;
@@ -46,18 +48,35 @@ pub use archive::{
     create_self_extracting_archive, data_file_beside, has_embedded_self_archive,
 };
 pub use errors::{Result, WinAppMigratorError, panic_text};
+pub use footprint::{
+    AlsoLeftOut, ChoiceId, ChosenScan, FolderGroup, FolderRow, Footprint, FootprintChoices,
+    IntegrationRow, ItemRow, LICENSES_LEFT_OUT_TEXT, LeftOutGroup, PrerequisiteRow, ScanFlags,
+    apply_choices, what_goes_with,
+};
 pub use models::*;
-pub use package::{create_package, create_package_monitored, read_embedded_manifest};
+pub use near_match::{NearMatchLook, RefusedNearMatch, near_matches_of};
+pub use package::{
+    create_package, create_package_from_scan, create_package_monitored, read_embedded_manifest,
+    scan_options_for,
+};
 pub use path_utils::hidden_command;
 pub use profile_survey::{ProfilePicker, ProfileRow, ProfileSurvey, survey_of, survey_profiles};
-pub use progress::{BuildMonitor, BuildStep, InstallMonitor, InstallPhase, InstallStep, Monitor};
+pub use progress::{
+    BuildMonitor, BuildStep, InstallMonitor, InstallPhase, InstallStep, Monitor, ScanMonitor,
+    ScanStep,
+};
 pub use restore::{default_install_location, restore_package, restore_package_monitored};
 pub use restore_review::{
-    SystemChange, SystemChangeKind, SystemChanges, install_location_problem, install_places,
+    CERTIFICATES_LEFT_OUT_TEXT, CREDENTIALS_LEFT_OUT_TEXT, FONTS_LEFT_OUT_TEXT, SystemChange,
+    SystemChangeKind, SystemChanges, install_location_problem, install_places,
     refuse_what_cannot_run_here, refuse_without_room_to_install, system_changes,
     system_changes_restoring,
 };
-pub use space::{RoomCheck, preview_needs, size_text};
+pub use scan::scan_app;
+pub use space::{
+    BuildInputs, RoomCheck, VolumeStats, preview_needs, room_before_a_build, size_text,
+    volume_stats_at,
+};
 pub use system_context::{
     ProfileChoice, ScanSource, SystemContext, looks_like_a_windows_drive, sweep_leaked_hive_mounts,
 };

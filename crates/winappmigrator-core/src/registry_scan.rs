@@ -151,6 +151,10 @@ pub struct RegistryScanContext {
     /// Nothing machine-wide goes by the name or the record of such an app, since both are that
     /// account's to write. What names its program is still its own.
     pub installed_for_one_account: bool,
+    /// Other folders that are the app's, because a person added them.
+    pub also_the_apps: Vec<PathBuf>,
+    /// The names of what a person added, which its keys go by as this app's go by its own.
+    pub(crate) also_named: Vec<ProductNames>,
 }
 
 /// A registry root as an install record names it.
@@ -227,6 +231,9 @@ pub(crate) fn scan_registry_artifacts(
     scan_run_keys(context, &hklm, &mut entries, &mut warnings);
     if !context.installed_for_one_account {
         scan_software_children(context, &names, &hklm, &mut entries, &mut warnings);
+        for names in &context.also_named {
+            scan_software_children(context, names, &hklm, &mut entries, &mut warnings);
+        }
     }
     scan_class_registrations(
         context,
@@ -244,6 +251,9 @@ pub(crate) fn scan_registry_artifacts(
         scan_uninstall_entries(context, &hkcu, HKCU_UNINSTALL, &mut entries, &mut warnings);
         scan_run_keys(context, &hkcu, &mut entries, &mut warnings);
         scan_software_children(context, &names, &hkcu, &mut entries, &mut warnings);
+        for names in &context.also_named {
+            scan_software_children(context, names, &hkcu, &mut entries, &mut warnings);
+        }
         scan_class_registrations(
             context,
             &hkcu,
@@ -745,20 +755,24 @@ fn scan_software_children(
         for key_path in product_keys_in_view(names, software_path, &children_of) {
             capture_registry_subtree(root, &key_path, MatchConfidence::Medium, entries, warnings);
         }
-        let Some(install) = context.install_location.as_deref() else {
-            continue;
-        };
-        for child_name in children_of(software_path) {
-            if !INSTALL_PATH_SEARCH_SKIPPED_KEYS.contains(&child_name.to_ascii_lowercase().as_str())
-            {
-                capture_keys_recording_install_path(
-                    root,
-                    &format!(r"{software_path}\{child_name}"),
-                    install,
-                    1,
-                    entries,
-                    warnings,
-                );
+        for install in context
+            .install_location
+            .iter()
+            .chain(&context.also_the_apps)
+        {
+            for child_name in children_of(software_path) {
+                if !INSTALL_PATH_SEARCH_SKIPPED_KEYS
+                    .contains(&child_name.to_ascii_lowercase().as_str())
+                {
+                    capture_keys_recording_install_path(
+                        root,
+                        &format!(r"{software_path}\{child_name}"),
+                        install,
+                        1,
+                        entries,
+                        warnings,
+                    );
+                }
             }
         }
     }
@@ -1145,8 +1159,9 @@ fn value_matches_context(context: &RegistryScanContext, value: &str) -> bool {
     }
     if context
         .install_location
-        .as_ref()
-        .is_some_and(|path| text_mentions_path(value, path, false))
+        .iter()
+        .chain(&context.also_the_apps)
+        .any(|path| text_mentions_path(value, path, false))
     {
         return true;
     }
@@ -1160,8 +1175,9 @@ fn command_path_matches(context: &RegistryScanContext, candidate: &Path) -> bool
     path_is_within(candidate, &context.executable_path)
         || context
             .install_location
-            .as_ref()
-            .is_some_and(|root| path_is_within(candidate, root))
+            .iter()
+            .chain(&context.also_the_apps)
+            .any(|root| path_is_within(candidate, root))
 }
 
 fn classify_com_registrations(entries: &[RegistryEntry]) -> Vec<ComRegistrationEntry> {
@@ -1340,6 +1356,8 @@ mod tests {
             source_registry_path: None,
             recorded_keys: Vec::new(),
             installed_for_one_account: false,
+            also_the_apps: Vec::new(),
+            also_named: Vec::new(),
         };
 
         assert!(!value_matches_context(&context, "ad 9.6.8"));
@@ -1354,6 +1372,8 @@ mod tests {
             source_registry_path: None,
             recorded_keys: Vec::new(),
             installed_for_one_account: false,
+            also_the_apps: Vec::new(),
+            also_named: Vec::new(),
         }
     }
 
@@ -1406,6 +1426,8 @@ mod tests {
             source_registry_path: None,
             recorded_keys: Vec::new(),
             installed_for_one_account: false,
+            also_the_apps: Vec::new(),
+            also_named: Vec::new(),
         };
         assert!(!value_matches_context(
             &context,
@@ -1429,6 +1451,8 @@ mod tests {
             source_registry_path: None,
             recorded_keys: Vec::new(),
             installed_for_one_account: false,
+            also_the_apps: Vec::new(),
+            also_named: Vec::new(),
         });
         assert!(
             seven_zip.matches_top_level("7-Zip", MatchScope::ProgramFolders),
@@ -1443,6 +1467,8 @@ mod tests {
             source_registry_path: None,
             recorded_keys: Vec::new(),
             installed_for_one_account: false,
+            also_the_apps: Vec::new(),
+            also_named: Vec::new(),
         });
         assert!(
             !photoshop.matches_top_level("Adobe", MatchScope::ProgramFolders),

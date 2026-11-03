@@ -3924,6 +3924,8 @@ mod tests {
             firewall_rules_detected: Vec::new(),
             certificates_reported: Vec::new(),
             fonts_reported: Vec::new(),
+            left_out_by_choice: Vec::new(),
+            added_by_choice: Vec::new(),
             warnings: Vec::new(),
             items_intentionally_excluded: Vec::new(),
             included_user_data: false,
@@ -5570,6 +5572,7 @@ mod tests {
         let options = restore_options(work.path(), work.path().join("no package"), true);
         let mut journal = journal_for_test(&options)?;
         let shortcut = ReviewedShortcut {
+            original_lnk_path: work.path().join("Acme.lnk"),
             placement: crate::restore_policy::ShortcutPlacement {
                 destination: link.join("Acme.lnk"),
                 root: link.clone(),

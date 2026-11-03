@@ -742,6 +742,7 @@ mod tests {
             firewall_rules: Vec::new(),
             certificates: Vec::new(),
             fonts_reported: Vec::new(),
+            near_matches: Vec::new(),
             warnings: Vec::new(),
             items_excluded: Vec::new(),
             confidence_score: 92,
