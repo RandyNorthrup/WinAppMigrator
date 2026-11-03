@@ -21,6 +21,8 @@ $script:failures = [Collections.Generic.List[string]]::new()
 $DllNotFound = -1073741515
 $RuntimeFiles = 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll', 'concrt140.dll', 'vccorlib140.dll'
 $RuntimeKeys = 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
+# Newer ones call the whole of it `Microsoft Visual C++ v14 Redistributable (x64)`.
+$RuntimeNames = '(v14|2015|2017|2019|2022).*(x64)'
 
 function Check([string]$Label, [bool]$Passed, [string]$Detail = '') {
     if ($Passed) {
@@ -65,7 +67,7 @@ function Exit-Code-Of([string]$Program, [string]$Arguments) {
 
 function Runtime-State {
     foreach ($entry in @(Uninstall-Entries 'Microsoft Visual C++')) {
-        if ($entry.DisplayName -match '(2015|2017|2019|2022).*(x64)') { Write-Host "  in Settings: $($entry.DisplayName): $($entry.Uninstall)" }
+        if ($entry.DisplayName -match $RuntimeNames) { Write-Host "  in Settings: $($entry.DisplayName): $($entry.Uninstall)" }
     }
     foreach ($file in $RuntimeFiles) {
         $path = "$env:SystemRoot\System32\$file"
@@ -96,7 +98,7 @@ Check 'the publisher''s broker can start' ($before -ne $DllNotFound) "$before"
 
 Write-Host "`n=== Take the runtime away, by its own uninstallers"
 foreach ($entry in @(Uninstall-Entries 'Microsoft Visual C++')) {
-    if ($entry.DisplayName -notmatch '(2015|2017|2019|2022).*(x64)') { continue }
+    if ($entry.DisplayName -notmatch $RuntimeNames) { continue }
     Write-Host "  $($entry.DisplayName): $($entry.Uninstall)"
     if ($entry.Uninstall -match '(?i)msiexec.*(\{[0-9a-f-]+\})') {
         # Visual Studio depends on these here, and without this, Windows Installer says it has done
@@ -169,7 +171,7 @@ if ($run.Code -ne 0) {
     foreach ($place in $env:TEMP, "$env:SystemRoot\Temp") {
         foreach ($log in @(Get-ChildItem -LiteralPath $place -Filter 'dd_vcredist*' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 2)) {
             Write-Host "`n--- $($log.FullName)"
-            Get-Content -LiteralPath $log.FullName | Select-Object -Last 40 | ForEach-Object { Write-Host "  $_" }
+            Get-Content -LiteralPath $log.FullName | Where-Object { $_ -match '(?i)related|Detected package: vcRuntime|e000|Exit code' } | ForEach-Object { Write-Host "  $_" }
         }
     }
     # Nothing after this could be anything but a consequence of it.
@@ -193,7 +195,7 @@ foreach ($file in 'vcruntime140.dll', 'msvcp140.dll') {
         Check "$file is Microsoft's" ($signature.Status -eq 'Valid' -and $signature.SignerCertificate.Subject -match 'O=Microsoft Corporation') "$($signature.Status) $($signature.SignerCertificate.Subject)"
     }
 }
-Check 'Windows lists it' (@(Uninstall-Entries 'Microsoft Visual C++' | Where-Object { $_.DisplayName -match '(2015|2017|2019|2022).*(x64)' }).Count -gt 0) ''
+Check 'Windows lists it' (@(Uninstall-Entries 'Microsoft Visual C++' | Where-Object { $_.DisplayName -match $RuntimeNames }).Count -gt 0) ''
 $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($RuntimeKeys[0])
 Check 'its record says it is there' ($key -and $key.GetValue('Installed') -eq 1) ''
 
