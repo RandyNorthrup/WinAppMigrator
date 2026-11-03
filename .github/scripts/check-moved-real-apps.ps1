@@ -56,7 +56,8 @@ if (Test-Path -LiteralPath $baselineFile) { Get-Content -Raw -LiteralPath $basel
 
 Section 'Take away any copy this runner came with'
 foreach ($app in $apps) { Remove-Preinstalled $app }
-$cleanState = Get-MachineState
+$manifests = Join-Path $Folder 'manifests'
+$cleanState = Get-MachineState $manifests $apps
 
 $rounds = @(
     @{ Name = 'where it was'; RootOf = { param($app) $app.source_root }; Arguments = { param($app) @() } },
@@ -82,10 +83,6 @@ foreach ($round in $rounds) {
         Check "$($app.id): the installer exits with 0" ($run.Code -eq 0) $run.Output
         Check "$($app.id): the package's hashes are right" ($run.Output -match 'Package hashes valid: true') ''
         Check "$($app.id): it read back what it installed" ($run.Output -match 'Reinstall hashes valid: true') ''
-        foreach ($entry in @(Uninstall-Entries $app.name)) {
-            $says = (Get-ItemProperty -LiteralPath "HKLM:\$($entry.Key)").WindowsInstaller
-            Check "$($app.id): its entry does not say Windows Installer has it" ($says -ne 1) "$says"
-        }
         Check "$($app.id): no errors" ($run.Output -match '(?m)^Errors: 0\s*$') ''
         if ($build -lt $expected.source_build) {
             Check "$($app.id): it says this Windows is older than the one the app came from" ($run.Output -match 'This app was on Windows build') ''
@@ -98,9 +95,22 @@ foreach ($round in $rounds) {
             Check "$($app.id): it has nothing to say about an emulator" ($run.Output -notmatch 'emulator') ''
         }
         if ($run.Output -match '(?m)^Install id: (.+?)\s*$') { $installs[$app.id] = $Matches[1] }
+        # What Settings would run, which only this install's uninstaller can do anything with.
+        foreach ($entry in @(Uninstall-Entries $app.name)) {
+            $says = (Get-ItemProperty -LiteralPath "HKLM:\$($entry.Key)").WindowsInstaller
+            Check "$($app.id): its entry does not say Windows Installer has it" ($says -ne 1) "$says"
+            $own = "`"C:\ProgramData\WinAppMigrator\installs\$($installs[$app.id])\uninstall.exe`" --uninstall $($installs[$app.id])"
+            Check "$($app.id): its entry's uninstall string is this install's" ($entry.Uninstall -ceq $own) $entry.Uninstall
+            Check "$($app.id): and so is its quiet one" ($entry.QuietUninstall -ceq "$own --quiet") $entry.QuietUninstall
+        }
         # What the publisher's own installer left in its folder, whatever the scan made of it.
         foreach ($file in @($app.files)) {
             $path = Join-Path $roots[$app.id] $file.relative
+            # It names who ran the setup, and lists where things were on that PC. See SECURITY.md.
+            if ($file.relative -match '^unins\d{3}\.dat$') {
+                Check "$($app.id): its Inno Setup log stayed behind" (-not (Test-Path -LiteralPath $path)) $path
+                continue
+            }
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
                 Check "$($app.id): $($file.relative) is here" $false 'it is not'
             } elseif ((Sha256-Of $path) -ne $file.sha256) {
@@ -153,7 +163,7 @@ foreach ($round in $rounds) {
     foreach ($app in $apps) {
         Check "$($app.id): its folder is gone" (-not (Test-Path -LiteralPath $roots[$app.id])) $roots[$app.id]
     }
-    $differences = @(State-Differences $cleanState (Get-MachineState))
+    $differences = @(State-Differences $cleanState (Get-MachineState $manifests $apps))
     foreach ($difference in $differences) { Write-Host "  $difference" }
     Check 'the machine is as it was before any of them' ($differences.Count -eq 0) ($differences -join '; ')
 }

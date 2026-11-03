@@ -332,6 +332,11 @@ $script:Checks = @{
         },
         @{ Name = 'App Paths: Windows finds the program by name alone'; Test = {
                 param($Root)
+                # A program can also be found on Path, which says nothing of this entry.
+                $registered = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\7zFM.exe')
+                if (-not $registered) { return 'there is no entry for it' }
+                $program = [string]$registered.GetValue('')
+                if (-not ((Is-Inside $program $Root) -and (Test-Path -LiteralPath $program))) { return "the entry says [$program]" }
                 Start-Process -FilePath '7zFM.exe' -ErrorAction Stop
                 if (-not (Started-From $Root '7zFM.exe')) { return 'it did not start from the app''s folder' }
                 return ''
@@ -552,16 +557,35 @@ function Value-Names([string]$Path) {
     return @($key.GetValueNames() | ForEach-Object { "$Path : $_" })
 }
 
-function Get-MachineState {
+# Each value a package says it sets, as it is on this PC now, so that what an uninstall leaves is seen
+# in what each one holds, wherever under a key that everyone shares it is.
+function Captured-Values([string]$Manifests, $Apps) {
+    foreach ($app in $Apps) {
+        $manifest = Get-Content -Raw -LiteralPath (Join-Path $Manifests "$($app.id).json") | ConvertFrom-Json
+        foreach ($entry in $manifest.registry_keys_exported) {
+            $hive = if ($entry.hive -match 'current') { [Microsoft.Win32.Registry]::CurrentUser } else { [Microsoft.Win32.Registry]::LocalMachine }
+            $key = $hive.OpenSubKey($entry.key_path)
+            if (-not $key) { continue }
+            if ($null -eq $entry.value_name) {
+                "$($hive.Name)\$($entry.key_path)"
+                continue
+            }
+            $name = if ($entry.value_name -eq '(Default)') { '' } else { $entry.value_name }
+            $value = $key.GetValue($name, $null, 'DoNotExpandEnvironmentNames')
+            if ($null -ne $value) { "$($hive.Name)\$($entry.key_path) : $($entry.value_name) = $($value -join ' ')" }
+        }
+    }
+}
+
+function Get-MachineState([string]$Manifests, $Apps) {
     $environmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
     $environment = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($environmentKey)
     $mine = [Microsoft.Win32.Registry]::CurrentUser
     $myEnvironment = $mine.OpenSubKey('Environment')
     $names = @{
+        'What they set'   = @(Captured-Values $Manifests $Apps)
         'This account''s' = @(
-            Key-Names 'Software' $mine
             Key-Names 'Software\Microsoft\Windows\CurrentVersion\Uninstall' $mine
-            Key-Names 'Software\Classes' $mine
             $myEnvironment.GetValueNames() | ForEach-Object { "Environment $_=$($myEnvironment.GetValue($_, '', 'DoNotExpandEnvironmentNames'))" }
             Get-ChildItem -LiteralPath ([Environment]::GetFolderPath('Programs')) -Recurse -Force | ForEach-Object FullName
         )

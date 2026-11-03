@@ -57,4 +57,10 @@ foreach ($name in 'mosquitto', 'windows_exporter') {
     Write-Host "  $name is $((Get-Service -Name $name).Status), $((Get-Service -Name $name).StartType)"
 }
 $baseline | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Output 'baseline.json')
+# Without the publisher's own installer doing it, the same failure later would say nothing of this project.
+$failed = @($baseline.Values | ForEach-Object { $_.Values } | Where-Object { $_ })
+if ($failed.Count -gt 0) {
+    Write-Host "`n$($failed.Count) checks failed with the publishers' own installers."
+    exit 1
+}
 exit 0

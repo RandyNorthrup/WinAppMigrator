@@ -90,8 +90,9 @@ same of it as `check-moved-real-apps.ps1` later asks of the move, so a failure t
 builds the installers the way the app does, with the License and User data options off and no runtime bundled, and looks
 through each package for the runner's account, folders, and tokens before anything is uploaded. On each fresh runner the script removes any
 copy it came with, shows that every check fails, installs, shows that every check works, removes each app by the string its
-entry recorded, shows that every check fails again, and compares the machine with how it was, once where each app was and
-once in a folder of another name. A check in `real-app-checks.ps1` asks Windows to do the thing rather than looking for a file or a key,
+entry recorded, shows that every check fails again, and compares the machine with how it was, by each registry value the
+packages say they set and by the names of the services, tasks, firewall rules, shortcuts, variables, and folders an app could add,
+once where each app was and once in a folder of another name. A check in `real-app-checks.ps1` asks Windows to do the thing rather than looking for a file or a key,
 so that only what was restored can make it pass. **Add a check only if it can fail, and never widen one to go green.**
 
 What those jobs upload is a redistribution of those apps, for a day, to anyone signed in to GitHub, so an app goes
