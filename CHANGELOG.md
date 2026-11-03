@@ -4,6 +4,56 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **A build reads each byte of an app once, and an install reads less.** An app's files used to be copied to a
+  staging folder, hashed there, zipped from there, and hashed again: about five reads of every byte, and up to three
+  times the installer's size on disk. They now go straight from where they are into the installer. What goes in the
+  manifest is the hash of what was read, and what goes in the package is compressed from those same bytes, so a file
+  changing during the build cannot make the two disagree. The finished installer is then read back and checked,
+  entry by entry, against the manifest. An install hashes each file as it unpacks it, and no longer reads them all
+  twice more in staging. It still reads back what it installed, and that is what "Reinstall hashes valid" goes by.
+- **Compression runs on every core, and leaves compressed data alone.** Files are compressed in parallel, in a fixed
+  order, into a standard zip, with memory bounded however big they are. What a sample shows will not compress is
+  stored, whatever it is called, and a mislabeled file is compressed, whatever it is called. See the numbers below.
+- **There has to be room before anything starts.** A build works out the most it could take and checks every drive it
+  writes to, and shows that in the window. An install does the same for the staging folder, the install location, and
+  what it keeps of what it replaces, in the window and from a command line. If there is not room it says how much is
+  needed and how much is free, and nothing is changed. A drive that will not say is said not to have said.
+- **Past 4 GiB, an installer is a small loader and a data file.** Windows cannot start an executable that large, and
+  a build used to stop there. The loader's footer holds the data file's SHA-256, so a signature on the loader covers it:
+  changing one byte of the data file leaves the signature valid and is refused before anything in it is read, and
+  changing the footer breaks the signature. It looks for the data file only beside itself, follows no link to it, and
+  holds it so that it cannot change. The window says the two files have to stay together. A package that fits still
+  comes out as one executable, with room left for a signature.
+- **An app that cannot run on this PC is refused before anything changes.** A package records the Windows and architecture
+  it came from, read from the hives on a drive, and what each of its programs and drivers needs, from their own headers. x64 on
+  32-bit Windows, a driver for another architecture, and a program that says it needs a newer Windows are refused. x64 on
+  Arm64, and a Windows older than the source that the program's headers allow, are in the list you agree to, since
+  they may well work.
+- **What a scan reads came down too.** Only the parts of a large program that are looked at are read, its headers, import
+  tables, resources, and signature, and not its code. On 2,779 real programs that found the same as reading each whole, from 22%
+  of the bytes. The size of a file comes from its folder's listing rather than being asked for again.
+- **A move between two PCs has been run for real.** Installers built on one runner, on Windows Server 2025 (build 26100),
+  are installed on others that have never seen the app, and checked with Windows' own tools. On another Windows Server
+  2025 nothing differs. On Windows Server 2022 (build 20348) it says this Windows is older than the app's, and refuses
+  an app with a file named `aux.h`, which there opens as a device. On Windows 11 on Arm (build 26200) it says the
+  programs run through an emulator, and they start.
+
+  Building real apps on a 20-thread PC, before and after, by Windows' own count of what the process read, with
+  `wam_measure`:
+
+  | App | Files | Size | Time | Bytes read, as a share of the app | Most on disk | Installer |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | GitHub CLI | 1 | 37 MiB | 4.7 s, 4.7 s | 6.8x, 2.2x | 64 MiB, 28 MiB | 27 MiB, 27 MiB |
+  | 7-Zip | 107 | 5 MiB | 2.1 s, 2.1 s | 10.8x, 5.3x | 23 MiB, 16 MiB | 16 MiB, 16 MiB |
+  | Git | 9,313 | 411 MiB | 24.3 s, 6.1 s | 4.7x, 2.0x | 610 MiB, 193 MiB | 181 MiB, 181 MiB |
+  | GIMP | 9,963 | 620 MiB | 27.4 s, 6.8 s | 4.8x, 1.9x | 848 MiB, 221 MiB | 206 MiB, 207 MiB |
+  | Ableton Live 11 Lite | 47,023 | 4.3 GiB | 200.5 s, 67.9 s | 4.8x, 3.1x | 7.4 GiB, about 6 GiB | 2.96 GiB, 2.98 GiB |
+  | Visual Studio Community 2022 | 53,504 | 11.0 GiB | 857.1 s, 87.7 s | 4.4x, 2.0x | 14.9 GiB, 7.6 GiB | 3.77 GiB, 3.77 GiB |
+
+  What is left after each app's one read is the stub, for a build that reads it from a file, and two reads of the finished
+  package to check it. The last two rows are over 4 GiB before compressing and under it after, so each is also copied once
+  to go after the stub, which is what the most on disk comes from. A scan's own reads are in those figures too.
+
 - **What ties an app into Windows now comes along.** COM type libraries, interfaces, AppIDs, and ProgIDs, per-user
   32-bit classes, URL protocols, `OpenWithProgids`, context menu handlers, icon overlays, the `Shell Extensions\Approved` list,
   Explorer namespaces, `RegisteredApplications` and `Clients` entries, firewall rules, fonts, ODBC drivers and sources,
@@ -138,7 +188,8 @@ All notable project changes are tracked here.
 - **A service set to start automatically but delayed keeps that.** It came back as plain automatic.
 - **A file named like a device, such as `aux.h`, now stops an install before Windows 11 with a clear
   message.** It reached the device, which threw its data away and reported a failed hash check, or could hang
-  on a real serial port. This has not been run on Windows 10.
+  on a real serial port. This has been run on Windows Server 2022, build 20348, where the name did open as a device,
+  and not on Windows 10 itself.
 - **PowerShell calls no longer search every module.** A call that had to find a command took 23
   seconds on Windows Server with no module cache, so a small app took more than 6 minutes to install
   there. Scripts now import what they use by name. On CI's Windows Server, a preview went from 23

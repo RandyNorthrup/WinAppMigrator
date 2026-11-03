@@ -91,7 +91,29 @@ installer is about to trust, and an honest package reaching too far:
 - **While it runs,** its staging folder is writable only by administrators, and a drive that cannot
   keep that, such as FAT32 or exFAT, is not used for it. That folder and the install location cannot be
   renamed and replaced, and it will not write through a link at or below the install location. From
-  the moment it opens its own file, that cannot be changed or swapped.
+  the moment it opens its own file, and a data file if it has one, those cannot be changed or swapped.
+- **What a package says it needs is not a protection.** An app that cannot run on this PC is refused before
+  anything changes, by what the package records of its programs and drivers. That is there to save a person a
+  failed install. A package can say what it likes, and the rules above are what stand between it and the PC.
+
+### An installer in two files
+
+A package too big for one executable is a data file, beside a small loader that is the stub and a footer.
+
+- **A signature on the loader covers the data file.** The footer holds the data file's SHA-256 and length, and sits
+  in what a signature covers. So changing the footer breaks the signature, and changing the data file leaves the
+  signature valid, with a file that no longer matches what it vouches for, which is refused. The elevated tests
+  check both ways with a throwaway certificate: one byte of the data file changed, a whole other package swapped in,
+  and one byte of the footer changed.
+- **A loader with no signature proves as much as any other unsigned installer,** which is nothing. Whoever can change
+  the data file can change the footer too. The hash then only catches damage.
+- **Nothing is read from a data file before it is checked.** It is looked for in one place, beside the loader, under
+  the loader's name with `.wamdata`, and whatever has that name is what is opened, not what a link there leads to. It
+  is held open with no write or delete sharing, hashed through that one handle, and only then parsed, through that
+  handle. So once it has been checked, nothing can change it for as long as the installer runs. A file that is missing,
+  a link, or of the wrong length or hash stops the installer, and it says what to do.
+- **A bare stub still cannot come out signed.** What an install leaves to uninstall with is cut from the loader as
+  from any installer, and is byte for byte the stub, with no signature.
 
 ## A drive from another PC
 
@@ -113,8 +135,9 @@ controlled. So:
   first read as Windows would read it, so that it is the real name that is asked about.
 - **There are limits on what a drive can make this do.** A hive is copied by reading it, up to 4 GiB, and 32 GiB for
   all of a run's. There are limits on a program, an install log, an AppX manifest, a task, how many tasks an app keeps,
-  how many accounts are listed, and how much of the registry is captured. How much of an app's own files can be staged
-  is left to the free-space check that is planned.
+  how many accounts are listed, and how much of the registry is captured. How much of an app's own files can be read
+  into a package is checked against the room there is, by what the listing says of each, and a file can only hold as
+  much as was read.
 - **The drive is not written to.** Loading a registry hive can replay its logs into it, so hives are copied to an
   administrators-only folder under `%ProgramData%\WinAppMigrator\hives`, and the copies are loaded. They can hold
   secrets, and are removed afterward. A run that dies leaves them, and hives loaded, so the app sweeps those when
@@ -166,8 +189,9 @@ folder redirected to a share is not included, and an app on a share cannot be bu
 counts as a disk, if the elevated session has one. Names Windows would read as another, as on a drive, are refused here too,
 since any account can make a real folder `x.` beside a link `x`.
 
-**What is left is a race.** A build asks again before and after copying each file whether it leads into another account's
-folder, or goes through a link that was not there when it was scanned. Whoever can write in a scanned folder could make
+**What is left is a race.** A build asks again before and after reading each file whether it leads into another account's
+folder, or goes through a link that was not there when it was scanned, and a file that fails that is taken back out of the
+package. Whoever can write in a scanned folder could make
 part of it a link and undo that around the moment a file is opened, and they would have to know a name that is there.
 Closing that needs the opened file's own path from Windows, which takes `unsafe` code this project does not otherwise
 have in the core. A link that was there when scanned is asked about too, in case it leads elsewhere by then. A stale

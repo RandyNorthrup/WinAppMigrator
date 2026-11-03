@@ -7,7 +7,8 @@ Issues and pull requests are welcome. For anything large, please open an issue f
 - **The app builds and the installer restores.** `winappmigrator-gui` builds an installer and never
   restores anything. Restore lives only in `winappmigrator-installer`. Shared logic goes in
   `winappmigrator-core`, and shared UI in `winappmigrator-ui`.
-- **One screen, one job.** The app is a single screen that produces one self-extracting `.exe`.
+- **One screen, one job.** The app is a single screen that produces one self-extracting `.exe`, or, past
+  the 4 GiB Windows can start, a small loader and a data file beside it.
 - **Restore is a dry run until told otherwise.** Nothing is installed without `--apply` or the Install
   button.
 - **Never sign the installer stub.** See [docs/signing.md](docs/signing.md).
@@ -64,6 +65,20 @@ is scanned at another letter, the drive's tree is hashed before and after, and a
 loaded to see the next start sweep them. It also makes a second real account with a real profile, whose hive
 is not loaded, and compares what the task reader says of every real task with `schtasks`.
 
+`elevated_packaging.rs` has a job of its own too. A file is written to the whole time it is being built from,
+and what is in the package is compared with what its manifest says by .NET's own zip reader. A loader is given a
+valid signature from a throwaway certificate, and its data file is then changed by one byte, swapped for another
+package, cut short, removed, and replaced by a link, with `Get-AuthenticodeSignature` saying what it sees of each.
+A small VHD with too little room is what an install and a build are refused on, before anything changes, and
+packages say they need what the runner is not. It also says how much a build and an install really read, by
+Windows' own count. `elevated_big_package.rs` builds, installs, and checks a real package past 4 GiB, with a real
+file over 4 GiB of data that does not compress, on a runner with the room to itself.
+
+`elevated_move.rs` and `.github/scripts/check-moved-app.ps1` are a real move between two PCs. One job builds
+installers of a fake app and uploads them, unsigned and kept for a day, and others download them onto runners that
+have never seen it, each on a Windows of its own, which build nothing and check out only that script. They install
+them there and look with Windows' own tools, and say what differed.
+
 They do nothing unless `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`, and
 `WAM_ELEVATED_E2E=1` are all set, and with them set they fail if not elevated. **Never set those on a real
 PC.** Without them they skip, so they are safe to run locally, and that shows only that they compile.
@@ -77,6 +92,13 @@ but not run, and click in a window, so the uninstaller's is only started.
 must never reach one. `crates/winappmigrator-core/tests/log_has_no_secrets.rs` pins that.
 
 Keep the docs true: update the README, `docs/`, and `CHANGELOG.md` in the same change as the code.
+
+## Measuring a build
+
+`cargo run --release -p winappmigrator-core --example wam_measure -- "<app name>" <stub.exe> <work folder>` builds an
+installer of a real app on this PC, and says how long each step took, how much it read and wrote by Windows' own
+count, and the most it had on disk. It reads the app, writes only in the work folder, removes that folder afterward,
+and never installs anything. Use a folder of your own for that, and read `README.md` on what a package can hold.
 
 ## Changing the UI
 

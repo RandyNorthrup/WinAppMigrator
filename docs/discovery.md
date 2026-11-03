@@ -484,8 +484,9 @@ This cannot catch everything. See [SECURITY.md](../SECURITY.md#an-installer-can-
   machine-wide `ProgramData` separately from per-user data. The app drives it from the
   same option.
 - `ScanOptions.include_hashes` — SHA-256 of copyable files during a scan. It dominates scan
-  time for large apps. Packaging leaves it off and hashes each file as it is staged, so the
-  hash describes what is in the package, including files read in backup mode.
+  time for large apps. Packaging leaves it off and hashes each file from what it reads into
+  the package, so the hash describes what is in the package, including files read in backup
+  mode.
 
 ## Runtime prerequisites
 
@@ -710,8 +711,6 @@ The ones that most affect what gets captured:
   folders every Windows has are known for a `%Variable%` in a value on a drive.
 - **Shortcuts on a drive with no file path.** An MSI's "advertised" shortcut names none, so whether it
   opens the app cannot be told without Windows' help, and it is counted and left out.
-- **Size.** Windows cannot start an executable of 4 GiB or more, so a larger package fails
-  the build with that reason.
 - **An ODBC source that uses Windows' own driver goes by the app's exact name.** It points at a driver, and not at
   the app, so one named anything else stays behind.
 - **A secret can be missed.** The rules go by names and a few shapes of text. See

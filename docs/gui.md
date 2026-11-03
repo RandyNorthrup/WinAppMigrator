@@ -73,11 +73,14 @@ visibly off-center.
    up on a worker thread, because it reads folders that may be on a failing drive. What it needs
    from each account's registry was read once, when the list of apps was.
 3. **Create the installer.** One background pipeline reverse-engineers the app
-   (analysis is part of building, not a separate step), copies its files, embeds
-   everything in a self-extracting `.exe`, and hash-verifies the package. A
-   `BuildMonitor` reports each step and carries the cancel request; cancelling takes
-   effect at the next file or between steps. The scan itself cannot stop part-way, so
-   a cancel during it takes effect when it ends.
+   (analysis is part of building, not a separate step), works out how much room that will
+   take and stops if it is not there, reads each file straight into a self-extracting `.exe`,
+   hashing and compressing what it read, and then reads back what it wrote and hash-verifies
+   it. A `BuildMonitor` reports each step and carries the cancel request; cancelling takes
+   effect within a few megabytes of the file being read, or between steps. The scan itself
+   cannot stop part-way, so a cancel during it takes effect when it ends. A package that will
+   not fit in one executable comes out as a small loader and a data file, and the result says
+   the two have to stay together.
 
 **Selection, source, reload, and options are locked while a build runs.** A build and
 its result belong to the app it started with.
@@ -115,14 +118,16 @@ model.
 
 ## Where files are staged (destination-drive staging)
 
-So a large migration never fails for lack of space on the system/temp drive, the
-builder stages the (potentially large) package on the **same drive as the chosen
-output folder**, not `%TEMP%`, in a randomly named folder removed when the build ends —
-the chosen folder still receives only the single installer. The installer is **named
-after the application** (`safe_file_stem`), e.g.
+An app's own files are not staged: they go straight from where they are into the installer.
+What has to be kept as a file along the way (reports, the manifest, license files, driver
+images, and downloaded runtimes, plus a file that only a backup-mode copy can read, for as long
+as it takes to read it) goes in a randomly named folder on the **same drive as the chosen output
+folder**, not `%TEMP%`, removed when the build ends. The chosen folder still receives only the
+installer, and its data file if it has one, written beside where it goes under a name of its own and
+renamed when finished. The installer is **named after the application** (`safe_file_stem`), e.g.
 `YAMAHA_DIAGNOSTIC_SYSTEM2_installer.exe`, not after the output folder. Each produced
-installer likewise extracts its embedded package onto the **install destination's
-drive** (falling back to the installer's own drive, then the system temp drive).
+installer extracts its package onto the **install destination's drive**, if that has room for it and
+for what gets installed, falling back to the installer's own drive, then the system temp drive.
 
 Elevated code reads from both folders, so `privilege::ProtectedFolder` restricts them to
 Administrators and SYSTEM before anything is written there, and the work stops if that fails.
@@ -135,11 +140,12 @@ is skipped without elevation, where there is no boundary to protect.
 Each installer is a standalone GUI self-extractor (its own crate, always embedding a
 `requireAdministrator` manifest). Its window opens at once however large the package is,
 showing a check while `EmbeddedPackage::open` hashes the whole package on a worker thread.
-That also holds the installer's own file open, so it cannot be changed or swapped while
-the window is up. Then it reads only the manifest, straight out of the package, and shows the app, an editable **install location** (defaulted to the
-original path), **User data** / **License** options — shown only when `PackageManifest.included_user_data`
-or `included_program_data`, and `included_license_data`, are set — and a
-**Dependencies** list.
+That also holds the installer's own file open, and a data file if it has one, so neither can be
+changed or swapped while the window is up. An app that cannot run on this PC stops there, and says
+why. Then it reads only the manifest, straight out of the package, and shows the app, an editable
+**install location** (defaulted to the original path), how much room it needs there, **User data** /
+**License** options (shown only when `PackageManifest.included_user_data` or `included_program_data`, and
+`included_license_data`, are set), and a **Dependencies** list.
 
 Before anything is installed, a card lists what the package sets up beyond files: services,
 drivers, scheduled tasks, autostart entries, shortcuts, and `Path` changes, from
@@ -151,9 +157,10 @@ name is not evidence of that, so the two are separate.
 The package also suggests the install location, so **Install** stays disabled while it is a whole
 drive, the Windows folder, or a folder such as `Program Files` that holds other things side by side.
 
-**Install** and **Preview changes** unpack the package on a worker thread only at that
-point, then run `restore_package_monitored`. **Install** hash-checks each file before writing
-anything and verifies the result afterward. **Preview changes** only works out the changes,
+**Install** and **Preview changes** check that there is room, then unpack the package on a worker
+thread only at that point, hashing each file as it comes out, then run `restore_package_monitored`.
+**Install** goes by those hashes to check each file before writing anything, and reads back what it
+installed to verify the result. **Preview changes** only works out the changes,
 checking no file hashes beyond the package's own; it lists the first 300, with what reaches
 beyond files first. The result appears first in the
 window, and a clean install offers **Close** and **Open install folder**. Given command-line args it instead runs headlessly

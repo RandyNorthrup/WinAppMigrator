@@ -7,6 +7,8 @@
 | `winappmigrator.exe`, the app | Yes, by the release workflow | It is what people download. The UAC prompt shows the publisher, Randy Northrup. |
 | `winappmigrator-installer.exe`, the stub | **Never** | See below. It is embedded in the app and never published alone. |
 | An installer you build | Only if you sign it yourself | You are its publisher, not this project. |
+| The loader of an installer in two files | Only if you sign it yourself | It is the `.exe` of that installer. Its footer holds the hash of its data file, so the signature covers that too. |
+| The data file of an installer in two files | No | It is not a program, and has nothing to carry a signature. |
 
 ## Why the stub must never be signed
 
@@ -23,9 +25,10 @@ Three independent layers stop this:
 
 1. **The release workflow** fails if the stub carries a signature, and signs only the app.
 2. **Building refuses a signed stub** (`refuse_signed_stub` in `archive.rs`).
-3. **The stub only trusts a package a signature would cover.** It reads the package from
-   directly before the certificate table, never from inside it, and refuses any data after
-   it. So even a stub signed by mistake could not be abused this way.
+3. **The stub only trusts a package a signature would cover.** It reads the package, or the
+   footer that vouches for a data file, from directly before the certificate table, never from
+   inside it, and refuses any data after it. So even a stub signed by mistake could not be abused
+   this way.
 
 ## Signing an installer you built
 
@@ -48,15 +51,33 @@ An installer's window says who signed it, or "Not signed: publisher unknown". Si
 thing that proves where one came from. The SHA-256 in its footer is checked before anything is read,
 which catches a truncated copy or an edited manifest, but whoever edits a package can update that too.
 
+### An installer in two files
+
+A package past the 4 GiB Windows can start is built as `App_installer.exe`, a small loader, and
+`App_installer.wamdata`, its data file. Sign the `.exe`, as usual. Do not sign anything else.
+
+The loader's footer holds the data file's SHA-256 and length. A signature covers everything in the loader but
+its own certificate table, so it covers that hash, and through it every byte of the data file:
+
+- Changing one byte of the data file leaves the signature valid, because the signature cannot see it, and the
+  installer refuses it before reading anything from it, because it no longer matches the footer.
+- Changing the footer to match another data file makes the signature invalid. Windows reports `HashMismatch`.
+
+`elevated_packaging.rs` shows both on a real runner, with a throwaway self-signed certificate and with no account
+of this project's. What this does not do is make a signature mean more than it does. It says what is in the package
+is what the signer built. It says nothing of what that package does.
+
+Keep the two together. A signed loader without its data file installs nothing, and says what it is missing.
+
 ## The uninstaller
 
 An install leaves a copy of the stub behind, for the app's entry in Settings to run. A validly signed
 copy would be exactly the signed stub this page says must never exist, so it has no signature, even if
-the installer it came from has one. When it is carved out of an installer, the package and the certificate
+the installer it came from has one. When it is carved out of an installer, the package, or a loader's footer, and the certificate
 table are cut off, and the table's location and the checksum, which signing writes into the headers,
 are cleared. It comes out byte for byte the stub the installer was built from, and Windows reports it as
-`NotSigned`. The elevated round trip checks that with `Get-AuthenticodeSignature`, for an installer given a
-valid signature from a throwaway certificate made on the runner.
+`NotSigned`. The elevated tests check that with `Get-AuthenticodeSignature`, for an installer and for a loader
+given a valid signature from a throwaway certificate made on the runner.
 
 So its UAC prompt says "Unknown publisher". That is the price of the rule, and what makes it safe is where
 it is: a folder only administrators can write to.

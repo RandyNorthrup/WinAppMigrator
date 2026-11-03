@@ -39,14 +39,17 @@
 Reinstalling software on a new PC usually means hunting down installers, license files, and
 settings. Sometimes the installer no longer exists, the vendor is gone, or the old PC will not boot.
 WinAppMigrator works backward from what is installed: it finds the app's files, registry entries,
-services, and runtimes, and packs them into a single `.exe`.
+services, and runtimes, and packs them into a single `.exe`, or two files if it is too big for one.
 
-- **One file.** The app is one portable `.exe`, and so is every installer it builds.
+- **One file, as long as Windows allows.** The app is one portable `.exe`, and so is an installer, unless its
+  package would pass the 4 GiB Windows can start. Then it is a small `.exe` and a data file, which stay together.
 - **Works from a pulled drive.** Connect the disk from a failed PC and pick an app from it.
 - **Brings the runtimes along.** The Visual C++ and .NET runtimes an app needs are downloaded when you build
   and embedded, so they install without internet.
-- **Checks its work.** The installer checks its package's hashes before writing anything, then checks
-  the files it installed.
+- **Checks its work.** The installer checks its package's hashes before writing anything, then reads back
+  the files it installed and checks those.
+- **Says whether it fits.** A build and an install each work out how much room they need before they start, and
+  an app that cannot run on the other PC is refused before anything changes.
 - **Says what it will do.** Before installing, it lists the services, drivers, scheduled tasks, autostart
   entries, shortcuts, `Path` changes, shell extensions, link protocols, file types, COM classes, firewall rules,
   and the rest of what it sets up, what it left out, and whether it is signed and by whom. A preview goes
@@ -69,8 +72,10 @@ data for the app, you choose whose.
 
 ### 2. Build the installer
 
-Follow the progress, or cancel. You get one file, named after what it contains, such as
-`Fabrikam_Data_Sync_userdata_license_installer.exe`.
+Follow the progress, or cancel. It shows how much room it needs once it has looked at the app, and stops if
+that is not there. You get one file, named after what it contains, such as
+`Fabrikam_Data_Sync_userdata_license_installer.exe`. A package too big for one executable comes as two files,
+`.exe` and `.wamdata`, and the window says they have to stay together.
 
 <p align="center">
   <picture>
@@ -81,8 +86,10 @@ Follow the progress, or cancel. You get one file, named after what it contains, 
 
 ### 3. Run it on the other PC
 
-Copy the installer over and run it. Check the install location, preview the changes if you like, then
-click **Install**. Follow the progress, or cancel, which puts back whatever it has done so far.
+Copy the installer over, with its data file if it has one, and run it. Check the install location, preview the
+changes if you like, then click **Install**. Follow the progress, or cancel, which puts back whatever it has done
+so far. It stops first if the app cannot run on that PC or there is not enough room, and says if the app might not
+work there, such as on a Windows older than the one it came from.
 
 <p align="center">
   <picture>
@@ -118,11 +125,21 @@ Please read these before relying on it, especially on a one-way trip from a fail
   Check the file count and size on the result. If they look wrong, don't rely on that installer.
 - **An app made of several packages only gets its own.** NVIDIA App's `NvContainer` is a separate package,
   for example, so an installer built from NVIDIA App alone does not have it.
-- **An installer cannot reach 4 GiB.** Windows cannot start an executable that large, so the build fails
-  and says so. Large apps may not fit.
+- **An installer past 4 GiB is two files.** Windows cannot start an executable that large, so a package too big for
+  one is a small `.exe` and a `.wamdata` file beside it with the same name. They have to stay together, in one
+  folder, with those names. A data file that is missing, or is not the one it was built with, is refused and
+  nothing is read from it.
+- **The room a build asks for is the most it could take.** It assumes nothing compresses, because that cannot be
+  known ahead of time, so it can stop on a drive the installer would have fit on. Choose an output folder on another
+  drive. A package of over 4 GiB before compressing can need up to 8 GiB, in case it comes out small enough for one
+  executable and has to be copied after the stub. A runtime it downloads is counted as 150 MiB.
 - **Building to a FAT32 or exFAT drive needs room on your system drive.** Those drives cannot keep the
   build's working files private, so they go in the system's temp folder, and only the installer is
-  written to the drive.
+  written to the drive. FAT32 also cannot hold a file of 4 GiB, so a build that large stops there when it gets
+  that far.
+- **Whether an app can run on the other PC goes by what its programs say.** A package records each program's
+  architecture and the oldest Windows its headers name. That is what Windows itself holds them to, and it does not
+  say what else a program relies on, so an app built on a newer Windows may need what an older one does not have.
 - **What an uninstall leaves.** Files and settings that changed after the install stay, and it says which,
   and in that case what they replaced does not come back.
   So do files you added, with the folders they are in, and user data and licenses unless you ask for them
@@ -175,7 +192,10 @@ Please read these before relying on it, especially on a one-way trip from a fail
 - **Some licenses will not move.** Anything tied to the old machine may need reactivating.
 - **A file named like a device, such as `aux.h`, cannot be installed before Windows 11.** Earlier versions
   open that name as the device instead. An installer holding one stops and says so, before anything is
-  installed. This goes by Microsoft's documented rule, because it has not been run on Windows 10.
+  installed. That has been run on Windows Server 2022, build 20348, where writing to `aux.h` goes to `\\.\aux`, and
+  on builds 26100 and 26200, where it is a file and installs. Windows 10 itself has not been run, and the line at
+  build 22000 is Microsoft's documented rule. Windows PowerShell's `Get-FileHash` says such a file does not exist
+  even where it is one, so use PowerShell 7 to check it.
 - **It is only for software you are licensed to move.** That part is up to you.
 
 The full list, with planned fixes, is in the [plan](docs/PLAN.md#open-issues-most-important-first).
@@ -226,9 +246,10 @@ prints usage.
 An uninstaller takes `--uninstall <ID>`, with `--quiet` for no window, `--remove-user-data` to also remove user
 data and licenses, and `--log <FILE>`. It reads only the record in the fixed location.
 
-Both print what they did, their warnings and errors, and what they left out. Pipe the output somewhere to read
-it, for example `| Out-String`. An installer is a windowed program, so it does not write to an interactive
-console. Automation still needs an elevated shell, because it demands elevation.
+Both print what they did, their warnings and errors, and what they left out, and an installer says how much room it
+needs on each drive before it starts. Pipe the output somewhere to read it, for example `| Out-String`. An
+installer is a windowed program, so it does not write to an interactive console. Automation still needs an elevated
+shell, because it demands elevation.
 
 Logs are in `%ProgramData%\WinAppMigrator\logs`, which only administrators can read, with the last 20 kept.
 They hold paths and key names, and never what a registry value, license file, or environment variable holds.

@@ -3,18 +3,20 @@
 ## Product (locked)
 
 WinAppMigrator backs up an installed Windows application into a single
-**self-extracting installer**. There are two binaries with a strict split:
+**self-extracting installer**, or, for a package past the 4 GiB Windows can start, a small
+loader and a data file beside it. There are two binaries with a strict split:
 
 - **`winappmigrator-gui` — the app** (binary `winappmigrator.exe`). Runs on the
   source machine. Lists installed apps — from **this PC or a connected drive** (a
   disk pulled from another, often failing, PC) — the user picks one and optionally
   includes its license and/or its user data. The app reverse-engineers the
-  application's full footprint and builds one self-extracting `.exe`,
-  hash-verifying the package. It never restores anything, and always runs elevated
+  application's full footprint and builds one self-extracting `.exe`, or a loader and a data
+  file if it will not fit in one, hash-verifying the package. It never restores anything, and always runs elevated
   (every build embeds a `requireAdministrator` manifest).
 - **`winappmigrator-installer` — the installer stub.** Embedded into the produced
-  `.exe`. Runs on the target machine: extracts its package, reinstalls the app and
-  bundled data, and hash-verifies the result. Restore lives only here.
+  `.exe`. Runs on the target machine: checks that the app can run there and that there is room,
+  extracts its package, reinstalls the app and bundled data, and hash-verifies the result.
+  Restore lives only here.
 
 `winappmigrator-core` holds all shared logic (inventory, install-source
 reverse-engineering, footprint discovery, packaging, restore, verification).
@@ -24,6 +26,16 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
 - Single-screen GUI: app list → pick → optional license / user-data toggles →
   build self-extracting installer, with progress and cancel. Self-extracting output
   is mandatory.
+- Each byte of an app is read once to build: hashed and compressed from what that read returned, straight
+  into the installer, in parallel and in a fixed order, with already-compressed data stored. The package is
+  then read back to check it. An install hashes as it unpacks, and reads back what it installed.
+- A size and free-space check before a build and before an install, on every drive each writes to.
+- Past the 4 GiB Windows can start: a small loader whose footer holds the hash of a data file beside it, so
+  a signature on the loader covers the data file.
+- A check of the target's Windows and architecture against what the app's programs and drivers say they
+  need, which refuses what cannot run there and warns of what may not.
+- A real move between PCs on CI: built on one runner and installed on others, on Windows Server 2022 and 2025
+  and Windows 11 on Arm, and checked with Windows' own tools.
 - Scan source selector: **this PC or a connected offline drive** (a disk from
   another PC). Offline reads load copies of the disk's registry hives, compare what
   its registry says with what that PC called things, and map a path to the volume in one
@@ -96,19 +108,10 @@ From the audit of 2026-11-01. Items are removed from this list as they are fixed
    change installed files afterward. A program already on the PC can swap a running installer's
    file in the moment before it opens it, which a handle to the running image would close.
 
-**Performance**
-
-2. Every byte is read about five times to build and four times to install. Hash while
-   copying, in parallel.
-3. Compression is single-threaded, and recompresses formats that are already compressed.
-
 **Features**
 
-4. Footprint preview with include and exclude before building, offering folders that nearly
+2. Footprint preview with include and exclude before building, offering folders that nearly
    match the product's name, which are now left out.
-5. Size and free-space check before building.
-6. A way past the 4 GiB limit: a small loader plus a data file beside it.
-7. Target OS and architecture check.
 
 ## Not in scope for this release line
 
