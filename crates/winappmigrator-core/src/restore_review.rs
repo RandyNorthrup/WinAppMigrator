@@ -1537,7 +1537,7 @@ fn describe_other_settings(review: &ReviewedPackage<'_>) -> Option<SystemChange>
         } else {
             format!("In {}", named.join(", "))
         },
-        high_rights: true,
+        high_rights: entries.iter().any(|entry| is_a_windows_key(entry)),
     })
 }
 
@@ -1606,14 +1606,22 @@ fn letters_of(name: &str) -> String {
 
 /// Whether a value is written somewhere other than the app's own keys and what the list already has
 /// a kind for. A service's own values, and what makes the entry in Settings, are the service and the
-/// entry.
+/// entry. `Software\Classes` is what file types and COM are made of, which go by rules of their own,
+/// and a key under `Software` named by an id is one no vendor's and nothing of Windows' goes by.
 pub(crate) fn is_other_setting(entry: &RegistryEntry, app: &AppKeys) -> bool {
     let key = normalized_key(&entry.key_path);
     change_kind_of(entry).is_none()
         && !is_autostart_entry(entry)
         && !is_uninstall_entry_key(&entry.key_path)
         && !key.starts_with(r"system\")
+        && !key.starts_with(r"software\classes\")
+        && !key.starts_with(r"software\{")
         && !app.holds(&key)
+}
+
+/// Whether a key is one of Windows' own, which it may act on.
+fn is_a_windows_key(entry: &RegistryEntry) -> bool {
+    normalized_key(&entry.key_path).starts_with(r"software\microsoft\")
 }
 
 /// What a service's row says of when it runs. One that starts by itself is started as soon as the
@@ -2984,6 +2992,45 @@ mod tests {
             "cmd.exe",
         )];
         assert!(other_settings_row(&manifest)?.is_some());
+        Ok(())
+    }
+
+    /// A file type is made of keys under `Classes`, which have rules of their own, and a row saying
+    /// so of nearly every app that has a file type would be a row nobody reads.
+    #[test]
+    fn what_makes_a_file_type_is_not_counted_as_anything_else() -> Result<()> {
+        let mut manifest = acme_manifest();
+        acme_app(&mut manifest);
+        manifest.registry_keys_exported = vec![
+            value(
+                RegistryHive::LocalMachine,
+                r"Software\Classes\.acme",
+                "x",
+                "y",
+            ),
+            value(
+                RegistryHive::LocalMachine,
+                r"Software\{F86AE060-B25C}",
+                "x",
+                "y",
+            ),
+        ];
+        assert_eq!(other_settings_row(&manifest)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn only_windows_own_keys_are_marked_for_a_second_look() -> Result<()> {
+        let mut manifest = acme_manifest();
+        acme_app(&mut manifest);
+        manifest.registry_keys_exported = vec![value(
+            RegistryHive::LocalMachine,
+            r"Software\JavaSoft\JDK",
+            "x",
+            "y",
+        )];
+        let row = other_settings_row(&manifest)?;
+        assert!(row.as_ref().is_some_and(|row| !row.high_rights), "{row:?}");
         Ok(())
     }
 
