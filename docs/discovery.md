@@ -398,20 +398,23 @@ themselves.
 
 **A hidden entry** is one in the Uninstall key marked `SystemComponent=1`, which no list of apps shows. It counts when it is
 beside the app in the same folder, or has the same publisher, by all of its name. A runtime the app uses stays a prerequisite. An
-entry in an account's own hive takes no rights to write, so it only counts for an app of that same account. One that goes by
-the name another app would take is not offered, wherever it says it is, since what an entry calls itself is only what it says, and
-ticking it brings in what goes by that name. Several in one folder are one row, named for all of them.
+entry in an account's own hive takes no rights to write, so it only counts for an app of that same account. What an entry calls
+itself is only what it says, so one that goes by the name another app would take, or by nothing but its publisher's, is not
+offered, wherever it says it is, and its folder is not offered by its name either. Several in one folder are one row, named for
+all of them.
 
 **What is never offered, or added.** Each of these is asked by `folder_refusal`, of a folder on the list and of each
 root a hidden entry goes on to name:
 
 - A drive, the Windows folder, `Program Files`, `Common Files`, `ProgramData`, a profile, `AppData`, or anything that holds one
   of those, by the same `is_walkable_app_dir` a scan goes by.
-- What is Windows' or everyone's by name (`NEVER_OFFERED`, such as `dotnet`, `Windows Defender`, `Package Cache`), and anything
-  under `Microsoft`, `Microsoft Shared`, or `WindowsApps`.
+- What is Windows' or everyone's by name (`NEVER_OFFERED`, such as `dotnet`, `Windows Defender`, `Package Cache`), anything
+  under `Microsoft`, `Microsoft Shared`, or `WindowsApps`, and `System`, `Services`, `SpeechEngines`, and `Designer` in `Common Files`.
 - A folder named only for the publisher, which may hold its other products, or one that holds this app's own folder.
 - **Another app's.** Where any other entry says it is, or anything that holds that or is inside it, or what that app would take
-  by its own name. An entry on the list of apps is another app, even by the same publisher: it is there to be built by itself.
+  by its own name. An entry on the list of apps is another app, even by the same publisher: it is there to be built by itself. An
+  MSI's entry often does not say where it is, so anything that Windows Installer's database says holds one of its files counts
+  too. That database is only gone through when there is something to offer, and takes a few seconds on a PC with a lot on it.
 - Whatever goes through a link, or may not be read on a drive.
 - A path written some other way than the folder is really called, such as `C:\PROGRA~3\MICROS~1`, since all of this goes by
   names. A drive with a letter that is also mounted on a folder is refused by that too, when it is read by the folder.
@@ -422,8 +425,10 @@ root a hidden entry goes on to name:
 what is on it now, so an id cannot name a folder of its own, and it warns of one that is not there any more. What is
 ticked is one more root for `collect_roots`, which goes by its rules, and what goes by where the app is (services, tasks, shortcuts,
 variables, and registry values) goes by that folder too. An entry also brings its install record, what it says of itself is asked
-about again, and data folders and keys named exactly for it. A key its install record lists is left out when it is what another app
-would take by its name. All of this is before `take_secret_files` and
+about again, and data folders and keys named exactly for it, as long as that is under its own publisher's folder or key, or starts
+with its publisher's name and goes on, so that one calling itself `Windows NT` or `Update Service` does not bring in what has that
+name elsewhere. A key found that way or listed in its install record is left out when it is what another app would take by its name
+or is one many apps share, and a file its install record lists is left out when another app's record lists it too. All of this is before `take_secret_files` and
 `license_scan`, so what looks like a credential stays out and a license goes by its option, however it came. What is in a
 data folder goes by the User data option, like any other.
 
@@ -521,7 +526,8 @@ by the installer. There is nothing to redact, so nothing can overwrite a real va
   definition, a shortcut's arguments, what opens a file type, and the uninstall string. A task definition that cannot be
   read to check it is dropped.
 - A file goes by its name (`.env`, `id_rsa`, `credentials.json`, and so on) or its extension (`*.pfx`, `*.kdbx`). A `.pem` or
-  `.key` only if a private key is in it, since Git and Python each ship a `cacert.pem` they cannot work without.
+  `.key` only if a private key is in it, since Git and Python each ship a `cacert.pem` they cannot work without, or if it cannot be
+  read to tell.
 
 With the License option off, `license_scan.rs`'s own rules take license files, values, service settings, command-line
 options, and variables out in the same way, named in `licenses_left_out`. Its FlexLM, CodeMeter, and Sentinel stores count only

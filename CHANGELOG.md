@@ -13,8 +13,9 @@ All notable project changes are tracked here.
   and keeps what you chose.
 - **You can leave things out.** Each folder of the app, each service, task, startup item, and shortcut, and each kind of
   what ties it into Windows, has a box to untick, and the size and the room it needs follow at once. What holds the main
-  program stays. What is left with nothing to run goes too, and the screen says so: a service that runs a file in a folder
-  you left out is not set up on the other PC, and neither is a task told to use one. An installer says what its builder
+  program, or what it cannot start without, stays. What is left with nothing to run goes too, and the screen says so: a service
+  that runs a file in a folder you left out is not set up on the other PC, and neither is a task told to use one, or a service that
+  needs one you left out. An installer says what its builder
   left out and added. A license goes by the License option alone, so one in a folder you left out still goes in, and the
   screen names it.
 - **Near matches are offered, not lost.** What exact names leave out and looks related is listed, unticked, each with why:

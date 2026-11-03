@@ -127,8 +127,9 @@ The app runs elevated and shows what it would package, and a person chooses. So 
   What is ticked is only ever an id, compared with what the scan would offer now, so it cannot name a folder of its own.
   [What is never offered](docs/discovery.md#near-matches): what is shared, another app's, under a link, in another account's
   folders, or holds any of those, however it is written: a short name such as `PROGRA~3` is refused, since these rules go
-  by names. A hidden entry's folder is asked the same, one that calls itself another app is not offered, a key of another
-  app's does not come with one, and one in an account's own hive says nothing about a machine-wide app, since that hive
+  by names. A hidden entry's folder is asked the same, one that calls itself another app or only its publisher is not offered,
+  what goes by its name only comes from under its own publisher's folder or key, a key of another app's or a file another app's
+  install record also lists does not come with it, and one in an account's own hive says nothing about a machine-wide app, since that hive
   takes no rights to write. What is left is a person ticking something
   that is close to the app and not its own, which an install record could not have said either. It says why it is offered.
 - **What is left with nothing to run is not set up.** What a choice leaves out goes through the review an install goes by, and
@@ -137,8 +138,10 @@ The app runs elevated and shows what it would package, and a person chooses. So 
   a package says what was left out, for whoever installs it. A plain setting of the app's that names such a folder stays. What a
   program does by itself, such as loading a file it knows the name of, cannot be told.
 - **A build goes by the scan on the screen, and only that.** One of another app, or of what the window no longer says, is not
-  used. A package holds what is read when it is built, with the same checks before and after each file. A file that has come to
-  hold a private key since the scan stays out, and the installer lists it with the rest.
+  used. A package holds what is read when it is built, with the same checks before and after each file. A file or license file
+  that has come to hold a private key since the scan stays out, and the installer lists it with the rest. A `.key` or `.pem` that
+  cannot be read to tell, because it is denied or too big to read, counts as one, since a package is read with more rights than
+  that look has.
 
 ## A drive from another PC
 
@@ -291,7 +294,7 @@ Treat an installer as being as sensitive as the PC it came from.
 option named for a credential (`Password`, `ApiKey`, `Token`, `ClientSecret`, and so on), or holding a connection
 string or URL with one in it, or a blob only DPAPI can read, is not captured at all, whatever else was asked
 for. Nor are files named for what they hold (`.env`, `id_rsa`, `credentials.json`, a browser's `Login Data`,
-`*.pfx`, `*.kdbx`, and so on), or a `.pem` or `.key` that holds a private key. They are named when you build and in the
+`*.pfx`, `*.kdbx`, and so on), or a `.pem` or `.key` that holds a private key or cannot be read to tell. They are named when you build and in the
 installer, and never with what they hold. Since there is nothing of them in a package, there is nothing to
 overwrite what the other PC has, and you may have to enter them again.
 

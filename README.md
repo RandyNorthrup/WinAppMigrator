@@ -78,7 +78,7 @@ The screen says how big the installer can be and whether it fits, then lists wha
 folders, services, startup items, scheduled tasks, shortcuts, what ties the app into Windows, and the runtimes it
 needs. Untick a folder, a service, or anything else you do not want, and the size follows. If that leaves something with
 nothing to run, it goes too, and the screen says so, so nothing is set up pointing at what you left out. Only what holds
-the main program has to stay.
+the main program, or what it cannot start without, has to stay.
 
 **Might also be part of it** lists what exact names left out and looks related, each with why, such as a folder with a
 close name or a part of the app that no list of apps shows. None of it goes in unless you tick it, and it then goes through
