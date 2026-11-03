@@ -37,7 +37,7 @@ use crate::path_utils::{
 };
 use crate::privilege::{
     ProtectedFolder, allow_users_to_start, confirm_protected_folder, ensure_protected_folder,
-    is_elevated,
+    is_elevated, refuse_what_others_put_in,
 };
 use crate::registry_target::{hex_decode, registry_root};
 use crate::restore_policy::paths_equal;
@@ -369,9 +369,9 @@ pub fn admin_only_staging_root(state_root: &Path) -> io::Result<PathBuf> {
         return Err(io::Error::other("not elevated"));
     }
     let staging = staging_root_in(state_root);
-    for folder in [state_root, staging.as_path()] {
-        ensure_protected_folder(folder)?;
-    }
+    ensure_protected_folder(state_root)?;
+    refuse_what_others_put_in(state_root)?;
+    ensure_protected_folder(&staging)?;
     Ok(staging)
 }
 
@@ -402,6 +402,8 @@ fn prepare_state_folders(state_root: &Path) -> Result<PathBuf> {
     for folder in [state_root, installs.as_path()] {
         ensure_protected_folder(folder).map_err(|error| WinAppMigratorError::io(folder, error))?;
     }
+    refuse_what_others_put_in(state_root)
+        .map_err(|error| WinAppMigratorError::io(state_root, error))?;
     Ok(installs)
 }
 

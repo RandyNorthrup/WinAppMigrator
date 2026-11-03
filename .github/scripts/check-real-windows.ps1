@@ -178,8 +178,13 @@ function Open-And-Look([string]$Program, [string]$Name, [string]$WindowTitle, [i
         return $null
     }
     Check "$Name`: a window opened" $true
-    # It has to get as far as drawing, and what it shows first it has to go and find.
+    # It has to get as far as drawing, and what it shows first it has to go and find. What first shows
+    # can be a little window of something it uses, and on a slow PC it can be a while before there is more.
     Start-Sleep -Seconds $Settle
+    Wait-Until {
+        $process.Refresh()
+        $process.HasExited -or [WamWindow]::TitleOf([WamWindow]::BiggestOf($process.Id)) -eq $WindowTitle
+    } 60 | Out-Null
     $process.Refresh()
     Check "$Name`: it is still running" (-not $process.HasExited) "exit $(if ($process.HasExited) { $process.ExitCode })"
     if ($process.HasExited) { return $null }

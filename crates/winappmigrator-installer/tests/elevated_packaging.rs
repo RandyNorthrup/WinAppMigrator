@@ -26,6 +26,7 @@ use winappmigrator_core::hashing::sha256_file;
 use winappmigrator_core::path_utils::POWERSHELL_UTF8_OUTPUT;
 use winappmigrator_core::privilege::{
     ensure_protected_folder, is_elevated, others_could_keep_a_folder_made_in,
+    refuse_what_others_put_in,
 };
 use winappmigrator_core::restore_policy::{MACHINE_ARM64, MACHINE_X64, MACHINE_X86};
 use winappmigrator_core::{
@@ -708,7 +709,7 @@ fn the_window_installs_what_it_checked_from_where_nobody_else_can_get_in() -> Te
         given.status.success(),
         String::from_utf8_lossy(&given.stdout),
     );
-    let taken_up = ensure_protected_folder(&state);
+    let taken_up = refuse_what_others_put_in(&state);
     checks.that(
         "a later run will not take it up",
         taken_up.is_err(),

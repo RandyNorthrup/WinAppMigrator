@@ -221,10 +221,7 @@ pub fn ensure_protected_folder(folder: &Path) -> io::Result<()> {
         Some(false) => return Ok(()),
         None => return Err(unknown_elevation()),
     }
-    // Its own permissions say nothing of what got in before they were closed, which is what stopped
-    // the run that made it. So a later run has to look as well.
-    let is_protected = read_with_folder_pinned(folder, &hold).is_ok()
-        && only_administrators_made_what_is_in(folder);
+    let is_protected = read_with_folder_pinned(folder, &hold).is_ok();
     drop(hold);
     if is_protected {
         return Ok(());
@@ -250,6 +247,26 @@ fn protect_new_folder(folder: &Path) -> io::Result<()> {
         let _ = fs::remove_dir_all(folder);
     }
     protected
+}
+
+/// Check a folder that an install trusts what is in, from [`ensure_protected_folder`]. Its own
+/// permissions say nothing of what got in before they were closed, which is what stops the run that
+/// made it, so a later run has to look as well. This takes a moment, so it is not asked of every folder
+/// that function looks after: a log folder is written to, and nothing in it is believed.
+pub fn refuse_what_others_put_in(folder: &Path) -> io::Result<()> {
+    match elevation() {
+        Some(true) => {}
+        Some(false) => return Ok(()),
+        None => return Err(unknown_elevation()),
+    }
+    if only_administrators_made_what_is_in(folder) {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "{} has something in it that was not made by WinAppMigrator, and others can change it. An \
+         administrator should check it and remove it",
+        folder.display()
+    )))
 }
 
 fn only_administrators_made_what_is_in(folder: &Path) -> bool {
