@@ -123,7 +123,7 @@ graphics that cannot start, which it forces with `WGPU_BACKEND`, and with the en
 newer than its own, and does not keep it loaded, so a list of what is loaded misses it. Its pictures are kept for a day, of the test app and of the runner's own list of what it has installed.
 
 What those jobs upload is a redistribution of those apps, for a day, to anyone signed in to GitHub, so an app goes
-in the list only if it is open source and its license allows that, and the workflow says which license. They hold no
+in the list only if it is open source and its license allows that, and the workflow says which license. Those jobs are given no
 secrets, keep no credentials from the checkout, and do not use the `release` environment. Windows' own packages add
 firewall rules of their own whenever one first starts, so those are the one thing the comparison does not count.
 

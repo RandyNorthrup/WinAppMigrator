@@ -122,9 +122,9 @@ Installers get copied and shared, and they said far more than anyone would expec
   should start on the other PC much as it would for someone new, except for what it keeps among its own files and machine-wide settings.
 - **A package says nothing of data that is not going in it.** Every file of an app's data was listed in the manifest and the
   report, by name, with the account's folders in its path.
-- **The PC's name and the account's are gone,** from every package, including what a scheduled task, a warning, a service's account,
-  or a certificate from an account's own store said. An app can keep the name in its own files and machine-wide settings, which go
-  as they are.
+- **The PC's name and the account's are gone from what a package says of itself,** including what a scheduled task, a warning, a
+  service's account, or a certificate from an account's own store said. An app can keep the name in its own files and machine-wide
+  settings, which go as they are, and an app installed for one account has that account's folders in the paths a package records.
 - **A shortcut in an account's own folders goes only if it just opens the app.** One with arguments is theirs, and goes with User
   data. An app of one account's keeps its own, and where one goes is said with no account in it.
 - **Environment variables say less.** A list of folders such as `Path` keeps only the app's entries, and an account's variable goes

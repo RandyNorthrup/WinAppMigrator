@@ -53,7 +53,7 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   more than one has data, going to whoever is signed in where it runs. Documents and Saved
   Games go to their real folders.
 - Installer stub: hash-check the package → reinstall → hash-verify the reinstalled
-  files, with progress and cancel; non-zero exit on any mismatch.
+  files, with progress and cancel; from a script, non-zero exit on any mismatch, and in the window, a failure says so.
 - A change journal for each install, in an admin-only folder, with rollback on any failure,
   cancel, or an install that never finished, and a generated uninstaller run from the app's
   entry in Settings. Persistent, secret-free logs.

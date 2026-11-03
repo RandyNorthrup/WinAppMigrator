@@ -106,7 +106,8 @@ sibling `winappmigrator-installer.exe`.
 
 ## What goes in
 
-Selecting an app starts a scan (`scan_app`, with a `ScanMonitor`). It writes nothing, and it stops
+Selecting an app starts a scan (`scan_app`, with a `ScanMonitor`). It writes no reports, and nothing to the drive it reads, and all it
+keeps on this PC while it runs is copies of registry hives it has to load, in an admin-only folder. It stops
 between its steps, and part-way through its files and its install record, when it is told to.
 Scans run on one worker, one at a time and only ever the newest, so clicking down a list starts
 one and stops it, and only the last goes on to the end. A finished scan is made into a `Footprint`
@@ -188,7 +189,8 @@ An app's own files are not staged: they go straight from where they are into the
 What has to be kept as a file along the way (reports, the manifest, license files, driver
 images, and downloaded runtimes, plus a file that only a backup-mode copy can read, for as long
 as it takes to read it) goes in a randomly named folder on the **same drive as the chosen output
-folder**, not `%TEMP%`, removed when the build ends. The chosen folder still receives only the
+folder**, removed when the build ends. A drive that cannot keep that private, such as FAT32 or exFAT, is not used for it, and it
+goes in the system's temp folder instead. The chosen folder still receives only the
 installer, and its data file if it has one, written beside where it goes under a name of its own and
 renamed when finished. The installer is **named after the application** (`safe_file_stem`), e.g.
 `YAMAHA_DIAGNOSTIC_SYSTEM2_installer.exe`, not after the output folder.

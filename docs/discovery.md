@@ -30,7 +30,7 @@ Code:
 - `crates/winappmigrator-core/src/product_match.rs`: the name rules layer 3 and the
   registry scan share.
 - `crates/winappmigrator-core/src/scan.rs` — orchestrates the layers, folds the
-  install-source roots into discovery, and records the result on `ScanReport`. It writes nothing
+  install-source roots into discovery, and records the result on `ScanReport`. It writes no reports
   (`scan_app`), so a window can look before anything is chosen.
 - `crates/winappmigrator-core/src/near_match.rs`: what is close to the app's names, for a person to choose from.
 - `crates/winappmigrator-core/src/footprint.rs`: what a scan found as rows to choose from, and what comes of a
