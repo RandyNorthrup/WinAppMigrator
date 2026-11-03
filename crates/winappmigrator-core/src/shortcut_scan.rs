@@ -9,7 +9,7 @@ use crate::models::{ShortcutEntry, Warning, WarningSeverity};
 use crate::path_utils::{
     DEEPEST_WALK, POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT,
     escape_powershell_single, hidden_command, path_has_extension, path_is_strictly_inside,
-    walk_asking,
+    trim_icon_suffix, walk_asking,
 };
 use crate::system_context::SystemContext;
 
@@ -242,9 +242,10 @@ fn shortcut_entry(
             .working_directory
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from),
+        // Windows says `,0` of a shortcut with no icon of its own, which uses its target's.
         icon_path: shortcut
             .icon_location
-            .filter(|value| !value.trim().is_empty())
+            .filter(|value| !trim_icon_suffix(value).is_empty())
             .map(PathBuf::from),
         target_is_selected_app: true,
     })
@@ -684,6 +685,14 @@ mod tests {
             Some(PathBuf::from(r"C:\Program Files\Acme\acme.ico,0"))
         );
         assert!(kept.target_is_selected_app);
+
+        let mut no_icon = powershell_shortcut(Some(r"C:\Program Files\Acme\acme.exe"), Some(link));
+        no_icon.icon_location = Some(",0".to_owned());
+        assert_eq!(
+            shortcut_entry(&context, no_icon).and_then(|kept| kept.icon_path),
+            None,
+            "as Windows says it of a shortcut with no icon of its own"
+        );
 
         for (target, path) in [
             (Some(r"C:\Windows\System32\cmd.exe"), Some(link)),
