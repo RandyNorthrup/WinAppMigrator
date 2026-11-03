@@ -15,6 +15,7 @@ use crate::path_utils::{
     is_auxiliary_executable, is_drive_root, looks_like_executable, normalize_name_for_match,
     path_is_within, split_command_executable_path,
 };
+use crate::pe_scan::read_pe_architecture;
 use crate::product_match::ProductNames;
 use crate::system_context::{SystemContext, UserHive};
 
@@ -393,6 +394,7 @@ pub fn parse_uninstall_entry(
         display_name.as_str(),
     )
     .filter(|path| system.may_read(path));
+    let architecture = architecture_of(main_executable.as_deref(), architecture);
 
     Some(InstalledApp {
         display_name,
@@ -406,6 +408,15 @@ pub fn parse_uninstall_entry(
         install_scope,
         owner_profile: None,
     })
+}
+
+/// What an app's program says it is. Which view of the registry its entry is in only says what its
+/// setup was: Eclipse Mosquitto's is 32-bit, and its programs are not.
+fn architecture_of(main_executable: Option<&Path>, listed_in: AppArchitecture) -> AppArchitecture {
+    main_executable
+        .and_then(|program| read_pe_architecture(program).ok())
+        .filter(|architecture| *architecture != AppArchitecture::Unknown)
+        .unwrap_or(listed_in)
 }
 
 /// The recorded install location, or `None` when it names a folder that holds other
@@ -571,6 +582,24 @@ mod tests {
         assert_eq!(app.version.as_deref(), Some("1.2.3"));
         assert_eq!(app.architecture, AppArchitecture::X64);
         assert_eq!(app.install_scope, InstallScope::PerMachine);
+        Ok(())
+    }
+
+    #[test]
+    fn an_app_is_what_its_program_says_and_otherwise_where_it_was_listed() -> Result<()> {
+        let running =
+            std::env::current_exe().map_err(|error| WinAppMigratorError::io("exe", error))?;
+        let own = read_pe_architecture(&running)?;
+        assert_ne!(own, AppArchitecture::Unknown);
+        let other = if own == AppArchitecture::X86 {
+            AppArchitecture::X64
+        } else {
+            AppArchitecture::X86
+        };
+        assert_eq!(architecture_of(Some(&running), other.clone()), own);
+        assert_eq!(architecture_of(None, other.clone()), other);
+        let not_a_program = running.with_extension("not-there");
+        assert_eq!(architecture_of(Some(&not_a_program), other.clone()), other);
         Ok(())
     }
 
