@@ -622,6 +622,9 @@ pub struct WalkedEntry {
     /// What the listing said of it, which takes nothing more to find out. A size here can lag behind
     /// a file that is open for writing, so it is not to be taken as what would be read.
     pub metadata: Option<std::fs::Metadata>,
+    /// A folder the walk went no further into, as it was as deep as it was asked to go. What is in it
+    /// was not looked at, so it is not to be taken for empty.
+    pub too_deep: bool,
 }
 
 /// A folder a walk could not read.
@@ -710,13 +713,15 @@ impl<F: FnMut(&Path, bool) -> bool> Iterator for AskingWalk<F> {
             if !(self.may_look)(&path, file_type.is_dir()) {
                 continue;
             }
-            if file_type.is_dir() && self.open.len() < self.max_depth {
+            let too_deep = file_type.is_dir() && self.open.len() >= self.max_depth;
+            if file_type.is_dir() && !too_deep {
                 self.enter(&path);
             }
             return Some(Ok(WalkedEntry {
                 path,
                 file_type,
                 metadata: entry.metadata().ok(),
+                too_deep,
             }));
         }
     }
@@ -1131,6 +1136,22 @@ mod tests {
     fn this_windows_has_a_build_number_and_this_account_a_sid() {
         assert!(windows_build() > 0);
         assert!(current_user_sid().is_some_and(|sid| sid.starts_with("S-1-")));
+    }
+
+    #[test]
+    fn a_walk_says_of_a_folder_it_went_no_further_into() {
+        let work = tempfile::tempdir().expect("a folder");
+        std::fs::create_dir_all(work.path().join(r"a\b\c")).expect("folders");
+        std::fs::write(work.path().join(r"a\b\c\deep.txt"), "x").expect("a file");
+        let found: Vec<(String, bool)> = walk_asking(work.path(), 2, |_, _| true)
+            .flatten()
+            .map(|entry| (file_name_string(&entry.path), entry.too_deep))
+            .collect();
+        assert_eq!(
+            found,
+            [("a".to_owned(), false), ("b".to_owned(), true)],
+            "c and what is in it are not seen, and b says so"
+        );
     }
 
     #[test]

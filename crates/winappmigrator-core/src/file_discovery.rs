@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::windows::fs::MetadataExt;
@@ -15,16 +16,17 @@ use crate::models::{
     Warning, WarningSeverity,
 };
 use crate::path_utils::{
-    UserAccount, comparable_path, expand_vars_with, file_name_string, is_auxiliary_executable,
-    is_drive_root, is_really_within, path_has_extension, path_is_strictly_inside, path_is_within,
-    program_data_dir, public_profile_dir, resolved_location, signed_in_user,
-    strip_prefix_ignore_case, walk_asking, windows_build,
+    DEEPEST_WALK, UserAccount, comparable_path, expand_vars_with, file_name_string,
+    is_auxiliary_executable, is_drive_root, is_really_within, path_has_extension,
+    path_is_strictly_inside, path_is_within, program_data_dir, public_profile_dir,
+    resolved_location, signed_in_user, strip_prefix_ignore_case, walk_asking, windows_build,
 };
 use crate::privilege::{hold_folder, hold_real_folder, pin_held_folder};
 use crate::product_match::{MatchScope, ProductNames};
 use crate::system_context::{SystemContext, UserHive, VolumeMap};
 
-const MAX_WALK_DEPTH: usize = 24;
+/// How many of what a walk left out to name, of however many there are.
+const MOST_NAMED_IN_A_WARNING: usize = 5;
 /// More than any app has, and a package could otherwise ask for any number. Nothing of them is stored
 /// but their names.
 pub const MAX_EMPTY_FOLDERS: usize = 10_000;
@@ -1482,11 +1484,20 @@ fn discover_tree(
     if root.kind != FootprintKind::InstallDirectory {
         folders.insert(comparable_path(&root.path), root.path.clone());
     }
+    // What a walk does not go through is named at the end of it. A link to somewhere else is, unless
+    // somebody says otherwise, somewhere else.
+    let links: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+    let mut too_deep: Vec<PathBuf> = Vec::new();
     // Asked about by name before each is looked at. See `walk_asking`.
-    let walker = walk_asking(&root.path, MAX_WALK_DEPTH, |path, is_dir| {
-        !is_cancelled()
-            && system.may_read(path)
-            && (!prune_volatile || !is_volatile_dir(path, is_dir))
+    let walker = walk_asking(&root.path, DEEPEST_WALK, |path, is_dir| {
+        if is_cancelled() {
+            return false;
+        }
+        if !system.may_read(path) {
+            links.borrow_mut().push(path.to_path_buf());
+            return false;
+        }
+        !prune_volatile || !is_volatile_dir(path, is_dir)
     });
 
     for entry in walker {
@@ -1505,6 +1516,13 @@ fn discover_tree(
         };
         if let Some(folder) = entry.path.parent() {
             folders_with_something.insert(comparable_path(folder));
+        }
+        if entry.file_type.is_symlink() {
+            links.borrow_mut().push(entry.path.clone());
+        }
+        if entry.too_deep {
+            too_deep.push(entry.path.clone());
+            folders_with_something.insert(comparable_path(&entry.path));
         }
         if entry.file_type.is_dir()
             && !entry
@@ -1541,6 +1559,33 @@ fn discover_tree(
         FileClassification::MachineAppData => include_program_data,
         _ => false,
     };
+    let links = links.into_inner();
+    if !links.is_empty() {
+        warnings.push(Warning::new(
+            "links_not_followed",
+            WarningSeverity::Warning,
+            format!(
+                "{} links, or names that would open something else, were not followed in this \
+                 folder, so what they point at is not in the installer: {}.",
+                links.len(),
+                named_in(&links, &root.path)
+            ),
+            Some(root.path.display().to_string()),
+        ));
+    }
+    if !too_deep.is_empty() {
+        warnings.push(Warning::new(
+            "folders_too_deep",
+            WarningSeverity::Warning,
+            format!(
+                "{} folders are more than {DEEPEST_WALK} levels down, so what is in them is not in \
+                 the installer: {}.",
+                too_deep.len(),
+                named_in(&too_deep, &root.path)
+            ),
+            Some(root.path.display().to_string()),
+        ));
+    }
     for (key, folder) in folders {
         if folders_with_something.contains(&key) || has_reserved_device_name(&folder) {
             continue;
@@ -1572,6 +1617,27 @@ fn discover_tree(
             }),
         });
     }
+}
+
+/// As many of what a walk left out as is worth reading, by where each is in what was walked.
+fn named_in(paths: &[PathBuf], root: &Path) -> String {
+    let mut names: Vec<String> = paths
+        .iter()
+        .take(MOST_NAMED_IN_A_WARNING)
+        .map(|path| {
+            strip_prefix_ignore_case(path, root)
+                .unwrap_or_else(|| path.clone())
+                .display()
+                .to_string()
+        })
+        .collect();
+    if paths.len() > MOST_NAMED_IN_A_WARNING {
+        names.push(format!(
+            "and {} more",
+            paths.len() - MOST_NAMED_IN_A_WARNING
+        ));
+    }
+    names.join(", ")
 }
 
 /// True for data folders, where a `Cache` or `Logs` folder is the app's own scratch
@@ -3000,6 +3066,101 @@ mod tests {
             .collect();
         found.sort_by(|left, right| left.0.cmp(&right.0));
         found
+    }
+
+    fn warnings_of_walking(root: &Path) -> (Vec<FileEntry>, Vec<FileEntry>, Vec<Warning>) {
+        let mut files = Vec::new();
+        let mut empty_folders = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut warnings = Vec::new();
+        discover_tree(
+            &DiscoveryRoot {
+                path: root.to_path_buf(),
+                kind: FootprintKind::InstallDirectory,
+                scope: InstallScope::PerMachine,
+                user_folder: None,
+            },
+            Some(root),
+            false,
+            false,
+            false,
+            &SystemContext::live(),
+            &|| false,
+            &mut files,
+            &mut empty_folders,
+            &mut seen,
+            &mut warnings,
+        );
+        (files, empty_folders, warnings)
+    }
+
+    #[test]
+    fn a_link_in_an_apps_folder_is_named_as_it_is_left_out() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let install = work.path().join("Demo");
+        let elsewhere = work.path().join("Elsewhere");
+        fs::create_dir_all(&install).map_err(|error| WinAppMigratorError::io(&install, error))?;
+        fs::create_dir_all(&elsewhere)
+            .map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
+        fs::write(elsewhere.join("a.dll"), "x")
+            .map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
+        fs::write(install.join("app.exe"), "x")
+            .map_err(|error| WinAppMigratorError::io(&install, error))?;
+        assert!(make_junction(&install.join("current"), &elsewhere));
+        let (files, _, warnings) = warnings_of_walking(&install);
+        assert!(
+            !files
+                .iter()
+                .any(|file| file.original_path.ends_with("a.dll")),
+            "{files:?}"
+        );
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.code == "links_not_followed")
+            .ok_or_else(|| WinAppMigratorError::Archive(format!("nothing said: {warnings:?}")))?;
+        assert!(warning.message.contains("current"), "{warning:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn what_is_too_deep_is_said_to_be_and_is_not_an_empty_folder() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let install = work.path().join("Demo");
+        let mut deep = install.clone();
+        for level in 0..DEEPEST_WALK + 3 {
+            deep = deep.join(format!("{}", level % 10));
+        }
+        fs::create_dir_all(&deep).map_err(|error| WinAppMigratorError::io(&deep, error))?;
+        fs::write(deep.join("too-deep.dll"), "x")
+            .map_err(|error| WinAppMigratorError::io(&deep, error))?;
+        let mut within_reach = install.clone();
+        for level in 0..DEEPEST_WALK - 2 {
+            within_reach = within_reach.join(format!("{}", level % 10));
+        }
+        fs::write(within_reach.join("deep.dll"), "x")
+            .map_err(|error| WinAppMigratorError::io(&within_reach, error))?;
+        let (files, empty_folders, warnings) = warnings_of_walking(&install);
+        assert!(
+            files
+                .iter()
+                .any(|file| file.original_path.ends_with("deep.dll")),
+            "as far down as anything real is"
+        );
+        assert!(
+            !files
+                .iter()
+                .any(|file| file.original_path.ends_with("too-deep.dll")),
+        );
+        assert!(empty_folders.is_empty(), "{empty_folders:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code == "folders_too_deep"),
+            "{warnings:?}"
+        );
+        Ok(())
     }
 
     #[test]
