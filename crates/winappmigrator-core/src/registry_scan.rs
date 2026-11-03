@@ -1271,7 +1271,10 @@ fn classify_com_registrations(entries: &[RegistryEntry]) -> Vec<ComRegistrationE
         if !is_default_value(entry.value_name.as_deref()) {
             continue;
         }
-        let server_path = entry.value_data.as_deref().and_then(registry_server_path);
+        let server_path = entry
+            .value_data
+            .as_deref()
+            .and_then(|value| registry_server_path(value, &server_kind));
         let threading_model = entries
             .iter()
             .find(|candidate| {
@@ -1377,16 +1380,52 @@ fn is_default_value(value_name: Option<&str>) -> bool {
     matches!(value_name, None | Some("(Default)"))
 }
 
-fn registry_server_path(value: &str) -> Option<PathBuf> {
-    split_command_executable_path(value).or_else(|| {
+/// What a class runs. A DLL's value is a path and nothing else, usually with no quotes around it
+/// whatever spaces it has, where a local server's is a command line.
+fn registry_server_path(value: &str, kind: &ComServerKind) -> Option<PathBuf> {
+    let whole = || {
         let trimmed = value.trim().trim_matches('"');
         (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
-    })
+    };
+    match kind {
+        ComServerKind::InProcess => whole(),
+        ComServerKind::LocalServer | ComServerKind::Unknown => {
+            split_command_executable_path(value).or_else(whole)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_class_goes_by_the_whole_of_a_dll_path_and_the_program_in_a_command() {
+        let in_process = |value| registry_server_path(value, &ComServerKind::InProcess);
+        let local = |value| registry_server_path(value, &ComServerKind::LocalServer);
+        // As 7-Zip really records its shell extension.
+        assert_eq!(
+            in_process(r"C:\Program Files\7-Zip\7-zip.dll"),
+            Some(PathBuf::from(r"C:\Program Files\7-Zip\7-zip.dll"))
+        );
+        assert_eq!(
+            in_process(r#""C:\Program Files\Acme\a b.dll""#),
+            Some(PathBuf::from(r"C:\Program Files\Acme\a b.dll"))
+        );
+        assert_eq!(
+            in_process("mscoree.dll"),
+            Some(PathBuf::from("mscoree.dll"))
+        );
+        assert_eq!(in_process("  "), None);
+        assert_eq!(
+            local(r#""C:\Program Files\Acme\server.exe" /automation"#),
+            Some(PathBuf::from(r"C:\Program Files\Acme\server.exe"))
+        );
+        assert_eq!(
+            local(r"C:\Program Files\Acme\server.exe /automation"),
+            Some(PathBuf::from(r"C:\Program Files\Acme\server.exe"))
+        );
+    }
 
     #[test]
     fn what_a_part_calls_itself_takes_only_what_is_under_its_own_publisher() {
