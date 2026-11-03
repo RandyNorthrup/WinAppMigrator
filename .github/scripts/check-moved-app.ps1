@@ -20,17 +20,15 @@ function Check([string]$Label, [bool]$Passed, [string]$Detail = '') {
 
 function Section([string]$Title) { Write-Host "`n=== $Title" }
 
-# An installer is a windowed program. Piping it is what makes PowerShell wait for it and show what
-# it says.
-function Run-Program([string]$Program, [string[]]$Arguments) {
+. (Join-Path $PSScriptRoot 'run-program.ps1')
+
+# And says here what it did.
+function Run-And-Show([string]$Program, [string[]]$Arguments) {
     Write-Host "`n--- $Program $($Arguments -join ' ')"
-    $ErrorActionPreference = 'Continue'
-    $output = & $Program @Arguments 2>&1 | Out-String
-    $code = $LASTEXITCODE
-    $ErrorActionPreference = 'Stop'
-    Write-Host "exit $code"
-    Write-Host $output
-    [pscustomobject]@{ Code = $code; Output = $output }
+    $run = Run-Program $Program $Arguments
+    Write-Host "exit $($run.Code)"
+    Write-Host $run.Output
+    $run
 }
 
 function Install-Id([string]$Output) {
@@ -88,13 +86,13 @@ Write-Host "On build $build, a file named aux.h opens as: $(if ($opensAsDevice) 
 Section 'A preview changes nothing'
 $installer = Join-Path $Folder $expected.app.installer
 $target = 'C:\Program Files\WAM Move Restored'
-$run = Run-Program $installer @('--target-root', $target)
+$run = Run-And-Show $installer @('--target-root', $target)
 Check 'the preview succeeded' ($run.Code -eq 0) $run.Output
 Check 'it made no install location' (-not (Test-Path -LiteralPath $target)) $target
 Check 'it says how much room it needs' ($run.Output -match 'Room: up to') $run.Output
 
 Section 'Install the whole app'
-$run = Run-Program $installer @('--target-root', $target, '--apply')
+$run = Run-And-Show $installer @('--target-root', $target, '--apply')
 Check 'it installs' ($run.Code -eq 0) $run.Output
 Check 'it read back what it installed' ($run.Output -match 'Reinstall hashes valid: true') $run.Output
 Check-Files $expected.app.files $target 'the installed app'
@@ -113,7 +111,7 @@ if ($architecture -eq 'ARM64') {
 
 Section 'What it set up, by Windows own tools'
 $program = Join-Path $target $expected.app.program
-$started = Run-Program $program @('--dry-run')
+$started = Run-And-Show $program @('--dry-run')
 Check 'the program it installed starts here' ($started.Code -eq 0) $started.Output
 $setting = (Get-ItemProperty -LiteralPath $expected.app.registry_key -Name Setting).Setting
 Check 'Get-ItemProperty: the setting came along' ($setting -eq 'hello') "$setting"
@@ -124,7 +122,7 @@ Check 'Get-ScheduledTask: the task runs the installed program' (($task.Actions[0
 $id = Install-Id $run.Output
 $entries = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' | Where-Object { (Get-ItemProperty $_.PSPath).DisplayName -eq $expected.app.name }
 Check 'Settings has an entry for it' (@($entries).Count -eq 1) "$(@($entries).Count)"
-$uninstallRun = Run-Program (Uninstaller-Of $id) @('--uninstall', $id, '--quiet')
+$uninstallRun = Run-And-Show (Uninstaller-Of $id) @('--uninstall', $id, '--quiet')
 Check 'its uninstaller works' ($uninstallRun.Code -eq 0) $uninstallRun.Output
 Check 'the install location is gone' (-not (Test-Path -LiteralPath $target)) $target
 Check 'the service is gone' ($null -eq (Get-Service -Name $expected.app.service -ErrorAction SilentlyContinue)) 'it is there'
@@ -137,21 +135,21 @@ New-Item -ItemType Directory -Force -Path $twoFolder | Out-Null
 Copy-Item -LiteralPath (Join-Path $Folder $expected.two_files.installer) -Destination $twoFolder
 $twoInstaller = Join-Path $twoFolder $expected.two_files.installer
 $twoTarget = 'C:\Program Files\WAM Move Two Restored'
-$run = Run-Program $twoInstaller @('--target-root', $twoTarget, '--apply')
+$run = Run-And-Show $twoInstaller @('--target-root', $twoTarget, '--apply')
 Check 'without its data file, it is refused and says what to do' (($run.Code -ne 0) -and ($run.Output -match 'stay together')) $run.Output
 Check 'and made nothing' (-not (Test-Path -LiteralPath $twoTarget)) $twoTarget
 Copy-Item -LiteralPath (Join-Path $Folder $expected.two_files.data_file) -Destination $twoFolder
-$run = Run-Program $twoInstaller @('--target-root', $twoTarget, '--apply')
+$run = Run-And-Show $twoInstaller @('--target-root', $twoTarget, '--apply')
 Check 'with it, it installs' ($run.Code -eq 0) $run.Output
 Check-Files $expected.two_files.files $twoTarget 'the two-file install'
-$uninstallRun = Run-Program (Uninstaller-Of (Install-Id $run.Output)) @('--uninstall', (Install-Id $run.Output), '--quiet')
+$uninstallRun = Run-And-Show (Uninstaller-Of (Install-Id $run.Output)) @('--uninstall', (Install-Id $run.Output), '--quiet')
 Check 'it uninstalls' ($uninstallRun.Code -eq 0) $uninstallRun.Output
 
 Section 'An installer holding a file named for a device'
 $deviceInstaller = Join-Path $Folder $expected.device_name_app.installer
 $deviceTarget = 'C:\Program Files\WAM Move Device Restored'
 $installsBefore = @(Get-ChildItem -LiteralPath 'C:\ProgramData\WinAppMigrator\installs' -ErrorAction SilentlyContinue | ForEach-Object Name)
-$run = Run-Program $deviceInstaller @('--target-root', $deviceTarget, '--apply')
+$run = Run-And-Show $deviceInstaller @('--target-root', $deviceTarget, '--apply')
 if ($opensAsDevice) {
     Check 'where that name opens as a device, it stops and says so' (($run.Code -ne 0) -and ($run.Output -match 'opens as a device')) $run.Output
     Check 'and made nothing' (-not (Test-Path -LiteralPath $deviceTarget)) $deviceTarget

@@ -15,7 +15,8 @@ use crate::archive::{
 use crate::authenticode::check_microsoft_signature;
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
-    has_reserved_device_name, is_user_profile_path, package_destination_path, safe_relative_path,
+    MAX_EMPTY_FOLDERS, has_reserved_device_name, is_user_profile_path, package_destination_path,
+    safe_relative_path,
 };
 use crate::footprint::{Footprint, FootprintChoices, ScanFlags, apply_choices};
 use crate::hashing::{hex_lower, sha256_file};
@@ -341,7 +342,6 @@ fn build_package(
     let what_it_says = what_a_package_says_of(report, options);
     let report = &what_it_says;
     let reports_dir = options.output_dir.join(REPORTS_DIR);
-    write_scan_reports(report, &reports_dir)?;
     let mut warnings = report.warnings.clone();
 
     let stub = if options.create_self_extracting_archive {
@@ -497,6 +497,7 @@ fn build_package(
         drivers_detected,
     );
     manifest.scan_timestamp_utc = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    keep_what_an_installer_will_make(&mut manifest.empty_folders, &mut warnings);
     manifest.warnings.clone_from(&warnings);
     manifest.secrets_left_out.extend(secrets_since);
     manifest
@@ -506,6 +507,7 @@ fn build_package(
 
     let manifest_path = options.output_dir.join(MANIFEST_FILE);
     write_json(&manifest_path, &manifest)?;
+    write_scan_reports(&what_was_built(report, &manifest), &reports_dir)?;
     write_integration_artifacts(&options.output_dir, &manifest)?;
     write_restore_plan(&options.output_dir.join(RESTORE_PLAN_FILE), &manifest)?;
 
@@ -550,6 +552,44 @@ fn build_package(
         self_extracting_archive_path,
         data_file_path,
     })
+}
+
+/// As many empty folders as an installer will make, of what was left once a person had chosen, which
+/// is why this waits for a build. An installer holds to this whatever a package asks of it.
+fn keep_what_an_installer_will_make(folders: &mut Vec<FileEntry>, warnings: &mut Vec<Warning>) {
+    if folders.len() <= MAX_EMPTY_FOLDERS {
+        return;
+    }
+    folders.truncate(MAX_EMPTY_FOLDERS);
+    warnings.push(Warning::new(
+        "empty_folders_truncated",
+        WarningSeverity::Warning,
+        format!(
+            "This app has more than {MAX_EMPTY_FOLDERS} empty folders, and only that many will be \
+             made again."
+        ),
+        None,
+    ));
+}
+
+/// What a scan said, as it came out. A report goes in the package with the manifest, and has to say
+/// the same: a file that could not be read is not going, and what the build found to say is said too.
+fn what_was_built(report: &ScanReport, manifest: &PackageManifest) -> ScanReport {
+    let mut built = report.clone();
+    built.file_inventory.clone_from(&manifest.file_inventory);
+    built.empty_folders.clone_from(&manifest.empty_folders);
+    built.warnings.clone_from(&manifest.warnings);
+    built
+        .secrets_left_out
+        .clone_from(&manifest.secrets_left_out);
+    built
+        .license_artifacts
+        .clone_from(&manifest.license_artifacts_detected);
+    built.drivers.clone_from(&manifest.drivers_detected);
+    built
+        .runtime_prerequisites
+        .clone_from(&manifest.runtime_prerequisites);
+    built
 }
 
 /// A manifest of what a scan said, with the parts a build works out for itself given.
@@ -2301,6 +2341,109 @@ mod tests {
             scan_of(&options)?.source_computer_name,
             std::env::var("COMPUTERNAME").ok()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_report_says_what_the_manifest_says_of_a_file_that_did_not_go_in() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let report = scan_of(&options)?;
+        let gone = exe
+            .parent()
+            .ok_or_else(|| WinAppMigratorError::Archive("no folder".to_owned()))?
+            .join(r"data\a.txt");
+        assert!(
+            report
+                .file_inventory
+                .iter()
+                .any(|file| file.original_path == gone && file.should_copy)
+        );
+        fs::remove_file(&gone).map_err(|error| WinAppMigratorError::io(&gone, error))?;
+
+        let result = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+
+        let manifest: PackageManifest = read_json(&result.manifest_path)?;
+        let said: ScanReport = read_json(&result.reports_dir.join("scan_report.json"))?;
+        let is_going = |files: &[FileEntry]| {
+            files
+                .iter()
+                .find(|file| file.original_path == gone)
+                .map(|file| file.should_copy)
+        };
+        assert_eq!(is_going(&manifest.file_inventory), Some(false));
+        assert_eq!(is_going(&said.file_inventory), Some(false));
+        assert!(
+            said.warnings
+                .iter()
+                .any(|warning| warning.code == FILE_GONE_CODE)
+        );
+        let warnings_file = result.reports_dir.join("warnings.md");
+        let warnings = fs::read_to_string(&warnings_file)
+            .map_err(|error| WinAppMigratorError::io(&warnings_file, error))?;
+        assert!(warnings.contains(&gone.display().to_string()), "{warnings}");
+        Ok(())
+    }
+
+    fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+        let text =
+            fs::read_to_string(path).map_err(|error| WinAppMigratorError::io(path, error))?;
+        serde_json::from_str(&text)
+            .map_err(|error| WinAppMigratorError::Archive(format!("{}: {error}", path.display())))
+    }
+
+    fn empty_folder(index: usize) -> FileEntry {
+        let path = PathBuf::from(format!(r"C:\App\empty {index}"));
+        FileEntry {
+            path: path.clone(),
+            original_path: path,
+            package_relative_path: None,
+            suggested_destination_path: None,
+            size_bytes: None,
+            hash_sha256: None,
+            classification: FileClassification::AppOwned,
+            should_copy: true,
+            reason: String::new(),
+            user_folder: None,
+        }
+    }
+
+    #[test]
+    fn only_what_is_left_of_empty_folders_counts_toward_how_many_are_made() {
+        let mut warnings = Vec::new();
+        let mut folders: Vec<FileEntry> = (0..MAX_EMPTY_FOLDERS).map(empty_folder).collect();
+        keep_what_an_installer_will_make(&mut folders, &mut warnings);
+        assert_eq!(folders.len(), MAX_EMPTY_FOLDERS);
+        assert!(warnings.is_empty(), "exactly that many is no loss");
+
+        folders.push(empty_folder(MAX_EMPTY_FOLDERS));
+        keep_what_an_installer_will_make(&mut folders, &mut warnings);
+        assert_eq!(folders.len(), MAX_EMPTY_FOLDERS);
+        assert_eq!(warnings.len(), 1);
+    }
+
+    /// A person leaves a folder out that holds most of them, and what is left is all made.
+    #[test]
+    fn a_scan_keeps_every_empty_folder_for_a_person_to_choose_from() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let app = exe
+            .parent()
+            .ok_or_else(|| WinAppMigratorError::Archive("no folder".to_owned()))?;
+        for index in 0..3 {
+            let folder = app.join(format!("empty {index}"));
+            fs::create_dir(&folder).map_err(|error| WinAppMigratorError::io(&folder, error))?;
+        }
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        assert_eq!(scan_of(&options)?.empty_folders.len(), 3);
         Ok(())
     }
 

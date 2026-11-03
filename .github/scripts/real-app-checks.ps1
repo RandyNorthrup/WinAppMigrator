@@ -52,12 +52,7 @@ function Sha256-Of([string]$Path) {
     }
 }
 
-# Piping a windowed program is what makes PowerShell wait for it and show what it says.
-function Run-Program([string]$Program, [string[]]$Arguments) {
-    $ErrorActionPreference = 'Continue'
-    $output = & $Program @Arguments 2>&1 | Out-String
-    return [pscustomobject]@{ Code = $LASTEXITCODE; Output = $output }
-}
+. (Join-Path $PSScriptRoot 'run-program.ps1')
 
 function Start-Hidden([string]$Program, [string]$Arguments, [switch]$CaptureOutput) {
     if (-not [IO.File]::Exists($Program)) { throw "$Program is not there" }

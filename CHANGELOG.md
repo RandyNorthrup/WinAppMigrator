@@ -4,6 +4,12 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **Counts read as counts everywhere, and a tooltip only appears when it has something to add.** `1380` is `1,380`, on all three
+  windows. The list of apps and the install location only offer all of a name or a path when some of it is cut.
+- **A package's reports say what its manifest says.** They were written before anything was copied, so a file that could not be
+  read was still listed as going in, and what the build found to say was missing from them. They are written last now.
+- **Empty folders are capped by what is left.** The limit on how many are made again was applied by the scan, so folders a
+  person went on to leave out counted toward it, and some that were staying were lost. A build applies it now.
 - **Windows fit the screen they open on.** At 1024x768 the app hung off the right edge with its close button out of reach, and
   an installer ran under the taskbar. On a laptop at 125% or 150% scaling there is less room still. A window that would not
   fit now opens maximized, and can be made as small as the screen is. CI opens all three and has Windows check.

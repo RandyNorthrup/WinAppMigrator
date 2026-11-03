@@ -224,18 +224,6 @@ pub(crate) fn discover_files_unless(
     locations.sort_by_key(|location| std::cmp::Reverse(location.total_bytes));
     empty_folders.sort_by_cached_key(|folder| comparable_path(&folder.original_path));
     empty_folders.dedup_by_key(|folder| comparable_path(&folder.original_path));
-    if empty_folders.len() > MAX_EMPTY_FOLDERS {
-        empty_folders.truncate(MAX_EMPTY_FOLDERS);
-        warnings.push(Warning::new(
-            "empty_folders_truncated",
-            WarningSeverity::Warning,
-            format!(
-                "This app has more than {MAX_EMPTY_FOLDERS} empty folders, and only that many will \
-                 be made again."
-            ),
-            None,
-        ));
-    }
 
     DiscoveredFiles {
         files,
