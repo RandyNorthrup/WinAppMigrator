@@ -44,25 +44,61 @@ pub fn write_scan_reports(report: &ScanReport, output_dir: &Path) -> Result<()> 
     Ok(())
 }
 
+/// Each part of a scan report, in the order they are in it.
+const REPORT_SECTIONS: [fn(&mut String, &ScanReport); 25] = [
+    write_summary,
+    write_source_app,
+    write_main_executable,
+    write_architecture,
+    write_install_location,
+    write_install_source,
+    write_data_locations,
+    write_files_collected,
+    write_dll_dependencies,
+    write_missing_dependencies,
+    write_runtime_prerequisites,
+    write_license_data,
+    write_registry_entries,
+    write_com_registrations,
+    write_file_associations,
+    write_services,
+    write_drivers_and_kernel_components,
+    write_scheduled_tasks,
+    write_shortcuts,
+    write_environment_variables,
+    write_items_excluded,
+    write_warnings,
+    write_prerequisites_manual_steps,
+    write_restore_instructions,
+    write_confidence_score,
+];
+
 pub fn render_markdown_scan_report(report: &ScanReport) -> String {
     let mut output = String::new();
     push_line(&mut output, "# WinAppMigrator Scan Report");
     push_line(&mut output, "");
-    push_line(&mut output, "## Summary");
+    for write in REPORT_SECTIONS {
+        write(&mut output, report);
+    }
+    output
+}
+
+fn write_summary(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Summary");
     push_line(
-        &mut output,
+        output,
         &format!("- Generated UTC: {}", report.generated_at_utc),
     );
     push_line(
-        &mut output,
+        output,
         &format!("- Confidence score: {}", report.confidence_score),
     );
     push_line(
-        &mut output,
+        output,
         &format!("- Direct dependencies: {}", report.dependencies.len()),
     );
     push_line(
-        &mut output,
+        output,
         &format!(
             "- Delay-loaded imports: {}",
             report
@@ -73,18 +109,18 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
         ),
     );
     push_line(
-        &mut output,
+        output,
         &format!("- File inventory entries: {}", report.file_inventory.len()),
     );
     push_line(
-        &mut output,
+        output,
         &format!(
             "- Environment variables: {}",
             report.environment_variables.len()
         ),
     );
     push_line(
-        &mut output,
+        output,
         &format!(
             "- Missing dependencies: {}",
             report
@@ -94,85 +130,90 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
                 .count()
         ),
     );
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Source App");
+fn write_source_app(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Source App");
     if let Some(app) = report.source_app.as_ref() {
-        push_line(&mut output, &format!("- Name: {}", app.display_name));
+        push_line(output, &format!("- Name: {}", app.display_name));
         push_line(
-            &mut output,
+            output,
             &format!("- Publisher: {}", option_text(app.publisher.as_deref())),
         );
         push_line(
-            &mut output,
+            output,
             &format!("- Version: {}", option_text(app.version.as_deref())),
         );
     } else {
-        push_line(&mut output, "- Source app: executable path scan");
+        push_line(output, "- Source app: executable path scan");
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Main Executable");
+fn write_main_executable(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Main Executable");
     push_line(
-        &mut output,
+        output,
         &format!("- Path: {}", report.main_executable.path.display()),
     );
     push_line(
-        &mut output,
+        output,
         &format!(
             "- File size bytes: {}",
             report.main_executable.file_size_bytes
         ),
     );
     push_line(
-        &mut output,
+        output,
         &format!("- Architecture: {:?}", report.architecture),
     );
     push_line(
-        &mut output,
+        output,
         &format!(
             "- Digital signature: {:?}",
             report.main_executable.digital_signature
         ),
     );
     push_line(
-        &mut output,
+        output,
         &format!("- Managed (.NET): {}", report.main_executable.is_dotnet),
     );
     push_line(
-        &mut output,
+        output,
         &format!(
             "- Embedded manifest: {}",
             report.main_executable.embedded_manifest
         ),
     );
     if let Some(level) = report.main_executable.requested_execution_level.as_deref() {
-        push_line(
-            &mut output,
-            &format!("- Requested execution level: {level}"),
-        );
+        push_line(output, &format!("- Requested execution level: {level}"));
     }
     if !report.main_executable.sxs_dependencies.is_empty() {
         push_line(
-            &mut output,
+            output,
             &format!(
                 "- Side-by-side dependencies: {}",
                 report.main_executable.sxs_dependencies.join(", ")
             ),
         );
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Architecture");
+fn write_architecture(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Architecture");
     push_line(
-        &mut output,
+        output,
         &format!("- PE architecture: {:?}", report.architecture),
     );
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Install Location");
+fn write_install_location(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Install Location");
     push_line(
-        &mut output,
+        output,
         &format!(
             "- {}",
             report
@@ -182,11 +223,13 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
                 .unwrap_or_else(|| "Unknown".to_owned())
         ),
     );
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Install Source");
+fn write_install_source(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Install Source");
     push_line(
-        &mut output,
+        output,
         &format!(
             "- Detected install method: {}",
             report
@@ -198,7 +241,7 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
     );
     if report.authoritative_file_count > 0 {
         push_line(
-            &mut output,
+            output,
             &format!(
                 "- Installer-recorded files: {}",
                 report.authoritative_file_count
@@ -206,19 +249,21 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
         );
     }
     for signal in &report.install_evidence {
-        push_line(&mut output, &format!("- Evidence: {signal}"));
+        push_line(output, &format!("- Evidence: {signal}"));
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Data Locations");
+fn write_data_locations(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Data Locations");
     if report.footprint_locations.is_empty() {
-        push_line(&mut output, "- No additional data locations were found.");
+        push_line(output, "- No additional data locations were found.");
     } else {
-        push_line(&mut output, "| Location | Kind | Scope | Files | Bytes |");
-        push_line(&mut output, "| --- | --- | --- | ---: | ---: |");
+        push_line(output, "| Location | Kind | Scope | Files | Bytes |");
+        push_line(output, "| --- | --- | --- | ---: | ---: |");
         for location in &report.footprint_locations {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "| {} | {} | {:?} | {} | {} |",
                     location.path.display(),
@@ -230,20 +275,19 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Files Collected");
+fn write_files_collected(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Files Collected");
     if report.file_inventory.is_empty() {
-        push_line(&mut output, "- No files discovered.");
+        push_line(output, "- No files discovered.");
     } else {
-        push_line(
-            &mut output,
-            "| Path | Classification | Copy? | Size | SHA-256 |",
-        );
-        push_line(&mut output, "| --- | --- | --- | ---: | --- |");
+        push_line(output, "| Path | Classification | Copy? | Size | SHA-256 |");
+        push_line(output, "| --- | --- | --- | ---: | --- |");
         for file in &report.file_inventory {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "| {} | {:?} | {} | {} | {} |",
                     file.original_path.display(),
@@ -257,23 +301,29 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## DLL Dependencies");
-    push_dependency_table(&mut output, &report.dependencies, false);
-    push_line(&mut output, "");
+fn write_dll_dependencies(output: &mut String, report: &ScanReport) {
+    push_line(output, "## DLL Dependencies");
+    push_dependency_table(output, &report.dependencies, false);
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Missing Dependencies");
-    push_dependency_table(&mut output, &report.dependencies, true);
-    push_line(&mut output, "");
+fn write_missing_dependencies(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Missing Dependencies");
+    push_dependency_table(output, &report.dependencies, true);
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Runtime Prerequisites");
+fn write_runtime_prerequisites(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Runtime Prerequisites");
     if report.runtime_prerequisites.is_empty() {
-        push_line(&mut output, "- None detected.");
+        push_line(output, "- None detected.");
     } else {
         for prerequisite in &report.runtime_prerequisites {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "- {} ({:?}): {}",
                     prerequisite.name, prerequisite.kind, prerequisite.evidence
@@ -281,21 +331,23 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## License Data");
+fn write_license_data(output: &mut String, report: &ScanReport) {
+    push_line(output, "## License Data");
     if report.license_artifacts.is_empty() {
-        push_line(&mut output, "- No licensing data detected.");
+        push_line(output, "- No licensing data detected.");
     } else {
         push_line(
-            &mut output,
+            output,
             "Licensing data may be machine-bound and require reactivation. WinAppMigrator never decrypts, bypasses activation, or emulates dongles.",
         );
         push_line(
-            &mut output,
+            output,
             "| Framework | Kind | Location | Transferable | Machine-bound | Copied |",
         );
-        push_line(&mut output, "| --- | --- | --- | --- | --- | --- |");
+        push_line(output, "| --- | --- | --- | --- | --- | --- |");
         for artifact in &report.license_artifacts {
             let location = artifact
                 .path
@@ -304,7 +356,7 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
                 .or_else(|| artifact.registry_location.clone())
                 .unwrap_or_else(|| artifact.detail.clone());
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "| {} | {:?} | {} | {:?} | {} | {} |",
                     artifact.framework.label(),
@@ -317,15 +369,17 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Registry Entries");
+fn write_registry_entries(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Registry Entries");
     if report.registry_entries.is_empty() {
-        push_line(&mut output, "- None discovered.");
+        push_line(output, "- None discovered.");
     } else {
         for entry in &report.registry_entries {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "- {:?}\\{} {} {:?}",
                     entry.hive,
@@ -336,15 +390,17 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## COM Registrations");
+fn write_com_registrations(output: &mut String, report: &ScanReport) {
+    push_line(output, "## COM Registrations");
     if report.com_registrations.is_empty() {
-        push_line(&mut output, "- None discovered.");
+        push_line(output, "- None discovered.");
     } else {
         for registration in &report.com_registrations {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "- {:?} {} {:?} -> {}",
                     registration.hive,
@@ -359,15 +415,17 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## File Associations");
+fn write_file_associations(output: &mut String, report: &ScanReport) {
+    push_line(output, "## File Associations");
     if report.file_associations.is_empty() {
-        push_line(&mut output, "- None discovered.");
+        push_line(output, "- None discovered.");
     } else {
         for association in &report.file_associations {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "- {:?} extension={} prog_id={} app={} verb={}",
                     association.hive,
@@ -379,15 +437,17 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Services");
+fn write_services(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Services");
     if report.services.is_empty() {
-        push_line(&mut output, "- None discovered.");
+        push_line(output, "- None discovered.");
     } else {
         for service in &report.services {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "- {} -> {}",
                     service.service_name,
@@ -396,15 +456,17 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Drivers And Kernel Components");
+fn write_drivers_and_kernel_components(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Drivers And Kernel Components");
     if report.drivers.is_empty() {
-        push_line(&mut output, "- None discovered.");
+        push_line(output, "- None discovered.");
     } else {
         for driver in &report.drivers {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "- {} ({:?}) -> {}",
                     driver.service_name,
@@ -414,15 +476,17 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Scheduled Tasks");
+fn write_scheduled_tasks(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Scheduled Tasks");
     if report.scheduled_tasks.is_empty() {
-        push_line(&mut output, "- None discovered.");
+        push_line(output, "- None discovered.");
     } else {
         for task in &report.scheduled_tasks {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "- {}{} -> {}",
                     task.task_path,
@@ -432,15 +496,17 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Shortcuts");
+fn write_shortcuts(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Shortcuts");
     if report.shortcuts.is_empty() {
-        push_line(&mut output, "- None discovered.");
+        push_line(output, "- None discovered.");
     } else {
         for shortcut in &report.shortcuts {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "- {} -> {}",
                     shortcut.original_lnk_path.display(),
@@ -449,15 +515,17 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Environment Variables");
+fn write_environment_variables(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Environment Variables");
     if report.environment_variables.is_empty() {
-        push_line(&mut output, "- None discovered.");
+        push_line(output, "- None discovered.");
     } else {
         for variable in &report.environment_variables {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "- {:?} `{}` = `{}`",
                     variable.scope, variable.name, variable.value
@@ -465,25 +533,29 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Items Excluded");
+fn write_items_excluded(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Items Excluded");
     if report.items_excluded.is_empty() {
-        push_line(&mut output, "- None recorded.");
+        push_line(output, "- None recorded.");
     } else {
         for item in &report.items_excluded {
-            push_line(&mut output, &format!("- {item}"));
+            push_line(output, &format!("- {item}"));
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Warnings");
+fn write_warnings(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Warnings");
     if report.warnings.is_empty() {
-        push_line(&mut output, "- None.");
+        push_line(output, "- None.");
     } else {
         for warning in &report.warnings {
             push_line(
-                &mut output,
+                output,
                 &format!(
                     "- {:?} `{}`: {}",
                     warning.severity, warning.code, warning.message
@@ -491,39 +563,43 @@ pub fn render_markdown_scan_report(report: &ScanReport) -> String {
             );
         }
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Prerequisites & Manual Steps");
+fn write_prerequisites_manual_steps(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Prerequisites & Manual Steps");
     if report.runtime_prerequisites.is_empty()
         && report.dependencies.iter().all(|entry| !entry.missing)
     {
-        push_line(&mut output, "- None detected by scanning.");
+        push_line(output, "- None detected by scanning.");
     } else {
         push_line(
-            &mut output,
+            output,
             "- Detected runtime prerequisites are bundled into the installer (or installed via winget), and checked on the target where a check exists.",
         );
         push_line(
-            &mut output,
+            output,
             "- Investigate any unresolved dependencies before migration.",
         );
     }
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Restore Instructions");
+fn write_restore_instructions(output: &mut String, _report: &ScanReport) {
+    push_line(output, "## Restore Instructions");
     push_line(
-        &mut output,
+        output,
         "- Run the produced installer on the target PC. Use its Preview changes button first, or run it with `--target-root <DIR>` and no `--apply`.",
     );
-    push_line(&mut output, "");
+    push_line(output, "");
+}
 
-    push_line(&mut output, "## Confidence Score");
+fn write_confidence_score(output: &mut String, report: &ScanReport) {
+    push_line(output, "## Confidence Score");
     push_line(
-        &mut output,
+        output,
         &format!("- Score: {} / 100", report.confidence_score),
     );
-
-    output
 }
 
 pub fn render_warnings_markdown(warnings: &[Warning]) -> String {
