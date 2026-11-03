@@ -56,7 +56,13 @@ const INSTALLER_USER_DATA: &str =
 const PART_KEY: &str = r"HKLM\Software\WAM Footprint Vendor\WAM Footprint Helper";
 const OTHER_VENDOR_KEY: &str = r"HKLM\Software\Another Publisher\WAM Footprint Helper";
 const MICROSOFT_KEY: &str = r"HKLM\Software\Microsoft\WAM Footprint Helper";
-const OTHER_APP_KEY: &str = r"HKLM\Software\WAM Footprint Vendor\WAM Footprint App Other";
+/// What the hidden part goes by under its publisher, without the first word, and what a whole other
+/// app is called. Without being told of that app, a scan takes this for the part's.
+const OTHER_APP_KEY: &str = r"HKLM\Software\WAM Footprint Vendor\Footprint Helper";
+const NAMED_LIKE_PART: &str = "Footprint Helper";
+const NAMED_LIKE_PART_ROOT: &str = r"C:\Program Files\Part Named Tool";
+const CODED_ROOT: &str = r"C:\Program Files\WAM Footprint Vendor Coded";
+const LOCKED_KEY_FILE: &str = r"C:\Program Files\WAM Footprint Vendor Helper\locked.pem";
 const BELOW_MICROSOFT_ROOT: &str = r"C:\ProgramData\Microsoft\WAM Footprint App Below";
 const UNINSTALL: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const USER_UNINSTALL: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall";
@@ -84,6 +90,7 @@ const OTHER_APP_KEY_CANARY: &str = "wam-footprint-other-app-key-canary";
 const KEY_BY_CONTENT_CANARY: &str = "wam-footprint-key-by-content-canary";
 const CERTIFICATE_CANARY: &str = "wam-footprint-certificate-canary";
 const DATA_NEAR_CANARY: &str = "wam-footprint-data-near-canary";
+const LOCKED_KEY_CANARY: &str = "wam-footprint-locked-key-canary";
 const SELF_REMOVAL_PATIENCE: Duration = Duration::from_secs(90);
 const FLAGS: ScanFlags = ScanFlags {
     include_user_data: false,
@@ -348,6 +355,16 @@ fn set_up_the_app() -> TestResult {
         &format!(r"{HELPER_ROOT}\ca.pem"),
         &format!("-----BEGIN CERTIFICATE-----\n{CERTIFICATE_CANARY}\n"),
     )?;
+    // One no administrator can open, and a package is read with more rights than that. It cannot be
+    // told what it holds, so it has to stay out.
+    write(
+        LOCKED_KEY_FILE,
+        &format!("-----BEGIN PRIVATE KEY-----\n{LOCKED_KEY_CANARY}\n"),
+    )?;
+    must(
+        "icacls",
+        &[LOCKED_KEY_FILE, "/inheritance:r", "/grant:r", "*S-1-5-18:F"],
+    )?;
     // What goes by the part's name, and what only says it does.
     for (key, canary) in [
         (PART_KEY, PART_KEY_CANARY),
@@ -366,22 +383,23 @@ fn set_up_the_app() -> TestResult {
     Ok(())
 }
 
-/// What Windows also calls a folder, which none of the rules would know it by if they went by it.
-fn short_name_of(folder: &str) -> TestResult<String> {
+/// What Windows also calls a folder, which none of the rules would know it by if they went by it. A
+/// volume can have these turned off, and a folder not be there.
+fn short_name_of(folder: &str) -> TestResult<Option<String>> {
+    if !Path::new(folder).is_dir() {
+        return Ok(None);
+    }
     let short = powershell(&format!(
         "(New-Object -ComObject Scripting.FileSystemObject).GetFolder({}).ShortPath",
         quoted(folder)
     ))?;
     let short = short.trim().to_owned();
-    if short.contains('~') {
-        Ok(short)
-    } else {
-        Err(format!("{folder} has no short name on this runner: {short}").into())
-    }
+    Ok(short.contains('~').then_some(short))
 }
 
 /// Everything that has a name close to the app's and must never be offered, each for its own reason.
-fn set_up_what_must_not_be_offered() -> TestResult {
+/// How many short names there were to try says whether that was tried.
+fn set_up_what_must_not_be_offered() -> TestResult<usize> {
     write(&format!(r"{OTHER_APP_ROOT}\other.txt"), "another app's")?;
     program_at(&format!(r"{OTHER_APP_ROOT}\other.exe"))?;
     uninstall_entry(
@@ -422,9 +440,13 @@ fn set_up_what_must_not_be_offered() -> TestResult {
         ("WAM Hostile Users", r"C:\Users"),
         ("WAM Hostile Below Microsoft", BELOW_MICROSOFT_ROOT),
         ("WAM Hostile Link", LINK_ROOT),
+        (
+            "WAM Hostile Below Windows NT",
+            r"C:\Program Files\Windows NT\Accessories",
+        ),
         ("WAM Hostile Other App", OTHER_APP_ROOT),
         (
-            "WAM Hostile This App's Parent",
+            "WAM Hostile Publisher's Folder",
             r"C:\Program Files\WAM Footprint Vendor",
         ),
     ];
@@ -432,13 +454,51 @@ fn set_up_what_must_not_be_offered() -> TestResult {
         hidden_entry(name, location)?;
     }
     // The same by what else Windows calls them, which no rule goes by.
-    let common_files = short_name_of(r"C:\Program Files\Common Files")?;
-    println!("{common_files} is a short name for Common Files");
-    hidden_entry("WAM Hostile Short Common Files", &common_files)?;
-    let program_files = short_name_of(r"C:\Program Files")?;
-    hidden_entry("WAM Hostile Short Program Files", &program_files)?;
-    let windows = short_name_of(r"C:\Program Files\Windows NT")?;
-    hidden_entry("WAM Hostile Short Windows NT", &windows)?;
+    let mut short_names = 0;
+    for (name, folder) in [
+        (
+            "WAM Hostile Short Common Files",
+            r"C:\Program Files\Common Files",
+        ),
+        ("WAM Hostile Short Program Files", r"C:\Program Files"),
+        (
+            "WAM Hostile Short Windows NT",
+            r"C:\Program Files\Windows NT",
+        ),
+    ] {
+        if let Some(short) = short_name_of(folder)? {
+            println!("{short} is a short name for {folder}");
+            hidden_entry(name, &short)?;
+            short_names += 1;
+        }
+    }
+    // A hidden entry in a folder of its own, whose install record is another product's.
+    write(&format!(r"{CODED_ROOT}\coded.txt"), "says it is another's")?;
+    hidden_entry("WAM Hostile Product Code", CODED_ROOT)?;
+    must(
+        "reg.exe",
+        &[
+            "add",
+            &format!(r"{UNINSTALL}\WAM Hostile Product Code"),
+            "/v",
+            "UninstallString",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &format!("MsiExec.exe /X{MSI_APP_CODE}"),
+            "/f",
+        ],
+    )?;
+    // An app whose name is what the hidden part goes by under its publisher.
+    program_at(&format!(r"{NAMED_LIKE_PART_ROOT}\tool.exe"))?;
+    uninstall_entry(
+        &format!(r"{UNINSTALL}\{NAMED_LIKE_PART}"),
+        &[
+            ("DisplayName", NAMED_LIKE_PART),
+            ("Publisher", "Someone Else"),
+            ("InstallLocation", NAMED_LIKE_PART_ROOT),
+        ],
+    )?;
     // A hidden entry of the same publisher, in a folder of its own, calling itself another app.
     write(&format!(r"{IMPOSTOR_ROOT}\impostor.txt"), "an impostor")?;
     hidden_entry_at("WAM Footprint Impostor Key", OTHER_APP_NAME, IMPOSTOR_ROOT)?;
@@ -505,7 +565,7 @@ fn set_up_what_must_not_be_offered() -> TestResult {
             "/f",
         ],
     )?;
-    Ok(())
+    Ok(short_names)
 }
 
 /// Take off the runner everything the app would have left there, so what is found after an install
@@ -534,6 +594,7 @@ fn remove_the_app() -> TestResult {
         &["delete", &format!(r"{UNINSTALL}\{HELPER_NAME}"), "/f"],
     )?;
     must("reg.exe", &["delete", PART_KEY, "/f"])?;
+    must("icacls", &[LOCKED_KEY_FILE, "/grant", "*S-1-5-32-544:F"])?;
     fs::remove_dir_all(SOURCE_ROOT)?;
     fs::remove_dir_all(HELPER_ROOT)?;
     Ok(())
@@ -604,7 +665,10 @@ fn machine_state(root: &str) -> TestResult<BTreeMap<String, String>> {
         "entry".to_owned(),
         query(&format!(r"{UNINSTALL}\{APP_NAME}"))?,
     );
-    state.insert("every uninstall entry".to_owned(), query(UNINSTALL)?);
+    state.insert(
+        "the list of uninstall entries".to_owned(),
+        query(UNINSTALL)?,
+    );
     state.insert("the part's key".to_owned(), query(PART_KEY)?);
     Ok(state)
 }
@@ -782,6 +846,7 @@ fn check_with_every_option_on(
         ("credentials.json", false),
         ("id_rsa", false),
         ("tls.pem", false),
+        ("locked.pem", false),
     ] {
         checks.same(
             &format!("{name} in a package of everything"),
@@ -796,6 +861,7 @@ fn check_with_every_option_on(
         (SECRET_CANARY, false),
         (KEY_CANARY, false),
         (KEY_BY_CONTENT_CANARY, false),
+        (LOCKED_KEY_CANARY, false),
     ] {
         checks.same(
             &format!("{canary} in a package of everything"),
@@ -878,6 +944,7 @@ fn check_what_is_offered(
     for hostile in [
         PUBLISHER_ROOT,
         MSI_APP_ROOT,
+        CODED_ROOT,
         OTHER_APP_ROOT,
         WINDOWS_NAMED_ROOT,
         LINK_ROOT,
@@ -1011,7 +1078,11 @@ fn check_the_package(checks: &mut Checks, installer: &Path, work: &Path) -> Test
             MICROSOFT_KEY_CANARY,
             false,
         ),
-        ("another app's key beside it", OTHER_APP_KEY_CANARY, false),
+        (
+            "one the part goes by that is another app's name",
+            OTHER_APP_KEY_CANARY,
+            false,
+        ),
     ] {
         checks.same(what, look.holds_text(canary)?, expected);
     }
@@ -1171,7 +1242,12 @@ fn what_is_chosen_is_what_is_in_the_package_and_on_the_machine() -> TestResult {
     let mut checks = Checks::default();
     let work = tempfile::tempdir()?;
     set_up_the_app()?;
-    set_up_what_must_not_be_offered()?;
+    let short_names = set_up_what_must_not_be_offered()?;
+    checks.that(
+        "there were short names to try",
+        short_names > 0,
+        "none of the folders tried has one on this runner",
+    );
     let apps = list_installed_apps_from(&SystemContext::live())?;
     let app = apps
         .iter()

@@ -399,8 +399,9 @@ themselves.
 **A hidden entry** is one in the Uninstall key marked `SystemComponent=1`, which no list of apps shows. It counts when it is
 beside the app in the same folder, or has the same publisher, by all of its name. A runtime the app uses stays a prerequisite. An
 entry in an account's own hive takes no rights to write, so it only counts for an app of that same account. What an entry calls
-itself is only what it says, so one that goes by the name another app would take, or by nothing but its publisher's, is not
-offered, wherever it says it is, and its folder is not offered by its name either. Several in one folder are one row, named for
+itself is only what it says, so one that goes by the name another app would take, or by nothing but its publisher's, or whose
+install record is another listed product's, is not offered, wherever it says it is, and its folder is not offered by its name
+either. Several in one folder are one row, named for
 all of them.
 
 **What is never offered, or added.** Each of these is asked by `folder_refusal`, of a folder on the list and of each
@@ -409,7 +410,9 @@ root a hidden entry goes on to name:
 - A drive, the Windows folder, `Program Files`, `Common Files`, `ProgramData`, a profile, `AppData`, or anything that holds one
   of those, by the same `is_walkable_app_dir` a scan goes by.
 - What is Windows' or everyone's by name (`NEVER_OFFERED`, such as `dotnet`, `Windows Defender`, `Package Cache`), anything
-  under `Microsoft`, `Microsoft Shared`, or `WindowsApps`, and `System`, `Services`, `SpeechEngines`, and `Designer` in `Common Files`.
+  under `Microsoft`, `Microsoft Shared`, `WindowsApps`, `dotnet`, `Internet Explorer`, `WindowsPowerShell`, `Windows.old`, or a folder
+  whose name starts with `Windows `, and `System`, `Services`, `SpeechEngines`, `Designer`, `InstallShield`, and `Merge Modules` in
+  `Common Files`.
 - A folder named only for the publisher, which may hold its other products, or one that holds this app's own folder.
 - **Another app's.** Where any other entry says it is, or anything that holds that or is inside it, or what that app would take
   by its own name. An entry on the list of apps is another app, even by the same publisher: it is there to be built by itself. An
@@ -425,10 +428,12 @@ root a hidden entry goes on to name:
 what is on it now, so an id cannot name a folder of its own, and it warns of one that is not there any more. What is
 ticked is one more root for `collect_roots`, which goes by its rules, and what goes by where the app is (services, tasks, shortcuts,
 variables, and registry values) goes by that folder too. An entry also brings its install record, what it says of itself is asked
-about again, and data folders and keys named exactly for it, as long as that is under its own publisher's folder or key, or starts
-with its publisher's name and goes on, so that one calling itself `Windows NT` or `Update Service` does not bring in what has that
-name elsewhere. A key found that way or listed in its install record is left out when it is what another app would take by its name
-or is one many apps share, and a file its install record lists is left out when another app's record lists it too. All of this is before `take_secret_files` and
+about again. If it has the app's publisher, by all of that name, so do data folders and keys named exactly for it, as long as that
+is under a folder or key with all of its publisher's name, or starts with all of that and goes on, so that one calling itself
+`Windows NT` or `Update Service` does not bring in what has that name elsewhere. Being beside the app says nothing of what it calls
+itself, so nothing comes by name for one with another publisher. A key found by name, by where something added is, or in an install
+record is left out when it is what another app would take by its name, and one found by name is left out when many apps share it.
+A file its install record lists is left out when another app's record lists it too. All of this is before `take_secret_files` and
 `license_scan`, so what looks like a credential stays out and a license goes by its option, however it came. What is in a
 data folder goes by the User data option, like any other.
 

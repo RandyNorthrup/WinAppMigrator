@@ -135,9 +135,9 @@ it again, since what goes can take more with it. A service, task, or shortcut to
 folder left out goes too, since the rules go by what runs, as does one told to start in such a folder. A shortcut whose icon
 only is there keeps going, without the icon. What goes is unticked on its row with why, and is said in a notice under the size.
 What ties the app into Windows is listed as that leaves it, so a firewall rule for a program left out is no longer on the
-list. A service that needs another that was left out goes too, and so does one whose own settings name a program left out. A
-folder with a row of its own inside one left out still goes in as its row says, since a file, or a path in a command, goes by the
-nearest row around it, which is how the size is added up. A folder that holds what the main program imports has no box, as what
+list. A service that needs another that was left out goes too, and so does one whose own settings name a program left out, though not
+one whose settings only name a folder. A folder with a row of its own inside one left out still goes in as its row says, since a
+file, or a path in a command, goes by the nearest row around it, which is how the size is added up. A folder that holds what the main program imports has no box, as what
 holds the main program does not, since it could not start without it. A DLL it only loads when it needs one is not counted. The button waits for that, so what is on the screen is what is built, and a build applies the
 same choices by the same code. A plain setting of the app's own that names such a folder stays. So does license data with
 the License option on, wherever it is, since a license goes by that option alone. A hint under the size names what is in a

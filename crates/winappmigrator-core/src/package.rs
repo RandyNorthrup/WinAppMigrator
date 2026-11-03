@@ -651,14 +651,14 @@ fn files_to_pack(
     let mut secrets_since = Vec::new();
     for file in report.file_inventory.iter().filter(|file| file.should_copy) {
         let is_a_secret_by_now = crate::secret_rules::is_secret_file(&file.original_path, || {
-            // One that has gone says so when it is copied. It holds nothing now.
-            if !file.path.exists() {
-                return Some(Vec::new());
+            // First, since nearly any other look at a path follows a link.
+            reader.check(&file.path).ok()?;
+            // One that has gone says so when it is copied, and holds nothing now. Anything else that
+            // stops it being looked at says nothing of what is in it.
+            match fs::symlink_metadata(&file.path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+                _ => read_small_file(&file.path),
             }
-            reader
-                .check(&file.path)
-                .ok()
-                .and_then(|()| read_small_file(&file.path))
         });
         if is_a_secret_by_now {
             let name = file.original_path.display().to_string();
@@ -670,7 +670,7 @@ fn files_to_pack(
             ));
             secrets_since.push(LeftOutItem {
                 name,
-                why: "it holds a private key".to_owned(),
+                why: crate::secret_rules::LEFT_OUT_REASON_SECRET.to_owned(),
             });
             not_packable.insert(file.original_path.clone());
             continue;

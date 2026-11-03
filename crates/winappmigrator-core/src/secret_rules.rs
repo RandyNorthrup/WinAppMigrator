@@ -174,7 +174,7 @@ const NOT_A_CREDENTIAL: &[&str] = &["0", "1", "false", "no", "none", "true", "ye
 const DPAPI_PROVIDER_GUID_HEX: &str = "d08c9ddf0115d1118c7a00c04fc297eb";
 /// In hex: four bytes of version come before that.
 const DPAPI_GUID_OFFSET: usize = 8;
-const LEFT_OUT_REASON_SECRET: &str = "it looks like a credential";
+pub(crate) const LEFT_OUT_REASON_SECRET: &str = "it looks like a credential";
 const NAME_HOLDS_A_CREDENTIAL: &str = "(a value whose name holds a credential)";
 const LEFT_OUT_REASON_LICENSE: &str = "the License option is off";
 /// A default value is named by its key, but not one under this: `Acme.Token` is a file type.

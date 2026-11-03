@@ -426,20 +426,22 @@ impl ProductNames {
 
     /// Whether something can be taken to be a part of an app by what it is called, given what the
     /// part says of itself is only what it says, and it could say anything. That takes it being under
-    /// what the part's own publisher is called, or starting with that and going on, and no publisher
-    /// on everything says anything. `parent` is what it is in, if that is not the top of where to look.
+    /// all of what the part's own publisher is called, or starting with all of that and going on, and
+    /// no publisher on everything says anything. A folder a part is in says nothing of who published
+    /// it. `parent` is what it is in, if that is not the top of where to look.
     pub(crate) fn is_a_parts_own_name(&self, parent: Option<&str>, name: &str) -> bool {
-        let says_nothing = |text: &str| {
-            significant_words(text)
-                .next()
-                .is_none_or(|first| is_publisher_of_everything(&first))
-        };
+        let publisher = &self.publisher_words;
+        if publisher
+            .first()
+            .is_none_or(|first| is_publisher_of_everything(first))
+        {
+            return false;
+        }
         match parent {
-            Some(parent) => !says_nothing(parent) && self.is_vendor_name(parent),
+            Some(parent) => vendor_words(parent) == *publisher,
             None => {
-                !says_nothing(name)
-                    && !self.is_named_only_for_publisher(name)
-                    && self.is_vendor_name(name)
+                let words = vendor_words(name);
+                words.len() > publisher.len() && words.starts_with(publisher)
             }
         }
     }
@@ -997,6 +999,24 @@ mod tests {
             ProductNames::new(Some("Some Part"), Some("Microsoft Corporation"), &[], &[]);
         assert!(!of_everyone.is_a_parts_own_name(Some("Microsoft"), "Some Part"));
         assert!(!of_everyone.is_a_parts_own_name(None, "Microsoft Some Part"));
+        // The first of a publisher's words, the start of one, or the folder it is in are not it.
+        let advanced = ProductNames::new(
+            Some("Update Service"),
+            Some("Advanced Micro Devices, Inc."),
+            &[],
+            &[],
+        );
+        assert!(!advanced.is_a_parts_own_name(Some("Advanced Installer"), "Update Service"));
+        assert!(advanced.is_a_parts_own_name(Some("Advanced Micro Devices"), "Update Service"));
+        let data = ProductNames::new(Some("Update Service"), Some("Data Systems"), &[], &[]);
+        assert!(!data.is_a_parts_own_name(Some("Datadog"), "Update Service"));
+        let in_a_folder = ProductNames::new(
+            Some("Update Service"),
+            Some("Fabrikam Inc."),
+            &[],
+            &["Contoso"],
+        );
+        assert!(!in_a_folder.is_a_parts_own_name(Some("Contoso"), "Update Service"));
 
         let short = ProductNames::new(Some("Vive"), Some("HTC Corp."), &[], &[]);
         assert!(

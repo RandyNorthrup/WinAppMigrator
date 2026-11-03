@@ -757,15 +757,17 @@ fn scan_software_children(
         for key_path in product_keys_in_view(names, software_path, &children_of) {
             capture_registry_subtree(root, &key_path, MatchConfidence::Medium, entries, warnings);
         }
-        for install in context
+        let own = context
             .install_location
             .iter()
-            .chain(&context.also_the_apps)
-        {
+            .map(|install| (install, false));
+        let added = context.also_the_apps.iter().map(|install| (install, true));
+        for (install, was_added) in own.chain(added) {
             for child_name in children_of(software_path) {
                 if !INSTALL_PATH_SEARCH_SKIPPED_KEYS
                     .contains(&child_name.to_ascii_lowercase().as_str())
                 {
+                    let first_new = entries.len();
                     capture_keys_recording_install_path(
                         root,
                         &format!(r"{software_path}\{child_name}"),
@@ -774,6 +776,14 @@ fn scan_software_children(
                         entries,
                         warnings,
                     );
+                    // A key of another app's can say where something a person added is.
+                    if was_added {
+                        let mut found = entries.split_off(first_new);
+                        found.retain(|entry| {
+                            !is_named_for_another_app(&entry.key_path, &context.not_named)
+                        });
+                        entries.append(&mut found);
+                    }
                 }
             }
         }
