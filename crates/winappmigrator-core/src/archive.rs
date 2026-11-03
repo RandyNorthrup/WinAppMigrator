@@ -805,11 +805,6 @@ impl EmbeddedPackage {
         ))
     }
 
-    /// Whether this package is in a data file beside the installer.
-    pub fn has_data_file(&self) -> bool {
-        self.data_file.is_some()
-    }
-
     /// How much room everything in the package takes once unpacked, by what its entries say. An
     /// entry can only hold as much as it says: see [`read_one_entry`].
     pub fn unpacked_bytes(&self) -> Result<u64> {
@@ -2126,7 +2121,7 @@ mod tests {
         assert!(has_embedded_self_archive(&parts.output)?);
         let package = EmbeddedPackage::open(&parts.output)?
             .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
-        assert!(package.has_data_file());
+        assert!(package.data_file.is_some());
         assert_eq!(package.stub_bytes(), stub.len() as u64);
         assert_eq!(package.read_file("manifest.json")?, b"{\"name\":\"app\"}");
 
@@ -2420,7 +2415,7 @@ mod tests {
         assert!(!parts.output.with_extension("partial").exists());
         let package = EmbeddedPackage::open(&parts.output)?
             .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
-        assert!(!package.has_data_file());
+        assert!(package.data_file.is_none());
         assert_eq!(package.read_file("manifest.json")?, b"{}");
         Ok(())
     }
@@ -2453,7 +2448,7 @@ mod tests {
         assert!(!data_file_beside(&parts.output).exists());
         let package = EmbeddedPackage::open(&parts.output)?
             .ok_or_else(|| WinAppMigratorError::Archive("no package".to_owned()))?;
-        assert!(!package.has_data_file());
+        assert!(package.data_file.is_none());
         assert_eq!(package.read_file("manifest.json")?, b"{}");
         Ok(())
     }

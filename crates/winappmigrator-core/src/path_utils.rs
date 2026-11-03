@@ -242,13 +242,6 @@ pub fn public_profile_dir() -> Option<&'static Path> {
         .as_deref()
 }
 
-/// This account's profile folder, from the admin-only registry. Which account comes from
-/// `whoami`, because a variable could name any other.
-pub fn user_profile_dir() -> Option<&'static Path> {
-    static FOLDER: OnceLock<Option<PathBuf>> = OnceLock::new();
-    FOLDER.get_or_init(query_user_profile).as_deref()
-}
-
 /// The SID of the account running this process, from `whoami`, because a variable could
 /// name any other.
 pub fn current_user_sid() -> Option<&'static str> {
@@ -262,10 +255,6 @@ pub fn current_user_sid() -> Option<&'static str> {
         sid_from_whoami_line(&line).map(str::to_owned)
     })
     .as_deref()
-}
-
-fn query_user_profile() -> Option<PathBuf> {
-    profile_of_sid(current_user_sid()?)
 }
 
 /// An account's profile folder, from the admin-only registry.
@@ -1050,7 +1039,11 @@ mod tests {
 
     #[test]
     fn this_accounts_profile_is_found_in_the_registry() {
-        assert!(user_profile_dir().is_some_and(Path::is_dir));
+        assert!(
+            current_user_sid()
+                .and_then(profile_of_sid)
+                .is_some_and(|profile| profile.is_dir())
+        );
     }
 
     #[test]

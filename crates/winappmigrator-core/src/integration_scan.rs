@@ -1190,7 +1190,6 @@ impl Scan<'_> {
             path: on_disk.clone(),
             original_path: on_disk,
             package_relative_path: None,
-            suggested_destination_path: None,
             size_bytes: Some(metadata.len()),
             hash_sha256: None,
             classification: FileClassification::AppOwned,

@@ -172,7 +172,6 @@ pub fn find_app_local_dlls(
             path: path.clone(),
             original_path: path,
             package_relative_path: None,
-            suggested_destination_path: None,
             size_bytes,
             hash_sha256: None,
             classification: FileClassification::AppOwned,

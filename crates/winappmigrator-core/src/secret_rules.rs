@@ -1654,7 +1654,6 @@ mod tests {
             path: path.into(),
             original_path: path.into(),
             package_relative_path: None,
-            suggested_destination_path: None,
             size_bytes: None,
             hash_sha256: None,
             classification: crate::models::FileClassification::AppOwned,

@@ -695,7 +695,7 @@ mod tests {
                 file_size_bytes: 10,
                 modified_utc: None,
                 version_info: None,
-                digital_signature: SignatureStatus::NotChecked,
+                digital_signature: SignatureStatus::NotPresent,
                 external_manifest: None,
                 is_dotnet: false,
                 dotnet_runtime_version: None,

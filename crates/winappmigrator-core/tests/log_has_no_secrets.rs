@@ -152,7 +152,6 @@ fn package_of(root: &Path, files: &[(&str, &[u8])]) -> TestResult<PathBuf> {
             path: original.clone(),
             original_path: original,
             package_relative_path: Some(Path::new("files").join(relative)),
-            suggested_destination_path: None,
             size_bytes: Some(bytes.len() as u64),
             hash_sha256: Some(sha256_file(&staged)?),
             classification: FileClassification::AppOwned,

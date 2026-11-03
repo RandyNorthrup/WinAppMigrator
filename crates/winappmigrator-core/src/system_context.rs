@@ -1132,11 +1132,6 @@ impl SystemContext {
         }
     }
 
-    /// The profiles this PC or drive records.
-    pub fn listed_profiles(&self) -> &[ListedProfile] {
-        &self.listed
-    }
-
     /// Who an app's data defaults to, before asking: whoever is signed in on this PC, and on a
     /// drive whoever last did.
     pub fn default_profile_id(&self) -> Option<String> {

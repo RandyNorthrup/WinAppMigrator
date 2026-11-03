@@ -3974,7 +3974,6 @@ mod tests {
             path: original.clone(),
             original_path: original,
             package_relative_path: Some(Path::new("files").join(relative)),
-            suggested_destination_path: None,
             size_bytes: Some(size),
             hash_sha256: hash,
             classification: FileClassification::AppOwned,

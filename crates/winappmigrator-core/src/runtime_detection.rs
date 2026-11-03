@@ -583,7 +583,6 @@ mod tests {
             path: PathBuf::from(path),
             original_path: PathBuf::from(path),
             package_relative_path: None,
-            suggested_destination_path: None,
             size_bytes: Some(1),
             hash_sha256: None,
             classification: FileClassification::AppOwned,

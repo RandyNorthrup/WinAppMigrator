@@ -1412,9 +1412,7 @@ fn registry_server_path(value: &str, kind: &ComServerKind) -> Option<PathBuf> {
     };
     match kind {
         ComServerKind::InProcess => whole(),
-        ComServerKind::LocalServer | ComServerKind::Unknown => {
-            split_command_executable_path(value).or_else(whole)
-        }
+        ComServerKind::LocalServer => split_command_executable_path(value).or_else(whole),
     }
 }
 

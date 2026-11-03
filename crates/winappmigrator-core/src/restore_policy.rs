@@ -2474,7 +2474,8 @@ pub fn com_class_key(key_path: &str) -> Option<String> {
 }
 
 /// True for a value naming what COM loads for a class.
-pub fn is_com_server_entry(entry: &RegistryEntry) -> bool {
+#[cfg(test)]
+pub(crate) fn is_com_server_entry(entry: &RegistryEntry) -> bool {
     let key = normalized_key(&entry.key_path);
     let Some(rest) = key.strip_prefix(CLSID_PREFIX) else {
         return false;

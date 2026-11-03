@@ -347,7 +347,6 @@ pub struct FileVersionInfo {
 pub enum SignatureStatus {
     NotPresent,
     EmbeddedSignaturePresent,
-    NotChecked,
     Unknown,
 }
 
@@ -625,7 +624,6 @@ pub struct FileEntry {
     /// Where it is on the PC it belongs to, which is what everything else on that PC calls it.
     pub original_path: PathBuf,
     pub package_relative_path: Option<PathBuf>,
-    pub suggested_destination_path: Option<PathBuf>,
     pub size_bytes: Option<u64>,
     pub hash_sha256: Option<String>,
     pub classification: FileClassification,
@@ -647,10 +645,8 @@ pub enum FileClassification {
     /// and distinct from per-user data; copied when ProgramData backup is
     /// enabled.
     MachineAppData,
-    SharedRuntime,
     WindowsSystem,
     Missing,
-    DoNotCopy,
     ManualRuntimeInstall,
     Unknown,
 }
@@ -699,19 +695,6 @@ impl FootprintKind {
             FootprintKind::Other => "Other location",
         }
     }
-
-    /// Whether this location holds genuine per-user data (as opposed to the
-    /// machine-wide `ProgramData`, the install directory, or a bare reference).
-    pub fn is_user_data(&self) -> bool {
-        matches!(
-            self,
-            FootprintKind::RoamingAppData
-                | FootprintKind::LocalAppData
-                | FootprintKind::LocalLowAppData
-                | FootprintKind::Documents
-                | FootprintKind::SavedGames
-        )
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -741,7 +724,6 @@ pub enum DependencySourceCategory {
     Windows,
     CurrentDirectory,
     Path,
-    SideBySide,
     RuntimePrerequisite,
     Unresolved,
 }
@@ -775,7 +757,6 @@ pub struct ComRegistrationEntry {
 pub enum ComServerKind {
     InProcess,
     LocalServer,
-    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -812,7 +793,6 @@ pub enum RegistryValueKind {
 pub enum MatchConfidence {
     High,
     Medium,
-    Low,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -955,7 +935,6 @@ pub enum LicenseArtifactKind {
     FrameworkStore,
     RegistryValue,
     EnvironmentVariable,
-    HardwareDongle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -968,8 +947,6 @@ pub enum LicenseFramework {
     FileBased,
     RegistryBased,
     EnvironmentVariable,
-    HardwareDongle,
-    Unknown,
 }
 
 impl LicenseFramework {
@@ -982,8 +959,6 @@ impl LicenseFramework {
             LicenseFramework::FileBased => "File-based license",
             LicenseFramework::RegistryBased => "Registry-based license",
             LicenseFramework::EnvironmentVariable => "License environment variable",
-            LicenseFramework::HardwareDongle => "Hardware dongle",
-            LicenseFramework::Unknown => "Unknown licensing",
         }
     }
 }

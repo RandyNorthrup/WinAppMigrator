@@ -38,7 +38,6 @@ pub enum Icon {
     Error,
     Info,
     Drive,
-    Monitor,
     ChevronUp,
     ChevronDown,
     ChevronRight,
@@ -1229,16 +1228,6 @@ pub fn paint_icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color3
             );
             line(&[(0.14, 0.5), (0.5, 0.5)]);
             painter.circle_filled(at(0.8, 0.5), unit * 0.06, color);
-        }
-        Icon::Monitor => {
-            painter.rect_stroke(
-                Rect::from_min_max(at(0.0, 0.08), at(1.0, 0.72)),
-                2,
-                stroke,
-                StrokeKind::Inside,
-            );
-            line(&[(0.5, 0.72), (0.5, 0.92)]);
-            line(&[(0.26, 0.92), (0.74, 0.92)]);
         }
         Icon::ChevronUp => {
             line(&[(0.14, 0.66), (0.5, 0.3), (0.86, 0.66)]);

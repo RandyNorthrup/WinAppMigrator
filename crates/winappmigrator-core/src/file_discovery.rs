@@ -733,21 +733,6 @@ fn is_external_package_path(package_relative_path: &Path) -> bool {
         })
 }
 
-/// Map an archived user-data source path to its real location on the target
-/// machine, e.g. `C:\Users\alice\AppData\Roaming\App\x` →
-/// `%APPDATA%\App\x`. Returns `Ok(None)` when the path is not under a known
-/// user-data anchor or the target base cannot be resolved.
-pub fn user_data_real_destination(original_path: &Path) -> Result<Option<PathBuf>> {
-    let Some((anchor, tail)) = split_user_data_relative(original_path) else {
-        return Ok(None);
-    };
-    let Some(base) = user_data_base(anchor) else {
-        return Ok(None);
-    };
-    reject_reserved_device_names(&tail)?;
-    Ok(Some(base.join(&tail)))
-}
-
 /// Split a source path into its user-data anchor and the path relative to that
 /// anchor (sanitized for safe rejoining). Pure and OS-environment independent.
 pub fn split_user_data_relative(original_path: &Path) -> Option<(UserDataAnchor, PathBuf)> {
@@ -1574,7 +1559,6 @@ fn discover_tree(
             path: folder.clone(),
             original_path: folder.clone(),
             package_relative_path: Some(package_relative_path(&folder, install_root)),
-            suggested_destination_path: None,
             size_bytes: None,
             hash_sha256: None,
             classification,
@@ -1747,7 +1731,6 @@ fn add_file(
         path: path.to_path_buf(),
         original_path: path.to_path_buf(),
         package_relative_path,
-        suggested_destination_path: None,
         size_bytes: Some(metadata.len()),
         hash_sha256,
         classification,
@@ -2811,9 +2794,10 @@ mod tests {
         assert_eq!(anchor, UserDataAnchor::PublicProfile);
         assert_eq!(tail, PathBuf::from(r"Documents\YDIS_Data\Config.xml"));
 
-        let Ok(Some(destination)) = user_data_real_destination(path) else {
+        let Some(base) = user_data_base(anchor) else {
             panic!("public base should resolve to a destination");
         };
+        let destination = base.join(&tail);
         assert!(
             destination.ends_with(r"Documents\YDIS_Data\Config.xml"),
             "unexpected destination: {}",
@@ -3309,7 +3293,6 @@ mod tests {
                     .join(EXTERNAL_FILES_DIR)
                     .join("payload.bin"),
             ),
-            suggested_destination_path: None,
             size_bytes: Some(1),
             hash_sha256: None,
             classification: FileClassification::UserData,
@@ -3390,7 +3373,6 @@ mod tests {
             path: PathBuf::from(r"C:\Program Files\App\bin\app.exe"),
             original_path: PathBuf::from(r"C:\Program Files\App\bin\app.exe"),
             package_relative_path: Some(PathBuf::from(r"files\bin\app.exe")),
-            suggested_destination_path: None,
             size_bytes: Some(1),
             hash_sha256: None,
             classification: FileClassification::AppOwned,

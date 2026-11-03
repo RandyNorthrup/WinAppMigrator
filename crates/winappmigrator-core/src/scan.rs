@@ -41,7 +41,7 @@ use crate::registry_scan::{
     RegistryScanContext, context_product_names, recorded_keys_of_one_account,
     scan_registry_artifacts,
 };
-use crate::reporting::{artifact_paths, write_scan_reports};
+use crate::reporting::artifact_paths;
 use crate::restore_policy::architecture_from_name;
 use crate::runtime_detection::{AppRuntimes, ArchitectureKey, DotNetNeed, inspect_app_runtimes};
 use crate::secret_rules::{
@@ -149,12 +149,6 @@ fn read_program_needs_of(
         note(&file.path, &file.original_path, ProgramRole::Other);
     }
     needs
-}
-
-pub fn scan_and_write_reports(options: &ScanOptions) -> Result<ScanReport> {
-    let report = scan_app(options, &ScanMonitor::default())?;
-    write_scan_reports(&report, &options.output_dir)?;
-    Ok(report)
 }
 
 /// Find out everything about an app that a build goes by, and write nothing anywhere. It stops with
