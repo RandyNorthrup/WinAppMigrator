@@ -381,7 +381,7 @@ fn a_running_build_locks_the_selection() {
     assert!(harness.query_by_label("Cancel").is_some());
     assert!(
         harness
-            .query_by_label_contains("Reading and compressing files: 412 of 1284")
+            .query_by_label_contains("Reading and compressing files: 412 of 1,284")
             .is_some()
     );
     assert!(

@@ -296,7 +296,7 @@ impl UninstallApp {
                 ("Environment", summary.environment),
             ] {
                 if count > 0 {
-                    widgets::kv_row(ui, theme, label, &count.to_string());
+                    widgets::kv_row(ui, theme, label, &widgets::format_count(count));
                 }
             }
             ui.add_space(SPACE_SM);
@@ -384,7 +384,7 @@ fn plan_hint(summary: &InstallSummary) -> String {
     if summary.files_coming_back > 0 {
         hint.push_str(&format!(
             " {} files this install replaced come back.",
-            summary.files_coming_back
+            widgets::format_count(summary.files_coming_back)
         ));
     }
     if !summary.runtimes_left.is_empty() {
@@ -399,7 +399,11 @@ fn plan_hint(summary: &InstallSummary) -> String {
 fn step_label(step: Option<InstallStep>) -> (String, Option<f32>) {
     match step {
         Some(step) if step.total > 0 => (
-            format!("Undoing the install: {} of {}…", step.done, step.total),
+            format!(
+                "Undoing the install: {} of {}…",
+                widgets::format_count(step.done),
+                widgets::format_count(step.total)
+            ),
             step.fraction(),
         ),
         _ => ("Undoing the install…".to_owned(), None),
@@ -454,10 +458,14 @@ fn draw_outcome(
         ui,
         theme,
         &[
-            widgets::metric("Undone", report.undone.len().to_string(), Role::Accent),
+            widgets::metric(
+                "Undone",
+                widgets::format_count(report.undone.len()),
+                Role::Accent,
+            ),
             widgets::metric(
                 "Left in place",
-                report.kept.len().to_string(),
+                widgets::format_count(report.kept.len()),
                 if report.kept.is_empty() {
                     Role::Neutral
                 } else {
@@ -466,7 +474,7 @@ fn draw_outcome(
             ),
             widgets::metric(
                 "Could not be undone",
-                report.failed.len().to_string(),
+                widgets::format_count(report.failed.len()),
                 if report.failed.is_empty() {
                     Role::Success
                 } else {
@@ -486,7 +494,10 @@ fn draw_outcome(
                 widgets::hint(
                     ui,
                     theme,
-                    &format!("and {} more.", left.len() - MAX_LISTED_ITEMS),
+                    &format!(
+                        "and {} more.",
+                        widgets::format_count(left.len() - MAX_LISTED_ITEMS)
+                    ),
                 );
             }
         });
@@ -547,7 +558,7 @@ mod tests {
                 window.contains_rect(button),
                 "{name}: Uninstall is at {button:?}"
             );
-            preview(&mut harness, &format!("uninstall-on-{name}-dark"));
+            preview(&mut harness, &format!("on-{name}-dark"));
         }
     }
 

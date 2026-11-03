@@ -27,7 +27,11 @@ const MOST_IT_COULD_NEED_TEXT: &str = "The most it could need, before compressin
 const LONG_AGO: Duration = Duration::from_secs(10 * 60);
 
 fn plural(count: usize, one: &str, many: &str) -> String {
-    format!("{count} {}", if count == 1 { one } else { many })
+    format!(
+        "{} {}",
+        widgets::format_count(count),
+        if count == 1 { one } else { many }
+    )
 }
 
 fn scan_step_text(step: Option<ScanStep>) -> &'static str {
@@ -250,7 +254,11 @@ impl WinAppMigratorApp {
                 ui,
                 theme,
                 &[
-                    metric("Files", inputs.payload_files.to_string(), Role::Accent),
+                    metric(
+                        "Files",
+                        widgets::format_count(inputs.payload_files),
+                        Role::Accent,
+                    ),
                     metric("Up to", widgets::format_bytes(needed), Role::Accent),
                     metric(
                         free_label,
@@ -343,7 +351,11 @@ impl WinAppMigratorApp {
             .collect();
         let more = self.also.items.len().saturating_sub(names.len());
         let list = if more > 0 {
-            format!("{}, and {more} more", names.join(", "))
+            format!(
+                "{}, and {} more",
+                names.join(", "),
+                widgets::format_count(more)
+            )
         } else {
             names.join(", ")
         };
@@ -485,7 +497,7 @@ impl WinAppMigratorApp {
             .count();
         let summary = format!(
             "{} of {}, {}",
-            included,
+            widgets::format_count(included),
             plural(rows.len(), "folder", "folders"),
             widgets::format_bytes(bytes)
         );
@@ -547,7 +559,11 @@ impl WinAppMigratorApp {
                 !self.choices.is_left_out(&row.id) && self.why_also_left_out(&row.id).is_none()
             })
             .count();
-        let summary = format!("{included} of {}", rows.len());
+        let summary = format!(
+            "{} of {}",
+            widgets::format_count(included),
+            widgets::format_count(rows.len())
+        );
         if !self.group_heading(ui, theme, group, title, &summary) {
             return;
         }
@@ -689,7 +705,11 @@ impl WinAppMigratorApp {
                     && (!near.follows_user_data || self.backup_user_data)
             })
             .count();
-        let summary = format!("{ticked} of {} added", rows.len());
+        let summary = format!(
+            "{} of {} added",
+            widgets::format_count(ticked),
+            widgets::format_count(rows.len())
+        );
         if !self.group_heading(
             ui,
             theme,

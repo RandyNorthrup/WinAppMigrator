@@ -133,7 +133,10 @@ impl WinAppMigratorApp {
                 ui.add_space(SPACE_SM);
                 let (label, role) = match &self.inventory_state {
                     InventoryState::Loading => ("Loading".to_owned(), Role::Neutral),
-                    InventoryState::Loaded => (format!("{} apps", self.apps.len()), Role::Success),
+                    InventoryState::Loaded => (
+                        format!("{} apps", widgets::format_count(self.apps.len())),
+                        Role::Success,
+                    ),
                     InventoryState::Failed(_) => ("Load failed".to_owned(), Role::Danger),
                 };
                 widgets::status_pill(ui, theme, &label, role);
@@ -699,7 +702,11 @@ impl WinAppMigratorApp {
             ui,
             theme,
             &[
-                metric("Files", package.files_copied.to_string(), Role::Accent),
+                metric(
+                    "Files",
+                    widgets::format_count(package.files_copied),
+                    Role::Accent,
+                ),
                 metric(
                     "Installer size",
                     widgets::format_bytes(*installer_bytes),
@@ -707,7 +714,7 @@ impl WinAppMigratorApp {
                 ),
                 metric(
                     "Warnings",
-                    package.warnings.len().to_string(),
+                    widgets::format_count(package.warnings.len()),
                     if package.warnings.is_empty() {
                         Role::Neutral
                     } else {
@@ -928,9 +935,12 @@ pub(crate) fn warning_list(
     }
     ui.add_space(SPACE_SM);
     egui::CollapsingHeader::new(
-        RichText::new(format!("{title} ({})", warnings.len()))
-            .font(theme::semibold(13.0))
-            .color(theme.text),
+        RichText::new(format!(
+            "{title} ({})",
+            widgets::format_count(warnings.len())
+        ))
+        .font(theme::semibold(13.0))
+        .color(theme.text),
     )
     .default_open(open)
     .show(ui, |ui| {
@@ -941,7 +951,10 @@ pub(crate) fn warning_list(
             widgets::hint(
                 ui,
                 theme,
-                &format!("and {} more.", warnings.len() - MAX_LISTED_WARNINGS),
+                &format!(
+                    "and {} more.",
+                    widgets::format_count(warnings.len() - MAX_LISTED_WARNINGS)
+                ),
             );
         }
     });
@@ -993,7 +1006,11 @@ fn progress_label(progress: Option<&BuildProgress>) -> (String, Option<f32>) {
             bytes_done,
             bytes_total,
         })) => (
-            format!("Reading and compressing files: {done} of {total}"),
+            format!(
+                "Reading and compressing files: {} of {}",
+                widgets::format_count(*done),
+                widgets::format_count(*total)
+            ),
             (*bytes_total > 0).then(|| *bytes_done as f32 / *bytes_total as f32),
         ),
         Some(BuildProgress::Build(BuildStep::WritingInstaller)) => {
@@ -1054,7 +1071,12 @@ fn app_row(
         (scope_label(&app.install_scope), theme.text_muted, false),
         (arch_label(&app.architecture), theme.text_muted, false),
     ];
-    for (cell, (text, color, strong)) in column_rects(rect).into_iter().zip(cells) {
+    let columns = column_rects(rect);
+    // All of it, if any of it was cut. It would otherwise only cover the rows below.
+    let name_font = theme::semibold(13.5);
+    let names_fit = widgets::text_fits(ui, &app.display_name, name_font, columns[0].width())
+        && widgets::text_fits(ui, publisher, theme::regular(13.0), columns[1].width());
+    for (cell, (text, color, strong)) in columns.into_iter().zip(cells) {
         let font = if strong {
             theme::semibold(13.5)
         } else {
@@ -1078,7 +1100,11 @@ fn app_row(
             egui::StrokeKind::Inside,
         );
     }
-    response.on_hover_text(app.display_name.as_str())
+    if names_fit {
+        response
+    } else {
+        response.on_hover_text(format!("{}\n{publisher}", app.display_name))
+    }
 }
 
 /// The cell rectangles of a table row, with a gutter between columns.

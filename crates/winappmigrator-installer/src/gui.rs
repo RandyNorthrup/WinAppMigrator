@@ -1062,7 +1062,7 @@ fn refused_ui(ui: &mut egui::Ui, theme: &Theme, refused: &[String]) {
             theme,
             &format!(
                 "and {} more were left out.",
-                refused.len() - MAX_LISTED_REFUSALS
+                widgets::format_count(refused.len() - MAX_LISTED_REFUSALS)
             ),
         );
     }
@@ -1093,7 +1093,11 @@ fn step_label(
 ) -> (String, Option<f32>) {
     let counted = |text: &str, step: &InstallStep| {
         if step.total > 0 {
-            format!("{text}: {} of {}…", step.done.min(step.total), step.total)
+            format!(
+                "{text}: {} of {}…",
+                widgets::format_count(step.done.min(step.total)),
+                widgets::format_count(step.total)
+            )
         } else {
             format!("{text}…")
         }
@@ -1200,7 +1204,7 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
                 match outcome.rollback.as_ref() {
                     Some(report) => metric(
                         "Changes put back",
-                        report.undone.len().to_string(),
+                        widgets::format_count(report.undone.len()),
                         Role::Accent,
                     ),
                     None => metric(
@@ -1209,13 +1213,13 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
                         } else {
                             "Changes planned"
                         },
-                        outcome.changes.len().to_string(),
+                        widgets::format_count(outcome.changes.len()),
                         Role::Accent,
                     ),
                 },
                 metric(
                     "Warnings",
-                    outcome.warnings.to_string(),
+                    widgets::format_count(outcome.warnings),
                     if outcome.warnings > 0 {
                         Role::Warning
                     } else {
@@ -1224,7 +1228,7 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
                 ),
                 metric(
                     "Errors",
-                    outcome.errors.to_string(),
+                    widgets::format_count(outcome.errors),
                     if outcome.errors > 0 {
                         Role::Danger
                     } else {
@@ -1281,9 +1285,12 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
         if !outcome.changes.is_empty() && outcome.rollback.is_none() {
             ui.add_space(SPACE_SM);
             egui::CollapsingHeader::new(
-                RichText::new(format!("Changes ({})", outcome.changes.len()))
-                    .font(theme::semibold(13.0))
-                    .color(theme.text),
+                RichText::new(format!(
+                    "Changes ({})",
+                    widgets::format_count(outcome.changes.len())
+                ))
+                .font(theme::semibold(13.0))
+                .color(theme.text),
             )
             .default_open(!outcome.applied)
             .show(ui, |ui| {
@@ -1294,7 +1301,10 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
                     widgets::hint(
                         ui,
                         theme,
-                        &format!("and {} more.", outcome.changes.len() - MAX_LISTED_CHANGES),
+                        &format!(
+                            "and {} more.",
+                            widgets::format_count(outcome.changes.len() - MAX_LISTED_CHANGES)
+                        ),
                     );
                 }
             });
@@ -1508,6 +1518,31 @@ mod tests {
         (911.0, 441.0, "1366x768-150"),
     ];
 
+    /// How many things on the screen say this, once whatever is under the pointer has had time to
+    /// offer something.
+    fn said_with_the_pointer_on_the_location(app: InstallerApp, path: &str) -> usize {
+        let mut harness = harness_for(app);
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .hover();
+        harness.run_steps(60);
+        harness.query_all_by_label_contains(path).count()
+    }
+
+    #[test]
+    fn the_location_is_only_offered_on_hover_when_some_of_it_cannot_be_seen() {
+        let path = r"C:\Program Files\Fabrikam Data Sync";
+        assert_eq!(
+            said_with_the_pointer_on_the_location(sample_installer(ThemeMode::Dark), path),
+            0
+        );
+
+        let mut long = sample_installer(ThemeMode::Dark);
+        let path = format!(r"C:\Program Files\{}", "Fabrikam Data Sync ".repeat(8));
+        long.target_root.clone_from(&path);
+        assert!(said_with_the_pointer_on_the_location(long, &path) > 0);
+    }
+
     #[test]
     fn on_a_small_screen_install_can_be_reached() {
         for (width, height, name) in WHAT_SMALL_SCREENS_LEAVE {
@@ -1519,7 +1554,7 @@ mod tests {
                 window.contains_rect(button),
                 "{name}: Install is at {button:?}"
             );
-            preview(&mut harness, &format!("installer-on-{name}-dark"));
+            preview(&mut harness, &format!("on-{name}-dark"));
         }
     }
 

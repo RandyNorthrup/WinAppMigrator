@@ -146,6 +146,16 @@ fn elided_galley(
     ui.painter().layout_job(job)
 }
 
+/// Whether a line of text fits in this much room, which is when there is no need to offer all of it
+/// when it is hovered over.
+pub fn text_fits(ui: &Ui, text: &str, font: FontId, width: f32) -> bool {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER)
+        .size()
+        .x
+        <= width
+}
+
 /// Paint one line of text left-aligned at `left`, centered vertically on `center_y`,
 /// cut with `…` at `max_width`.
 pub fn paint_elided(
@@ -687,6 +697,9 @@ pub fn option_row(
     response
 }
 
+/// Between a text field's edge and its text.
+const TEXT_FIELD_MARGIN_X: i8 = 10;
+
 /// How tall a row of a long list is. They are all the same, so that a list of any length can be
 /// scrolled with only the rows in view drawn.
 pub const LIST_ROW_HEIGHT: f32 = 44.0;
@@ -935,7 +948,7 @@ pub fn text_field(ui: &mut Ui, value: &mut String, hint: &str, width: f32) -> Re
             .hint_text(hint)
             .desired_width(width)
             .min_size(vec2(width, CONTROL_HEIGHT))
-            .margin(Margin::symmetric(10, 8)),
+            .margin(Margin::symmetric(TEXT_FIELD_MARGIN_X, 8)),
     )
 }
 
@@ -1007,6 +1020,7 @@ pub fn path_field(
     pick: impl FnOnce() -> Option<PathBuf>,
 ) {
     const BROWSE_WIDTH: f32 = 86.0;
+    const FIELD_MARGINS: f32 = 2.0 * TEXT_FIELD_MARGIN_X as f32;
     field_label(ui, theme, label);
     ui.add_space(SPACE_XS);
     control_row(ui, |ui| {
@@ -1014,7 +1028,9 @@ pub fn path_field(
         let current = value.clone();
         ui.add_enabled_ui(enabled, |ui| {
             let field = text_field(ui, value, hint, width);
-            if !current.is_empty() {
+            // Only when some of it cannot be seen. It would otherwise only cover what is below.
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            if !text_fits(ui, &current, font, width - FIELD_MARGINS) {
                 field.on_hover_text(current);
             }
         });
@@ -1236,6 +1252,19 @@ pub fn paint_icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color3
     }
 }
 
+/// Format a count for people: `1,380`.
+pub fn format_count(count: usize) -> String {
+    let digits = count.to_string();
+    let mut text = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            text.push(',');
+        }
+        text.push(digit);
+    }
+    text
+}
+
 /// Format a byte count for people.
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -1285,6 +1314,22 @@ mod tests {
         assert_eq!(format_elapsed(0), "00:00");
         assert_eq!(format_elapsed(65), "01:05");
         assert_eq!(format_elapsed(3661), "1:01:01");
+    }
+
+    #[test]
+    fn counts_are_grouped_by_thousands() {
+        for (count, text) in [
+            (0, "0"),
+            (7, "7"),
+            (999, "999"),
+            (1000, "1,000"),
+            (1380, "1,380"),
+            (53_504, "53,504"),
+            (100_000, "100,000"),
+            (1_234_567, "1,234,567"),
+        ] {
+            assert_eq!(format_count(count), text);
+        }
     }
 
     #[test]
