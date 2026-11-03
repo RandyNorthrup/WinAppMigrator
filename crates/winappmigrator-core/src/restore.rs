@@ -5138,8 +5138,7 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_file_that_replaced_another_stays_and_says_the_other_is_not_coming_back()
-    -> Result<()> {
+    fn a_changed_file_that_replaced_another_stays_and_the_other_goes_beside_it() -> Result<()> {
         let work = temp_folder()?;
         let target = work.path().join("target");
         write_file(&target.join("a.dat"), b"from before")?;
@@ -5149,12 +5148,18 @@ mod tests {
         let outcome = uninstall(&options, &id, false)?;
 
         assert_eq!(read_text(&target.join("a.dat"))?, "edited since");
+        assert_eq!(
+            read_text(&target.join("a.dat.before-install"))?,
+            "from before"
+        );
         assert!(
             outcome
                 .report
                 .kept
                 .join("\n")
-                .contains("not being put back")
+                .contains("a.dat.before-install"),
+            "{:?}",
+            outcome.report.kept
         );
         Ok(())
     }

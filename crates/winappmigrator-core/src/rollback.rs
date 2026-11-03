@@ -104,9 +104,11 @@ enum FileAction {
     Nothing,
     Delete,
     PutBackBackup,
-    /// It has changed since, so it is not this install's to remove.
+    /// It has changed since, so it is not this install's to remove. What it replaced, if it is
+    /// still kept, goes beside it.
     KeepChanged,
-    /// User data or a license, which stay unless someone asks.
+    /// User data or a license, which stay unless someone asks. What it replaced, if it is still
+    /// kept and it has changed since, goes beside it.
     KeepByRequest,
 }
 
@@ -128,10 +130,13 @@ fn file_action(mode: UndoMode, item: ItemKind, facts: &FileFacts) -> FileAction 
         }
     ) && matches!(item, ItemKind::UserData | ItemKind::License);
     if kept_by_request {
-        return if facts.exists {
-            FileAction::KeepByRequest
-        } else {
-            FileAction::Nothing
+        // What it replaced was someone's own, and nobody asked for that to go. It comes back unless
+        // what is there has been changed since, and then both stay.
+        return match (facts.exists, facts.has_backup) {
+            (false, false) => FileAction::Nothing,
+            (false, true) => FileAction::PutBackBackup,
+            (true, true) if facts.unchanged == Some(true) => FileAction::PutBackBackup,
+            (true, _) => FileAction::KeepByRequest,
         };
     }
     if facts.replaced && !facts.has_backup {
@@ -676,8 +681,11 @@ impl Undoer<'_> {
             }
         }
         let exists = fs::symlink_metadata(path).is_ok();
-        let wants_hash = exists && !matches!(self.mode, UndoMode::Rollback);
-        let unchanged = if wants_hash && !self.keeps(item) {
+        // What stays by request is only asked about if there is something for it to give way to.
+        let wants_hash = exists
+            && !matches!(self.mode, UndoMode::Rollback)
+            && (!self.keeps(item) || found_backup.is_some());
+        let unchanged = if wants_hash {
             match sha256.map(|expected| {
                 sha256_file(path).map(|actual| actual.eq_ignore_ascii_case(expected))
             }) {
@@ -708,15 +716,8 @@ impl Undoer<'_> {
         if matches!(action, FileAction::Delete | FileAction::PutBackBackup)
             && self.is_still_named(path)
         {
-            self.kept(format!(
-                "{} stays, because something that stays still uses it.{}",
-                path.display(),
-                if found_backup.is_some() {
-                    " The file it replaced is not being put back."
-                } else {
-                    ""
-                }
-            ));
+            let why = "because something that stays still uses it";
+            self.keep_with_what_it_replaced(root, path, found_backup.as_ref(), why);
             return;
         }
         match action {
@@ -764,29 +765,51 @@ impl Undoer<'_> {
                 }
             }
             FileAction::KeepChanged => {
-                let replaced = if found_backup.is_some() {
-                    " The file it replaced is not being put back."
-                } else {
-                    ""
-                };
-                self.kept(format!(
-                    "{} stays, because it has changed since it was installed.{replaced}",
-                    path.display()
-                ));
+                let why = "because it has changed since it was installed";
+                self.keep_with_what_it_replaced(root, path, found_backup.as_ref(), why);
             }
             FileAction::KeepByRequest => {
-                let replaced = if found_backup.is_some() {
-                    " The file it replaced is not being put back."
-                } else {
-                    ""
-                };
-                self.kept(format!(
-                    "{} stays, since it was not asked to be removed.{replaced}",
-                    path.display()
-                ));
+                let why = "since it was not asked to be removed";
+                self.keep_with_what_it_replaced(root, path, found_backup.as_ref(), why);
             }
         }
         drop(holds);
+    }
+
+    /// Leave a file where it is, and what it replaced beside it. What it replaced was someone's own,
+    /// and once this install's record goes there is no other copy of it.
+    fn keep_with_what_it_replaced(
+        &mut self,
+        root: &Path,
+        path: &Path,
+        replaced: Option<&Backup>,
+        why: &str,
+    ) {
+        let Some(replaced) = replaced else {
+            self.kept(format!("{} stays, {why}.", path.display()));
+            return;
+        };
+        let beside = free_name_beside(path);
+        let placed = self
+            .pin(root, path)
+            .map_err(WinAppMigratorError::InvalidInput)
+            .and_then(|pinned| {
+                let placed = put_back_backup(replaced, &beside);
+                drop(pinned);
+                placed
+            });
+        match placed {
+            Ok(()) => self.kept(format!(
+                "{} stays, {why}. The file it replaced is beside it, as {}.",
+                path.display(),
+                file_name_of(&beside)
+            )),
+            // This install's record stays while this is in it, so nothing is lost by stopping.
+            Err(error) => self.failed(format!(
+                "{} stays, {why}, and the file it replaced could not be put beside it: {error}.",
+                path.display()
+            )),
+        }
     }
 
     /// Open a hive for a change made during the install. An install writes to the hive of
@@ -1295,6 +1318,34 @@ fn value_label(hive: &RegistryHive, key: &str, name: &str) -> String {
         registry_hive_name(hive),
         if name.is_empty() { "(Default)" } else { name }
     )
+}
+
+/// What a file an install replaced is called when the file that replaced it stays.
+const REPLACED_FILE_SUFFIX: &str = "before-install";
+/// A folder with this many of them has more to say than a number could.
+const MOST_REPLACED_FILE_NAMES: u32 = 1000;
+
+/// A name beside `path` that nothing has yet, which says what the file is.
+fn free_name_beside(path: &Path) -> PathBuf {
+    let name = file_name_of(path);
+    let first = path.with_file_name(format!("{name}.{REPLACED_FILE_SUFFIX}"));
+    std::iter::once(first)
+        .chain(
+            (2..=MOST_REPLACED_FILE_NAMES).map(|number| {
+                path.with_file_name(format!("{name}.{REPLACED_FILE_SUFFIX}-{number}"))
+            }),
+        )
+        .find(|candidate| fs::symlink_metadata(candidate).is_err())
+        .unwrap_or_else(|| {
+            path.with_file_name(format!(
+                "{name}.{REPLACED_FILE_SUFFIX}-{MOST_REPLACED_FILE_NAMES}"
+            ))
+        })
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 /// Put a backup back at `path`, whatever is there now. Going through a rename means a link
@@ -1999,9 +2050,21 @@ mod tests {
                 file_action(KEEP, item, &facts(false, false, true, Some(true))),
                 FileAction::KeepByRequest
             );
+            // What it replaced comes back if it is as it was installed, and what the install put
+            // there goes, since it was only ever a copy of the package's.
             assert_eq!(
                 file_action(KEEP, item, &facts(true, true, true, Some(true))),
+                FileAction::PutBackBackup
+            );
+            // Changed since, it stays, and undo_file puts what it replaced beside it.
+            assert_eq!(
+                file_action(KEEP, item, &facts(true, true, true, Some(false))),
                 FileAction::KeepByRequest
+            );
+            // Gone, and what it replaced still comes back.
+            assert_eq!(
+                file_action(KEEP, item, &facts(true, true, false, None)),
+                FileAction::PutBackBackup
             );
             assert_eq!(
                 file_action(KEEP, item, &facts(false, false, false, None)),
@@ -2150,6 +2213,138 @@ mod tests {
         assert_eq!(report.drives_waited_for, [root]);
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert!(report.kept.join(" ").contains("not connected"));
+    }
+
+    /// A journal in a folder of its own with `backup 1` kept, and a file installed over it.
+    fn installed_over_a_file(work: &Path) -> Result<(ReadJournal, PathBuf, PathBuf, String)> {
+        let root = work.join("data");
+        let record = work.join("record");
+        let io_error = |path: &Path, error| WinAppMigratorError::io(path, error);
+        fs::create_dir_all(&root).map_err(|error| io_error(&root, error))?;
+        let backups = crate::journal::backup_path(&record, 1, "moved");
+        if let Some(parent) = backups.parent() {
+            fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+        }
+        fs::write(&backups, b"what was there before").map_err(|error| io_error(&backups, error))?;
+        let file = root.join("settings.ini");
+        fs::write(&file, b"what the package holds").map_err(|error| io_error(&file, error))?;
+        let hash = sha256_file(&file)?;
+        let mut journal = journal_with(
+            vec![Change::Root {
+                path: root.clone(),
+                real: real_path(&root).map_err(|error| io_error(&root, error))?,
+            }],
+            false,
+        );
+        journal.folder = record;
+        Ok((journal, root, file, hash))
+    }
+
+    fn read_text(path: &Path) -> Result<String> {
+        fs::read_to_string(path).map_err(|error| WinAppMigratorError::io(path, error))
+    }
+
+    /// As the review found it: a default uninstall kept the new file and deleted the record, and
+    /// with it the only copy of what a person had there.
+    #[test]
+    fn an_uninstall_that_keeps_data_gives_back_what_it_replaced() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let (journal, root, file, hash) = installed_over_a_file(work.path())?;
+        let changes = journal.settled_changes();
+        let mut undoer = undoer_for(&journal, &changes, KEEP);
+        undoer.undo_file(&file, &root, ItemKind::UserData, Some(1), Some(&hash), None);
+        assert!(
+            undoer.report.failed.is_empty(),
+            "{:?}",
+            undoer.report.failed
+        );
+        assert_eq!(read_text(&file)?, "what was there before");
+        assert!(!root.join("settings.ini.before-install").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_changed_since_stays_and_what_it_replaced_goes_beside_it() -> Result<()> {
+        for (item, mode) in [
+            (ItemKind::UserData, KEEP),
+            (ItemKind::Program, KEEP),
+            (ItemKind::License, REMOVE),
+        ] {
+            let work = tempfile::tempdir()
+                .map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+            let (journal, root, file, hash) = installed_over_a_file(work.path())?;
+            fs::write(&file, b"changed since")
+                .map_err(|error| WinAppMigratorError::io(&file, error))?;
+            let changes = journal.settled_changes();
+            let mut undoer = undoer_for(&journal, &changes, mode);
+            undoer.undo_file(&file, &root, item, Some(1), Some(&hash), None);
+            assert!(
+                undoer.report.failed.is_empty(),
+                "{:?}",
+                undoer.report.failed
+            );
+            assert_eq!(read_text(&file)?, "changed since");
+            assert_eq!(
+                read_text(&root.join("settings.ini.before-install"))?,
+                "what was there before"
+            );
+            assert!(
+                undoer
+                    .report
+                    .kept
+                    .join(" ")
+                    .contains("settings.ini.before-install"),
+                "{:?}",
+                undoer.report.kept
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn what_goes_beside_a_file_never_takes_the_place_of_something_there() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let (journal, root, file, hash) = installed_over_a_file(work.path())?;
+        fs::write(&file, b"changed since")
+            .map_err(|error| WinAppMigratorError::io(&file, error))?;
+        let taken = root.join("settings.ini.before-install");
+        fs::write(&taken, b"already here")
+            .map_err(|error| WinAppMigratorError::io(&taken, error))?;
+        let changes = journal.settled_changes();
+        let mut undoer = undoer_for(&journal, &changes, KEEP);
+        undoer.undo_file(&file, &root, ItemKind::UserData, Some(1), Some(&hash), None);
+        assert!(
+            undoer.report.failed.is_empty(),
+            "{:?}",
+            undoer.report.failed
+        );
+        assert_eq!(read_text(&taken)?, "already here");
+        assert_eq!(
+            read_text(&root.join("settings.ini.before-install-2"))?,
+            "what was there before"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_something_still_uses_stays_and_what_it_replaced_is_not_lost() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let (journal, root, file, hash) = installed_over_a_file(work.path())?;
+        let changes = journal.settled_changes();
+        let mut undoer = undoer_for(&journal, &changes, KEEP);
+        undoer
+            .kept_mentions
+            .push(format!("\"{}\" --changed", file.display()));
+        undoer.undo_file(&file, &root, ItemKind::Program, Some(1), Some(&hash), None);
+        assert_eq!(read_text(&file)?, "what the package holds");
+        assert_eq!(
+            read_text(&root.join("settings.ini.before-install"))?,
+            "what was there before"
+        );
+        Ok(())
     }
 
     /// Or it would be left set to run a file that has gone, from a folder someone may be able

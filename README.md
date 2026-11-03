@@ -187,8 +187,8 @@ Please read these before relying on it, especially on a one-way trip from a fail
 - **Whether an app can run on the other PC goes by what its programs say.** A package records each program's
   architecture and the oldest Windows its headers name. That is what Windows itself holds them to, and it does not
   say what else a program relies on, so an app built on a newer Windows may need what an older one does not have.
-- **What an uninstall leaves.** Files and settings that changed after the install stay, and it says which,
-  and in that case what they replaced does not come back.
+- **What an uninstall leaves.** Files and settings that changed after the install stay, and it says which. A
+  file one of those replaced goes beside it, as `name.before-install`, and is never lost.
   So do files you added, with the folders they are in, and user data and licenses unless you ask for them
   to go. A runtime it installed stays, because other programs may be using it, including when a failed
   install is rolled back. A service that ran as a custom account does not get its password back, because it

@@ -305,7 +305,8 @@ impl UninstallApp {
             widgets::section_gap(ui);
             let description = format!(
                 "{keepable} items of its settings, data, and license. They stay unless this is \
-                 on, and anything they replaced only comes back if it is."
+                 on. What they replaced comes back, or goes beside them if they have changed \
+                 since."
             );
             widgets::card_titled(ui, theme, "Options", None, |ui| {
                 widgets::option_row(
@@ -381,7 +382,8 @@ fn plan_hint(summary: &InstallSummary) -> String {
     let mut hint = "Files you added or changed stay, with the folders they are in.".to_owned();
     if summary.files_coming_back > 0 {
         hint.push_str(&format!(
-            " {} files this install replaced come back.",
+            " {} files this install replaced come back, or go beside a file that has changed \
+             since.",
             widgets::format_count(summary.files_coming_back)
         ));
     }

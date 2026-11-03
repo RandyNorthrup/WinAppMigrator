@@ -78,7 +78,8 @@ installer is about to trust, and an honest package reaching too far:
     was there. Outside the install location, without such a record, no program goes in a folder of a data location that
     was already there, new or replacing, with `--force` or not, and that goes for a license store's files too. That is by
     kind of file, with what a program is told to load by, such as `.exe.config`, among them. A data file there is replaced,
-    by the window as well, since restoring a person's data is what that is for, and it comes back on uninstall. A
+    by the window as well, since restoring a person's data is what that is for. On uninstall it comes back, or if the file
+    that replaced it has changed since, goes beside that as `name.before-install`, so an uninstall never loses it. A
     setting can decide what an app runs, so a package could use that to change what another app does, and that is not on
     the list.
 - **The rules do not make a package safe.** A package may still run its own files, as a service
