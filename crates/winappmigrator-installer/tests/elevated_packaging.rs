@@ -24,14 +24,17 @@ use std::time::{Duration, Instant};
 use winappmigrator_core::archive::create_zip_archive;
 use winappmigrator_core::hashing::sha256_file;
 use winappmigrator_core::path_utils::POWERSHELL_UTF8_OUTPUT;
-use winappmigrator_core::privilege::is_elevated;
+use winappmigrator_core::privilege::{
+    ensure_protected_folder, is_elevated, others_could_keep_a_folder_made_in,
+};
 use winappmigrator_core::restore_policy::{MACHINE_ARM64, MACHINE_X64, MACHINE_X86};
 use winappmigrator_core::{
-    AppArchitecture, BuildMonitor, BuildStep, EmbeddedPackage, InstallerStub, PackageManifest,
-    PackageOptions, ProgramNeed, ProgramRole, SourcePlatform, create_installer_with_data_file,
-    create_package, create_package_monitored, create_self_extracting_archive, data_file_beside,
-    read_embedded_manifest, verify_installer,
+    AppArchitecture, BuildMonitor, BuildStep, EmbeddedPackage, InstallMonitor, InstallerStub,
+    PackageManifest, PackageOptions, ProgramNeed, ProgramRole, SourcePlatform,
+    create_installer_with_data_file, create_package, create_package_monitored,
+    create_self_extracting_archive, data_file_beside, read_embedded_manifest, verify_installer,
 };
+use winappmigrator_installer::gui::install_as_the_window_does;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -596,6 +599,125 @@ fn a_signature_on_a_loader_covers_its_data_file() -> TestResult {
         "it says it carries no package",
         run.success && run.output.contains("carries no application"),
         &run.output,
+    );
+
+    checks.finish()
+}
+
+#[test]
+fn the_window_installs_what_it_checked_from_where_nobody_else_can_get_in() -> TestResult {
+    if !may_change_this_machine()? {
+        return Ok(());
+    }
+    let mut checks = Checks::default();
+    let package = hand_built_package("WAM Window Route", &[("payload.bin", b"from the package")])?;
+    let installer = package.one_file("window route")?;
+    let staging_root = Path::new(r"C:\ProgramData\WinAppMigrator\staging");
+    let staged = Arc::new(AtomicBool::new(false));
+
+    section("Where a package is unpacked");
+    let seen = Arc::clone(&staged);
+    let monitor = InstallMonitor::new(move |_step| {
+        if fs::read_dir(staging_root).is_ok_and(|mut entries| entries.next().is_some()) {
+            seen.store(true, Ordering::SeqCst);
+        }
+    });
+    let target = Path::new(PROGRAM_FILES).join("WAM Window Route Installed");
+    let result = install_as_the_window_does(&installer, &target, true, (false, false), &monitor);
+    let result = result.map_err(|error| format!("the install failed: {error}"))?;
+    checks.that(
+        "the install succeeded",
+        result.errors.is_empty(),
+        format!("{:?}", result.errors),
+    );
+    checks.that(
+        "and it read back what it installed",
+        result
+            .verification
+            .as_ref()
+            .and_then(|report| report.restore_valid)
+            == Some(true),
+        format!("{:?}", result.verification.is_some()),
+    );
+    checks.that(
+        "it was unpacked inside the folder only administrators can get into",
+        staged.load(Ordering::SeqCst),
+        staging_root.display(),
+    );
+    checks.that(
+        "and nothing of it is left there",
+        fs::read_dir(staging_root).is_ok_and(|mut entries| entries.next().is_none()),
+        staging_root.display(),
+    );
+    checks.same(
+        "Get-FileHash: the file installed is the file packaged",
+        file_hash(&target.join("payload.bin"))?,
+        file_hash(&package.program.with_file_name("payload.bin"))?,
+    );
+    let id = result.install_id.clone().ok_or("the install gave no id")?;
+    let run = uninstall_quietly(&id)?;
+    checks.that(
+        "it uninstalls",
+        run.success && !target.exists(),
+        &run.output,
+    );
+
+    section("A folder that is an account's own is not one to unpack in");
+    let profile = std::env::var("USERPROFILE")?;
+    checks.that(
+        "an account's own folder gives it what it takes to keep a new folder",
+        others_could_keep_a_folder_made_in(Path::new(&profile)),
+        &profile,
+    );
+    checks.that(
+        "Program Files does not",
+        !others_could_keep_a_folder_made_in(Path::new(PROGRAM_FILES)),
+        PROGRAM_FILES,
+    );
+    let per_user = Path::new(&profile).join(r"AppData\Local\Programs\WAM Window Route");
+    staged.store(false, Ordering::SeqCst);
+    let result = install_as_the_window_does(&installer, &per_user, false, (false, false), &monitor);
+    checks.that(
+        "a preview there works",
+        result.is_ok(),
+        format!("{:?}", result.err()),
+    );
+    checks.that(
+        "and unpacks where nobody else can get in as well",
+        staged.load(Ordering::SeqCst),
+        staging_root.display(),
+    );
+
+    section("A state folder someone got into first is not taken up");
+    let state = package.work.path().join("state");
+    ensure_protected_folder(&state)?;
+    ensure_protected_folder(&state)?;
+    checks.that(
+        "what this made itself is used again",
+        state.is_dir(),
+        state.display(),
+    );
+    let planted = state.join("planted.txt");
+    fs::write(&planted, b"x")?;
+    let given = Command::new("icacls")
+        .arg(&planted)
+        .args(["/setowner", "*S-1-5-32-545"])
+        .output()?;
+    checks.that(
+        "the file was given to Users",
+        given.status.success(),
+        String::from_utf8_lossy(&given.stdout),
+    );
+    let taken_up = ensure_protected_folder(&state);
+    checks.that(
+        "a later run will not take it up",
+        taken_up.is_err(),
+        format!("{taken_up:?}"),
+    );
+    checks.that(
+        "and says so",
+        format!("{taken_up:?}").contains("An administrator should check"),
+        format!("{taken_up:?}"),
     );
 
     checks.finish()

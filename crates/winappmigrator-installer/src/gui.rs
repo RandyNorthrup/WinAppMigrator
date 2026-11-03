@@ -531,6 +531,32 @@ impl InstallerApp {
 /// What an install would set up, by what it is asked to do with user data and with a license.
 type ChangesByChoice = std::collections::HashMap<(bool, bool), SystemChanges>;
 
+/// Install or preview just as the window's buttons do, for what checks this with no window. `Err` is
+/// what the window would have shown.
+pub fn install_as_the_window_does(
+    exe: &Path,
+    target_root: &Path,
+    apply: bool,
+    (restore_user_data, restore_license): (bool, bool),
+    monitor: &InstallMonitor,
+) -> std::result::Result<RestoreResult, String> {
+    let package = EmbeddedPackage::open(exe)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "it carries no package".to_owned())?;
+    let choices = RestoreChoices {
+        target_root: target_root.to_path_buf(),
+        apply,
+        restore_user_data,
+        restore_license,
+    };
+    match run_restore(exe, &package, choices, monitor) {
+        Msg::Done(result) => Ok(*result),
+        Msg::Failed(error) => Err(error),
+        Msg::Cancelled => Err("it was cancelled".to_owned()),
+        Msg::Progress(_) => Err("it stopped part way".to_owned()),
+    }
+}
+
 /// What the person chose in the window.
 struct RestoreChoices {
     target_root: PathBuf,
@@ -1753,6 +1779,86 @@ mod tests {
         );
         manifest.included_program_data = true;
         assert_eq!(keys(&changes_for_every_choice(&manifest)?).len(), 4);
+        Ok(())
+    }
+
+    /// An app and an installer of it, all real but for the stub being this test's own program, which
+    /// is never run. What the window does with it is what is being looked at.
+    fn real_installer_in(folder: &Path) -> Result<PathBuf> {
+        let io = |error| WinAppMigratorError::io("temp", error);
+        let this_program = std::env::current_exe().map_err(io)?;
+        let app = folder.join("app");
+        std::fs::create_dir_all(&app).map_err(io)?;
+        let program = app.join("fixture.exe");
+        std::fs::copy(&this_program, &program).map_err(io)?;
+        std::fs::write(app.join("data.txt"), b"hello").map_err(io)?;
+        let options = winappmigrator_core::PackageOptions {
+            create_self_extracting_archive: true,
+            self_extracting_stub: Some(winappmigrator_core::InstallerStub::File(this_program)),
+            installer_dir: Some(folder.join("out")),
+            include_user_data: false,
+            include_program_data: false,
+            ..winappmigrator_core::PackageOptions::for_executable(
+                &program,
+                folder.join("staging").join("App"),
+            )
+        };
+        winappmigrator_core::create_package(&options)?
+            .self_extracting_archive_path
+            .ok_or_else(|| WinAppMigratorError::InvalidInput("no installer was made".to_owned()))
+    }
+
+    fn run_until_done(harness: &mut Harness<'static, InstallerApp>) {
+        let finished = (0..3000).any(|_| {
+            harness.run_steps(1);
+            std::thread::sleep(Duration::from_millis(10));
+            let ctx = harness.ctx.clone();
+            harness.state_mut().poll(&ctx);
+            harness.state().phase == Phase::Done
+        });
+        assert!(finished, "the window never came back");
+    }
+
+    /// The window has a route of its own through staging, room, and unpacking, and everything else
+    /// goes by the one for scripts. Here a real package is loaded and worked as a person would, by
+    /// what is on the screen, into a folder that is only ever looked at. Installing for real changes
+    /// the PC, so that is left to elevated_packaging.rs on a runner, and here it gets as far as what
+    /// stops it without rights.
+    #[test]
+    fn a_person_who_clicks_through_a_real_installer_gets_what_it_says() -> Result<()> {
+        let work = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let installer = real_installer_in(work.path())?;
+        let target = work.path().join("target");
+
+        let mut app = InstallerApp::blank();
+        app.theme = Theme::new(ThemeMode::Dark);
+        let ctx = egui::Context::default();
+        let loaded = load_package(&installer);
+        assert!(matches!(loaded, Loaded::Ready(..)), "it did not load");
+        app.finish_load(loaded, &ctx);
+        assert!(matches!(app.screen, Screen::Ready));
+        app.target_root = target.display().to_string();
+        app.signature = SignatureState::Unsigned;
+
+        let mut harness = harness_for(app);
+        harness.run();
+        harness.get_by_label("Preview changes").click();
+        run_until_done(&mut harness);
+        let state = harness.state();
+        assert_eq!(state.error, None);
+        let outcome = state.outcome.as_ref();
+        assert!(outcome.is_some_and(|outcome| !outcome.applied));
+        assert!(!target.exists(), "a preview changed something");
+
+        if winappmigrator_core::privilege::is_elevated() {
+            return Ok(());
+        }
+        harness.run_steps(2);
+        harness.get_by_label("Install").click();
+        run_until_done(&mut harness);
+        let said = harness.state().error.clone().unwrap_or_default();
+        assert!(said.contains("administrator rights"), "{said}");
+        assert!(!target.exists());
         Ok(())
     }
 
