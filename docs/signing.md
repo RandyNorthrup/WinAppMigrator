@@ -118,6 +118,9 @@ name, so both executables also:
   registry rather than from an environment variable the user controls. winget is not a
   Windows tool. `PATH` only holds a shortcut to it in a folder the user can write to, so the
   installer asks Windows where its package is installed and checks that file's signature;
+- take nothing about how a window is drawn from the environment. wgpu would otherwise go by
+  `WGPU_DX12_AGILITY_SDK_PATH`, and have Direct3D run `D3D12Core.dll` from any folder the user names,
+  past the restriction above. `check-real-windows.ps1` plants a stand-in to show that it does not;
 - start PowerShell with a fixed list of environment variables, and its module path and tools from
   the Windows folder. It is a .NET program, and the user's environment could otherwise load a
   runtime or DLL into it, or replace the commands it runs;

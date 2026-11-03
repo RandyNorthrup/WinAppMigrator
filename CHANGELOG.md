@@ -4,6 +4,59 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **Nothing about how a window is drawn comes from the environment.** A program running as the account that started these could
+  set `WGPU_DX12_AGILITY_SDK_PATH` and its version, which elevating keeps, and Direct3D then ran `D3D12Core.dll` from that
+  folder with full rights, past the restriction of DLLs to System32. A check plants a stand-in and sees that none of it
+  runs, in the app, an installer and an uninstaller, on each kind of runner. Without this fix it ran on all of them.
+- **What an installer says it will do is what it does.** Its list was worked out as if user data were coming, and the install
+  then ran with the box as it was. A package could have the list say a file and what runs it were left out, and have them
+  accepted, with the file under the install location. Unticking the box did the same on an honest package. The list and the
+  install now go through one review with the same options, the list changes as the boxes do, and nothing is set up to run a
+  file from a data folder that is not going back to one.
+- **An installer connects to nothing a package names before anyone has agreed to it.** A package names where its app was,
+  and the window asked a share there how much room it had just by opening, which hands the far end the name and password
+  hash of whoever is looking. One check of how a path is written now decides this everywhere, and it knows `//host/share`,
+  `\\?\UNC\`, and `\??\UNC\`, which got past the checks of icons and working folders.
+- **More of what Windows acts on is refused, and what else a package writes is on the list.** Compatibility telemetry's command,
+  .NET's `InstallRoot`, accessibility tools, Control Panel items, Group Policy's startup scripts, `Internet Settings`, Office
+  test, WSMAN plugins, font drivers, PowerShell's execution policy, security notifications, and Internet Explorer extensions.
+  A list of refusals can never be complete, so values outside the app's own keys and what the list has words for now show as
+  one row, "N settings outside the app's own keys", marked for a second look. It can be left out in the app.
+- **A scheduled task says who it really runs as.** That was the first account named anywhere in its definition, including by
+  a trigger, so one running as an administrator could read as a guest's. It now goes by its principal, says when it asks
+  for the highest rights it can have, and marks that for a second look.
+- **An uninstall never loses what an install replaced.** A default uninstall kept a data file an install had put over
+  someone's own, said it had finished, and deleted the only copy of the original with the install's record. So did one for a
+  file changed since. What was replaced now comes back if the file over it is as it was installed, and otherwise goes
+  beside it as `name.before-install`. If that cannot be done, the record stays, with the original in it.
+- **Each file of a license store is held to the rule for where it lands.** Only the store's own folder was checked, so a store could
+  put a `.url` in the Startup folder, or a template where Word or Excel load them, which a license file could not.
+- **A package is unpacked where nobody else can have a hold on it.** It was unpacked beside where it was going and closed to
+  everyone a moment after the folder appeared. In an account's own folders, a program of that account could open it in that
+  moment, keep the right to change its permissions, and open it up again to replace what an install was about to read. It now
+  goes in the admin-only folder where installs keep their records whenever it can, anywhere else has to give nobody that
+  right, and if there is nowhere like that the install does not go ahead. What to do comes from the package held open since
+  it was checked, each file is hashed as it is copied into place, and a copy does not follow a link.
+- **Smaller routes the same review found are closed.** Without `--force`, a script is told the same as the window about a folder with
+  files and no install on record, including when nothing would be replaced, as a DLL added beside another app's programs is
+  loaded by them. Install looks at the folder again when clicked. A link anywhere on the way to the install location is
+  seen. A state folder someone got into first is not taken up by a later run. And rewriting a value has a real limit on what
+  it can cost: a package could make it take many seconds on load, before anyone had agreed to anything.
+- **What an install set to start by itself is started.** A service set to start automatically was only set up, so an app that
+  relies on one looked broken until the next restart. It now starts once what was installed has been read back, each after
+  what it needs. One that will not start is a warning and not a failed install, what starts only when asked stays stopped, and
+  the row for a service says so.
+- **An uninstaller says when its window cannot open.** It only printed to stderr, so Uninstall from Settings seemed to do nothing. It now
+  shows a dialog with the command that does the same without a window.
+- **Sizes read the same on every screen.** The installer said `356.0 GiB` where the app said `356.0 GB`, of the same number worked out the
+  same way. Screens say KB, MB, and GB, by 1024, as Windows Explorer does.
+- **A release is held to carrying the stub it was built from.** It only checked that the app was bigger than the stub, which it is
+  with no stub in it. The new check finds the stub's exact bytes in the app, on every push as well as in a release, and
+  it found an app holding the previous build's stub, of the same size, since `cargo build --workspace` builds the two side by
+  side. So the stub is built first, a release build fails with none to embed, and a release never takes one from beside it.
+- **The installer's window route is run for real.** Everything that installed went by the route for scripts. A test now works a real
+  package through the window, and an elevated one installs through it.
+
 - **Counts read as counts everywhere, and a tooltip only appears when it has something to add.** `1380` is `1,380`, on all three
   windows. The list of apps and the install location only offer all of a name or a path when some of it is cut.
 - **A package's reports say what its manifest says.** They were written before anything was copied, so a file that could not be

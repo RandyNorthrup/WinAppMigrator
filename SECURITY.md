@@ -30,7 +30,15 @@ installer is about to trust, and an honest package reaching too far:
   anything other than a file the package installs. It cannot install to a system folder or take
   over a service, task, or COM class already on the PC. Which installer runs for a runtime, and how,
   is compiled in, and the file must be signed by Microsoft. What is refused is listed. The lists are
-  of what is known to be dangerous, so a package can still do something they do not name.
+  of what is known to be dangerous, so a package can still do something they do not name. So values it
+  writes outside the app's own keys and the kinds on the list show as one row of their own, for a second
+  look. What counts as the app's own goes by what the package calls itself, and Windows' own keys never do.
+- **What it says it will do is what it does.** The list a person agrees to and the install go through one
+  review, with the same options, and a file from a data folder that is not going back to one can arrive
+  under the install location, but nothing is set up to run it. Who a scheduled task runs as is its principal,
+  and asking for the highest rights it can have is marked as high rights.
+- **Nothing a package names is connected to before anyone has agreed.** A share in a path, however it is
+  written, is told by how it is written, without going there.
 - **What ties an app into Windows has rules of its own,** in one place. What makes a class, interface, type
   library, AppID, event source, or ODBC driver or source unusable takes all of it, and a value refused for what it
   says by itself, such as an icon on a share, takes only that value:
@@ -74,8 +82,9 @@ installer is about to trust, and an honest package reaching too far:
   - **Replacing a file is limited, and is the exception to all of that.** In the install location, `--force` on a command
     line replaces a file of the same name, and an uninstall puts it back. If that file is a program another app's service
     runs, the next start of that service runs the package's, which no rule above sees. So only use `--force` for a folder
-    you know is this app's. The installer's window will not use a folder with files in it unless a record says an install
-    was there. Outside the install location, without such a record, no program goes in a folder of a data location that
+    you know is this app's. Without it, a command line is told what the installer's window is: a folder with files in it is
+    not used unless a record says an install was there, whether or not any would be replaced, and the window looks again
+    when Install is clicked. Outside the install location, without such a record, no program goes in a folder of a data location that
     was already there, new or replacing, with `--force` or not, and that goes for a license store's files too. That is by
     kind of file, with what a program is told to load by, such as `.exe.config`, among them. A data file there is replaced,
     by the window as well, since restoring a person's data is what that is for. On uninstall it comes back, or if the file

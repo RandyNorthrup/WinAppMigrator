@@ -281,7 +281,8 @@ and disrupts the desktop). Instead:
 - Nearly all of those tests give the window a scan or a build of its own. One,
   `a_person_who_picks_an_app_and_clicks_create_gets_an_installer`, has it do both for real, by clicking,
   as far as an installer on disk, because a build from the window once failed every time with all the rest
-  passing. Keep it that way.
+  passing. Keep it that way. `a_person_who_clicks_through_a_real_installer_gets_what_it_says` does the same for
+  the installer's window, with a real package, and `elevated_packaging.rs` installs through that route on a runner.
 - To see the result, set `WAM_UI_PREVIEW_DIR` and run the UI tests. The main states of the
   app, the installer, and the uninstaller are written there as PNGs:
 
