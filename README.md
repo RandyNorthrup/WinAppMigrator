@@ -378,8 +378,12 @@ An installer takes:
 - `--log <FILE>`: also write the log to this file, which must not exist yet.
 - `--help` and `--version`.
 
-An uninstaller takes `--uninstall <ID>`, with `--quiet` for no window, `--remove-user-data` to also remove user
-data and licenses, and with `--quiet`, `--log <FILE>`. It reads only the record in the fixed location.
+An uninstaller reads only the record in the fixed location, and takes:
+
+- `--uninstall <ID>`: which install to undo.
+- `--quiet`: no window.
+- `--remove-user-data`: also remove user data and licenses.
+- `--log <FILE>`: with `--quiet`, also write the log to this file, which must not exist yet.
 
 Both print what they did, their warnings and errors, and what they left out, and an installer says how much room it
 needs on each drive before it starts.
