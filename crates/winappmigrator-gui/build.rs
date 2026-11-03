@@ -19,10 +19,11 @@
 //!      2. the sibling `winappmigrator-installer(.exe)` already in the profile's
 //!         target directory.
 //!
-//!    If neither exists yet (a first-pass `cargo build`), nothing is embedded and
-//!    the app falls back to a sibling stub at runtime, so builds always succeed.
+//!    A debug build with neither (a first-pass `cargo build`) embeds nothing, and takes a
+//!    sibling stub at runtime. A release build with neither fails: an app without the stub
+//!    builds no installers, and a program beside it in Downloads should never be taken for one.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -96,24 +97,35 @@ fn stage_installer_stub() {
         .flatten()
         .find(|path| path.is_file());
 
-    match source.as_ref() {
-        Some(path) => {
-            if let Err(error) = std::fs::copy(path, &staged) {
-                println!(
-                    "cargo:warning=could not stage installer stub ({error}); the app will fall back to a sibling stub"
-                );
-                let _ = std::fs::write(&staged, []);
-            } else {
-                println!("cargo:rerun-if-changed={}", path.display());
-            }
+    println!("cargo:rerun-if-env-changed=WINAPPMIGRATOR_INSTALLER_STUB");
+    if let Some(path) = source.as_ref() {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    let problem = match source.as_ref() {
+        Some(path) => stage(path, &staged).err(),
+        None => Some(format!(
+            "there is no {}. Build it first: cargo build --release -p winappmigrator-installer",
+            stub_file_name()
+        )),
+    };
+    if let Some(problem) = problem {
+        if std::env::var("PROFILE").is_ok_and(|profile| profile == "release") {
+            println!("cargo:error=a release of the app has to carry its installer stub: {problem}");
+            std::process::exit(1);
         }
-        None => {
-            let _ = std::fs::write(&staged, []);
-        }
+        println!("cargo:warning=no installer stub is embedded in this build: {problem}");
+        let _ = std::fs::write(&staged, []);
     }
 
     println!("cargo:rustc-env=WAM_INSTALLER_STUB={}", staged.display());
-    println!("cargo:rerun-if-env-changed=WINAPPMIGRATOR_INSTALLER_STUB");
+}
+
+fn stage(stub: &Path, staged: &Path) -> Result<(), String> {
+    let bytes = std::fs::copy(stub, staged).map_err(|error| error.to_string())?;
+    if bytes == 0 {
+        return Err(format!("{} is empty", stub.display()));
+    }
+    Ok(())
 }
 
 fn stub_file_name() -> &'static str {

@@ -1391,11 +1391,20 @@ fn staging_base(installer_dir: &Path) -> &Path {
 /// runtime then falls back to a sibling stub file.
 const EMBEDDED_INSTALLER_STUB: &[u8] = include_bytes!(env!("WAM_INSTALLER_STUB"));
 
-/// Resolve the installer stub used to build a self-extracting installer.
-///
-/// WinAppMigrator is one portable executable, so the stub normally lives inside
-/// it. When the stub was not embedded (a bootstrap build), fall back to a sibling
-/// `winappmigrator-installer.exe`.
+// `build.rs` fails a release without one, and this makes sure of it.
+#[cfg(not(debug_assertions))]
+const _: () = assert!(!EMBEDDED_INSTALLER_STUB.is_empty());
+
+/// Resolve the installer stub used to build a self-extracting installer. WinAppMigrator is one
+/// portable executable, so the stub lives inside it.
+#[cfg(not(debug_assertions))]
+fn installer_stub() -> Option<InstallerStub> {
+    Some(InstallerStub::Embedded(EMBEDDED_INSTALLER_STUB))
+}
+
+/// A development build can come before the stub does, and takes the one built beside it. A
+/// release never looks there, as whatever is beside it in a Downloads folder could be anything.
+#[cfg(debug_assertions)]
 fn installer_stub() -> Option<InstallerStub> {
     if !EMBEDDED_INSTALLER_STUB.is_empty() {
         return Some(InstallerStub::Embedded(EMBEDDED_INSTALLER_STUB));

@@ -88,13 +88,10 @@ jobs:
           WINAPPMIGRATOR_INSTALLER_STUB: ${{ github.workspace }}\target\release\winappmigrator-installer.exe
         run: cargo build --locked --release -p winappmigrator-gui
 
-      # An app without the stub inside it would build no installers.
+      # An app without the stub inside it would build no installers. CI runs the same check.
       - name: Check the app embeds the stub
         shell: pwsh
-        run: |
-          $app = (Get-Item target/release/winappmigrator.exe).Length
-          $stub = (Get-Item target/release/winappmigrator-installer.exe).Length
-          if ($app -le $stub) { throw "The app ($app bytes) is not larger than the stub ($stub bytes), so the stub was not embedded." }
+        run: .github/scripts/check-stub-embedded.ps1 -App target/release/winappmigrator.exe -Stub target/release/winappmigrator-installer.exe
 
       # Code signing with Azure Artifact Signing, under the maintainer's verified
       # identity (CN=Randy Northrup). No password is stored anywhere: Azure accepts

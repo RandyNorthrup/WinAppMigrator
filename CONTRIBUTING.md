@@ -24,6 +24,7 @@ Issues and pull requests are welcome. For anything large, please open an issue f
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+cargo build --release -p winappmigrator-installer
 cargo build --workspace --release
 cargo audit
 cargo deny check

@@ -61,9 +61,19 @@ jobs:
         shell: pwsh
         run: cargo deny check
 
+      # The stub first, for the app to carry: a release of it will not build without one.
+      - name: Release build of the stub
+        shell: pwsh
+        run: cargo build --locked --release -p winappmigrator-installer
+
       - name: Release build
         shell: pwsh
         run: cargo build --locked --workspace --release
+
+      # What a release checks, here where it is run on every push.
+      - name: Check the app embeds the stub
+        shell: pwsh
+        run: .github/scripts/check-stub-embedded.ps1 -App target/release/winappmigrator.exe -Stub target/release/winappmigrator-installer.exe
 
       # What the job that opens it plants for it not to run. It only says that it ran.
       - name: Build a stand-in for planted code
