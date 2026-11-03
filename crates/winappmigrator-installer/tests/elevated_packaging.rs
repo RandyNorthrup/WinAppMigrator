@@ -829,7 +829,7 @@ fn what_an_account_says_of_windows_own_folders_is_not_gone_by() -> TestResult {
         ("APPDATA", files.as_path()),
         ("LOCALAPPDATA", files.as_path()),
     ];
-    let hostile_text = path_text(hostile.path());
+    let hostile_text = hostile.path().display().to_string();
     let package = hand_built_package(HOSTILE_APP, &[])?;
 
     section("Control: what is set reaches a program that goes by it");
@@ -842,7 +842,8 @@ fn what_an_account_says_of_windows_own_folders_is_not_gone_by() -> TestResult {
     println!("{control}");
     checks.that(
         "a plain child sees it",
-        control.contains(&path_text(&data)) && control.contains(&path_text(&temp)),
+        control.contains(&data.display().to_string())
+            && control.contains(&temp.display().to_string()),
         &control,
     );
 
@@ -885,7 +886,7 @@ fn what_an_account_says_of_windows_own_folders_is_not_gone_by() -> TestResult {
     section("A real install, in the same environment");
     let installer = package.one_file("hostile.exe")?;
     let target = tempfile::tempdir()?;
-    let target_text = path_text(&target.path().join("app"));
+    let target_text = target.path().join("app").display().to_string();
     let mut install = Command::new(&installer);
     install.args(["--apply", "--target-root", target_text.as_str()]);
     for (name, value) in environment {

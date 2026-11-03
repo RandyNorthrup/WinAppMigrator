@@ -475,6 +475,19 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         }
         refusal.is_none()
     });
+    // What it says is its own is taken as that. It is said, so that it can be seen.
+    if let Some(location) = install_location
+        .as_deref()
+        .filter(|location| near_look.holds_another_apps_folder(location))
+    {
+        folders_left_out.push(Warning::new(
+            "app_folder_holds_another_app",
+            WarningSeverity::Warning,
+            "Another app on this PC is on record as being inside this app's folder, and comes along \
+             with it, as all of that folder is taken.",
+            Some(location.display().to_string()),
+        ));
+    }
     extra_roots.append(&mut picks.roots);
     monitor.report(ScanStep::Files);
     let DiscoveredFiles {

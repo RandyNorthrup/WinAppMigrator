@@ -30,8 +30,8 @@ use crate::models::{
     Warning, WarningSeverity,
 };
 use crate::path_utils::{
-    DEEPEST_WALK, comparable_path, file_name_string, has_parent_step, path_is_within,
-    resolved_location, walk_asking,
+    DEEPEST_WALK, comparable_path, file_name_string, has_parent_step, path_is_strictly_inside,
+    path_is_within, resolved_location, walk_asking,
 };
 use crate::product_match::{MatchScope, NearName, ProductNames, is_generic_name};
 use crate::registry_scan::{RecordedRegistryKey, is_named_for_another_app};
@@ -584,6 +584,16 @@ impl NearMatchLook {
                 .any(|folder| path_is_within(folder, path))
         });
         holds_another_app.then_some(IS_ANOTHER_APPS)
+    }
+
+    /// Whether another app has on record that it is somewhere inside this folder.
+    pub(crate) fn holds_another_apps_folder(&self, path: &Path) -> bool {
+        self.others.iter().any(|other| {
+            other
+                .folders
+                .iter()
+                .any(|folder| path_is_strictly_inside(folder, path))
+        })
     }
 
     /// Whether a folder is somewhere inside what another app has on record as its own.
@@ -1160,7 +1170,9 @@ mod tests {
     #[test]
     fn a_folder_on_record_is_refused_for_what_it_holds_and_not_for_what_it_is_in() {
         let work = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let vendor = work.path().join("Vendor");
+        // A runner's temp folder is said with a short name, and this goes by what things are called.
+        let base = crate::path_utils::resolved_location(work.path());
+        let vendor = base.join("Vendor");
         let dist = vendor.join(r"Client\dist");
         std::fs::create_dir_all(&dist).unwrap_or_else(|error| panic!("{error}"));
         let system = SystemContext::live();
@@ -1177,7 +1189,7 @@ mod tests {
             "that folder is the other app's"
         );
         assert_eq!(
-            look.root_refusal(work.path(), false, &system),
+            look.root_refusal(&base, false, &system),
             Some(IS_ANOTHER_APPS),
             "and what holds it holds that"
         );

@@ -35,14 +35,10 @@ Translate([Security.Principal.SecurityIdentifier]).Value } }; \
      exit 0";
 /// What a tool may take from this process's environment, none of which can load code or say where
 /// Windows is. Where Windows and its folders are is set separately, from the registry.
-const TOOL_ENVIRONMENT: &[&str] = &[
-    "COMPUTERNAME",
-    "NUMBER_OF_PROCESSORS",
-    "OS",
-    "PROCESSOR_ARCHITECTURE",
-    "USERDOMAIN",
-    "USERNAME",
-];
+const TOOL_ENVIRONMENT: &[&str] = &["COMPUTERNAME", "USERDOMAIN", "USERNAME"];
+/// What this is built as, which is what a program it starts runs as, emulated or not. An installer
+/// picks what to install by this.
+const PROCESSOR_THIS_RUNS_AS: &str = "AMD64";
 /// Where an account's folders are, which a tool can go by. From what the registry says of that
 /// account when this is elevated, and otherwise, as nothing is at stake, as they were given.
 const ACCOUNT_FOLDER_VARIABLES: [&str; 5] = [
@@ -251,8 +247,13 @@ fn set_tool_environment(command: &mut Command) {
     command
         .env("TEMP", &windows_temp)
         .env("TMP", &windows_temp)
+        .env("OS", "Windows_NT")
+        .env("PROCESSOR_ARCHITECTURE", PROCESSOR_THIS_RUNS_AS)
         .env("PATHEXT", TOOL_EXTENSIONS)
         .env("PSModulePath", powershell_home.join("Modules"));
+    if let Ok(processors) = std::thread::available_parallelism() {
+        command.env("NUMBER_OF_PROCESSORS", processors.to_string());
+    }
     if let Ok(path) =
         std::env::join_paths([system32.clone(), system32.join("Wbem"), powershell_home])
     {

@@ -285,6 +285,8 @@ Write-Host "`n=== The app, as it is released"
 $opened = Open-And-Look $App 'The app' 'WinAppMigrator' 32 20 -HasToFit
 if ($opened) {
     Check-Mode 'The app' 'light'
+    # It starts its log in the background, which under emulation can take longer than all of this.
+    [void](Wait-Until { Latest-Log 'app' } 120)
     Ask-To-Close $opened 'The app' 0
     $log = Latest-Log 'app'
     if ($log) {

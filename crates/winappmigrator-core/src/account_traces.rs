@@ -20,6 +20,7 @@ use crate::models::{
 use crate::path_utils::{current_user_sid, is_person_sid, path_is_within, signed_in_user};
 use crate::restore_policy::ServiceAccount;
 use crate::secret_rules::LeftOut;
+use crate::shortcut_scan::folders_of_the_accounts_shortcuts;
 use crate::system_context::SystemContext;
 use crate::task_scan::{
     TaskThatNames, task_for_whoever_installs_it, without_what_names_an_account,
@@ -67,7 +68,7 @@ const NETWORK_PATH_START: &str = r"\\";
 const NOT_A_NETWORK_PATH: [&str; 2] = [r"\\?\", r"\\.\"];
 const MENTIONS_CODE: &str = "package_mentions_an_account";
 /// The shortest run of hex that can be a value's bytes, rather than a number.
-const SHORTEST_HEX_VALUE: usize = 8;
+const SHORTEST_HEX_VALUE: usize = 6;
 
 /// Who a scan was of and who is building, for what a package with none of an account's data has no
 /// reason to say. Only ever in memory: nothing here goes in a package.
@@ -180,6 +181,10 @@ impl AccountTraces {
             if let Some(name) = folder.file_name() {
                 traces.add_account(&name.to_string_lossy(), None, Some(&folder));
             }
+        }
+        // Where its own settings say its Desktop and Start Menu are, which can be anywhere.
+        for folder in folders_of_the_accounts_shortcuts(system) {
+            traces.add_folder(&system.logical_path(&folder));
         }
         if let Some(computer) = system.source_identity().computer_name {
             traces.add_computer(&computer);
@@ -483,9 +488,11 @@ pub(crate) fn what_a_package_still_says(
     };
     let mut said: BTreeMap<TraceKind, BTreeMap<String, usize>> = BTreeMap::new();
     for (kind, what) in traces.to_look_for() {
+        let mut in_the_manifest = false;
         for (field, value) in &fields {
             let count = count_mentions(value, kind, what);
             if count > 0 {
+                in_the_manifest = true;
                 *said
                     .entry(kind)
                     .or_default()
@@ -493,7 +500,7 @@ pub(crate) fn what_a_package_still_says(
                     .or_default() += count;
             }
         }
-        if said.contains_key(&kind) {
+        if in_the_manifest {
             continue;
         }
         for (name, bytes) in written {
@@ -566,6 +573,14 @@ fn names_a_place_of_an_account(
         while let Some(found) = lower[from..].find(&folder) {
             let at = from + found;
             from = at + folder.len();
+            // `D:\\Profiles\\AliceProject` is not Alice's.
+            let goes_on = lower[from..]
+                .chars()
+                .next()
+                .is_some_and(|next| !next.is_whitespace() && !"\\\"<>|;,".contains(next));
+            if goes_on {
+                continue;
+            }
             let path = lower[at..]
                 .split(['"', '<', '>', '|', ';', ','])
                 .next()
@@ -645,9 +660,13 @@ fn withhold_shortcuts(
             withheld += 1;
             return false;
         }
-        if let Some(location) = location_with_no_account(&shortcut.original_lnk_path) {
-            shortcut.original_lnk_path = location;
-        }
+        // Somewhere only this account's own settings say is its Desktop, which is nowhere on another
+        // PC, and a restore would have nowhere to put it.
+        let Some(location) = location_with_no_account(&shortcut.original_lnk_path) else {
+            withheld += 1;
+            return false;
+        };
+        shortcut.original_lnk_path = location;
         let keep = |path: &PathBuf| !is_in_an_accounts_folders(path, traces) || is_the_apps(path);
         shortcut.working_directory = shortcut.working_directory.take().filter(keep);
         shortcut.icon_path = shortcut.icon_path.take().filter(keep);
@@ -1114,6 +1133,27 @@ mod tests {
     }
 
     #[test]
+    fn a_shortcut_somewhere_only_its_account_calls_its_desktop_goes_with_that_account() {
+        let folders = [PathBuf::from(APP)];
+        let traces = AccountTraces {
+            profile_folders: vec![r"D:\PrivateDesk".to_owned()],
+            ..AccountTraces::default()
+        };
+        let mut shortcuts = vec![shortcut(r"D:\PrivateDesk\Acme.lnk", MAIN, None)];
+        let mut left_out = LeftOut::default();
+        withhold_shortcuts(
+            &mut shortcuts,
+            &folders,
+            Path::new(MAIN),
+            false,
+            &traces,
+            &mut left_out,
+        );
+        assert!(shortcuts.is_empty(), "{shortcuts:?}");
+        assert_eq!(left_out.settings.len(), 1);
+    }
+
+    #[test]
     fn running_again_says_nothing_again() {
         let folders = [PathBuf::from(APP)];
         let mut shortcuts = vec![
@@ -1230,6 +1270,26 @@ mod tests {
     #[test]
     fn a_last_look_goes_through_the_other_files_when_the_manifest_says_nothing() {
         let quiet = manifest_saying("nothing");
+        let in_both = AccountTraces {
+            account_names: vec!["alice".to_owned(), "bob".to_owned()],
+            ..AccountTraces::default()
+        };
+        let warnings = what_a_package_still_says(
+            &manifest_saying("by alice"),
+            &[("report.md".to_owned(), b"and by bob".to_vec())],
+            &in_both,
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].message.contains("report.md"), "{warnings:?}");
+        let three = AccountTraces {
+            computer_names: vec!["Bob".to_owned()],
+            ..AccountTraces::default()
+        };
+        assert_eq!(
+            what_a_package_still_says(&manifest_saying("426f62"), &[], &three).len(),
+            1,
+            "three letters, as a binary value holds them"
+        );
         let written = vec![(
             r"reports\warnings.md".to_owned(),
             "on OLD-LAPTOP"
@@ -1368,6 +1428,16 @@ mod tests {
             r"D:\Profiles\Alice\a.ini",
             &folders,
             &none
+        ));
+        assert!(!names_a_place_of_an_account(
+            r"D:\Profiles\AliceProject\a.ini",
+            &folders,
+            &elsewhere
+        ));
+        assert!(names_a_place_of_an_account(
+            r#""D:\Profiles\Alice" --x"#,
+            &folders,
+            &elsewhere
         ));
         assert!(names_a_place_of_an_account(
             r"D:\Profiles\Alice\a.ini",

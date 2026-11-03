@@ -42,6 +42,7 @@ const WINDOWS_OWN_AUTHORITIES: [&str; 5] = [
 const SIGNED_IN_LOGON_TYPE: &str = "InteractiveToken";
 const LOGON_TYPES_WITH_A_PASSWORD: [&str; 2] = ["Password", "InteractiveTokenOrPassword"];
 const SID_PREFIX: &str = "S-1-";
+const THIS_PC_AUTHORITY: &str = ".";
 
 /// The XML of a scheduled task on this PC, or `None` if there is no such task.
 pub(crate) fn live_task_xml(task_path: &str, task_name: &str) -> std::io::Result<Option<String>> {
@@ -304,11 +305,18 @@ fn names_a_person(account: &str) -> bool {
     {
         return is_person_sid(&account.to_ascii_uppercase());
     }
+    if is_system_account(account) {
+        return false;
+    }
     let (authority, name) = account.rsplit_once('\\').unwrap_or(("", account));
-    !WINDOWS_OWN_AUTHORITIES
+    if WINDOWS_OWN_AUTHORITIES
         .iter()
         .any(|known| known.eq_ignore_ascii_case(authority))
-        && !is_windows_own_account_name(name)
+    {
+        return false;
+    }
+    // `CORP\\Users` is called what `Users` is called, and is somewhere else's.
+    !(authority.is_empty() || authority == THIS_PC_AUTHORITY) || !is_windows_own_account_name(name)
 }
 
 /// Changes to a document, each by where it is, which leave the rest as it was read.
@@ -401,12 +409,22 @@ pub(crate) fn task_for_whoever_installs_it(xml: &str) -> Option<(String, bool)> 
             // Their group is nobody here, and every user here is more than it was. So it comes to the
             // one person it can be said to be, as an account would.
             "GroupId" if names_a_person(&node_text(element)) => {
-                edits.replace_with(
-                    element,
-                    &format!(
-                        "<UserId>{WHOEVER_INSTALLS_IT}</UserId><LogonType>{SIGNED_IN_LOGON_TYPE}</LogonType>"
-                    ),
-                );
+                let logon_type = element
+                    .parent_element()
+                    .into_iter()
+                    .flat_map(|principal| principal.children())
+                    .find(|child| child.tag_name().name() == "LogonType");
+                if let Some(logon_type) = logon_type {
+                    edits.set_text(logon_type, SIGNED_IN_LOGON_TYPE);
+                    edits.replace_with(element, &format!("<UserId>{WHOEVER_INSTALLS_IT}</UserId>"));
+                } else {
+                    edits.replace_with(
+                        element,
+                        &format!(
+                            "<UserId>{WHOEVER_INSTALLS_IT}</UserId><LogonType>{SIGNED_IN_LOGON_TYPE}</LogonType>"
+                        ),
+                    );
+                }
                 runs_as_a_person = true;
             }
             _ => {}
@@ -750,6 +768,34 @@ mod tests {
                 "{account}"
             );
         }
+    }
+
+    #[test]
+    fn a_name_like_windows_own_from_somewhere_else_is_somewhere_elses() {
+        for theirs in [r"CORP\Users", r"CORP\Administrators", "randy", r"PC\randy"] {
+            assert!(names_a_person(theirs), "{theirs}");
+        }
+        for its_own in [
+            "Users",
+            r".\Users",
+            r"PC\SYSTEM",
+            r"BUILTIN\Administrators",
+            r"NT AUTHORITY\NETWORK SERVICE",
+        ] {
+            assert!(!names_a_person(its_own), "{its_own}");
+        }
+    }
+
+    #[test]
+    fn a_group_with_a_logon_type_has_one_logon_type_afterward() {
+        let xml = r"<Task><Principals><Principal><GroupId>CORP\Finance</GroupId><LogonType>Group</LogonType></Principal></Principals></Task>";
+        let (kept, _) = task_for_whoever_installs_it(xml).unwrap_or_else(|| panic!("it parses"));
+        assert_eq!(kept.matches("<LogonType>").count(), 1, "{kept}");
+        assert!(
+            kept.contains("<LogonType>InteractiveToken</LogonType>"),
+            "{kept}"
+        );
+        assert!(kept.contains(WHOEVER_INSTALLS_IT), "{kept}");
     }
 
     #[test]

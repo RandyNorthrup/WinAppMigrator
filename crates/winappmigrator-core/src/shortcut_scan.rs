@@ -73,6 +73,29 @@ pub fn scan_shortcuts(
     (entries, warnings)
 }
 
+/// Where the account being scanned keeps shortcuts, by what its own settings say.
+pub(crate) fn folders_of_the_accounts_shortcuts(system: &SystemContext) -> Vec<PathBuf> {
+    let mut warnings = Vec::new();
+    let mut folders = Vec::new();
+    for user in system.user_hives() {
+        folders.extend(user_folder_of(
+            &user,
+            DESKTOP_VALUE,
+            DESKTOP_FALLBACK,
+            system,
+            &mut warnings,
+        ));
+        folders.extend(user_folder_of(
+            &user,
+            START_MENU_VALUE,
+            START_MENU_FALLBACK,
+            system,
+            &mut warnings,
+        ));
+    }
+    folders
+}
+
 /// Where the account being scanned, and everyone on the PC, keep shortcuts.
 fn shortcut_folders(system: &SystemContext, warnings: &mut Vec<Warning>) -> Vec<PathBuf> {
     let mut folders = Vec::new();

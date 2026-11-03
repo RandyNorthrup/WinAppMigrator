@@ -131,7 +131,9 @@ foreach ($round in $rounds) {
 
     Section "$($round.Name): what someone made of 7-Zip came as far as it could, and with no one's name"
     $task = Get-ScheduledTask -TaskPath $script:PersonalTaskPath -TaskName $script:PersonalTaskName -ErrorAction SilentlyContinue
-    Check 'the task that ran as someone came, to run as whoever installed it' ([bool]$task -and ($task.Principal.UserId -split '\\')[-1] -eq $env:USERNAME) "$($task.Principal.UserId)"
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $runsAs = if ($task) { try { ([Security.Principal.NTAccount]$task.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value } catch { "$($task.Principal.UserId): $($_.Exception.Message)" } }
+    Check 'the task that ran as someone came, to run as whoever installed it' ($runsAs -eq $me) "$runsAs, and this is $me"
     Check 'what it says of who wrote it did not' ([bool]$task -and -not $task.Author) "$($task.Author)"
     $program = Join-Path $roots['7zip'] '7zFM.exe'
     Check 'it runs 7-Zip where it is now' ([bool]$task -and @($task.Actions).Count -eq 1 -and $task.Actions[0].Execute.Trim('"') -eq $program) "$(@($task.Actions | ForEach-Object Execute) -join ', ')"
