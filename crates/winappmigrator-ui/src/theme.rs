@@ -57,11 +57,12 @@ impl ThemeMode {
         }
     }
 
-    /// Parse a tag written by [`ThemeMode::as_tag`]; anything else is `Dark`.
-    pub fn from_tag(tag: &str) -> Self {
+    /// Parse a tag written by [`ThemeMode::as_tag`]. Anything else says nothing was chosen.
+    pub fn from_tag(tag: &str) -> Option<Self> {
         match tag {
-            "light" => ThemeMode::Light,
-            _ => ThemeMode::Dark,
+            "dark" => Some(ThemeMode::Dark),
+            "light" => Some(ThemeMode::Light),
+            _ => None,
         }
     }
 }
@@ -447,14 +448,14 @@ mod tests {
     #[test]
     fn theme_mode_tag_round_trips() {
         for mode in [ThemeMode::Dark, ThemeMode::Light] {
-            assert!(ThemeMode::from_tag(mode.as_tag()) == mode);
+            assert!(ThemeMode::from_tag(mode.as_tag()) == Some(mode));
         }
     }
 
     #[test]
-    fn unknown_theme_tag_defaults_to_dark() {
-        assert!(ThemeMode::from_tag("nonsense") == ThemeMode::Dark);
-        assert!(ThemeMode::from_tag("") == ThemeMode::Dark);
+    fn a_tag_that_is_not_one_says_nothing_was_chosen() {
+        assert!(ThemeMode::from_tag("nonsense").is_none());
+        assert!(ThemeMode::from_tag("").is_none());
     }
 
     #[test]

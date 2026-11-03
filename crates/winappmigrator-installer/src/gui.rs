@@ -72,6 +72,7 @@ pub fn run() -> eframe::Result {
         Box::new(move |cc| {
             theme::install_fonts(&cc.egui_ctx, &system_root().join("Fonts"));
             let mut app = InstallerApp::blank();
+            (app.opening, app.theme) = Opening::on_this_account(WINDOW_SIZES);
             app.theme.apply(&cc.egui_ctx);
             app.start_load(&cc.egui_ctx);
             Ok(Box::new(app))

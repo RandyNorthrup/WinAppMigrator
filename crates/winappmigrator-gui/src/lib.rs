@@ -35,7 +35,7 @@ use winappmigrator_core::{
 };
 use winappmigrator_ui::theme::{self, Theme, ThemeMode};
 use winappmigrator_ui::widgets;
-use winappmigrator_ui::window::{Opening, WindowSizes};
+use winappmigrator_ui::window::{self, Opening, WindowSizes};
 
 use crate::worker::LatestWorker;
 
@@ -45,8 +45,6 @@ const WINDOW_SIZES: WindowSizes = WindowSizes {
 };
 const WINDOW_TITLE: &str = "WinAppMigrator";
 const STAGING_PREFIX: &str = ".winappmigrator-build-";
-const SETTINGS_DIR: &str = "WinAppMigrator";
-const THEME_FILE: &str = "theme.txt";
 /// How often to redraw while a worker runs, enough for smooth animation without
 /// spending a core on repainting during a long build.
 const BUSY_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
@@ -77,12 +75,9 @@ pub fn run() -> eframe::Result {
                 tracing::info!(%adapter, "graphics adapter");
             });
             theme::install_fonts(&cc.egui_ctx, &fonts_dir());
-            let saved = saved_theme_mode();
-            let mut app =
-                WinAppMigratorApp::new(cc.egui_ctx.clone(), saved.unwrap_or(ThemeMode::Dark));
-            if saved.is_none() {
-                app.opening = Opening::new(WINDOW_SIZES);
-            }
+            let (opening, theme) = Opening::on_this_account(WINDOW_SIZES);
+            let mut app = WinAppMigratorApp::new(cc.egui_ctx.clone(), theme.mode);
+            app.opening = opening;
             app.theme.apply(&cc.egui_ctx);
             // Remove a stub temp directory left behind by an older version.
             sweep_legacy_stub_temp_dirs();
@@ -94,28 +89,6 @@ pub fn run() -> eframe::Result {
 
 fn fonts_dir() -> PathBuf {
     system_root().join("Fonts")
-}
-
-fn theme_file() -> Option<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
-    Some(base.join(SETTINGS_DIR).join(THEME_FILE))
-}
-
-fn saved_theme_mode() -> Option<ThemeMode> {
-    let tag = std::fs::read_to_string(theme_file()?).ok()?;
-    Some(ThemeMode::from_tag(tag.trim()))
-}
-
-/// Remember the theme the user picked. Losing this is harmless, so a failure to
-/// write it is not worth interrupting them for.
-fn save_theme_mode(mode: ThemeMode) {
-    let Some(path) = theme_file() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, mode.as_tag());
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1137,7 +1110,7 @@ impl WinAppMigratorApp {
         let mode = self.theme.mode.toggled();
         self.theme = Theme::new(mode);
         self.theme.apply(&self.ctx);
-        save_theme_mode(mode);
+        window::remember_chosen_mode(mode);
     }
 }
 

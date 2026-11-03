@@ -13,13 +13,14 @@ All notable project changes are tracked here.
 - **Windows fit the screen they open on.** At 1024x768 the app hung off the right edge with its close button out of reach, and
   an installer ran under the taskbar. On a laptop at 125% or 150% scaling there is less room still. A window that would not
   fit now opens maximized, and can be made as small as the screen is. CI opens all three and has Windows check.
-- **An installer and an uninstaller are in the mode Windows is in, where they run.** An installer used to open in whatever mode
-  the app happened to be in on the PC it was built on, carried in the package, and the uninstaller took it from the installer.
-  So on one PC the app could be light and the installer dark. That is out of the package now. The app goes by the same rule,
-  ahead of which comes the mode you chose in it.
-- **A package only names the PC it came from with the User data option on.** Every package said what the PC was called, and
+- **All three windows go by one rule for light and dark, where they run.** An installer used to open in whatever mode the app
+  happened to be in on the PC it was built on, carried in the package, and the uninstaller took it from the installer. So on
+  one PC the app could be light and the installer dark. That is out of the package now. Each window is in the mode you chose in
+  the app, if you are on an account that has, or else the one Windows is in.
+- **A package only says what PC it came from with the User data option on.** Every package said what the PC was called, and
   the installer showed it, in a file meant to be handed to someone. An account's name already went by that option, and now
-  this does too. A real package is searched for the runner's name on every push.
+  this does too. A real package is searched for the runner's name on every push. An app can keep the name in its own files
+  and machine-wide settings, which go as they are.
 - **What an account keeps for an app now goes by the User data option.** An app's key under `HKEY_CURRENT_USER` is where it
   remembers things: 7-Zip the folders and archives it last opened, PuTTY the hosts it has been to and who as. An installer
   built with the option off used to carry all of that, because none of it is called what it is, so the rules for credentials

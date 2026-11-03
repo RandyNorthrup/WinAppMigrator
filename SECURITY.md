@@ -336,7 +336,9 @@ would not hand the PC to. Reading the list of what was left out tells you what w
 was not.
 
 With the User data option on, the package also records the name of the computer the app was on, and the name of that
-account's profile folder, and the installer shows them. With it off, it records neither.
+account's profile folder, and the installer shows them. With it off, it records neither. That is what the package says of
+where it came from. An app can keep that computer's name in its own files or machine-wide registry values, which go in
+as the app has them, and nothing looks for it there.
 
 ## How the executables protect themselves
 

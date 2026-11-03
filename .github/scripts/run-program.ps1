@@ -7,14 +7,19 @@ function Run-Program([string]$Program, [string[]]$Arguments, [double]$Minutes = 
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     $process = [Diagnostics.Process]::Start($info)
-    $out = $process.StandardOutput.ReadToEndAsync()
-    $err = $process.StandardError.ReadToEndAsync()
+    $out = [IO.MemoryStream]::new()
+    $err = [IO.MemoryStream]::new()
+    $copying = [Threading.Tasks.Task[]]@(
+        $process.StandardOutput.BaseStream.CopyToAsync($out),
+        $process.StandardError.BaseStream.CopyToAsync($err)
+    )
     $finished = $process.WaitForExit([int]($Minutes * 60000))
     if (-not $finished) { $process.Kill($true) }
     $process.WaitForExit()
-    # Something it left running can keep these open after it has gone, and has nothing to add to them.
-    $read = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($out, $err), 60000)
-    $said = $(if ($read) { $out.Result + $err.Result } else { '(something it started is still holding what it said)' })
+    # Something it left running can keep these open after it has gone, and all it said by then is here.
+    [void][Threading.Tasks.Task]::WaitAll($copying, 10000)
+    $encoding = [Console]::OutputEncoding
+    $said = $encoding.GetString($out.ToArray()) + $encoding.GetString($err.ToArray())
     if (-not $finished) {
         return [pscustomobject]@{ Code = -1; Output = "It was still running after $Minutes minutes, so it was stopped.`n$said" }
     }

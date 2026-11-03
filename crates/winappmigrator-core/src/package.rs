@@ -590,6 +590,22 @@ fn what_was_built(report: &ScanReport, manifest: &PackageManifest) -> ScanReport
     built
         .runtime_prerequisites
         .clone_from(&manifest.runtime_prerequisites);
+    // A location's figures were worked out by the scan, of what it hoped to copy.
+    let did_not_go = report
+        .file_inventory
+        .iter()
+        .zip(&manifest.file_inventory)
+        .filter(|(hoped, went)| hoped.should_copy && !went.should_copy);
+    for (file, _) in did_not_go {
+        for location in &mut built.footprint_locations {
+            if path_is_within(&file.original_path, &location.path) {
+                location.copyable_bytes = location
+                    .copyable_bytes
+                    .saturating_sub(file.size_bytes.unwrap_or(0));
+                location.included = location.copyable_bytes > 0;
+            }
+        }
+    }
     built
 }
 
@@ -2361,6 +2377,19 @@ mod tests {
 
         let manifest: PackageManifest = read_json(&result.manifest_path)?;
         let said: ScanReport = read_json(&result.reports_dir.join("scan_report.json"))?;
+        let hoped_for = report.footprint_locations[0].copyable_bytes;
+        let size_of_it = report
+            .file_inventory
+            .iter()
+            .find(|file| file.original_path == gone)
+            .and_then(|file| file.size_bytes)
+            .unwrap_or(0);
+        assert!(size_of_it > 0);
+        assert_eq!(
+            said.footprint_locations[0].copyable_bytes,
+            hoped_for - size_of_it,
+            "what a location is said to have copied goes by what it did"
+        );
         let is_going = |files: &[FileEntry]| {
             files
                 .iter()

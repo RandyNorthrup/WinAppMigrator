@@ -320,14 +320,20 @@ foreach ($case in @(
     }
 }
 
-Write-Host "`n=== What a person chose in the app goes ahead of what Windows is in"
+Write-Host "`n=== What a person chose in the app goes ahead of what Windows is in, in all three"
 $chosen = Join-Path $env:LOCALAPPDATA 'WinAppMigrator\theme.txt'
 New-Item -ItemType Directory -Force -Path (Split-Path $chosen) | Out-Null
 Set-Content -LiteralPath $chosen -Value 'light' -NoNewline
-$opened = Open-And-Look $App 'The app, chosen light with Windows dark' 'WinAppMigrator' 32 20
-if ($opened) {
-    Check-Mode 'The app, chosen light with Windows dark' 'light'
-    Ask-To-Close $opened 'The app, chosen light with Windows dark' 0
+foreach ($case in @(
+        @{ Program = $App; Name = 'The app, chosen light with Windows dark'; Title = 'WinAppMigrator'; Settle = 20; Colors = 32; Arguments = @() },
+        @{ Program = $installer; Name = 'The installer, chosen light with Windows dark'; Title = "Install $($expected.app.name)"; Settle = 15; Colors = 32; Arguments = @() },
+        @{ Program = $installer; Name = 'The uninstaller, chosen light with Windows dark'; Title = 'Uninstall'; Settle = 8; Colors = 8; Arguments = @('--uninstall', 'no-such-install') }
+    )) {
+    $opened = Open-And-Look $case.Program $case.Name $case.Title $case.Colors $case.Settle -Arguments $case.Arguments
+    if ($opened) {
+        Check-Mode $case.Name 'light'
+        Ask-To-Close $opened $case.Name 0
+    }
 }
 Remove-Item -LiteralPath $chosen
 Set-WindowsMode 'light'

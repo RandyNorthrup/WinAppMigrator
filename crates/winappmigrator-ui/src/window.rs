@@ -1,9 +1,11 @@
 //! How a window of these programs opens, the same for all of them: it fits the screen it is on, and
-//! until a person chooses a mode, it is in the one Windows is in.
+//! it is in the mode a person chose in the app, or else the one Windows is in.
 //!
 //! Neither can be known before there is a window, since that is who egui asks, and a window is only
 //! shown once its first frame is painted. So the first frame finds out, and what that changes is done
 //! before anything else can be drawn.
+
+use std::path::PathBuf;
 
 use eframe::egui::{self, Rect, Vec2, ViewportCommand, vec2};
 
@@ -14,8 +16,34 @@ use crate::widgets;
 const WINDOW_FRAME: Vec2 = vec2(16.0, 39.0);
 /// How much of a screen to leave for the taskbar, which can be on any edge. Windows 11's is this tall.
 const TASKBAR: f32 = 48.0;
-/// What a window is never made smaller than, whatever a screen says it has.
-const SMALLEST: Vec2 = vec2(480.0, 320.0);
+/// Below this, a window has no room for its own title bar, so it is no use asking for less.
+const SMALLEST: Vec2 = vec2(160.0, 100.0);
+const SETTINGS_DIR: &str = "WinAppMigrator";
+const MODE_FILE: &str = "theme.txt";
+
+fn file_of_the_chosen_mode() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
+    Some(base.join(SETTINGS_DIR).join(MODE_FILE))
+}
+
+/// The mode a person chose in the app, if they have, on this account. Only ever one of two words is
+/// taken from this, so it does not matter who could have written it.
+fn chosen_mode() -> Option<ThemeMode> {
+    let tag = std::fs::read_to_string(file_of_the_chosen_mode()?).ok()?;
+    ThemeMode::from_tag(tag.trim())
+}
+
+/// Remember the mode a person chose. Losing this is harmless, so a failure to write it is not worth
+/// interrupting them for.
+pub fn remember_chosen_mode(mode: ThemeMode) {
+    let Some(path) = file_of_the_chosen_mode() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, mode.as_tag());
+}
 
 /// How big a window would like to be, in points.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,7 +70,7 @@ impl WindowSizes {
     /// other than the main one starts cannot be told from here, so that only goes by a window that
     /// starts inside what would be the main one, and being wrong about it only means it is maximized.
     fn on_a_screen_of(self, screen: Vec2, placed_at: Option<Rect>) -> Option<Self> {
-        let room = (screen - WINDOW_FRAME - vec2(TASKBAR, TASKBAR)).max(SMALLEST);
+        let room = screen - WINDOW_FRAME - vec2(TASKBAR, TASKBAR);
         let too_big = self.opens_at.x > room.x || self.opens_at.y > room.y;
         let placed_off_it = placed_at.is_some_and(|placed| {
             let starts_on_it = placed.min.x >= 0.0
@@ -52,8 +80,8 @@ impl WindowSizes {
             starts_on_it && (placed.max.x > screen.x || placed.max.y > screen.y - TASKBAR)
         });
         (too_big || placed_off_it).then(|| Self {
-            opens_at: self.opens_at.min(room),
-            at_least: self.at_least.min(room),
+            opens_at: self.opens_at.min(room).max(SMALLEST),
+            at_least: self.at_least.min(room).max(SMALLEST),
         })
     }
 }
@@ -67,6 +95,14 @@ pub struct Opening {
 }
 
 impl Opening {
+    /// How a window opens on this account, with the theme to start it in.
+    pub fn on_this_account(sizes: WindowSizes) -> (Self, Theme) {
+        match chosen_mode() {
+            Some(mode) => (Self::in_a_chosen_mode(sizes), Theme::new(mode)),
+            None => (Self::new(sizes), Theme::new(ThemeMode::Dark)),
+        }
+    }
+
     /// A window in the mode Windows is in, until a person chooses.
     pub fn new(sizes: WindowSizes) -> Self {
         Self {
@@ -137,7 +173,9 @@ impl Opening {
 }
 
 /// In this order, since eframe shows a window just before it does what is asked of it in the first
-/// frame. Hidden again at once, it goes from nothing to its final place, with nothing in between to see.
+/// frame. Hidden again straight after being shown, there is as little to see of it before its final
+/// place as can be had without knowing the screen before there is a window. Nothing has measured how
+/// little that is, on a real screen.
 fn hide_fit_and_show(fitting: WindowSizes) -> [ViewportCommand; 5] {
     [
         ViewportCommand::Visible(false),
@@ -244,9 +282,22 @@ mod tests {
         }
     }
 
+    /// 1280x720 at 300%, where what is left is less than any of them would ask for.
     #[test]
-    fn a_screen_too_small_to_tell_about_still_leaves_a_window_to_use() {
-        let fitting = APP.on_a_screen_of(vec2(320.0, 200.0), None);
+    fn the_smallest_a_window_can_be_made_is_never_more_than_a_screen_has() {
+        let screen = vec2(426.7, 240.0);
+        let room = screen - WINDOW_FRAME - vec2(TASKBAR, TASKBAR);
+        for sizes in [APP, INSTALLER, UNINSTALLER] {
+            let Some(fitting) = sizes.on_a_screen_of(screen, None) else {
+                panic!("none of them fit");
+            };
+            assert!(fitting.at_least.x <= room.x && fitting.at_least.y <= room.y);
+        }
+    }
+
+    #[test]
+    fn a_screen_too_small_to_tell_about_still_asks_for_a_window_there_is_some_of() {
+        let fitting = APP.on_a_screen_of(vec2(100.0, 80.0), None);
         assert_eq!(fitting.map(|fitting| fitting.at_least), Some(SMALLEST));
     }
 
