@@ -417,7 +417,11 @@ fn the_first_time_it_takes_the_theme_windows_is_in_and_a_choice_stays() {
     assert_eq!(first.state().theme.mode, ThemeMode::Light);
     assert!(!first.state().follows_windows_theme);
 
-    let mut chosen = harness_with(ThemeMode::Dark, |_| {});
+    let mut chosen = harness_with(ThemeMode::Dark, |app| {
+        app.follows_windows_theme = true;
+        app.toggle_theme();
+        app.toggle_theme();
+    });
     chosen.input_mut().system_theme = Some(egui::Theme::Light);
     chosen.run_steps(2);
     assert_eq!(chosen.state().theme.mode, ThemeMode::Dark);

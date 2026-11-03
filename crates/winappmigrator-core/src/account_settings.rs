@@ -13,10 +13,12 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
+use crate::file_discovery::is_user_profile_path;
 use crate::models::{
     LicenseArtifact, LicenseArtifactKind, RegistryEntry, RegistryHive, RegistryValueKind, Warning,
 };
 use crate::path_utils::path_is_within;
+use crate::registry_scan::is_named_like_an_install_path;
 use crate::restore_policy::{
     default_apps_capabilities_of, is_where_windows_looks_for_an_app, key_is_within, normalized_key,
 };
@@ -32,6 +34,9 @@ const NOT_IN_A_PATH: &[char] = &['"', '*', '?', '<', '>', '|', ';', '\t', '\r', 
 /// How far below `Software` an app's own key is: `Software\7-Zip`, or `Software\Vendor\App`. A value
 /// further down is in something the app keeps, whose name can be what it was keeping.
 const MOST_KEYS_BELOW_SOFTWARE: usize = 2;
+/// One further down still counts if it is called what an installer calls where it installed, as it
+/// does for finding the app's key at all: `Software\Vendor\Products\App`.
+const MOST_KEYS_BELOW_SOFTWARE_FOR_AN_INSTALL_PATH: usize = 3;
 /// What says a key is an entry in Default apps' list of what an app can do, as it is by convention.
 const CAPABILITIES_KEY: &str = "capabilities";
 const REGISTRY_HIVE_PREFIX: &str = r"HKCU\";
@@ -64,9 +69,14 @@ fn says_where_the_app_is(
     let Some(data) = entry.value_data.as_deref() else {
         return false;
     };
-    if !is_in_the_apps_own_key(&entry.key_path)
-        || !entry.value_name.as_deref().is_some_and(is_a_plain_name)
-    {
+    let Some(name) = entry
+        .value_name
+        .as_deref()
+        .filter(|name| is_a_plain_name(name))
+    else {
+        return false;
+    };
+    if !is_in_the_apps_own_key(&entry.key_path, name) {
         return false;
     }
     let path = data.trim();
@@ -82,14 +92,20 @@ fn says_where_the_app_is(
             .any(|folder| path_is_within(Path::new(path), folder))
 }
 
-fn is_in_the_apps_own_key(key_path: &str) -> bool {
+fn is_in_the_apps_own_key(key_path: &str, value_name: &str) -> bool {
     let mut parts = key_path
         .split('\\')
         .filter(|part| !part.is_empty() && !part.eq_ignore_ascii_case(WOW6432_NODE));
-    parts
+    if !parts
         .next()
         .is_some_and(|first| first.eq_ignore_ascii_case(SOFTWARE))
-        && parts.count() <= MOST_KEYS_BELOW_SOFTWARE
+    {
+        return false;
+    }
+    let below = parts.count();
+    below <= MOST_KEYS_BELOW_SOFTWARE
+        || (below <= MOST_KEYS_BELOW_SOFTWARE_FOR_AN_INSTALL_PATH
+            && is_named_like_an_install_path(value_name))
 }
 
 /// What a setting is called, rather than a path, a host, or anything else a list goes by.
@@ -185,8 +201,8 @@ pub(crate) fn say_no_more_than_the_apps_key(warnings: &mut [Warning]) {
 }
 
 /// With both options off: nothing of a license is going, and all there is of one in an account's
-/// keys is said no further down than the app's. With the License option on, it has to say where a
-/// value goes.
+/// keys is said no further down than the app's, and of one in an account's folders, by what it is
+/// called. With the License option on, it has to say where one goes.
 pub(crate) fn say_no_more_of_licenses_than_the_apps_key(
     artifacts: &mut [LicenseArtifact],
     left_out: &mut LeftOut,
@@ -196,6 +212,16 @@ pub(crate) fn say_no_more_of_licenses_than_the_apps_key(
             .strip_prefix(REGISTRY_HIVE_PREFIX)
             .map(|key| format!("{REGISTRY_HIVE_PREFIX}{}", key_of_the_app(key)))
     };
+    let name_in_an_account = |path: &Path| -> Option<PathBuf> {
+        is_user_profile_path(path)
+            .then(|| path.file_name().map(PathBuf::from))
+            .flatten()
+    };
+    for artifact in artifacts.iter_mut() {
+        if let Some(name) = artifact.path.as_deref().and_then(name_in_an_account) {
+            artifact.path = Some(name);
+        }
+    }
     for artifact in artifacts
         .iter_mut()
         .filter(|artifact| artifact.kind == LicenseArtifactKind::RegistryValue)
@@ -212,6 +238,8 @@ pub(crate) fn say_no_more_of_licenses_than_the_apps_key(
     for item in &mut left_out.licenses {
         if let Some(said) = of_an_account(&item.name) {
             item.name = said;
+        } else if let Some(name) = name_in_an_account(Path::new(&item.name)) {
+            item.name = name.display().to_string();
         }
     }
 }
@@ -469,6 +497,7 @@ mod tests {
                 "PublicKeyFile",
             ),
             (r"Software\7-Zip\Recent\the-secret-host", "File"),
+            (r"Software\7-Zip\A\B\the-secret-host", "InstallDir"),
             (r"Software\7-Zip", r"C:\Users\alice\secret.7z"),
             (r"Software\7-Zip", "ssh-ed25519@22:the-secret-host"),
             (r"Control Panel\7-Zip", "Path"),
@@ -481,6 +510,8 @@ mod tests {
             (r"Software\7-Zip", "(Default)"),
             (r"Software\Igor Pavlov\7-Zip", "Install Dir"),
             (r"Software\WOW6432Node\Igor Pavlov\7-Zip", "install_dir"),
+            // One further down, only as what an installer calls that.
+            (r"Software\Igor Pavlov\Products\7-Zip", "InstallDir"),
         ] {
             let (kept, _) = after_taking(vec![text(key, name, IN_THE_FOLDER)]);
             assert_eq!(kept.len(), 1, "{key} {name}");
@@ -541,12 +572,28 @@ mod tests {
                     name: r"C:\Program Files\Acme\license.lic".to_owned(),
                     why: "the License option is off".to_owned(),
                 },
+                LeftOutItem {
+                    name: r"C:\Users\alice\AppData\Roaming\Acme\license.lic".to_owned(),
+                    why: "the License option is off".to_owned(),
+                },
             ],
             ..LeftOut::default()
         };
+        artifacts.push(LicenseArtifact {
+            kind: LicenseArtifactKind::File,
+            path: Some(PathBuf::from(
+                r"C:\Users\alice\AppData\Roaming\Acme\license.lic",
+            )),
+            registry_location: None,
+            detail: "License file detected: license.lic".to_owned(),
+            ..artifacts[0].clone()
+        });
         say_no_more_of_licenses_than_the_apps_key(&mut artifacts, &mut left_out);
         let said = format!("{artifacts:?} {:?}", left_out.licenses);
         assert!(!said.contains("the-secret-host"), "{said}");
+        assert!(!said.contains("alice"), "{said}");
+        assert_eq!(artifacts[1].path.as_deref(), Some(Path::new("license.lic")));
+        assert_eq!(left_out.licenses[2].name, "license.lic");
         assert_eq!(
             artifacts[0].registry_location.as_deref(),
             Some(r"HKCU\Software\Acme")

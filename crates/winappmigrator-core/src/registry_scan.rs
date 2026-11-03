@@ -948,10 +948,15 @@ fn capture_keys_recording_install_path(
     }
 }
 
+/// True for what an installer calls a value that says where it installed.
+pub(crate) fn is_named_like_an_install_path(value_name: &str) -> bool {
+    INSTALL_PATH_VALUE_NAMES.contains(&normalize_name_for_match(value_name).as_str())
+}
+
 /// True for a value named like an install path whose data is the install folder or a
 /// path inside it.
 fn value_records_install_path(value_name: &str, data: &str, install: &Path) -> bool {
-    if !INSTALL_PATH_VALUE_NAMES.contains(&normalize_name_for_match(value_name).as_str()) {
+    if !is_named_like_an_install_path(value_name) {
         return false;
     }
     // Usually a plain folder, with spaces and no quotes, but sometimes a command line.

@@ -46,6 +46,14 @@
       "installed_at": "C:\\Program Files\\Git LFS"
     }
   ],
+  "account_files": [
+    {
+      "app": "7zip",
+      "relative": "7-Zip\\WamMarkFileName7f3a.txt",
+      "content": "WamMarkFileContent7f3a",
+      "goes_with": "user_data"
+    }
+  ],
   "account_settings": [
     {
       "app": "7zip",

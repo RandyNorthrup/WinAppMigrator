@@ -43,14 +43,16 @@ public static class WamWindow {
 
     delegate bool EachWindow(IntPtr window, IntPtr unused);
     [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr window, EachWindow each, IntPtr unused);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr window, System.Text.StringBuilder text, int most);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr most, System.Text.StringBuilder text, uint flags, uint milliseconds, out IntPtr result);
 
-    // What the windows in this one say, which is what a plain message box's text is.
+    // What the windows in this one say, which is what a plain message box's text is. They are another
+    // program's, so this asks each with WM_GETTEXT, as GetWindowText would not answer for them.
     public static string TextIn(IntPtr window) {
         var all = new System.Text.StringBuilder();
         EnumChildWindows(window, (child, unused) => {
             var text = new System.Text.StringBuilder(4096);
-            GetWindowTextW(child, text, text.Capacity);
+            IntPtr got;
+            SendMessageTimeoutW(child, 0x000D, (IntPtr)text.Capacity, text, 2, 5000, out got);
             all.AppendLine(text.ToString());
             return true;
         }, IntPtr.Zero);

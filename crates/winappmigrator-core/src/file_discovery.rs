@@ -1907,7 +1907,7 @@ fn is_program_data_path(path: &Path) -> bool {
         .contains(r"\programdata")
 }
 
-fn is_user_profile_path(path: &Path) -> bool {
+pub(crate) fn is_user_profile_path(path: &Path) -> bool {
     path.to_string_lossy()
         .to_ascii_lowercase()
         .contains(r"\users\")

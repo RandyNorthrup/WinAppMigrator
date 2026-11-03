@@ -25,6 +25,7 @@ function Check([string]$Label, [bool]$Passed, [string]$Detail = '') {
 $list = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'real-apps.json') | ConvertFrom-Json
 $expected = Get-Content -Raw -LiteralPath (Join-Path $Folder 'expected.json') | ConvertFrom-Json
 $settings = @($list.account_settings | Where-Object { $_.goes_with -eq 'user_data' })
+$files = @($list.account_files | Where-Object { $_.goes_with -eq 'user_data' })
 
 Write-Host "`n=== Take the apps away, and what this account has of them"
 foreach ($app in @($list.apps | Where-Object { $_.id -in $expected.apps.id })) {
@@ -37,6 +38,10 @@ foreach ($key in 'Software\7-Zip', 'Software\SimonTatham') {
 }
 foreach ($setting in $settings) {
     Check "with it gone, it fails as it should: $($setting.key)\$($setting.name)" ([bool](AccountSetting-Problem $setting)) 'it is still there'
+}
+foreach ($file in $files) {
+    Remove-Item -LiteralPath (Split-Path -Parent (AccountFile-Path $file)) -Recurse -Force
+    Check "with it gone, it fails as it should: $($file.relative)" (-not (Test-Path -LiteralPath (AccountFile-Path $file))) 'it is still there'
 }
 
 $installs = @{}
@@ -54,6 +59,11 @@ Write-Host "`n=== Each value came to the account installing, as it was"
 foreach ($setting in $settings) {
     $problem = AccountSetting-Problem $setting
     Check "$($setting.key)\$($setting.name) ($($setting.kind))" (-not $problem) $problem
+}
+
+foreach ($file in $files) {
+    $path = AccountFile-Path $file
+    Check "$($file.relative) is in this account's folders, as it was" ((Test-Path -LiteralPath $path) -and (Get-Content -Raw -LiteralPath $path) -ceq $file.content) $path
 }
 
 foreach ($app in @($expected.apps)) {

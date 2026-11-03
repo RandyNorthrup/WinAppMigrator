@@ -27,7 +27,8 @@ use crate::models::{
 };
 use crate::packer::{PackItem, PackOutcome, PackedFile, Packer, SourceRules};
 use crate::path_utils::{
-    DEEPEST_WALK, hidden_command, is_on_a_local_disk, sanitize_filename, walk_asking,
+    DEEPEST_WALK, comparable_path, hidden_command, is_on_a_local_disk, path_is_within,
+    sanitize_filename, walk_asking,
 };
 use crate::prerequisites::PREREQUISITES_DIR;
 use crate::privilege::ProtectedFolder;
@@ -138,13 +139,11 @@ pub fn create_package_from_scan(
     let footprint = Footprint::of(report, flags)?;
     let chosen = apply_choices(report, &footprint, choices)?;
     monitor.checkpoint()?;
-    let had_data = report.file_inventory.iter().any(|file| {
-        file.should_copy
-            && matches!(
-                file.classification,
-                FileClassification::UserData | FileClassification::MachineAppData
-            )
-    });
+    let had_data = report
+        .file_inventory
+        .iter()
+        .chain(&report.empty_folders)
+        .any(|file| file.should_copy && is_data(&file.classification));
     // A package with no data left has nothing to ask about it, or to be named for.
     let keeps_data = chosen.has_user_data || chosen.has_program_data || !had_data;
     let adjusted = PackageOptions {
@@ -206,6 +205,46 @@ fn refuse_a_scan_whose_program_is_gone(report: &ScanReport) -> Result<()> {
     )))
 }
 
+fn is_data(classification: &FileClassification) -> bool {
+    matches!(
+        classification,
+        FileClassification::UserData | FileClassification::MachineAppData
+    )
+}
+
+/// What a package says of a scan. A scan looks at an app's data whichever way the options are, so that
+/// the screen can say what there is to bring. What that data is called, and whose folders it is in, is
+/// no business of another PC's when none of it is going there.
+fn without_data_that_is_not_going(report: &ScanReport) -> ScanReport {
+    let mut said = report.clone();
+    let is_staying = |file: &FileEntry| !file.should_copy && is_data(&file.classification);
+    let files_staying: HashSet<String> = said
+        .file_inventory
+        .iter()
+        .filter(|file| is_staying(file))
+        .map(|file| comparable_path(&file.original_path))
+        .collect();
+    said.file_inventory.retain(|file| !is_staying(file));
+    let folders_staying: Vec<PathBuf> = said
+        .footprint_locations
+        .iter()
+        .filter(|location| !location.included)
+        .map(|location| location.path.clone())
+        .collect();
+    said.footprint_locations
+        .retain(|location| location.included);
+    said.warnings.retain(|warning| {
+        warning.source.as_deref().is_none_or(|source| {
+            let source = Path::new(source);
+            !files_staying.contains(&comparable_path(source))
+                && !folders_staying
+                    .iter()
+                    .any(|folder| path_is_within(source, folder))
+        })
+    });
+    said
+}
+
 /// The package itself, from what a scan said. With an installer to build, an app's files go straight
 /// from where they are into the package: each is read once, and hashed and compressed from what that
 /// read returned. Only what has to be looked at or kept as a file is put in the staging folder first.
@@ -217,6 +256,8 @@ fn build_package(
     what_was_chosen: &WhatWasChosen,
     monitor: &BuildMonitor,
 ) -> Result<PackageResult> {
+    let what_it_says = without_data_that_is_not_going(report);
+    let report = &what_it_says;
     let reports_dir = options.output_dir.join(REPORTS_DIR);
     write_scan_reports(report, &reports_dir)?;
     let mut warnings = report.warnings.clone();
@@ -1970,6 +2011,74 @@ mod tests {
         include_program_data: false,
         include_license_data: false,
     };
+
+    #[test]
+    fn what_a_package_says_holds_nothing_of_data_that_is_not_going() -> Result<()> {
+        const THEIRS: &str = r"C:\Users\the-secret-account\AppData\Roaming\Acme";
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = PackageOptions {
+            create_self_extracting_archive: false,
+            ..installer_options(root.path(), &exe, &stub)
+        };
+        let mut report = scan_of(&options)?;
+        let staying = PathBuf::from(THEIRS).join("the-secret-host.conf");
+        report.file_inventory.push(FileEntry {
+            path: staying.clone(),
+            original_path: staying.clone(),
+            package_relative_path: None,
+            suggested_destination_path: None,
+            size_bytes: Some(1),
+            hash_sha256: None,
+            classification: FileClassification::UserData,
+            should_copy: false,
+            reason: "User data found but excluded by current scan options".to_owned(),
+            user_folder: None,
+        });
+        report
+            .footprint_locations
+            .push(crate::models::FootprintLocation {
+                path: PathBuf::from(THEIRS),
+                kind: crate::models::FootprintKind::RoamingAppData,
+                scope: crate::models::InstallScope::PerUser,
+                file_count: 1,
+                total_bytes: 1,
+                copyable_bytes: 0,
+                included: false,
+            });
+        report.warnings.push(Warning::new(
+            "cloud_placeholder_skipped",
+            WarningSeverity::Info,
+            "Online-only",
+            Some(staying.display().to_string()),
+        ));
+        report.warnings.push(Warning::new(
+            "another",
+            WarningSeverity::Info,
+            "this one stays",
+            Some(r"Software\Acme".to_owned()),
+        ));
+
+        let result = create_package_from_scan(
+            &options,
+            &report,
+            &FootprintChoices::default(),
+            &BuildMonitor::default(),
+        )?;
+
+        let manifest = fs::read_to_string(&result.manifest_path)
+            .map_err(|error| WinAppMigratorError::io(&result.manifest_path, error))?;
+        let reports = result.reports_dir.join("scan_report.json");
+        let said = fs::read_to_string(&reports)
+            .map_err(|error| WinAppMigratorError::io(&reports, error))?;
+        for what in [&manifest, &said] {
+            assert!(!what.contains("the-secret-account"), "{what}");
+            assert!(!what.contains("the-secret-host"), "{what}");
+            assert!(what.contains("this one stays"), "{what}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn a_scan_writes_nothing_and_a_build_from_it_does_not_scan_again() -> Result<()> {

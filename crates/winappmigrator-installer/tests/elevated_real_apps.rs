@@ -266,6 +266,22 @@ fn account_marks() -> TestResult<Vec<AccountMark>> {
         .as_array()
         .ok_or("real-apps.json lists no account settings")?;
     let mut marks = Vec::new();
+    for file in parsed["account_files"]
+        .as_array()
+        .ok_or("real-apps.json lists no account files")?
+    {
+        let name = text_of(file, "relative")?;
+        for text in [
+            name.find("WamMark").map_or(name, |start| &name[start..]),
+            text_of(file, "content")?,
+        ] {
+            marks.push(AccountMark {
+                app: text_of(file, "app")?.to_owned(),
+                text: text.to_owned(),
+                goes_with: text_of(file, "goes_with")?.to_owned(),
+            });
+        }
+    }
     for setting in settings {
         for field in ["marker", "key", "name"] {
             let text = text_of(setting, field)?;

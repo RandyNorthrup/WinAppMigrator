@@ -188,6 +188,11 @@ function Set-AccountSetting($Setting) {
     $key.Dispose()
 }
 
+# Where a file an account has for an app is, in this account's folders.
+function AccountFile-Path($File) {
+    return Join-Path ([Environment]::GetFolderPath('ApplicationData')) $File.relative
+}
+
 # What is wrong with the value as this account has it now, or nothing.
 function AccountSetting-Problem($Setting) {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($Setting.key)

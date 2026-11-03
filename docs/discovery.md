@@ -562,7 +562,7 @@ This cannot catch everything. See [SECURITY.md](../SECURITY.md#an-installer-can-
 
 - `ScanOptions.include_user_data` / `PackageOptions.include_user_data` — when false,
   genuine per-user data (Roaming/Local/LocalLow AppData, Documents, Saved Games) is
-  discovered and reported but not copied. Set from the app's "User data" option, which is
+  discovered and reported to the screen but not copied, and a package says nothing of it. Set from the app's "User data" option, which is
   off by default. `for_executable` and the serde default set it to `true`, for library
   callers.
 - `ScanOptions.include_program_data` / `PackageOptions.include_program_data` — controls
@@ -571,7 +571,8 @@ This cannot catch everything. See [SECURITY.md](../SECURITY.md#an-installer-can-
 - With `include_user_data` false, `account_settings.rs` also takes out of the captured registry what an account keeps for the
   app. It goes by where a value is: of `HKEY_CURRENT_USER`, what stays is what `is_where_windows_looks_for_an_app` knows, what an
   entry in Default apps points at if it is called `Capabilities`, and a plainly named text value in the app's own key, no more
-  than two below `Software`, whose whole data is a path in one of the app's folders. It runs after `license_scan`, so a license value goes by the
+  than two below `Software`, or three if it is called what an installer calls that, whose whole data is a path in one of the app's
+  folders. It runs after `license_scan`, so a license value goes by the
   License option either way, and before anything names what it finds, since a key's name can be what was being kept.
 - `ScanOptions.include_hashes` — SHA-256 of copyable files during a scan. It dominates scan
   time for large apps. Packaging leaves it off and hashes each file from what it reads into

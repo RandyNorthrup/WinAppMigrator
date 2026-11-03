@@ -42,10 +42,16 @@ public static class WamErrorMode {
 '@
 [WamErrorMode]::SetErrorMode(0x8001) | Out-Null
 
-# What a program does when it is asked only to say how it is used, with nothing listening, or how long
-# that took if it went on too long.
+# What a program does when it is asked only to say how it is used. A clean PC has none of the tools
+# this runner has on its PATH, several of which carry a copy of this runtime, so it starts as it would
+# there: with Windows' own folders to look in, and in one of those.
 function Exit-Code-Of([string]$Program, [string]$Arguments) {
-    $process = Start-Hidden $Program $Arguments
+    $info = [Diagnostics.ProcessStartInfo]::new($Program, $Arguments)
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.WorkingDirectory = $env:SystemRoot
+    $info.Environment['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot"
+    $process = [Diagnostics.Process]::Start($info)
     if (-not $process.WaitForExit(30000)) {
         $process.Kill()
         return 'it was still running after 30 seconds'
@@ -89,7 +95,9 @@ foreach ($entry in @(Uninstall-Entries 'Microsoft Visual C++')) {
     if ($entry.DisplayName -notmatch '(2015|2017|2019|2022).*(x64)') { continue }
     Write-Host "  $($entry.DisplayName): $($entry.Uninstall)"
     if ($entry.Uninstall -match '(?i)msiexec.*(\{[0-9a-f-]+\})') {
-        $process = Start-Process msiexec.exe -ArgumentList '/x', $Matches[1], '/qn', '/norestart' -PassThru
+        # Visual Studio depends on these here, and without this, Windows Installer says it has done
+        # as it was asked and leaves them.
+        $process = Start-Process msiexec.exe -ArgumentList '/x', $Matches[1], '/qn', '/norestart', 'IGNOREDEPENDENCIES=ALL' -PassThru
     } else {
         $command = Split-CommandLine $entry.Uninstall
         $process = Start-Process $command.Program -ArgumentList (@($command.Arguments) + '/quiet', '/norestart') -PassThru
@@ -97,8 +105,9 @@ foreach ($entry in @(Uninstall-Entries 'Microsoft Visual C++')) {
     if ($process.WaitForExit(300000)) {
         Write-Host "    it exited with $($process.ExitCode)"
     } else {
-        Write-Host '    it was still going after five minutes, and was stopped'
+        Check "$($entry.DisplayName)'s uninstaller finishes" $false 'it was still going after five minutes, and was stopped'
         $process.Kill()
+        $process.WaitForExit(30000) | Out-Null
     }
 }
 Runtime-State

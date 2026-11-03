@@ -318,12 +318,12 @@ impl<'a> ReviewedPackage<'a> {
             manifest
                 .empty_folders
                 .iter()
-                .take(MAX_EMPTY_FOLDERS)
                 .filter(|folder| {
                     self.map
                         .folder_destination_of(&folder.original_path)
                         .is_some()
-                }),
+                })
+                .take(MAX_EMPTY_FOLDERS),
         );
     }
 

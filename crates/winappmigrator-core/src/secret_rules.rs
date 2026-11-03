@@ -1003,7 +1003,9 @@ pub(crate) fn take_secrets_from_license_values(
     });
 }
 
-/// Take credential files out of what is to be copied, whichever of an app's folders they are in.
+/// Take credential files out of what is to be copied, whichever of an app's folders they are in. One
+/// that was not going anyway is nothing to tell anyone, and its path can name an account that has no
+/// other part in a package.
 pub(crate) fn take_secret_files(
     files: &mut Vec<FileEntry>,
     system: &SystemContext,
@@ -1011,7 +1013,7 @@ pub(crate) fn take_secret_files(
 ) {
     files.retain(|file| {
         let secret = is_secret_file(&file.original_path, || read_key_file(file, system));
-        if secret {
+        if secret && file.should_copy {
             left_out.secret(system.logical_path(&file.path).display().to_string());
         }
         !secret

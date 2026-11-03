@@ -12,6 +12,10 @@ All notable project changes are tracked here.
   rules for credentials still apply. The screen and the installer say how much was left out of which app's key, and no more
   than that, since a host can be what a key is called. A real 7-Zip and PuTTY show this on every push, with marks left in
   those keys that are searched for through the whole of a package, in every form a value is written in.
+- **A package says nothing of data that is not going in it.** A scan looks at an app's data whichever way the options are, so
+  the screen can say what there is to bring, and every file of that went on to be listed in the manifest and the report in
+  the package, by name, with the account's folders in its path. Now it is only on the screen. A credential among it is not named
+  either, and with the License option off too, a license in an account's folders is named by the file alone.
 - **An app's empty folders come along.** A package went by files, so a folder with nothing in it was not on the other PC,
   such as windows_exporter's `textfile_inputs`. It is made again now, by the same rules as a file going there, if the rest
   of what is around it is going, and it is listed for the installer to check. An uninstall takes it away if it is still

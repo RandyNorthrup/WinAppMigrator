@@ -49,6 +49,15 @@ foreach ($setting in @($list.account_settings | Where-Object { $_.app -in $apps.
     Write-Host "  HKCU\$($setting.key) : $($setting.name), $($setting.kind), goes with $($setting.goes_with)"
 }
 
+foreach ($file in @($list.account_files | Where-Object { $_.app -in $apps.id })) {
+    $path = AccountFile-Path $file
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    Set-Content -LiteralPath $path -Value $file.content -NoNewline
+    # Named for what it holds, so that it counts as a secret, and is nothing to name with this off.
+    Set-Content -LiteralPath (Join-Path (Split-Path -Parent $path) 'credentials.json') -Value '{}' -NoNewline
+    Write-Host "  in this account's folders: $($file.relative), goes with $($file.goes_with)"
+}
+
 Write-Host "`n=== What the publishers' own installers give, with no reboot"
 $baseline = [ordered]@{}
 foreach ($app in $apps) {
