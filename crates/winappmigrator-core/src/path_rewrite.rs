@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
-use crate::file_discovery::{data_location_of, restore_destination_for_entry};
+use crate::file_discovery::{MAX_EMPTY_FOLDERS, data_location_of, restore_destination_for_entry};
 use crate::models::PackageManifest;
 use crate::path_utils::{is_drive_root, path_is_within};
 use crate::restore_policy::data_location_refusal;
@@ -51,6 +51,10 @@ pub struct RestoreMap {
     /// Files whose destination is not allowed, and why. They are not in this map, so
     /// nothing can count on them being on the target.
     refused_files: Vec<(PathBuf, String)>,
+    /// Empty folders, by their folded source path. No file is at any of these, so what says a
+    /// program is there is not told that one is.
+    empty_folders: HashMap<String, PathBuf>,
+    refused_folders: Vec<(PathBuf, String)>,
 }
 
 impl RestoreMap {
@@ -82,6 +86,31 @@ impl RestoreMap {
             match refusal {
                 Some(reason) => map.refused_files.push((file.original_path.clone(), reason)),
                 None => map.add_file(&file.original_path, destination),
+            }
+        }
+        for folder in manifest
+            .empty_folders
+            .iter()
+            .filter(|folder| folder.should_copy && folder.package_relative_path.is_some())
+            .take(MAX_EMPTY_FOLDERS)
+        {
+            let destination =
+                restore_destination_for_entry(folder, target_root, restore_user_data)?;
+            let refusal = if path_is_within(&destination, target_root) {
+                None
+            } else {
+                data_location_of(folder).and_then(|(_, tail)| data_location_refusal(&tail))
+            };
+            match refusal {
+                Some(reason) => map
+                    .refused_folders
+                    .push((folder.original_path.clone(), reason)),
+                None => {
+                    // A value can say where this is, and what it says has to follow it.
+                    map.add_root(&folder.original_path, &destination);
+                    map.empty_folders
+                        .insert(folded_path(&folder.original_path), destination);
+                }
             }
         }
         // Files are stored relative to the install location, which can be above the
@@ -122,6 +151,13 @@ impl RestoreMap {
         self.files.get(&folded_path(source)).map(PathBuf::as_path)
     }
 
+    /// Where an empty folder goes on the target. `None` for one that is not going anywhere.
+    pub fn folder_destination_of(&self, source: &Path) -> Option<&Path> {
+        self.empty_folders
+            .get(&folded_path(source))
+            .map(PathBuf::as_path)
+    }
+
     /// True when `path` is exactly where a copied file lands on the target.
     pub fn is_restored_file(&self, path: &Path) -> bool {
         self.destinations.contains(&folded_path(path))
@@ -134,6 +170,11 @@ impl RestoreMap {
     /// Files left out because of where they would have gone, with why.
     pub fn refused_files(&self) -> &[(PathBuf, String)] {
         &self.refused_files
+    }
+
+    /// Empty folders left out because of where they would have gone, with why.
+    pub fn refused_folders(&self) -> &[(PathBuf, String)] {
+        &self.refused_folders
     }
 
     #[cfg(test)]
@@ -574,6 +615,8 @@ mod tests {
             license_registry_entries: Vec::new(),
             secrets_left_out: Vec::new(),
             licenses_left_out: Vec::new(),
+            settings_left_out: Vec::new(),
+            empty_folders: Vec::new(),
             firewall_rules_detected: Vec::new(),
             certificates_reported: Vec::new(),
             fonts_reported: Vec::new(),

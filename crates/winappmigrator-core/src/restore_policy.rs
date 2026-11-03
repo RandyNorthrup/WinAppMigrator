@@ -368,6 +368,7 @@ const REFUSED_CLASSES: &[&str] = &[
 /// Values that name a debugger for every .NET program.
 const NET_DEBUGGER_KEY: &str = r"software\microsoft\.netframework";
 const NET_DEBUGGER_VALUES: &[&str] = &["dbgmanageddebugger", "dbgjitdebuglaunchsetting"];
+const CLASSES_KEY: &str = r"software\classes";
 const CLASSES_PREFIX: &str = r"software\classes\";
 /// File types and protocols every program shares. An app can add a command to them, which
 /// is how "Git Bash Here" works, so long as the command runs the app's own file. Changing
@@ -692,7 +693,7 @@ const REFUSED_DOCUMENTS_FOLDERS: &[&str] = &[r"windowspowershell\", r"powershell
 
 /// A key path to compare against the rules: lowercase, single separators, and no
 /// `WOW6432Node`, which is the same key seen by a 32-bit program.
-fn normalized_key(key_path: &str) -> String {
+pub(crate) fn normalized_key(key_path: &str) -> String {
     key_path
         .split('\\')
         .filter(|part| !part.is_empty() && !part.eq_ignore_ascii_case("wow6432node"))
@@ -702,7 +703,7 @@ fn normalized_key(key_path: &str) -> String {
 }
 
 /// True when `key` is `parent` or inside it. Compared per component.
-fn key_is_within(key: &str, parent: &str) -> bool {
+pub(crate) fn key_is_within(key: &str, parent: &str) -> bool {
     key.strip_prefix(parent)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\'))
 }
@@ -728,6 +729,31 @@ pub fn is_autostart_entry(entry: &RegistryEntry) -> bool {
             .value_name
             .as_deref()
             .is_some_and(|name| name.eq_ignore_ascii_case(ACTIVE_SETUP_COMMAND))
+}
+
+/// What an entry in Default apps says its capabilities are under, by normalized key, if it is one.
+pub(crate) fn default_apps_capabilities_of(entry: &RegistryEntry) -> Option<String> {
+    (normalized_key(&entry.key_path) == REGISTERED_APPLICATIONS_KEY)
+        .then_some(entry.value_data.as_deref())
+        .flatten()
+        .map(normalized_key)
+}
+
+/// True for what Windows itself looks in to find an app, or to know what to do with one. What an
+/// app keeps for itself is anywhere else. It goes by the whole of a key, part by part, since
+/// `Explorer\RecentDocs` is just as near to these and is what someone did last.
+pub(crate) fn is_where_windows_looks_for_an_app(entry: &RegistryEntry) -> bool {
+    let key = normalized_key(&entry.key_path);
+    registration_of(entry).is_some()
+        || key_is_within(&key, CLASSES_KEY)
+        || key_is_within(&key, APP_PATHS_KEY)
+        || key_is_within(&key, UNINSTALL_KEY)
+        || key_is_within(&key, CLIENTS_KEY)
+        || key_is_within(&key, REGISTERED_APPLICATIONS_KEY)
+        || key_is_within(&key, ICON_OVERLAYS_KEY)
+        || AUTOSTART_KEYS
+            .iter()
+            .any(|parent| key_is_within(&key, parent))
 }
 
 /// True when a key is an app's own entry in Settings' list of installed apps.

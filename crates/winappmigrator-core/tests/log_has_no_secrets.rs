@@ -55,6 +55,7 @@ fn manifest_for(files: Vec<FileEntry>) -> PackageManifest {
         main_executable_path: Path::new(INSTALLED_FROM).join("acme.exe"),
         application_metadata: None,
         file_inventory: files,
+        empty_folders: Vec::new(),
         registry_keys_exported: vec![
             value(r"Software\Acme", "ApiKey", SECRET.to_owned()),
             // Refused, and the reason it is refused quotes what it would run.
@@ -103,6 +104,7 @@ fn manifest_for(files: Vec<FileEntry>) -> PackageManifest {
             why: "it looks like a credential".to_owned(),
         }],
         licenses_left_out: Vec::new(),
+        settings_left_out: Vec::new(),
         firewall_rules_detected: vec![FirewallRuleEntry {
             name: "Evil".to_owned(),
             description: Some(SECRET.to_owned()),

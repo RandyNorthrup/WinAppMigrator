@@ -27,7 +27,8 @@ const ROW_HEIGHT: f32 = 36.0;
 const COLUMN_GUTTER: f32 = 12.0;
 const COLUMN_FRACTIONS: [f32; 5] = [0.38, 0.25, 0.14, 0.13, 0.10];
 const LICENSE_OPTION_TEXT: &str = "May be tied to this PC and need reactivation on the new one.";
-const USER_DATA_OPTION_TEXT: &str = "Settings, Documents, Saved Games, and ProgramData.";
+const USER_DATA_OPTION_TEXT: &str =
+    "Settings and history, Documents, Saved Games, and ProgramData.";
 /// How many warnings to list before summarizing the rest.
 const MAX_LISTED_WARNINGS: usize = 200;
 /// How many accounts' names fit across the details panel, of a width anyone would have.

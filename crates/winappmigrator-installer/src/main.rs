@@ -48,7 +48,12 @@ fn main() -> ExitCode {
             rfd::MessageDialog::new()
                 .set_level(rfd::MessageLevel::Error)
                 .set_title("WinAppMigrator Installer")
-                .set_description(format!("The installer's window could not open: {error}"))
+                .set_description(format!(
+                    "The installer's window could not open: {error}\n\n{}\n\nIt can still install \
+                     without one: run this file from an administrator's command prompt with \
+                     --apply, and --target-root followed by a folder to choose where.",
+                    winappmigrator_ui::NEEDS_DIRECT3D_12_TEXT
+                ))
                 .show();
             ExitCode::FAILURE
         }

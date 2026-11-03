@@ -199,6 +199,9 @@ pub struct ScanReport {
     #[serde(default)]
     pub footprint_locations: Vec<FootprintLocation>,
     pub file_inventory: Vec<FileEntry>,
+    /// Folders of the app's with nothing in them, which go wherever a file there would.
+    #[serde(default)]
+    pub empty_folders: Vec<FileEntry>,
     pub dependencies: Vec<DependencyEntry>,
     pub app_local_dlls: Vec<FileEntry>,
     pub registry_entries: Vec<RegistryEntry>,
@@ -225,6 +228,10 @@ pub struct ScanReport {
     /// What was not captured because the License option is off. Names only.
     #[serde(default)]
     pub licenses_left_out: Vec<LeftOutItem>,
+    /// How much of what an account keeps for the app was not captured, because the User data option
+    /// is off, by the key of the app it was in. Nothing of what it was.
+    #[serde(default)]
+    pub settings_left_out: Vec<LeftOutItem>,
     /// The app's own rules in Windows Firewall.
     #[serde(default)]
     pub firewall_rules: Vec<FirewallRuleEntry>,
@@ -358,6 +365,10 @@ pub struct PackageManifest {
     pub main_executable_path: PathBuf,
     pub application_metadata: Option<InstalledApp>,
     pub file_inventory: Vec<FileEntry>,
+    /// Folders of the app's with nothing in them, which some programs count on finding. Nothing of
+    /// these is in the package but this.
+    #[serde(default)]
+    pub empty_folders: Vec<FileEntry>,
     pub registry_keys_exported: Vec<RegistryEntry>,
     #[serde(default)]
     pub com_registrations_detected: Vec<ComRegistrationEntry>,
@@ -383,6 +394,10 @@ pub struct PackageManifest {
     /// What is not in this package because the License option was off. Names only.
     #[serde(default)]
     pub licenses_left_out: Vec<LeftOutItem>,
+    /// How much of what an account keeps for the app is not in this package, because the User data
+    /// option was off, by the key of the app it was in. Nothing of what it was.
+    #[serde(default)]
+    pub settings_left_out: Vec<LeftOutItem>,
     /// The app's own rules in Windows Firewall, which go through their own rules on restore.
     #[serde(default)]
     pub firewall_rules_detected: Vec<FirewallRuleEntry>,

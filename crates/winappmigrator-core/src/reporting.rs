@@ -739,6 +739,8 @@ mod tests {
             license_registry_entries: Vec::new(),
             secrets_left_out: Vec::new(),
             licenses_left_out: Vec::new(),
+            settings_left_out: Vec::new(),
+            empty_folders: Vec::new(),
             firewall_rules: Vec::new(),
             certificates: Vec::new(),
             fonts_reported: Vec::new(),

@@ -149,7 +149,12 @@ const SECRET_FILE_NAMES: &[&str] = &[
     "key4.db",
     "local state",
     "login data",
+    "logins.csv",
     "logins.json",
+    "passwd.txt",
+    "password.txt",
+    "passwords.csv",
+    "passwords.txt",
     "secret.json",
     "secrets.json",
     "secrets.yaml",
@@ -159,12 +164,28 @@ const SECRET_FILE_NAMES: &[&str] = &[
     "wallet.dat",
     "web data",
 ];
-/// Extensions of what holds a private key or a store of passwords, whatever it is called.
-const SECRET_FILE_EXTENSIONS: &[&str] = &["jks", "kdb", "kdbx", "keystore", "p12", "pfx", "ppk"];
+/// What SQLite keeps beside a database as it writes, which holds what the database does. So
+/// `Login Data-journal` is as much a store of passwords as `Login Data` is.
+const DATABASE_SIDE_FILES: &[&str] = &["-journal", "-shm", "-wal"];
+/// Extensions of what holds a private key or a store of passwords, whatever it is called. A VPN's
+/// profile usually has its keys in it, and one that does not is nothing an app needs to start.
+const SECRET_FILE_EXTENSIONS: &[&str] = &[
+    "jks", "kdb", "kdbx", "keystore", "ovpn", "p12", "pfx", "ppk",
+];
 /// These can be public, and apps ship them that way: Git and Python each have a `cacert.pem` they
 /// cannot work without. So it takes finding a private key in one for it to count.
 const KEY_FILE_EXTENSIONS: &[&str] = &["key", "pem"];
+/// These are certificates, which are public, unless someone put the key in the same file. So one
+/// that cannot be read to tell goes in like any other file, unlike those above.
+const CERTIFICATE_FILE_EXTENSIONS: &[&str] = &["cer", "crt"];
+/// A key in binary rather than text, which has no marker to find. Only this kind of file: the same
+/// structure in a `.crt` or a `.der` is what a public certificate looks like.
+const BINARY_KEY_FILE_EXTENSION: &str = "key";
 const PRIVATE_KEY_MARKER: &[u8] = b"PRIVATE KEY-----";
+const DER_SEQUENCE: u8 = 0x30;
+/// In a DER length, this bit says the rest of the byte is how many bytes the length takes.
+const DER_LONG_LENGTH: u8 = 0x80;
+const DER_MOST_LENGTH_BYTES: usize = 4;
 /// A key file is nowhere near this, and one this size is not read whole for a marker.
 pub(crate) const MAX_KEY_FILE_BYTES: u64 = 1024 * 1024;
 const ENV_FILE_PREFIX: &str = ".env.";
@@ -407,15 +428,56 @@ fn name_from_key(key_path: &str) -> Option<&str> {
         .flatten()
 }
 
+/// Whether there is a private key in this, written out in text of either width.
+fn holds_a_private_key(bytes: &[u8]) -> bool {
+    let wide_at = |first_byte: usize| -> bool {
+        let every_other: Vec<u8> = bytes.iter().skip(first_byte).step_by(2).copied().collect();
+        every_other
+            .windows(PRIVATE_KEY_MARKER.len())
+            .any(|window| window == PRIVATE_KEY_MARKER)
+    };
+    bytes
+        .windows(PRIVATE_KEY_MARKER.len())
+        .any(|window| window == PRIVATE_KEY_MARKER)
+        || wide_at(0)
+        || wide_at(1)
+}
+
+/// Whether these bytes are exactly one DER structure, which is what a key in binary is: a sequence
+/// whose length says it ends where the file does. Any other file would have to happen to agree.
+fn is_one_der_structure(bytes: &[u8]) -> bool {
+    let (Some(&DER_SEQUENCE), Some(&first_length)) = (bytes.first(), bytes.get(1)) else {
+        return false;
+    };
+    if first_length & DER_LONG_LENGTH == 0 {
+        return usize::from(first_length) + 2 == bytes.len();
+    }
+    let length_bytes = usize::from(first_length & !DER_LONG_LENGTH);
+    if length_bytes == 0 || length_bytes > DER_MOST_LENGTH_BYTES {
+        return false;
+    }
+    let Some(length) = bytes.get(2..2 + length_bytes) else {
+        return false;
+    };
+    let length = length
+        .iter()
+        .fold(0_usize, |sum, byte| (sum << 8) | usize::from(*byte));
+    2 + length_bytes + length == bytes.len()
+}
+
 /// Whether a file's name says it holds credentials, or a private key. `read_start` gives what it
-/// holds, for a kind of file that can go either way. One of those that cannot be read to tell counts
+/// holds, for a kind of file that can go either way. A key file that cannot be read to tell counts
 /// as one, since a package is made with more rights than this has, and can read what this cannot.
 pub fn is_secret_file(path: &Path, read_start: impl FnOnce() -> Option<Vec<u8>>) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
     let name = name.to_ascii_lowercase();
-    if SECRET_FILE_NAMES.contains(&name.as_str()) {
+    let database = DATABASE_SIDE_FILES
+        .iter()
+        .find_map(|side| name.strip_suffix(side))
+        .unwrap_or(&name);
+    if SECRET_FILE_NAMES.contains(&database) {
         return true;
     }
     if let Some(kind) = name.strip_prefix(ENV_FILE_PREFIX) {
@@ -429,12 +491,14 @@ pub fn is_secret_file(path: &Path, read_start: impl FnOnce() -> Option<Vec<u8>>)
     if SECRET_FILE_EXTENSIONS.contains(&extension.as_str()) {
         return true;
     }
-    KEY_FILE_EXTENSIONS.contains(&extension.as_str())
-        && read_start().is_none_or(|bytes| {
-            bytes
-                .windows(PRIVATE_KEY_MARKER.len())
-                .any(|window| window == PRIVATE_KEY_MARKER)
-        })
+    if KEY_FILE_EXTENSIONS.contains(&extension.as_str()) {
+        return read_start().is_none_or(|bytes| {
+            holds_a_private_key(&bytes)
+                || (extension == BINARY_KEY_FILE_EXTENSION && is_one_der_structure(&bytes))
+        });
+    }
+    CERTIFICATE_FILE_EXTENSIONS.contains(&extension.as_str())
+        && read_start().is_some_and(|bytes| holds_a_private_key(&bytes))
 }
 
 /// A command line without what these rules take for a credential, with the name of each option
@@ -587,6 +651,7 @@ fn task_xml_without_arguments(
 pub(crate) struct LeftOut {
     pub secrets: Vec<LeftOutItem>,
     pub licenses: Vec<LeftOutItem>,
+    pub settings: Vec<LeftOutItem>,
 }
 
 impl LeftOut {
@@ -602,6 +667,16 @@ impl LeftOut {
             name,
             why: LEFT_OUT_REASON_LICENSE.to_owned(),
         });
+    }
+
+    /// How much of what an account keeps for an app went from a key, and never what it was.
+    pub(crate) fn setting(&mut self, key: String, values: usize) {
+        let why = if values == 1 {
+            "1 value, which only goes with the User data option".to_owned()
+        } else {
+            format!("{values} values, which only go with the User data option")
+        };
+        self.settings.push(LeftOutItem { name: key, why });
     }
 }
 
@@ -1194,6 +1269,13 @@ mod tests {
             r"C:\App\my.ppk",
             r"C:\Users\me\AppData\Local\Vendor\Browser\User Data\Default\Login Data",
             r"C:\App\logins.json",
+            r"C:\App\passwords.txt",
+            r"C:\App\Passwords.CSV",
+            r"C:\App\work.ovpn",
+            r"C:\Users\me\AppData\Local\Vendor\Browser\User Data\Default\Login Data-journal",
+            r"C:\Users\me\AppData\Local\Vendor\Browser\User Data\Default\Cookies-wal",
+            r"C:\Users\me\AppData\Local\Vendor\Browser\User Data\Default\Web Data-shm",
+            r"C:\App\key4.db-journal",
         ] {
             assert!(is_secret_file(Path::new(name), never_read), "{name}");
         }
@@ -1205,6 +1287,9 @@ mod tests {
             r"C:\App\app.exe",
             r"C:\App\settings.json",
             r"C:\App\credentials.txt",
+            r"C:\App\settings.db-journal",
+            r"C:\App\tokens.txt",
+            r"C:\App\passwords-policy.txt",
         ] {
             assert!(!is_secret_file(Path::new(name), never_read), "{name}");
         }
@@ -1223,6 +1308,82 @@ mod tests {
             is_secret_file(Path::new(r"C:\App\unread.pem"), || None),
             "what cannot be read to tell stays out"
         );
+    }
+
+    /// A short DER sequence, of the length given, with any bytes in it.
+    fn der(length_bytes: &[u8], body: usize) -> Vec<u8> {
+        let mut bytes = vec![0x30];
+        bytes.extend_from_slice(length_bytes);
+        bytes.resize(bytes.len() + body, 0x02);
+        bytes
+    }
+
+    #[test]
+    fn a_key_in_binary_is_known_by_its_shape_and_only_in_a_key_file() {
+        let key = der(&[0x82, 0x04, 0xBD], 0x04BD);
+        assert!(is_one_der_structure(&key));
+        assert!(is_one_der_structure(&der(&[0x81, 0x90], 0x90)));
+        assert!(is_one_der_structure(&der(&[0x20], 0x20)));
+        assert!(is_secret_file(Path::new(r"C:\App\server.key"), || Some(
+            key.clone()
+        )));
+        // The same shape is what a public certificate is.
+        assert!(!is_secret_file(Path::new(r"C:\App\server.crt"), || Some(
+            key.clone()
+        )));
+        assert!(!is_secret_file(Path::new(r"C:\App\cacert.pem"), || Some(
+            key.clone()
+        )));
+        for not_one in [
+            Vec::new(),
+            vec![0x30],
+            vec![0x30, 0x82, 0x04],
+            der(&[0x82, 0x04, 0xBD], 10),
+            der(&[0x80], 3),
+            der(&[0x85, 0, 0, 0, 0, 3], 3),
+            b"This key file is only a license: ABCD-1234\n".to_vec(),
+        ] {
+            assert!(!is_one_der_structure(&not_one), "{not_one:?}");
+            assert!(
+                !is_secret_file(Path::new(r"C:\App\license.key"), || Some(not_one.clone())),
+                "{not_one:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_in_text_is_found_in_either_width_and_in_a_certificate_too() {
+        let text = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n";
+        let little: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        let big: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        for bytes in [text.as_bytes().to_vec(), little, big] {
+            for name in [
+                r"C:\App\server.pem",
+                r"C:\App\server.key",
+                r"C:\App\server.crt",
+                r"C:\App\server.cer",
+            ] {
+                assert!(
+                    is_secret_file(Path::new(name), || Some(bytes.clone())),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_certificate_alone_goes_in_even_when_it_cannot_be_read_to_tell() {
+        let certificate = || Some(b"-----BEGIN CERTIFICATE-----\nabc\n".to_vec());
+        for name in [r"C:\App\ca-bundle.crt", r"C:\App\root.CER"] {
+            assert!(!is_secret_file(Path::new(name), certificate), "{name}");
+            assert!(!is_secret_file(Path::new(name), || None), "{name}");
+        }
     }
 
     #[test]

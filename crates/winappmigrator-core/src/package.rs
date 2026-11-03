@@ -449,6 +449,16 @@ fn manifest_of(
         main_executable_path: report.main_executable.path.clone(),
         application_metadata: report.source_app.clone(),
         file_inventory,
+        empty_folders: report
+            .empty_folders
+            .iter()
+            .cloned()
+            .map(|mut folder| {
+                // Where it could be read during this build means nothing to an installer.
+                folder.path = folder.original_path.clone();
+                folder
+            })
+            .collect(),
         registry_keys_exported: report.registry_entries.clone(),
         com_registrations_detected: report.com_registrations.clone(),
         file_associations_detected: report.file_associations.clone(),
@@ -462,6 +472,7 @@ fn manifest_of(
         license_registry_entries: report.license_registry_entries.clone(),
         secrets_left_out: report.secrets_left_out.clone(),
         licenses_left_out: report.licenses_left_out.clone(),
+        settings_left_out: report.settings_left_out.clone(),
         firewall_rules_detected: report.firewall_rules.clone(),
         certificates_reported: report.certificates.clone(),
         fonts_reported: report.fonts_reported.clone(),

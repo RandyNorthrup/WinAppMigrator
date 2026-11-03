@@ -19,7 +19,8 @@ use crate::models::{
     WarningSeverity,
 };
 use crate::path_utils::{
-    normalize_name_for_match, path_is_within, split_command_executable_path, text_mentions_path,
+    is_drive_root, normalize_name_for_match, path_is_within, split_command_executable_path,
+    text_mentions_path,
 };
 use crate::product_match::{MatchScope, ProductNames};
 use crate::system_context::{SystemContext, UserHive};
@@ -177,6 +178,23 @@ pub struct RecordedRegistryKey {
     pub value_name: Option<String>,
     /// Recorded in the 32-bit view, so on 64-bit Windows it lives under `WOW6432Node`.
     pub wow64_32: bool,
+}
+
+impl RegistryScanContext {
+    /// Where the app's own files are, as its PC calls them.
+    pub(crate) fn folders_of_the_app(&self) -> Vec<PathBuf> {
+        self.install_location
+            .clone()
+            .or_else(|| {
+                self.executable_path
+                    .parent()
+                    .filter(|folder| !is_drive_root(folder))
+                    .map(Path::to_path_buf)
+            })
+            .into_iter()
+            .chain(self.also_the_apps.iter().cloned())
+            .collect()
+    }
 }
 
 impl RecordedRegistryKey {

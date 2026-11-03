@@ -15,9 +15,10 @@ use winappmigrator_core::{
     FileEntry, FirewallRuleEntry, Footprint, FootprintKind, FootprintLocation, InstallScope,
     InstalledApp, LeftOutItem, LicenseArtifact, LicenseArtifactKind, LicenseFramework,
     MatchConfidence, NearMatch, NearMatchKind, RegistryEntry, RegistryHive, RegistryValueKind,
-    RuntimePrerequisite, RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanFlags, ScanMonitor,
-    ScanOptions, ScanReport, ScheduledTaskEntry, ServiceEntry, ShortcutEntry, SignatureStatus,
-    SystemChangeKind, TransferableHint, VolumeStats, WinAppMigratorError,
+    RuntimePrerequisite, RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, SETTINGS_LEFT_OUT_TEXT,
+    ScanFlags, ScanMonitor, ScanOptions, ScanReport, ScheduledTaskEntry, ServiceEntry,
+    ShortcutEntry, SignatureStatus, SystemChangeKind, TransferableHint, VolumeStats,
+    WinAppMigratorError,
 };
 
 use crate::theme::ThemeMode;
@@ -323,6 +324,11 @@ pub(crate) fn sample_report(app: &InstalledApp) -> ScanReport {
             name: format!(r"{INSTALL}\license.lic"),
             why: "the License option is off".to_owned(),
         }],
+        settings_left_out: vec![LeftOutItem {
+            name: r"HKCU\Software\Fabrikam".to_owned(),
+            why: "12 values, which only go with the User data option".to_owned(),
+        }],
+        empty_folders: Vec::new(),
         firewall_rules: vec![FirewallRuleEntry {
             name: "Fabrikam Data Sync".to_owned(),
             description: None,
@@ -665,8 +671,28 @@ fn what_stays_out_is_named_and_cannot_be_ticked() {
         license.accesskit_node().role(),
         egui::accesskit::Role::Label
     );
+    assert!(
+        harness
+            .query_by_label_contains(SETTINGS_LEFT_OUT_TEXT)
+            .is_some(),
+        "what an account keeps is said to be left out"
+    );
+    let settings = harness.get_by_label_contains(r"HKCU\Software\Fabrikam");
+    assert_eq!(
+        settings.accesskit_node().role(),
+        egui::accesskit::Role::Label,
+        "and the way to bring it is the User data option, not a box here"
+    );
     scroll_to_row(&mut harness, "license.lic");
     preview(&mut harness, "footprint-left-out-dark");
+    let mut light = harness_with(ThemeMode::Light, |app| {
+        ready_app(app);
+        app.open_groups.clear();
+        app.open_groups.insert(crate::ListGroup::LeftOut);
+    });
+    light.run_steps(2);
+    scroll_to_row(&mut light, "license.lic");
+    preview(&mut light, "footprint-left-out-light");
 }
 
 #[test]

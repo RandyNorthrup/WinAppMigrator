@@ -717,6 +717,7 @@ impl Run<'_, '_> {
         // Runtimes first, so the app's own services and drivers have them available.
         self.restore_prerequisites();
         self.restore_files();
+        self.restore_empty_folders();
         // Services first, so a registry key under one can never make it look like it
         // already existed.
         self.restore_services();
@@ -938,6 +939,74 @@ impl Run<'_, '_> {
                         "restore_file_failed",
                         WarningSeverity::Error,
                         format!("Could not write {}: {error}", destination.display()),
+                        Some(destination.display().to_string()),
+                    ));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// What the app had with nothing in it, as some programs count on finding it. A folder that is
+    /// already there is nothing this did, so it is nothing to undo either.
+    fn restore_empty_folders(&mut self) {
+        let review = self.review;
+        for folder in &review.empty_folders {
+            if self.stopped() {
+                return;
+            }
+            let Some(destination) = review.map.folder_destination_of(&folder.original_path) else {
+                continue;
+            };
+            match fs::symlink_metadata(destination) {
+                Ok(found) if found.is_dir() => continue,
+                Ok(_) => {
+                    let warning = Warning::new(
+                        "restore_destination_exists",
+                        WarningSeverity::Warning,
+                        "Something other than a folder is where this empty folder goes.",
+                        Some(destination.display().to_string()),
+                    );
+                    if self.journal.is_some() {
+                        self.errors.push(warning);
+                        return;
+                    }
+                    self.warnings.push(warning);
+                    continue;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    self.errors.push(Warning::new(
+                        "restore_file_failed",
+                        WarningSeverity::Error,
+                        format!("Could not look at {}: {error}", destination.display()),
+                        Some(destination.display().to_string()),
+                    ));
+                    return;
+                }
+            }
+            let Some(journal) = self.journal.as_mut() else {
+                self.changes.files.push(format!(
+                    "would create the empty folder {}",
+                    destination.display()
+                ));
+                continue;
+            };
+            match create_restored_folder(
+                journal,
+                destination,
+                &self.options.target_root,
+                file_item_kind(folder),
+            ) {
+                Ok(()) => self.changes.files.push(format!(
+                    "created the empty folder {}",
+                    destination.display()
+                )),
+                Err(error) => {
+                    self.errors.push(Warning::new(
+                        "restore_file_failed",
+                        WarningSeverity::Error,
+                        format!("Could not make {}: {error}", destination.display()),
                         Some(destination.display().to_string()),
                     ));
                     return;
@@ -3435,6 +3504,43 @@ fn copy_restore_file(
     copied
 }
 
+/// Only what a file in a folder would be called, for what checks the way to one.
+const FOLDER_PIN_PLACEHOLDER: &str = "_";
+
+/// Make a folder of the app's with nothing in it, held to the same as a file going there.
+fn create_restored_folder(
+    journal: &mut Journal,
+    destination: &Path,
+    target_root: &Path,
+    item: ItemKind,
+) -> Result<()> {
+    if journal
+        .state_root()
+        .is_some_and(|state_root| path_is_within(destination, state_root))
+    {
+        return Err(WinAppMigratorError::InvalidInput(format!(
+            "refusing to write where installs keep their records: {}",
+            destination.display()
+        )));
+    }
+    let root = write_root_for(destination, target_root).ok_or_else(|| {
+        WinAppMigratorError::InvalidInput(format!(
+            "refusing to write outside the install location and the known data folders: {}",
+            destination.display()
+        ))
+    })?;
+    if fs::symlink_metadata(&root).is_err() {
+        journal.note_new_folders_to(&root, item)?;
+        fs::create_dir_all(&root).map_err(|error| WinAppMigratorError::io(&root, error))?;
+    }
+    ensure_within_root(&root, destination)?;
+    journal.note_new_folders(&root, destination, item)?;
+    // What is held on the way to a file makes each folder it takes, and goes through no link.
+    let in_it = destination.join(FOLDER_PIN_PLACEHOLDER);
+    let _pinned = pin_path_below_root(&root, &in_it)?;
+    Ok(())
+}
+
 /// A rename does not replace a read-only file, and an earlier install of the same app can
 /// have left one, since a copy keeps the read-only attribute. Whether to replace it has
 /// been decided by this point. On Windows this clears that one attribute, and nothing else.
@@ -3921,6 +4027,8 @@ mod tests {
             license_registry_entries: Vec::new(),
             secrets_left_out: Vec::new(),
             licenses_left_out: Vec::new(),
+            settings_left_out: Vec::new(),
+            empty_folders: Vec::new(),
             firewall_rules_detected: Vec::new(),
             certificates_reported: Vec::new(),
             fonts_reported: Vec::new(),
@@ -4935,6 +5043,101 @@ mod tests {
             1,
             "{kept}"
         );
+        Ok(())
+    }
+
+    /// A folder below where the app was, as a package lists it.
+    fn empty_folder(relative: &str) -> FileEntry {
+        let mut folder = file_entry(relative, None, 0);
+        folder.size_bytes = None;
+        folder.reason = "An empty folder of the app's".to_owned();
+        folder
+    }
+
+    #[test]
+    fn an_empty_folder_is_made_and_goes_when_the_install_does() -> Result<()> {
+        let work = temp_folder()?;
+        let (options, id) = installed(work.path(), &[("a.dat", b"a")], |manifest| {
+            manifest.empty_folders = vec![
+                empty_folder("textfile_inputs"),
+                empty_folder(r"deep\down\there"),
+            ];
+        })?;
+        let target = options.target_root.clone();
+        assert!(target.join("textfile_inputs").is_dir());
+        assert!(target.join(r"deep\down\there").is_dir());
+        assert!(names_in(&target.join("textfile_inputs"))?.is_empty());
+
+        let outcome = uninstall(&options, &id, false)?;
+
+        assert!(outcome.finished, "{:?}", outcome.report);
+        assert!(!target.join("textfile_inputs").exists());
+        assert!(!target.join("deep").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_folder_that_got_something_in_it_stays_and_says_so() -> Result<()> {
+        let work = temp_folder()?;
+        let (options, id) = installed(work.path(), &[("a.dat", b"a")], |manifest| {
+            manifest.empty_folders = vec![empty_folder("textfile_inputs")];
+        })?;
+        let target = options.target_root.clone();
+        write_file(&target.join(r"textfile_inputs\mine.prom"), b"added")?;
+
+        let outcome = uninstall(&options, &id, false)?;
+
+        assert!(outcome.finished, "{:?}", outcome.report);
+        assert_eq!(names_in(&target.join("textfile_inputs"))?, ["mine.prom"]);
+        let kept = outcome.report.kept.join("\n");
+        assert!(kept.contains("textfile_inputs"), "{kept}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_folder_already_there_is_nothing_an_uninstall_takes() -> Result<()> {
+        let work = temp_folder()?;
+        let target = work.path().join("target");
+        let already = target.join("textfile_inputs");
+        fs::create_dir_all(&already).map_err(|error| WinAppMigratorError::io(&already, error))?;
+        let (options, id) = installed(work.path(), &[("a.dat", b"a")], |manifest| {
+            manifest.empty_folders = vec![empty_folder("textfile_inputs")];
+        })?;
+
+        let outcome = uninstall(&options, &id, false)?;
+
+        assert!(outcome.finished, "{:?}", outcome.report);
+        assert!(already.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn a_preview_makes_no_empty_folder_and_says_it_would() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("a.dat", b"a")], |manifest| {
+            manifest.empty_folders = vec![empty_folder("textfile_inputs")];
+        })?;
+        let options = restore_options(work.path(), package, false);
+        let result = restore_package(&options)?;
+        let said = result.changes_logged.join("\n");
+        assert!(said.contains("would create the empty folder"), "{said}");
+        assert!(!options.target_root.join("textfile_inputs").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_install_takes_back_the_empty_folders_it_made() -> Result<()> {
+        let work = temp_folder()?;
+        // A folder where a file has to go is what stops this install, after the folders are made.
+        let target = work.path().join("target");
+        let package = package_of(work.path(), &[("a.dat", b"a")], |manifest| {
+            manifest.empty_folders = vec![empty_folder("made"), empty_folder(r"a.dat\below")];
+        })?;
+        let mut options = restore_options(work.path(), package, true);
+        options.force = true;
+        let result = restore_package(&options)?;
+        assert!(!result.errors.is_empty());
+        assert!(!target.join("made").exists());
         Ok(())
     }
 

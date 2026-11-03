@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -15,16 +15,19 @@ use crate::models::{
     Warning, WarningSeverity,
 };
 use crate::path_utils::{
-    UserAccount, file_name_string, is_auxiliary_executable, is_drive_root, is_really_within,
-    path_has_extension, path_is_strictly_inside, path_is_within, program_data_dir,
-    public_profile_dir, resolved_location, signed_in_user, strip_prefix_ignore_case, walk_asking,
-    windows_build,
+    UserAccount, comparable_path, file_name_string, is_auxiliary_executable, is_drive_root,
+    is_really_within, path_has_extension, path_is_strictly_inside, path_is_within,
+    program_data_dir, public_profile_dir, resolved_location, signed_in_user,
+    strip_prefix_ignore_case, walk_asking, windows_build,
 };
 use crate::privilege::{hold_folder, hold_real_folder, pin_held_folder};
 use crate::product_match::{MatchScope, ProductNames};
 use crate::system_context::{SystemContext, UserHive, VolumeMap};
 
 const MAX_WALK_DEPTH: usize = 24;
+/// More than any app has, and a package could otherwise ask for any number. Nothing of them is stored
+/// but their names.
+pub const MAX_EMPTY_FOLDERS: usize = 10_000;
 /// The first build of Windows 11. From here on, a device's name with an extension, such as
 /// `aux.h`, is an ordinary file.
 const FIRST_BUILD_WITH_ORDINARY_DEVICE_EXTENSIONS: u32 = 22000;
@@ -108,11 +111,21 @@ pub(crate) struct DiscoveryRoot {
     user_folder: Option<(UserDataAnchor, PathBuf)>,
 }
 
+/// What a look through an app's folders found.
+#[derive(Debug, Default)]
+pub(crate) struct DiscoveredFiles {
+    pub(crate) files: Vec<FileEntry>,
+    pub(crate) empty_folders: Vec<FileEntry>,
+    pub(crate) locations: Vec<FootprintLocation>,
+    pub(crate) warnings: Vec<Warning>,
+}
+
 pub fn discover_files(
     context: &FileDiscoveryContext,
     system: &SystemContext,
 ) -> (Vec<FileEntry>, Vec<FootprintLocation>, Vec<Warning>) {
-    discover_files_unless(context, system, &|| false)
+    let found = discover_files_unless(context, system, &|| false);
+    (found.files, found.locations, found.warnings)
 }
 
 /// [`discover_files`], going no further once `is_cancelled` says so, in which case what it found so
@@ -121,9 +134,10 @@ pub(crate) fn discover_files_unless(
     context: &FileDiscoveryContext,
     system: &SystemContext,
     is_cancelled: &dyn Fn() -> bool,
-) -> (Vec<FileEntry>, Vec<FootprintLocation>, Vec<Warning>) {
+) -> DiscoveredFiles {
     let mut warnings = Vec::new();
     let mut files = Vec::new();
+    let mut empty_folders = Vec::new();
     let mut seen = BTreeSet::new();
     let mut locations = Vec::new();
 
@@ -181,6 +195,7 @@ pub(crate) fn discover_files_unless(
             system,
             is_cancelled,
             &mut files,
+            &mut empty_folders,
             &mut seen,
             &mut warnings,
         );
@@ -207,8 +222,27 @@ pub(crate) fn discover_files_unless(
 
     files.sort_by_cached_key(|file| file.original_path.to_string_lossy().to_ascii_lowercase());
     locations.sort_by_key(|location| std::cmp::Reverse(location.total_bytes));
+    empty_folders.sort_by_cached_key(|folder| comparable_path(&folder.original_path));
+    empty_folders.dedup_by_key(|folder| comparable_path(&folder.original_path));
+    if empty_folders.len() > MAX_EMPTY_FOLDERS {
+        empty_folders.truncate(MAX_EMPTY_FOLDERS);
+        warnings.push(Warning::new(
+            "empty_folders_truncated",
+            WarningSeverity::Warning,
+            format!(
+                "This app has more than {MAX_EMPTY_FOLDERS} empty folders, and only that many will \
+                 be made again."
+            ),
+            None,
+        ));
+    }
 
-    (files, locations, warnings)
+    DiscoveredFiles {
+        files,
+        empty_folders,
+        locations,
+        warnings,
+    }
 }
 
 pub fn package_relative_path(original_path: &Path, install_root: Option<&Path>) -> PathBuf {
@@ -1498,10 +1532,18 @@ fn discover_tree(
     system: &SystemContext,
     is_cancelled: &dyn Fn() -> bool,
     files: &mut Vec<FileEntry>,
+    empty_folders: &mut Vec<FileEntry>,
     seen: &mut BTreeSet<String>,
     warnings: &mut Vec<Warning>,
 ) {
     let prune_volatile = holds_disposable_data(&root.kind);
+    // The walk has been to everything in a folder by the time it is done, so nothing has to be asked
+    // of a folder twice: what is left of these when it ends had nothing come from it.
+    let mut folders: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut folders_with_something: BTreeSet<String> = BTreeSet::new();
+    if root.kind != FootprintKind::InstallDirectory {
+        folders.insert(comparable_path(&root.path), root.path.clone());
+    }
     // Asked about by name before each is looked at. See `walk_asking`.
     let walker = walk_asking(&root.path, MAX_WALK_DEPTH, |path, is_dir| {
         !is_cancelled()
@@ -1513,6 +1555,7 @@ fn discover_tree(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
+                folders_with_something.insert(comparable_path(&error.path));
                 warnings.push(Warning::new(
                     "file_discovery_walk_error",
                     WarningSeverity::Info,
@@ -1522,6 +1565,17 @@ fn discover_tree(
                 continue;
             }
         };
+        if let Some(folder) = entry.path.parent() {
+            folders_with_something.insert(comparable_path(folder));
+        }
+        if entry.file_type.is_dir()
+            && !entry
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| is_online_only(metadata.file_attributes()))
+        {
+            folders.insert(comparable_path(&entry.path), entry.path.clone());
+        }
         if entry.file_type.is_file() {
             add_file(
                 files,
@@ -1539,6 +1593,47 @@ fn discover_tree(
                 warnings,
             );
         }
+    }
+    if is_cancelled() {
+        return;
+    }
+    let is_kept = |classification: &FileClassification| match classification {
+        FileClassification::AppOwned => true,
+        FileClassification::UserData => include_user_data,
+        FileClassification::MachineAppData => include_program_data,
+        _ => false,
+    };
+    for (key, folder) in folders {
+        if folders_with_something.contains(&key) || has_reserved_device_name(&folder) {
+            continue;
+        }
+        let classification = classify_file(
+            &system.logical_path(&folder),
+            install_root
+                .map(|root| system.logical_path(root))
+                .as_deref(),
+            &root.kind,
+        );
+        if !is_kept(&classification) {
+            continue;
+        }
+        empty_folders.push(FileEntry {
+            path: folder.clone(),
+            original_path: folder.clone(),
+            package_relative_path: Some(package_relative_path(&folder, install_root)),
+            suggested_destination_path: None,
+            size_bytes: None,
+            hash_sha256: None,
+            classification,
+            should_copy: true,
+            reason: "An empty folder of the app's".to_owned(),
+            user_folder: root.user_folder.as_ref().and_then(|(anchor, base)| {
+                strip_prefix_ignore_case(&folder, base).map(|relative| UserFolderPath {
+                    anchor: *anchor,
+                    relative,
+                })
+            }),
+        });
     }
 }
 
@@ -2938,8 +3033,148 @@ mod tests {
         assert_eq!(found, vec![base.join("PowerShell")]);
     }
 
+    /// The folders below `root` with nothing in them, as a walk with these options finds them.
+    fn empty_folders_of(
+        root: &Path,
+        kind: FootprintKind,
+        install_root: Option<&Path>,
+        include_user_data: bool,
+    ) -> Vec<(String, FileClassification)> {
+        let mut files = Vec::new();
+        let mut empty_folders = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut warnings = Vec::new();
+        discover_tree(
+            &DiscoveryRoot {
+                path: root.to_path_buf(),
+                kind,
+                scope: InstallScope::PerUser,
+                user_folder: None,
+            },
+            install_root,
+            false,
+            include_user_data,
+            false,
+            &SystemContext::live(),
+            &|| false,
+            &mut files,
+            &mut empty_folders,
+            &mut seen,
+            &mut warnings,
+        );
+        let mut found: Vec<(String, FileClassification)> = empty_folders
+            .into_iter()
+            .map(|folder| {
+                assert!(folder.should_copy);
+                assert!(folder.package_relative_path.is_some());
+                let relative = strip_prefix_ignore_case(&folder.original_path, root)
+                    .unwrap_or_default()
+                    .display()
+                    .to_string();
+                (relative, folder.classification)
+            })
+            .collect();
+        found.sort_by(|left, right| left.0.cmp(&right.0));
+        found
+    }
+
+    #[test]
+    fn a_folder_with_nothing_in_it_is_found_and_one_on_the_way_to_it_is_not() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let install = work.path().join("Demo");
+        let made = |relative: &str| -> Result<()> {
+            let path = install.join(relative);
+            fs::create_dir_all(&path).map_err(|error| WinAppMigratorError::io(&path, error))
+        };
+        made(r"textfile_inputs")?;
+        made(r"a\b\deep")?;
+        made(r"has_a_file")?;
+        let file = install.join(r"has_a_file\x.txt");
+        fs::write(&file, b"x").map_err(|error| WinAppMigratorError::io(&file, error))?;
+
+        let found = empty_folders_of(
+            &install,
+            FootprintKind::InstallDirectory,
+            Some(&install),
+            false,
+        );
+
+        let names: Vec<&str> = found.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, [r"a\b\deep", "textfile_inputs"]);
+        assert!(
+            found
+                .iter()
+                .all(|(_, classification)| *classification == FileClassification::AppOwned)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_folder_of_data_goes_by_the_option_as_a_file_there_would() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let data = work.path().join("Demo");
+        let inside = data.join("saves");
+        fs::create_dir_all(&inside).map_err(|error| WinAppMigratorError::io(&inside, error))?;
+
+        assert!(empty_folders_of(&data, FootprintKind::RoamingAppData, None, false).is_empty());
+        let found = empty_folders_of(&data, FootprintKind::RoamingAppData, None, true);
+        assert_eq!(
+            found,
+            [("saves".to_owned(), FileClassification::UserData)],
+            "and the folder it is in has something in it, so it is not one"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_data_folder_with_nothing_in_it_is_one_and_the_install_folder_is_not() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let folder = work.path().join("Demo");
+        fs::create_dir_all(&folder).map_err(|error| WinAppMigratorError::io(&folder, error))?;
+
+        let found = empty_folders_of(&folder, FootprintKind::RoamingAppData, None, true);
+        assert_eq!(found.len(), 1);
+        assert!(
+            empty_folders_of(
+                &folder,
+                FootprintKind::InstallDirectory,
+                Some(&folder),
+                false
+            )
+            .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_link_to_a_folder_is_not_an_empty_folder() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let install = work.path().join("Demo");
+        let elsewhere = work.path().join("Elsewhere");
+        fs::create_dir_all(&install).map_err(|error| WinAppMigratorError::io(&install, error))?;
+        fs::create_dir_all(&elsewhere)
+            .map_err(|error| WinAppMigratorError::io(&elsewhere, error))?;
+        assert!(make_junction(&install.join("link"), &elsewhere));
+
+        assert!(
+            empty_folders_of(
+                &install,
+                FootprintKind::InstallDirectory,
+                Some(&install),
+                false
+            )
+            .is_empty()
+        );
+        Ok(())
+    }
+
     fn walk_tree(root: &Path, kind: FootprintKind) -> Vec<String> {
         let mut files = Vec::new();
+        let mut empty_folders = Vec::new();
         let mut seen = BTreeSet::new();
         let mut warnings = Vec::new();
         discover_tree(
@@ -2956,6 +3191,7 @@ mod tests {
             &SystemContext::live(),
             &|| false,
             &mut files,
+            &mut empty_folders,
             &mut seen,
             &mut warnings,
         );

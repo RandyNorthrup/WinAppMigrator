@@ -18,7 +18,7 @@ use crate::models::{
     FileEntry, LicenseArtifact, LicenseArtifactKind, LicenseFramework, RegistryEntry, RegistryHive,
     RegistryValueKind, TransferableHint, Warning, WarningSeverity,
 };
-use crate::path_utils::text_mentions_path;
+use crate::path_utils::{path_is_within, text_mentions_path};
 use crate::product_match::{MatchScope, ProductNames};
 use crate::registry_scan::registry_value_text;
 use crate::secret_rules::{LeftOut, is_dpapi_hex, is_license_registry_entry, registry_entry_name};
@@ -269,9 +269,20 @@ fn detect_framework_stores(
             FLEXLM_CLIENT_FILES,
         ),
     ];
+    // By what is in the app's own folder. What a person ticked as a near match is something else's as
+    // often as not, and says nothing of what the app itself uses.
+    let own_files: Vec<&FileEntry> = context
+        .discovered_files
+        .iter()
+        .filter(|file| {
+            context
+                .install_location
+                .is_none_or(|folder| path_is_within(&system.logical_path(&file.path), folder))
+        })
+        .collect();
     for (relative, framework, machine_bound, client_files) in stores {
         // These are on the PC for whatever uses the framework, and may hold other apps' licenses.
-        if !app_has_a_file_starting(context.discovered_files, client_files) {
+        if !app_has_a_file_starting(&own_files, client_files) {
             continue;
         }
         let path = program_data.join(relative);
@@ -308,7 +319,7 @@ fn detect_framework_stores(
     }
 }
 
-fn app_has_a_file_starting(files: &[FileEntry], starts: &[&str]) -> bool {
+fn app_has_a_file_starting(files: &[&FileEntry], starts: &[&str]) -> bool {
     files.iter().any(|file| {
         file.original_path
             .file_name()
@@ -699,8 +710,14 @@ mod tests {
     fn a_license_store_is_only_for_an_app_that_uses_that_framework() {
         let with = [found_file(r"C:\A\lmgr11.dll")];
         let without = [found_file(r"C:\A\app.exe")];
-        assert!(app_has_a_file_starting(&with, FLEXLM_CLIENT_FILES));
-        assert!(!app_has_a_file_starting(&without, FLEXLM_CLIENT_FILES));
+        assert!(app_has_a_file_starting(
+            &with.iter().collect::<Vec<_>>(),
+            FLEXLM_CLIENT_FILES
+        ));
+        assert!(!app_has_a_file_starting(
+            &without.iter().collect::<Vec<_>>(),
+            FLEXLM_CLIENT_FILES
+        ));
     }
 
     fn registry_value(hive: RegistryHive, name: &str) -> RegistryEntry {

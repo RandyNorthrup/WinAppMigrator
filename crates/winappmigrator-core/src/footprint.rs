@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::account_settings::is_account_setting;
 use crate::errors::Result;
 use crate::models::{
     FileClassification, FileEntry, FootprintKind, FootprintLocation, LeftOutItem, NearMatch,
@@ -27,11 +28,14 @@ use crate::registry_target::is_path_variable;
 use crate::restore_policy::is_autostart_entry;
 use crate::restore_review::{
     CERTIFICATES_LEFT_OUT_TEXT, CREDENTIALS_LEFT_OUT_TEXT, ChangeRow, FONTS_LEFT_OUT_TEXT,
-    NO_TARGET_YET, ReviewedPackage, SystemChange, SystemChangeKind, autostart_choice,
-    certificate_label, change_kind_of, described_rows, driver_choice, notes_of, registry_item,
-    service_choice, shortcut_choice, task_choice,
+    NO_TARGET_YET, ReviewedPackage, SETTINGS_LEFT_OUT_TEXT, SystemChange, SystemChangeKind,
+    autostart_choice, certificate_label, change_kind_of, described_rows, driver_choice, notes_of,
+    registry_item, service_choice, shortcut_choice, task_choice,
 };
 use crate::space::BuildInputs;
+
+/// What in a task's definition is one path, however many spaces are in it.
+const TASK_TAGS_OF_ONE_PATH: &[&str] = &["Command", "WorkingDirectory"];
 
 /// What the list of what is left out says of licenses, before anything has been built.
 pub const LICENSES_LEFT_OUT_TEXT: &str = "Not in this installer, because the License option is off";
@@ -327,6 +331,7 @@ impl Footprint {
         let groups = [
             (CREDENTIALS_LEFT_OUT_TEXT, report.secrets_left_out.clone()),
             (LICENSES_LEFT_OUT_TEXT, report.licenses_left_out.clone()),
+            (SETTINGS_LEFT_OUT_TEXT, report.settings_left_out.clone()),
             (
                 CERTIFICATES_LEFT_OUT_TEXT,
                 report
@@ -843,9 +848,27 @@ impl LeftOutFolders {
         })
     }
 
-    /// The same of a task's definition, where a tag can end a path as well.
+    /// The same of a task's definition. What it runs and where are one path each, spaces and all,
+    /// which is only so of those: its arguments are a command line. Anything else that names one is
+    /// counted too, as a tag can hold a path in any way, and so is all of what cannot be read.
     fn are_named_in_xml(&self, xml: &str) -> bool {
-        self.are_named_in_a_command(&xml.replace('<', "\n"))
+        let Ok(document) = roxmltree::Document::parse(xml) else {
+            return self.are_named_in_a_command(&xml.replace('<', "\n"));
+        };
+        document
+            .descendants()
+            .filter(|node| node.is_text())
+            .any(|node| {
+                let text = node.text().unwrap_or_default();
+                let is_one_path = node
+                    .parent_element()
+                    .is_some_and(|tag| TASK_TAGS_OF_ONE_PATH.contains(&tag.tag_name().name()));
+                if is_one_path {
+                    self.are_named_by(text.trim().trim_matches('"'))
+                } else {
+                    self.are_named_in_a_command(text)
+                }
+            })
     }
 }
 
@@ -1308,6 +1331,9 @@ pub fn apply_choices(
         .file_inventory
         .retain(|file| keep_path(&comparable_path(&file.original_path)));
     chosen
+        .empty_folders
+        .retain(|folder| keep_path(&comparable_path(&folder.original_path)));
+    chosen
         .app_local_dlls
         .retain(|file| keep_path(&comparable_path(&file.original_path)));
     let kept_drivers: HashSet<String> = manifest
@@ -1383,7 +1409,10 @@ pub fn apply_choices(
             .iter()
             .any(|file| file.should_copy && file.classification == classification)
     };
-    let has_user_data = has(FileClassification::UserData);
+    // What an account keeps for the app makes this a package holding that account's data, even with
+    // none of its folders left.
+    let has_user_data =
+        has(FileClassification::UserData) || chosen.registry_entries.iter().any(is_account_setting);
     let has_program_data = has(FileClassification::MachineAppData);
     Ok(ChosenScan {
         report: chosen,
@@ -1731,6 +1760,8 @@ mod tests {
                 name: format!(r"{INSTALL}\acme.lic"),
                 why: "the License option is off".to_owned(),
             }],
+            settings_left_out: Vec::new(),
+            empty_folders: Vec::new(),
             firewall_rules: vec![
                 firewall_rule("Acme Main", r"bin\svc.exe"),
                 firewall_rule("Acme Plugins", r"plugins\host.exe"),
@@ -1857,6 +1888,81 @@ mod tests {
                 .iter()
                 .any(|item| item.name.ends_with("samples"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_folder_in_what_is_left_out_stays_out_and_the_rest_go() -> Result<()> {
+        let mut report = report();
+        let empty = |relative: &str| FileEntry {
+            size_bytes: None,
+            ..file(relative, 0)
+        };
+        report.empty_folders = vec![empty(r"plugins\inputs"), empty(r"bin\inputs")];
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let row = footprint
+            .folders
+            .iter()
+            .find(|row| row.name == "plugins")
+            .ok_or_else(|| crate::errors::WinAppMigratorError::InvalidInput("no row".to_owned()))?;
+        let mut choices = FootprintChoices::default();
+        choices.set_included(&row.id, false);
+
+        let chosen = apply_choices(&report, &footprint, &choices)?;
+
+        let kept: Vec<String> = chosen
+            .report
+            .empty_folders
+            .iter()
+            .map(|folder| folder.original_path.display().to_string())
+            .collect();
+        assert_eq!(kept, [format!(r"{INSTALL}\bin\inputs")]);
+        Ok(())
+    }
+
+    #[test]
+    fn what_an_account_keeps_makes_a_package_hold_that_accounts_data() -> Result<()> {
+        let mut report = report();
+        let flags = ScanFlags {
+            include_user_data: true,
+            ..FLAGS
+        };
+        let footprint = Footprint::of(&report, flags)?;
+        let without = apply_choices(&report, &footprint, &FootprintChoices::default())?;
+        assert!(!without.has_user_data);
+        report.registry_entries.push(RegistryEntry {
+            hive: RegistryHive::CurrentUser,
+            key_path: r"Software\Acme\Recent".to_owned(),
+            value_name: Some("Last".to_owned()),
+            value_data: Some(r"D:\Taxes".to_owned()),
+            value_kind: Some(RegistryValueKind::String),
+            value_bytes_hex: None,
+            confidence: MatchConfidence::Medium,
+            requires_admin: false,
+        });
+        let footprint = Footprint::of(&report, flags)?;
+        let with = apply_choices(&report, &footprint, &FootprintChoices::default())?;
+        assert!(with.has_user_data);
+        Ok(())
+    }
+
+    #[test]
+    fn what_an_account_keeps_is_said_to_be_left_out_with_how_much() -> Result<()> {
+        let mut report = report();
+        report.settings_left_out = vec![LeftOutItem {
+            name: r"HKCU\Software\Acme".to_owned(),
+            why: "2 values, which only go with the User data option".to_owned(),
+        }];
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let group = footprint
+            .left_out
+            .iter()
+            .find(|group| group.title == SETTINGS_LEFT_OUT_TEXT)
+            .ok_or_else(|| {
+                crate::errors::WinAppMigratorError::InvalidInput("no group".to_owned())
+            })?;
+        assert_eq!(group.items.len(), 1);
+        assert_eq!(group.items[0].name, r"HKCU\Software\Acme");
         Ok(())
     }
 
@@ -2492,6 +2598,37 @@ mod tests {
         let footprint = Footprint::of(&report, FLAGS)?;
         let chosen = apply_choices(&report, &footprint, &leaving_out(&[folder("plugins")]))?;
         assert_eq!(chosen.added, ["Plugins, as a near match"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_task_run_from_a_folder_with_a_space_in_its_name_is_not_taken_for_another() -> Result<()> {
+        let mut report = report();
+        let kept = PathBuf::from(INSTALL).join("plugins Extra");
+        report
+            .file_inventory
+            .push(file(r"plugins Extra\run.exe", 1));
+        let definition = |program: &Path, arguments: &str| {
+            format!(
+                "<?xml version=\"1.0\"?><Task><Principals><Principal><UserId>S-1-5-18</UserId>\
+                 </Principal></Principals><Actions><Exec><Command>{}</Command>\
+                 <Arguments>{arguments}</Arguments></Exec></Actions></Task>",
+                program.display()
+            )
+        };
+        report.scheduled_tasks[0].definition_xml = Some(definition(&kept.join("run.exe"), ""));
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let chosen = apply_choices(&report, &footprint, &leaving_out(&[folder("plugins")]))?;
+        assert_eq!(chosen.report.scheduled_tasks.len(), 1, "{:?}", chosen.also);
+        // And one told to use what is left out still goes.
+        let plugin = PathBuf::from(INSTALL).join(r"plugins\x.dat");
+        report.scheduled_tasks[0].definition_xml = Some(definition(
+            &kept.join("run.exe"),
+            &format!("--use {}", plugin.display()),
+        ));
+        let footprint = Footprint::of(&report, FLAGS)?;
+        let chosen = apply_choices(&report, &footprint, &leaving_out(&[folder("plugins")]))?;
+        assert!(chosen.report.scheduled_tasks.is_empty());
         Ok(())
     }
 

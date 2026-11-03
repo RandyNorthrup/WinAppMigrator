@@ -11,7 +11,10 @@ fn main() -> eframe::Result {
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
             .set_title("WinAppMigrator")
-            .set_description(format!("The window could not open: {error}"))
+            .set_description(format!(
+                "The window could not open: {error}\n\n{}",
+                winappmigrator_ui::NEEDS_DIRECT3D_12_TEXT
+            ))
             .show();
     }
     result

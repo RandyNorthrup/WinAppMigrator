@@ -395,6 +395,7 @@ fn verify_restored_target(
         });
     }
     verify_restored_files(&review, is_cancelled, items, errors)?;
+    verify_restored_folders(&review, items, errors);
     verify_prerequisites(manifest, items);
     verify_license_restored(&review.license, items, errors)?;
     verify_registry_entries(
@@ -411,6 +412,43 @@ fn verify_restored_target(
     verify_scheduled_tasks(&review.tasks, items, warnings, errors);
     verify_shortcuts(&review.shortcuts, items, warnings, errors);
     Ok(())
+}
+
+/// Each empty folder of the app's is there, as a folder. There is nothing else of one to check.
+fn verify_restored_folders(
+    review: &ReviewedPackage<'_>,
+    items: &mut Vec<VerificationItem>,
+    errors: &mut Vec<Warning>,
+) {
+    for folder in &review.empty_folders {
+        let Some(destination) = review.map.folder_destination_of(&folder.original_path) else {
+            continue;
+        };
+        let name = destination.display().to_string();
+        if destination.is_dir() {
+            items.push(VerificationItem {
+                category: VerificationCategory::RestoredFile,
+                name,
+                status: VerificationStatus::Passed,
+                message: "Empty folder is there.".to_owned(),
+                source: Some(destination.display().to_string()),
+            });
+        } else {
+            let message = "Empty folder is missing.";
+            items.push(failed_item(
+                VerificationCategory::RestoredFile,
+                name.clone(),
+                message,
+                Some(name.clone()),
+            ));
+            errors.push(Warning::new(
+                "verification_restored_file_failed",
+                WarningSeverity::Error,
+                message,
+                Some(name),
+            ));
+        }
+    }
 }
 
 /// Read back every file that was installed, from where it now is. This is what "Reinstall hashes

@@ -5,13 +5,15 @@ use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::account_settings::{say_no_more_than_the_apps_key, take_account_settings};
 use crate::dll_resolver::{
     DllResolutionContext, VisualCppRuntime, find_app_local_dlls, resolve_imports,
 };
 use crate::env_scan::{EnvironmentScanContext, scan_environment};
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
-    FileDiscoveryContext, discover_files_unless, names_of_app, package_relative_path,
+    DiscoveredFiles, FileDiscoveryContext, discover_files_unless, names_of_app,
+    package_relative_path,
 };
 use crate::install_source::{
     InstallSource, add_app_paths_roots, detect_install_source_unless, is_usable_main_executable,
@@ -424,7 +426,12 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     }
     extra_roots.append(&mut picks.roots);
     monitor.report(ScanStep::Files);
-    let (mut file_inventory, footprint_locations, file_warnings) = discover_files_unless(
+    let DiscoveredFiles {
+        files: mut file_inventory,
+        empty_folders,
+        locations: footprint_locations,
+        warnings: file_warnings,
+    } = discover_files_unless(
         &FileDiscoveryContext {
             executable_path: executable_path.clone(),
             install_location: install_location.clone(),
@@ -563,6 +570,16 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
             && !is_only_true_where_it_was_installed(entry)
     });
     file_inventory.retain(|file| !is_license_file(&file.original_path));
+    // After what is a license has gone its own way, which is the License option's to say, and before
+    // anything names what it finds, since a key's name can be what an account was keeping.
+    if !options.include_user_data {
+        take_account_settings(
+            &mut registry_artifacts.entries,
+            &registry_context.folders_of_the_app(),
+            &mut left_out,
+        );
+        say_no_more_than_the_apps_key(&mut registry_artifacts.warnings);
+    }
     if !options.include_license_data {
         environment_variables.retain(|variable| {
             let is_a_license = is_license_env_var(&variable.name);
@@ -687,6 +704,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
             .unwrap_or_default(),
         footprint_locations,
         file_inventory,
+        empty_folders,
         dependencies,
         app_local_dlls,
         registry_entries: registry_artifacts.entries,
@@ -702,6 +720,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         license_registry_entries,
         secrets_left_out: left_out.secrets,
         licenses_left_out: left_out.licenses,
+        settings_left_out: left_out.settings,
         firewall_rules: registry_artifacts.firewall_rules,
         certificates: registry_artifacts.certificates,
         fonts_reported: registry_artifacts.fonts_reported,
@@ -769,6 +788,13 @@ fn use_what_the_source_pc_calls_things(report: &mut ScanReport, system: &SystemC
                 install_location.as_deref(),
             ));
         }
+    }
+    for folder in &mut report.empty_folders {
+        folder.original_path = logical(&folder.path);
+        folder.package_relative_path = Some(package_relative_path(
+            &folder.original_path,
+            install_location.as_deref(),
+        ));
     }
     for artifact in &mut report.license_artifacts {
         artifact.path = artifact.path.as_deref().map(logical);
@@ -1155,6 +1181,12 @@ fn left_out_warnings(left_out: &LeftOut) -> Vec<Warning> {
                 .licenses
                 .iter()
                 .map(|item| about("license_left_out", item)),
+        )
+        .chain(
+            left_out
+                .settings
+                .iter()
+                .map(|item| about("settings_left_out", item)),
         )
         .collect()
 }

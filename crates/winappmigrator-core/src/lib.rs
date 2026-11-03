@@ -1,3 +1,4 @@
+mod account_settings;
 pub mod app_inventory;
 pub mod archive;
 pub mod authenticode;
@@ -67,10 +68,10 @@ pub use progress::{
 };
 pub use restore::{default_install_location, restore_package, restore_package_monitored};
 pub use restore_review::{
-    CERTIFICATES_LEFT_OUT_TEXT, CREDENTIALS_LEFT_OUT_TEXT, FONTS_LEFT_OUT_TEXT, SystemChange,
-    SystemChangeKind, SystemChanges, install_location_problem, install_places,
-    refuse_what_cannot_run_here, refuse_without_room_to_install, system_changes,
-    system_changes_restoring,
+    CERTIFICATES_LEFT_OUT_TEXT, CREDENTIALS_LEFT_OUT_TEXT, FONTS_LEFT_OUT_TEXT,
+    SETTINGS_LEFT_OUT_TEXT, SystemChange, SystemChangeKind, SystemChanges,
+    install_location_problem, install_places, refuse_what_cannot_run_here,
+    refuse_without_room_to_install, system_changes, system_changes_restoring,
 };
 pub use scan::scan_app;
 pub use space::{

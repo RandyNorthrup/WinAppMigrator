@@ -76,6 +76,10 @@ pub fn run() -> eframe::Result {
         WINDOW_TITLE,
         native_options,
         Box::new(|cc| {
+            tracing::info!(
+                adapter = %winappmigrator_ui::graphics_adapter_of(cc),
+                "graphics adapter"
+            );
             theme::install_fonts(&cc.egui_ctx, &fonts_dir());
             let mode = saved_theme_mode()
                 .or_else(|| system_theme_mode(&cc.egui_ctx))

@@ -14,9 +14,9 @@ use winreg::enums::{HKEY_USERS, KEY_READ};
 
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
-    DESKTOP_FALLBACK, DESKTOP_VALUE, START_MENU_FALLBACK, START_MENU_VALUE, UserDataAnchor,
-    UserFolderPlace, account_shell_folder, data_location_of, expand_env_vars, first_link_to,
-    has_reserved_device_name, known_base_dirs, link_refusal, safe_relative_path,
+    DESKTOP_FALLBACK, DESKTOP_VALUE, MAX_EMPTY_FOLDERS, START_MENU_FALLBACK, START_MENU_VALUE,
+    UserDataAnchor, UserFolderPlace, account_shell_folder, data_location_of, expand_env_vars,
+    first_link_to, has_reserved_device_name, known_base_dirs, link_refusal, safe_relative_path,
     split_user_data_relative, user_data_base, user_folder_place,
 };
 use crate::footprint::ChoiceId;
@@ -129,6 +129,8 @@ pub(crate) struct ReviewedFirewallRule<'a> {
 pub(crate) struct ReviewedPackage<'a> {
     pub map: RestoreMap,
     pub files: Vec<&'a FileEntry>,
+    /// Folders of the app's with nothing in them.
+    pub empty_folders: Vec<&'a FileEntry>,
     pub registry: Vec<&'a RegistryEntry>,
     /// The entries in `registry` that make an app's entry in Settings, which an install points
     /// at its own uninstaller.
@@ -205,6 +207,7 @@ impl<'a> ReviewedPackage<'a> {
         let map = RestoreMap::new(manifest, target_root, restore_user_data)?;
         let mut review = Self {
             files: Vec::new(),
+            empty_folders: Vec::new(),
             registry: Vec::new(),
             uninstall_keys: Vec::new(),
             license_registry: Vec::new(),
@@ -234,6 +237,7 @@ impl<'a> ReviewedPackage<'a> {
             ));
         }
         review.review_files(manifest);
+        review.review_empty_folders(manifest);
         if restore_user_data {
             review.review_user_folders(target_root, &user_folder_place);
         }
@@ -294,6 +298,27 @@ impl<'a> ReviewedPackage<'a> {
                 self.files.push(file);
             }
         }
+    }
+
+    fn review_empty_folders(&mut self, manifest: &'a PackageManifest) {
+        let refused: Vec<(PathBuf, String)> = self.map.refused_folders().to_vec();
+        for (path, reason) in refused {
+            self.refuse(format!("The folder {}", path.display()), reason);
+        }
+        if manifest.empty_folders.len() > MAX_EMPTY_FOLDERS {
+            self.warnings.push(Warning::new(
+                "restore_too_many_empty_folders",
+                WarningSeverity::Warning,
+                format!("This package lists more than {MAX_EMPTY_FOLDERS} empty folders, and only that many are made."),
+                None,
+            ));
+        }
+        self.empty_folders
+            .extend(manifest.empty_folders.iter().filter(|folder| {
+                self.map
+                    .folder_destination_of(&folder.original_path)
+                    .is_some()
+            }));
     }
 
     /// Say where what should go in Documents or Saved Games goes instead, when those folders are
@@ -1667,6 +1692,8 @@ fn names_of_left_out(items: &[LeftOutItem]) -> String {
 /// What the app and an installer both call what is left out, so that the two screens agree.
 pub const CREDENTIALS_LEFT_OUT_TEXT: &str =
     "Not in this installer, because they look like credentials";
+pub const SETTINGS_LEFT_OUT_TEXT: &str =
+    "Settings and history an account keeps for the app, which only go in with the User data option";
 pub const CERTIFICATES_LEFT_OUT_TEXT: &str =
     "The app seems to rely on certificates that were trusted on its PC, and they are not installed";
 pub const FONTS_LEFT_OUT_TEXT: &str = "These fonts go by the app's name, and nothing says they are its own, so they are not installed";
@@ -1689,6 +1716,14 @@ fn notes_on_what_is_left_out(manifest: &PackageManifest) -> Vec<String> {
         notes.push(format!(
             "Not in this installer, because the License option was off when it was built: {}.",
             names_of_left_out(&manifest.licenses_left_out)
+        ));
+    }
+    if !manifest.settings_left_out.is_empty() {
+        notes.push(format!(
+            "Not in this installer, because the User data option was off when it was built: the \
+             settings and history an account keeps for the app, in {}. The app starts here as it \
+             would for someone new to it.",
+            names_of_left_out(&manifest.settings_left_out)
         ));
     }
     if !manifest.certificates_reported.is_empty() {
@@ -1775,6 +1810,8 @@ mod tests {
             license_registry_entries: Vec::new(),
             secrets_left_out: Vec::new(),
             licenses_left_out: Vec::new(),
+            settings_left_out: Vec::new(),
+            empty_folders: Vec::new(),
             firewall_rules_detected: Vec::new(),
             certificates_reported: Vec::new(),
             fonts_reported: Vec::new(),
@@ -2715,6 +2752,105 @@ mod tests {
             reason: String::new(),
             user_folder: None,
         }
+    }
+
+    #[test]
+    fn an_empty_folder_cannot_reach_a_startup_folder_any_more_than_a_file_can() -> Result<()> {
+        const STARTUP: &str = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\x";
+        const ORDINARY: &str = r"C:\ProgramData\Acme\inputs";
+        let empty = |path: &str| {
+            let mut folder = external_data(path);
+            folder.size_bytes = None;
+            folder.hash_sha256 = None;
+            folder
+        };
+        let mut manifest = acme_manifest();
+        manifest.empty_folders = vec![empty(STARTUP), empty(ORDINARY)];
+        let review_with = |restore_user_data| {
+            ReviewedPackage::with_folders(
+                &manifest,
+                Path::new(TARGET),
+                restore_user_data,
+                true,
+                &folders(),
+                &|text| text.to_owned(),
+                &|_| Ok(None),
+            )
+        };
+
+        let real_locations = review_with(true)?;
+        assert_eq!(real_locations.empty_folders.len(), 1);
+        assert_eq!(real_locations.refused.len(), 1);
+        assert!(real_locations.refused[0].message.contains("Startup"));
+        assert!(
+            real_locations.refused[0]
+                .source
+                .as_deref()
+                .is_some_and(|item| item.starts_with("The folder"))
+        );
+        assert_eq!(
+            real_locations.map.folder_destination_of(Path::new(STARTUP)),
+            None
+        );
+        assert!(
+            real_locations
+                .map
+                .folder_destination_of(Path::new(ORDINARY))
+                .is_some()
+        );
+        // What makes a program is known by the files, and no file is at one of these.
+        let destination = real_locations
+            .map
+            .folder_destination_of(Path::new(ORDINARY));
+        assert!(destination.is_some_and(|path| !real_locations.map.is_restored_file(path)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_package_from_before_these_were_kept_still_loads() -> Result<()> {
+        let mut value = serde_json::to_value(acme_manifest())
+            .map_err(|error| crate::errors::WinAppMigratorError::InvalidInput(error.to_string()))?;
+        let fields = value.as_object_mut().ok_or_else(|| {
+            crate::errors::WinAppMigratorError::InvalidInput("not an object".to_owned())
+        })?;
+        assert!(fields.remove("empty_folders").is_some());
+        assert!(fields.remove("settings_left_out").is_some());
+        let manifest: PackageManifest = serde_json::from_value(value)
+            .map_err(|error| crate::errors::WinAppMigratorError::InvalidInput(error.to_string()))?;
+        assert!(manifest.empty_folders.is_empty());
+        assert!(manifest.settings_left_out.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_package_cannot_ask_for_any_number_of_empty_folders() -> Result<()> {
+        let mut manifest = acme_manifest();
+        manifest.empty_folders = (0..MAX_EMPTY_FOLDERS + 5)
+            .map(|number| {
+                let path = format!(r"C:\ProgramData\Acme\{number}");
+                let mut folder = external_data(&path);
+                folder.package_relative_path =
+                    Some(PathBuf::from(format!(r"files\_external\{number}")));
+                folder
+            })
+            .collect();
+        let review = ReviewedPackage::with_folders(
+            &manifest,
+            Path::new(TARGET),
+            false,
+            true,
+            &folders(),
+            &|text| text.to_owned(),
+            &|_| Ok(None),
+        )?;
+        assert_eq!(review.empty_folders.len(), MAX_EMPTY_FOLDERS);
+        assert!(
+            review
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "restore_too_many_empty_folders")
+        );
+        Ok(())
     }
 
     #[test]
