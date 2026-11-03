@@ -20,7 +20,7 @@ use crate::file_discovery::{
     split_user_data_relative, user_data_base, user_folder_place,
 };
 use crate::footprint::ChoiceId;
-use crate::journal::machine_state_root;
+use crate::journal::{install_on_record_at, machine_state_root};
 use crate::license_scan::is_license_env_var;
 use crate::models::{
     AppArchitecture, CertificateEntry, DriverEntry, EnvironmentScope, EnvironmentVariableEntry,

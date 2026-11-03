@@ -20,7 +20,7 @@ use eframe::egui::{self, Margin, RichText};
 
 use winappmigrator_core::archive::has_certificate_table;
 use winappmigrator_core::authenticode::read_signature;
-use winappmigrator_core::journal::{install_on_record_at, machine_state_root};
+use winappmigrator_core::journal::{machine_state_root, remove_staging_root_if_unused};
 use winappmigrator_core::logging;
 use winappmigrator_core::path_utils::{is_network_path, system_root};
 use winappmigrator_core::prerequisites::spec_for_bundle;
@@ -455,7 +455,11 @@ impl InstallerApp {
             // What goes wrong in a way nothing was ready for still has to end in something a person
             // can read, or this window would say it was running forever and could not be closed.
             let message = catch_unwind(AssertUnwindSafe(|| {
-                run_restore(&exe, &package, choices, &monitor)
+                let message = run_restore(&exe, &package, choices, &monitor);
+                if let Some(state_root) = machine_state_root() {
+                    remove_staging_root_if_unused(&state_root);
+                }
+                message
             }))
             .unwrap_or_else(|panic| {
                 let reason = panic_text(panic.as_ref());
@@ -610,21 +614,25 @@ fn run_restore(
     }
     // Remove extraction directories from previous or crashed runs first, so nothing
     // accumulates even if a prior window was killed before its own cleanup could run.
-    crate::cleanup::sweep_stale_extractions(exe);
     let Some(state_root) = machine_state_root() else {
         return failed(
             "This PC's ProgramData folder could not be found, so the install could not be undone."
                 .to_owned(),
         );
     };
+    crate::cleanup::sweep_stale_extractions(exe, Some(&state_root));
     let unpacked_bytes = match package.unpacked_bytes() {
         Ok(bytes) => bytes,
         Err(error) => return failed(format!("Could not read the package: {error}")),
     };
     // Stage on the install destination's drive, so a large package never fails to
     // extract for lack of space on C:.
-    let staging = match crate::cleanup::create_staging_dir(Some(&target_root), exe, unpacked_bytes)
-    {
+    let staging = match crate::cleanup::create_staging_dir(
+        Some(&target_root),
+        exe,
+        unpacked_bytes,
+        Some(&state_root),
+    ) {
         Ok(staging) => staging,
         Err(error) => return failed(format!("Could not create a staging folder: {error}")),
     };

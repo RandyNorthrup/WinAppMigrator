@@ -38,6 +38,37 @@ $others = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdenti
 Where-Object { $_.AccessControlType -eq 'Allow' -and ([int]$_.FileSystemRights -band $write) -and \
 $admins -notcontains $_.IdentityReference.Value }); \
 if ($admins -contains $owner -and $others.Count -eq 0) { 'yes' } else { 'no' }";
+/// `yes` if a folder made here would give someone other than administrators what lets them keep it:
+/// the right to change its permissions or take it over, by what it inherits. A process can open a new
+/// folder in the moment before its permissions are closed, and a handle keeps what it was given.
+/// `CREATOR OWNER` is whoever makes the folder, which is this process.
+const OTHERS_COULD_KEEP_A_NEW_FOLDER_SCRIPT: &str = "Import-Module Microsoft.PowerShell.LocalAccounts \
+-ErrorAction Ignore; \
+$acl = Get-Acl -LiteralPath $env:WAM_ACL_PATH; \
+$admins = @('S-1-5-32-544', 'S-1-5-18', 'S-1-3-0', \
+'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464') + \
+@(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Ignore | ForEach-Object { $_.SID.Value }); \
+$control = 0x40000 -bor 0x80000 -bor 0x10000000; \
+$others = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | \
+Where-Object { $_.AccessControlType -eq 'Allow' -and ([int]$_.FileSystemRights -band $control) -and \
+([int]$_.InheritanceFlags -band 1) -and $admins -notcontains $_.IdentityReference.Value }); \
+if ($others.Count -gt 0) { 'yes' } else { 'no' }";
+/// `yes` if only Administrators, its members, SYSTEM, and TrustedInstaller own and can change all of
+/// what is directly in a folder. See [`ONLY_ADMINISTRATORS_CAN_CHANGE_SCRIPT`].
+const ONLY_ADMINISTRATORS_MADE_WHAT_IS_INSIDE_SCRIPT: &str = "Import-Module Microsoft.PowerShell.LocalAccounts \
+-ErrorAction Ignore; \
+$admins = @('S-1-5-32-544', 'S-1-5-18', \
+'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464') + \
+@(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Ignore | ForEach-Object { $_.SID.Value }); \
+$write = 0x2 -bor 0x4 -bor 0x10 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000; \
+$bad = @(Get-ChildItem -Force -LiteralPath $env:WAM_ACL_PATH | Where-Object { \
+$acl = Get-Acl -LiteralPath $_.FullName; \
+$owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; \
+$others = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | \
+Where-Object { $_.AccessControlType -eq 'Allow' -and ([int]$_.FileSystemRights -band $write) -and \
+$admins -notcontains $_.IdentityReference.Value }); \
+-not ($admins -contains $owner -and $others.Count -eq 0) }); \
+if ($bad.Count -eq 0) { 'yes' } else { 'no' }";
 /// The owner a protected folder has in SDDL, the form that reads the same in any language.
 const SDDL_ADMINISTRATORS_OWNER: &str = "O:BA";
 const SDDL_GROUP_MARKER: &str = "G:";
@@ -190,7 +221,10 @@ pub fn ensure_protected_folder(folder: &Path) -> io::Result<()> {
         Some(false) => return Ok(()),
         None => return Err(unknown_elevation()),
     }
-    let is_protected = read_with_folder_pinned(folder, &hold).is_ok();
+    // Its own permissions say nothing of what got in before they were closed, which is what stopped
+    // the run that made it. So a later run has to look as well.
+    let is_protected = read_with_folder_pinned(folder, &hold).is_ok()
+        && only_administrators_made_what_is_in(folder);
     drop(hold);
     if is_protected {
         return Ok(());
@@ -206,9 +240,49 @@ pub fn ensure_protected_folder(folder: &Path) -> io::Result<()> {
     protect_new_folder(folder)
 }
 
+/// A folder this run just made, closed to everyone else. If that fails it is not left there to be
+/// taken up by a later run, with whatever stopped this one still in it.
 fn protect_new_folder(folder: &Path) -> io::Result<()> {
-    let _hold = hold_real_folder(folder)?;
-    protect_staging_folder(folder)
+    let hold = hold_real_folder(folder)?;
+    let protected = protect_staging_folder(folder);
+    drop(hold);
+    if protected.is_err() {
+        let _ = fs::remove_dir_all(folder);
+    }
+    protected
+}
+
+fn only_administrators_made_what_is_in(folder: &Path) -> bool {
+    let text = folder.to_string_lossy();
+    powershell_command(format!(
+        "{POWERSHELL_IMPORT_SECURITY}{ONLY_ADMINISTRATORS_MADE_WHAT_IS_INSIDE_SCRIPT}"
+    ))
+    .env(ACL_PATH_VARIABLE, without_verbatim_prefix(&text))
+    .output()
+    .is_ok_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "yes"
+    })
+}
+
+/// Whether a folder made in `parent` is one that someone could go on controlling, however it is
+/// closed afterward, as anywhere in an account's own profile: they can open it in the moment it
+/// appears and keep the right to change its permissions. Without elevation there is no boundary to
+/// keep. Not being able to tell is taken for yes.
+pub fn others_could_keep_a_folder_made_in(parent: &Path) -> bool {
+    match elevation() {
+        Some(true) => {}
+        Some(false) => return false,
+        None => return true,
+    }
+    let text = parent.to_string_lossy();
+    powershell_command(format!(
+        "{POWERSHELL_IMPORT_SECURITY}{OTHERS_COULD_KEEP_A_NEW_FOLDER_SCRIPT}"
+    ))
+    .env(ACL_PATH_VARIABLE, without_verbatim_prefix(&text))
+    .output()
+    .map_or(true, |output| {
+        !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "no"
+    })
 }
 
 /// Check a folder [`ensure_protected_folder`] looks after. A failure means what is in it cannot

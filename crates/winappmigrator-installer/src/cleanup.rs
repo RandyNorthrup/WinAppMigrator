@@ -4,10 +4,11 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use winappmigrator_core::journal::STAGING_PREFIX;
+use winappmigrator_core::file_discovery::first_link_to;
+use winappmigrator_core::journal::{STAGING_PREFIX, admin_only_staging_root, staging_root_in};
 use winappmigrator_core::path_utils::is_network_path;
-use winappmigrator_core::privilege::ProtectedFolder;
-use winappmigrator_core::space::volume_stats_at;
+use winappmigrator_core::privilege::{ProtectedFolder, others_could_keep_a_folder_made_in};
+use winappmigrator_core::space::{on_same_volume, volume_stats_at};
 
 /// Prefix of the directories the installer extracts its embedded package into.
 pub const EXTRACTION_PREFIX: &str = STAGING_PREFIX;
@@ -17,16 +18,21 @@ pub const EXTRACTION_PREFIX: &str = STAGING_PREFIX;
 /// expected, and a folder left behind is only wasted space until a later run.
 const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
-/// Remove stale extraction directories from the two places the installer stages
-/// its package — beside the installer executable and in the system temp
-/// directory. Call this at startup **before** creating the current run's
+/// Remove stale extraction directories from the places the installer stages its
+/// package — where it keeps its records, beside the installer executable, and in the
+/// system temp directory. Call this at startup **before** creating the current run's
 /// directory, so only prior leftovers are removed. Best-effort, and anything newer
 /// than [`STALE_AFTER`] is left alone, because it can be another installer's.
-pub fn sweep_stale_extractions(executable: &Path) {
-    sweep_extractions_older_than(executable, SystemTime::now(), STALE_AFTER);
+pub fn sweep_stale_extractions(executable: &Path, state_root: Option<&Path>) {
+    sweep_extractions_older_than(executable, state_root, SystemTime::now(), STALE_AFTER);
 }
 
-fn sweep_extractions_older_than(executable: &Path, now: SystemTime, age: Duration) {
+fn sweep_extractions_older_than(
+    executable: &Path,
+    state_root: Option<&Path>,
+    now: SystemTime,
+    age: Duration,
+) {
     let mut roots = vec![std::env::temp_dir()];
     if let Some(parent) = executable.parent() {
         let parent = parent.to_path_buf();
@@ -34,6 +40,7 @@ fn sweep_extractions_older_than(executable: &Path, now: SystemTime, age: Duratio
             roots.push(parent);
         }
     }
+    roots.extend(state_root.map(staging_root_in));
     for root in roots {
         let Ok(entries) = std::fs::read_dir(&root) else {
             continue;
@@ -67,65 +74,95 @@ fn is_stale_folder(path: &Path, now: SystemTime, age: Duration) -> bool {
         .is_some_and(|elapsed| elapsed >= age)
 }
 
-/// Create a fresh extraction staging directory, preferring a drive with room for
-/// a large package: the install destination's drive first (when `target_root` is
-/// given), then the installer executable's own drive, then the system temp drive
-/// — so a large package never fails to extract for lack of space on `C:`. Using
-/// [`EXTRACTION_PREFIX`] keeps every staging directory matchable by
+/// Create a fresh extraction staging directory, so that a large package never fails to extract for
+/// lack of space on `C:`. Using [`EXTRACTION_PREFIX`] keeps every staging directory matchable by
 /// [`sweep_stale_extractions`]. Removed when the result drops.
 ///
-/// `unpacked_bytes` is how much will go in it. The destination's drive has to have room for that
-/// twice over to be worth it, since the same files go on to the install location. A drive that
+/// Elevated code reads from this folder, so what it reads must not be up to anyone else. Inside
+/// `state_root` nobody but an administrator can open what is made, from the moment it is made. Anywhere
+/// else, it is made admin-only just afterward and held so it cannot be swapped, and whoever could
+/// open it in that moment and keep the right to change its permissions could still get in, so a place
+/// like an account's own folders, where that is who has the rights, is not used. In order:
+///
+/// - `state_root`, if it is on the install destination's drive, as files then only move once.
+/// - The destination's drive, by the nearest folder of the install location that exists.
+/// - `state_root`, on another drive.
+/// - Beside the installer, and then the system's temp folder, which is what is left if `state_root`
+///   cannot be used. Usually neither can be, by that same rule, and then the install does not go ahead.
+///
+/// `unpacked_bytes` is how much will go in it. On the destination's drive there has to be room for
+/// that twice over to be worth it, since the same files go on to the install location. A drive that
 /// will not say how much room it has is taken at its word, and if nowhere has room, the first place
 /// that can be used is, for what checks the room to say so.
 ///
-/// Elevated code reads from this folder, so it is made admin-only before anything is
-/// written there, and held so it cannot be swapped. A location where that fails is not
-/// used, and if none works the install does not go ahead. A link on the way to the install
-/// location is passed over, because the package would be unpacked wherever it points
-/// before the install got as far as refusing it.
+/// A location where any of this fails is not used. A link on the way to the install location is
+/// passed over, because the package would be unpacked wherever it points before the install got as
+/// far as refusing it.
 pub fn create_staging_dir(
     target_root: Option<&Path>,
     executable: &Path,
     unpacked_bytes: u64,
+    state_root: Option<&Path>,
 ) -> std::io::Result<ProtectedFolder> {
-    // The nearest existing ancestor of the install location sits on the
-    // destination drive.
     let destination = target_root
         .filter(|target| !is_network_path(&target.to_string_lossy()))
-        .and_then(|target| target.ancestors().find(|ancestor| is_real_folder(ancestor)));
+        .and_then(|target| target.ancestors().find(|ancestor| is_real_folder(ancestor)))
+        .filter(|place| first_link_to(place).is_none());
+    let admin_only = state_root.and_then(|root| admin_only_staging_root(root).ok());
     let beside_installer = executable.parent();
+    let temp = std::env::temp_dir();
     let has_room = |place: &Path, needed: u64| {
         volume_stats_at(place).is_none_or(|stats| stats.free_bytes >= needed)
     };
-    if let Some(destination) =
-        destination.filter(|place| has_room(place, unpacked_bytes.saturating_mul(2)))
-        && let Ok(staging) = ProtectedFolder::new_in(destination, EXTRACTION_PREFIX)
+    let make_in_protected = |place: &Path| ProtectedFolder::new_in(place, EXTRACTION_PREFIX).ok();
+    let make_in = |place: &Path| {
+        (!others_could_keep_a_folder_made_in(place))
+            .then(|| make_in_protected(place))
+            .flatten()
+    };
+    let twice = unpacked_bytes.saturating_mul(2);
+
+    if let (Some(admin_only), Some(destination)) = (admin_only.as_deref(), destination)
+        && on_same_volume(admin_only, destination)
+        && has_room(admin_only, twice)
+        && let Some(staging) = make_in_protected(admin_only)
+    {
+        return Ok(staging);
+    }
+    if let Some(destination) = destination.filter(|place| has_room(place, twice))
+        && let Some(staging) = make_in(destination)
+    {
+        return Ok(staging);
+    }
+    if let Some(admin_only) = admin_only
+        .as_deref()
+        .filter(|place| has_room(place, unpacked_bytes))
+        && let Some(staging) = make_in_protected(admin_only)
     {
         return Ok(staging);
     }
     if let Some(parent) = beside_installer.filter(|place| has_room(place, unpacked_bytes))
-        && let Ok(staging) = ProtectedFolder::new_in(parent, EXTRACTION_PREFIX)
+        && let Some(staging) = make_in(parent)
     {
         return Ok(staging);
     }
-    if has_room(&std::env::temp_dir(), unpacked_bytes)
-        && let Ok(staging) = ProtectedFolder::new_in_temp(EXTRACTION_PREFIX)
+    if has_room(&temp, unpacked_bytes)
+        && let Some(staging) = make_in(&temp)
     {
         return Ok(staging);
     }
     // Nowhere has room. What checks that says so, of the first place that would have been used.
-    if let Some(destination) = destination
-        && let Ok(staging) = ProtectedFolder::new_in(destination, EXTRACTION_PREFIX)
-    {
-        return Ok(staging);
-    }
-    if let Some(parent) = beside_installer
-        && let Ok(staging) = ProtectedFolder::new_in(parent, EXTRACTION_PREFIX)
-    {
-        return Ok(staging);
-    }
-    ProtectedFolder::new_in_temp(EXTRACTION_PREFIX)
+    admin_only
+        .as_deref()
+        .and_then(make_in_protected)
+        .or_else(|| destination.and_then(make_in))
+        .or_else(|| beside_installer.and_then(make_in))
+        .or_else(|| make_in(&temp))
+        .ok_or_else(|| {
+            std::io::Error::other(
+                "there is nowhere to unpack the package that only administrators can get into",
+            )
+        })
 }
 
 fn is_real_folder(path: &Path) -> bool {
@@ -154,7 +191,7 @@ mod tests {
         std::fs::create_dir_all(&unrelated)?;
 
         let later = SystemTime::now() + STALE_AFTER + Duration::from_secs(60);
-        sweep_extractions_older_than(&exe, later, STALE_AFTER);
+        sweep_extractions_older_than(&exe, None, later, STALE_AFTER);
 
         assert!(!stale.exists(), "stale extraction dir should be removed");
         assert!(unrelated.exists(), "unrelated dir must be kept");
@@ -167,7 +204,7 @@ mod tests {
         let exe = base.path().join("SomeApp_installer.exe");
         let recent = stale_dir_in(base.path());
 
-        sweep_stale_extractions(&exe);
+        sweep_stale_extractions(&exe, None);
 
         assert!(recent.join("files").join("x.bin").is_file());
         Ok(())
@@ -191,7 +228,7 @@ mod tests {
 
         let later = SystemTime::now() + STALE_AFTER + Duration::from_secs(60);
         assert!(!is_stale_folder(&link, later, STALE_AFTER));
-        sweep_extractions_older_than(&base.path().join("x.exe"), later, STALE_AFTER);
+        sweep_extractions_older_than(&base.path().join("x.exe"), None, later, STALE_AFTER);
 
         assert!(victim.join("important.txt").is_file());
         Ok(())
@@ -216,6 +253,7 @@ mod tests {
             Some(&base.path().join("target")),
             &base.path().join("x.exe"),
             u64::MAX,
+            None,
         )?;
         assert_eq!(staging.path().parent(), Some(base.path()));
         Ok(())
@@ -236,7 +274,7 @@ mod tests {
             .output()?;
         assert!(made.status.success());
 
-        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"), 0)?;
+        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"), 0, None)?;
 
         assert_eq!(staging.path().parent(), Some(base.path()));
         assert_eq!(std::fs::read_dir(&elsewhere)?.count(), 0);

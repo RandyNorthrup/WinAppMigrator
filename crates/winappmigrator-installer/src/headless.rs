@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use winappmigrator_core::journal::machine_state_root;
+use winappmigrator_core::journal::{machine_state_root, remove_staging_root_if_unused};
 use winappmigrator_core::logging;
 use winappmigrator_core::rollback::report_lines;
 use winappmigrator_core::{
@@ -91,7 +91,11 @@ where
         return Ok(EXIT_SUCCESS);
     }
 
-    run_installer(raw_args, &executable)
+    let result = run_installer(raw_args, &executable);
+    if let Some(state_root) = machine_state_root() {
+        remove_staging_root_if_unused(&state_root);
+    }
+    result
 }
 
 /// What a warning is about, for a line of its own in what a script reads.
@@ -135,14 +139,17 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     refuse_what_cannot_run_here(&manifest)?;
 
     // Remove extraction directories from previous or crashed runs first.
-    crate::cleanup::sweep_stale_extractions(executable);
-    // Stage the extracted package on the install destination's drive (falling
-    // back to the installer's own drive, then the system temp drive) so a large
-    // package never fails to extract for lack of space on the system drive.
+    crate::cleanup::sweep_stale_extractions(executable, Some(&state_root));
+    // See this for where it goes: somewhere nobody else can have a hold on, with the room for it, so
+    // that a large package never fails to extract for lack of space on the system drive.
     let unpacked_bytes = package.unpacked_bytes()?;
-    let temp_dir =
-        crate::cleanup::create_staging_dir(Some(&target_root), executable, unpacked_bytes)
-            .map_err(|source| WinAppMigratorError::io("staging extraction directory", source))?;
+    let temp_dir = crate::cleanup::create_staging_dir(
+        Some(&target_root),
+        executable,
+        unpacked_bytes,
+        Some(&state_root),
+    )
+    .map_err(|source| WinAppMigratorError::io("staging extraction directory", source))?;
 
     let applied = cli.apply;
     let restore_license = !cli.no_restore_license;

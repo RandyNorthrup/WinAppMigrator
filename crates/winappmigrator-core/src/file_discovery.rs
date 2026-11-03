@@ -371,7 +371,7 @@ fn leads_to_itself(path: &Path) -> bool {
 /// The outermost link on the way to `path`, `path` included. Whoever can write beside a link can
 /// change where it leads at any moment, and with no need for it to be empty, so what is done
 /// through one with full rights can be sent anywhere that way.
-pub(crate) fn first_link_to(path: &Path) -> Option<PathBuf> {
+pub fn first_link_to(path: &Path) -> Option<PathBuf> {
     path.ancestors()
         .filter(|ancestor| {
             fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.file_type().is_symlink())

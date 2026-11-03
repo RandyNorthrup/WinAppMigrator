@@ -2,12 +2,14 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use filetime::{FileTime, set_file_times};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use winreg::RegValue;
 use winreg::enums::{REG_DWORD, REG_NONE, REG_SZ};
@@ -30,7 +32,7 @@ use crate::models::{
     RegistryValueKind, RestoreOptions, RestoreResult, RuntimePrerequisite, ServiceEntry,
     VerificationOptions, Warning, WarningSeverity,
 };
-use crate::package::{PreparedPackage, read_manifest};
+use crate::package::{PreparedPackage, read_embedded_manifest, read_manifest};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_TASKS, POWERSHELL_IMPORT_UTILITY,
@@ -68,6 +70,9 @@ use crate::service_scan::DELAYED_AUTOMATIC_START_LABEL;
 use crate::task_scan::live_task_xml;
 use crate::verify::{PackageFiles, verify_prepared_package, without_what_was_refused};
 
+/// Opens whatever has the name, rather than what a link with that name points at.
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 pub(crate) const SC_EXE: &str = "sc.exe";
 /// Buffer for copying a file out of the package. Large files are the slow ones.
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
@@ -221,8 +226,12 @@ pub fn restore_package_monitored(
     let mut effective_options = options.clone();
     effective_options.package_root = prepared.package_root().to_path_buf();
     // Read once. Everything below works from this copy, so nothing can change between
-    // the hash check and the install, even if the file on disk does.
-    let manifest = read_manifest(&effective_options.package_root)?;
+    // the hash check and the install, even if the file on disk does. From an installer it comes from
+    // the package held open since it was checked, and not from where that was unpacked to.
+    let manifest = match installer {
+        Some(package) => read_embedded_manifest(package)?,
+        None => read_manifest(&effective_options.package_root)?,
+    };
     // What cannot run here stops here, before the record of an install is begun, let alone anything
     // it would change. What may not run is said along with everything else.
     let fit = refuse_what_cannot_run_here(&manifest)?;
@@ -3481,7 +3490,7 @@ fn copy_restore_file(
     let backup = journal.note_file(destination, &root, item, replaces, sha256, Some(&partial))?;
     // With a file to put back, what is written has to be on disk before it takes that file's
     // place. After a power cut, what stands there may be taken for something the user changed.
-    let copied = write_partial_copy(source, &partial, replaces).and_then(|()| {
+    let copied = write_partial_copy_of(source, &partial, replaces, sha256).and_then(|()| {
         if let Some(number) = backup {
             journal.back_up(destination, number)?;
         }
@@ -3562,14 +3571,49 @@ pub(crate) fn partial_file_name() -> String {
 /// Copy a file under a new name, with its times and read-only attribute. With `durable`, its
 /// contents are on disk before this returns, for a copy that may be all that is left.
 pub(crate) fn write_partial_copy(source: &Path, partial: &Path, durable: bool) -> Result<()> {
-    let mut input = File::open(source).map_err(|error| WinAppMigratorError::io(source, error))?;
+    write_partial_copy_of(source, partial, durable, None)
+}
+
+/// [`write_partial_copy`], holding what is read to a hash. The hash is of what was copied and not of
+/// what was on the disk a moment ago, so a file changed since it was checked cannot go on through
+/// this, whatever it took to change it.
+fn write_partial_copy_of(
+    source: &Path,
+    partial: &Path,
+    durable: bool,
+    sha256: Option<&str>,
+) -> Result<()> {
+    let mut input =
+        open_without_following(source).map_err(|error| WinAppMigratorError::io(source, error))?;
     let output = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(partial)
         .map_err(|error| WinAppMigratorError::io(partial, error))?;
     let mut output = BufWriter::with_capacity(COPY_BUFFER_BYTES, output);
-    io::copy(&mut input, &mut output).map_err(|error| WinAppMigratorError::io(partial, error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| WinAppMigratorError::io(source, error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        output
+            .write_all(&buffer[..read])
+            .map_err(|error| WinAppMigratorError::io(partial, error))?;
+    }
+    if let Some(expected) = sha256 {
+        let copied = crate::hashing::hex_lower(&hasher.finalize());
+        if !copied.eq_ignore_ascii_case(expected) {
+            return Err(WinAppMigratorError::InvalidInput(format!(
+                "{} is not what the package holds any more, so it was not installed",
+                source.display()
+            )));
+        }
+    }
     let output = output
         .into_inner()
         .map_err(|error| WinAppMigratorError::io(partial, error.into_error()))?;
@@ -3589,6 +3633,35 @@ pub(crate) fn write_partial_copy(source: &Path, partial: &Path, durable: bool) -
     fs::set_permissions(partial, metadata.permissions())
         .map_err(|error| WinAppMigratorError::io(partial, error))?;
     Ok(())
+}
+
+/// Open a file to read, and not what a link of that name leads to, as that is someone's choice of
+/// what elevated code reads. Whatever else is a reparse point, such as a file kept in the cloud,
+/// reads as itself, and is opened the ordinary way so that it does.
+fn open_without_following(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::other(format!(
+            "{} is a link, and it is not to be followed",
+            path.display()
+        )));
+    }
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+        return Ok(file);
+    }
+    drop(file);
+    let file = File::open(path)?;
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(io::Error::other(format!(
+            "{} became a link while it was being opened",
+            path.display()
+        )));
+    }
+    Ok(file)
 }
 
 /// Worked out from what the restore will do, not from what the manifest says about it.
@@ -4877,6 +4950,46 @@ mod tests {
         assert!(options.target_root.join("a.dat").is_file());
         assert_eq!(install_folders(&next.state_root)?.len(), 2);
         drop(running);
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_changed_after_it_was_checked_goes_no_further_than_the_copy() -> Result<()> {
+        let work = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let source = work.path().join("source.bin");
+        let partial = work.path().join("partial");
+        fs::write(&source, b"what was checked")
+            .map_err(|error| WinAppMigratorError::io(&source, error))?;
+        let hash = sha256_file(&source)?;
+        write_partial_copy_of(&source, &partial, false, Some(&hash))?;
+        assert_eq!(
+            fs::read(&partial).map_err(|error| WinAppMigratorError::io(&partial, error))?,
+            b"what was checked"
+        );
+        fs::remove_file(&partial).map_err(|error| WinAppMigratorError::io(&partial, error))?;
+
+        fs::write(&source, b"swapped in after")
+            .map_err(|error| WinAppMigratorError::io(&source, error))?;
+        assert!(write_partial_copy_of(&source, &partial, false, Some(&hash)).is_err());
+        Ok(())
+    }
+
+    /// As the review found it: between the check of what was there and the copy of it, a link put
+    /// in its place would have the copy made of what the link led to, and that could later come back
+    /// with the permissions of a folder anyone can read. It takes the right to make a link.
+    #[test]
+    fn a_copy_is_not_made_through_a_link() -> Result<()> {
+        let work = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let secret = work.path().join("secret.txt");
+        let link = work.path().join("link.txt");
+        let partial = work.path().join("partial");
+        fs::write(&secret, b"x").map_err(|error| WinAppMigratorError::io(&secret, error))?;
+        if std::os::windows::fs::symlink_file(&secret, &link).is_err() {
+            return Ok(());
+        }
+        assert!(write_partial_copy(&link, &partial, false).is_err());
+        assert!(!partial.exists());
+        assert!(write_partial_copy(&secret, &partial, false).is_ok());
         Ok(())
     }
 

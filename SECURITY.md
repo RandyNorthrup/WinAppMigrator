@@ -90,9 +90,15 @@ installer is about to trust, and an honest package reaching too far:
   and Default apps entries it will set up, what it will leave out, and whether it is signed and by whom. Read it.
   Each of them is journaled first, so a rollback and an uninstall take it back out.
 - **While it runs,** its staging folder is writable only by administrators, and a drive that cannot
-  keep that, such as FAT32 or exFAT, is not used for it. That folder and the install location cannot be
-  renamed and replaced, and it will not write through a link at or below the install location. From
-  the moment it opens its own file, and a data file if it has one, those cannot be changed or swapped.
+  keep that, such as FAT32 or exFAT, is not used for it. It is made inside the admin-only folder where
+  installs keep their records whenever it can be, so nothing else can ever have opened it. Elsewhere it is
+  closed just after it is made, in a folder where only administrators have the rights to go on controlling
+  what is made there, so a program of the account running this cannot keep a hold on it from the moment it
+  appears. What is unpacked is hashed again as it is copied into place, and the list of what to do comes
+  from the package held open since it was checked, so changing what was unpacked gets nowhere. That
+  folder and the install location cannot be renamed and replaced, and it will not write through a link at or
+  below the install location. From the moment it opens its own file, and a data file if it has one, those
+  cannot be changed or swapped.
 - **What a package says it needs is not a protection.** An app that cannot run on this PC is refused before
   anything changes, by what the package records of its programs and drivers. That is there to save a person a
   failed install. A package can say what it likes, and the rules above are what stand between it and the PC.

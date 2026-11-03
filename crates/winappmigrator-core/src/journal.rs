@@ -44,6 +44,9 @@ use crate::restore_policy::paths_equal;
 
 const STATE_FOLDER: &str = "WinAppMigrator";
 const INSTALLS_FOLDER: &str = "installs";
+/// Where a package is unpacked when it can be. Only administrators can get in, from the moment
+/// anything is made in it, so nothing can be holding what is made there.
+const STAGING_FOLDER: &str = "staging";
 const JOURNAL_FILE: &str = "journal.jsonl";
 /// Held by whatever is installing or uninstalling, so there is only ever one.
 const BUSY_FILE: &str = "busy.lock";
@@ -357,6 +360,31 @@ fn folded(path: &Path) -> String {
 pub(crate) fn real_path(path: &Path) -> io::Result<String> {
     let actual = fs::canonicalize(path)?;
     Ok(without_verbatim_prefix(&actual.to_string_lossy()).to_owned())
+}
+
+/// Where a package can be unpacked in `state_root`, made if it has to be and only if this is
+/// elevated. Without elevation there is no boundary to keep, and nowhere safe to make this.
+pub fn admin_only_staging_root(state_root: &Path) -> io::Result<PathBuf> {
+    if !is_elevated() {
+        return Err(io::Error::other("not elevated"));
+    }
+    let staging = staging_root_in(state_root);
+    for folder in [state_root, staging.as_path()] {
+        ensure_protected_folder(folder)?;
+    }
+    Ok(staging)
+}
+
+/// Where [`admin_only_staging_root`] would be, whether or not it is there.
+pub fn staging_root_in(state_root: &Path) -> PathBuf {
+    state_root.join(STAGING_FOLDER)
+}
+
+/// Take away what a preview made to unpack in, as it changes nothing, and it is no harm to anything
+/// else: neither can go while anything is in it.
+pub fn remove_staging_root_if_unused(state_root: &Path) {
+    let _ = fs::remove_dir(staging_root_in(state_root));
+    let _ = fs::remove_dir(state_root);
 }
 
 /// Make sure the state root and the folder of installs are there and are what they should be.
