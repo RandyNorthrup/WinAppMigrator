@@ -38,7 +38,7 @@ use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_TASKS, POWERSHELL_IMPORT_UTILITY,
     POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, path_is_strictly_inside,
-    path_is_within, powershell_command, strip_prefix_ignore_case, system_root,
+    path_is_within, powershell_command, strip_prefix_ignore_case, system_root, text_mentions_path,
 };
 use crate::prerequisites::{
     PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
@@ -55,18 +55,18 @@ use crate::restore_policy::{
     COM_SERVER_KEYS, EVENT_LOG_PREFIX, Registration, SERVICES_PREFIX, ServiceAccount,
     com_class_key, com_server_refusal, existing_service_refusal, existing_task_refusal,
     firewall_fingerprint, firewall_identity, is_autostart_entry, is_uninstall_entry_key,
-    netsh_add_rule_arguments, program_placement_refusal, registration_of, registration_unit_of,
-    restored_value_bytes, restored_value_name, restored_value_text, service_image_path_value,
-    stored_firewall_rule_matches,
+    netsh_add_rule_arguments, paths_equal, program_placement_refusal, registration_of,
+    registration_unit_of, restored_value_bytes, restored_value_name, restored_value_text,
+    service_image_path_value, stored_firewall_rule_matches,
 };
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
-    STATE_ROOT_REFUSAL, install_location_problem, overlaps_state_root, refuse_what_cannot_run_here,
-    store_file_destination,
+    STATE_ROOT_REFUSAL, change_kind_of, install_location_problem, overlaps_state_root,
+    refuse_what_cannot_run_here, registry_item, store_file_destination,
 };
 use crate::rollback::{
     interrupted_installs, put_back_backup, query_shows_running, query_shows_stopped,
-    recover_interrupted_installs, roll_back,
+    recover_interrupted_installs, roll_back, stop_service,
 };
 use crate::service_scan::DELAYED_AUTOMATIC_START_LABEL;
 use crate::task_scan::live_task_xml;
@@ -425,6 +425,7 @@ pub fn restore_package_monitored(
         earlier_install_here,
         data_folders_already_here: Vec::new(),
         cancelled: false,
+        stopped_services: Vec::new(),
         app_name: &app_name,
         manifest: &manifest,
         package_files,
@@ -440,6 +441,7 @@ pub fn restore_package_monitored(
         mut warnings,
         mut errors,
         refused,
+        stopped_services,
         ..
     } = run;
     let mut changes_logged = changes.in_order();
@@ -475,7 +477,12 @@ pub fn restore_package_monitored(
             install_id = Some(journal.id().to_owned());
             // Only now, with everything checked and the record finished, and if one will not start
             // that is for a person to know about and not a reason to take all of it back out.
-            let started = start_what_starts_by_itself(&review.services, monitor, &run_sc_start);
+            let started = start_what_starts_by_itself(
+                &review.services,
+                &stopped_services,
+                monitor,
+                &run_sc_start,
+            );
             changes_logged.extend(started.started);
             warnings.extend(started.warnings);
         } else {
@@ -484,6 +491,17 @@ pub fn restore_package_monitored(
                 "install failed, putting back what it changed"
             );
             rollback = Some(roll_back(journal, monitor));
+            // What this stopped is as it was again, and was running then.
+            for name in &stopped_services {
+                if run_sc_start(name) != StartAnswer::Running {
+                    warnings.push(Warning::new(
+                        SERVICE_NOT_STARTED_CODE,
+                        WarningSeverity::Warning,
+                        format!("The service {name} was running, and did not start again."),
+                        Some(name.clone()),
+                    ));
+                }
+            }
         }
     }
 
@@ -502,6 +520,53 @@ pub fn restore_package_monitored(
     Ok(result)
 }
 
+/// What a package sets up that would run this file, if anything.
+fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
+    let is_it = |path: &Path| paths_equal(path, file);
+    if let Some(service) = review
+        .services
+        .iter()
+        .find(|service| is_it(&service.binary))
+    {
+        return Some(format!("the service {}", service.entry.service_name));
+    }
+    if let Some(task) = review.tasks.iter().find(|task| {
+        task.commands
+            .iter()
+            .any(|command| is_it(Path::new(command.trim().trim_matches('"'))))
+    }) {
+        return Some(format!("the scheduled task {}", task.entry.task_name));
+    }
+    if let Some(rule) = review
+        .firewall_rules
+        .iter()
+        .find(|rule| is_it(&rule.program))
+    {
+        return Some(format!("the firewall rule {}", rule.entry.name));
+    }
+    if let Some(shortcut) = review
+        .shortcuts
+        .iter()
+        .find(|shortcut| is_it(&shortcut.target))
+    {
+        return Some(format!(
+            "the shortcut {}",
+            shortcut.original_lnk_path.display()
+        ));
+    }
+    review
+        .registry
+        .iter()
+        .filter(|entry| is_autostart_entry(entry) || change_kind_of(entry).is_some())
+        .find(|entry| {
+            entry
+                .value_data
+                .as_deref()
+                .is_some_and(|data| text_mentions_path(&review.map.rewrite(data), file, true))
+        })
+        .map(|entry| format!("the registry value {}", registry_item(entry)))
+}
+
 /// What came of starting what was installed to start by itself.
 #[derive(Debug, Default)]
 struct Started {
@@ -512,16 +577,19 @@ struct Started {
 /// Whether Windows would start this service by itself at each boot. An app that relies on one
 /// would otherwise not work until the next restart, and look broken until then.
 fn starts_by_itself(service: &ReviewedService<'_>) -> bool {
-    !matches!(service.account, ServiceAccount::Custom(_))
-        && matches!(
-            service.entry.start_type.as_deref().and_then(sc_start_type),
-            Some("auto" | "delayed-auto")
-        )
+    matches!(
+        service.entry.start_type.as_deref().and_then(sc_start_type),
+        Some("auto" | "delayed-auto")
+    )
 }
 
-/// Those that start by themselves, each after what it depends on among them. A list that goes round in
-/// a circle is not one any order would help, and Windows will say what it makes of it.
-fn in_order_to_start<'a>(services: &'a [ReviewedService<'a>]) -> Vec<&'a ReviewedService<'a>> {
+/// Those that start by themselves or were running when this stopped them, each after what it depends
+/// on among them. A list that goes round in a circle is not one any order would help, and Windows
+/// will say what it makes of it.
+fn in_order_to_start<'a>(
+    services: &'a [ReviewedService<'a>],
+    were_running: &[String],
+) -> Vec<&'a ReviewedService<'a>> {
     fn visit<'a>(
         service: &'a ReviewedService<'a>,
         chosen: &[&'a ReviewedService<'a>],
@@ -543,7 +611,12 @@ fn in_order_to_start<'a>(services: &'a [ReviewedService<'a>]) -> Vec<&'a Reviewe
     }
     let chosen: Vec<&ReviewedService<'_>> = services
         .iter()
-        .filter(|service| starts_by_itself(service))
+        .filter(|service| {
+            starts_by_itself(service)
+                || were_running
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&service.entry.service_name))
+        })
         .collect();
     let mut seen = HashSet::new();
     let mut order = Vec::with_capacity(chosen.len());
@@ -563,11 +636,12 @@ enum StartAnswer {
 
 fn start_what_starts_by_itself(
     services: &[ReviewedService<'_>],
+    were_running: &[String],
     monitor: &InstallMonitor,
     start: &dyn Fn(&str) -> StartAnswer,
 ) -> Started {
     let mut result = Started::default();
-    let order = in_order_to_start(services);
+    let order = in_order_to_start(services, were_running);
     for (done, service) in order.iter().enumerate() {
         monitor.report(InstallStep::new(InstallPhase::Services, done, order.len()));
         let name = &service.entry.service_name;
@@ -858,6 +932,8 @@ struct Run<'a, 'p> {
     /// this install put anything in them.
     data_folders_already_here: Vec<PathBuf>,
     cancelled: bool,
+    /// Services of an earlier install here that this stopped, to replace what they run.
+    stopped_services: Vec<String>,
     /// How the package's own files are checked.
     package_files: PackageFiles<'a>,
 }
@@ -869,6 +945,7 @@ impl Run<'_, '_> {
         self.note_data_folders();
         // Runtimes first, so the app's own services and drivers have them available.
         self.restore_prerequisites();
+        self.stop_what_is_being_replaced();
         self.restore_files();
         self.restore_empty_folders();
         // Services first, so a registry key under one can never make it look like it
@@ -882,6 +959,28 @@ impl Run<'_, '_> {
         self.restore_shortcuts();
         self.restore_environment();
         self.write_uninstall_entry();
+    }
+
+    /// A service of an earlier install here may be running what is about to be replaced. A file in
+    /// use cannot be, or the old program would go on running with the new one in its place, so it
+    /// is stopped first, and what happens to it after that is for the end of the install to say.
+    fn stop_what_is_being_replaced(&mut self) {
+        if self.journal.is_none() {
+            return;
+        }
+        for service in &self.review.services {
+            let name = &service.entry.service_name;
+            match stop_service(name) {
+                Ok(true) => self.stopped_services.push(name.clone()),
+                Ok(false) => {}
+                Err(reason) => self.warnings.push(Warning::new(
+                    "service_not_stopped",
+                    WarningSeverity::Warning,
+                    format!("The service {name} could not be stopped first: {reason}."),
+                    Some(name.clone()),
+                )),
+            }
+        }
     }
 
     /// Before anything is put in them, so that what this install makes does not count.
@@ -1042,6 +1141,21 @@ impl Run<'_, '_> {
                 self.earlier_install_here,
                 &self.data_folders_already_here,
             ) {
+                // Whatever is there is not this package's. Set up to run all the same, it would run
+                // what may have been left there for that, as whatever this was going to run it as.
+                if let Some(runner) = what_would_run(review, destination) {
+                    self.errors.push(Warning::new(
+                        "program_left_alone_would_run",
+                        WarningSeverity::Error,
+                        format!(
+                            "{} is not this package's to replace, and {runner} is set up to run \
+                             it, so nothing was installed: {refusal}",
+                            destination.display()
+                        ),
+                        Some(destination.display().to_string()),
+                    ));
+                    return;
+                }
                 self.record_failure(Warning::new(
                     FILE_EXISTS_ELSEWHERE_CODE,
                     WarningSeverity::Warning,
@@ -5143,7 +5257,7 @@ mod tests {
             service_starting("Other", "automatic", &[]),
         ];
         let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
-        let order: Vec<&str> = in_order_to_start(&services)
+        let order: Vec<&str> = in_order_to_start(&services, &[])
             .iter()
             .map(|service| service.entry.service_name.as_str())
             .collect();
@@ -5157,15 +5271,27 @@ mod tests {
             service_starting("B", "automatic", &["A"]),
         ];
         let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
-        assert_eq!(in_order_to_start(&services).len(), 2);
+        assert_eq!(in_order_to_start(&services, &[]).len(), 2);
     }
 
-    /// Windows has no password for it, and what was said about that has been said already.
+    /// It is set up to run as LocalService, so it can be started like any other.
     #[test]
-    fn one_that_runs_as_someone_of_its_own_is_not_asked() {
+    fn one_recorded_with_an_account_of_its_own_is_started_too() {
         let entries = [service_starting("Custom", "automatic", &[])];
         let services = [reviewed(&entries[0], Some(r".\someone"))];
-        assert!(in_order_to_start(&services).is_empty());
+        assert_eq!(in_order_to_start(&services, &[]).len(), 1);
+    }
+
+    #[test]
+    fn what_this_stopped_goes_back_to_running_whatever_it_starts_as() {
+        let entries = [
+            service_starting("Asked", "manual", &[]),
+            service_starting("Other", "manual", &[]),
+        ];
+        let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
+        let order = in_order_to_start(&services, &["asked".to_owned()]);
+        assert_eq!(order.len(), 1);
+        assert_eq!(order[0].entry.service_name, "Asked");
     }
 
     #[test]
@@ -5177,15 +5303,13 @@ mod tests {
         ];
         let services: Vec<_> = entries.iter().map(|entry| reviewed(entry, None)).collect();
         let result =
-            start_what_starts_by_itself(
-                &services,
-                &InstallMonitor::default(),
-                &|name| match name {
+            start_what_starts_by_itself(&services, &[], &InstallMonitor::default(), &|name| {
+                match name {
                     "Bad" => StartAnswer::Failed("it would not".to_owned()),
                     "Slow" => StartAnswer::StillStarting,
                     _ => StartAnswer::Running,
-                },
-            );
+                }
+            });
         assert_eq!(result.started, ["started service Good"]);
         assert_eq!(result.warnings.len(), 2);
         assert!(result.warnings[0].message.contains("Bad"));

@@ -787,7 +787,14 @@ impl Undoer<'_> {
             self.kept(format!("{} stays, {why}.", path.display()));
             return;
         };
-        let beside = free_name_beside(path);
+        let Some(beside) = free_name_beside(path) else {
+            self.failed(format!(
+                "{} stays, {why}, and the file it replaced could not be put beside it: every name \
+                 for it is taken.",
+                path.display()
+            ));
+            return;
+        };
         let placed = self
             .pin(root, path)
             .map_err(WinAppMigratorError::InvalidInput)
@@ -1323,8 +1330,9 @@ const REPLACED_FILE_SUFFIX: &str = "before-install";
 /// A folder with this many of them has more to say than a number could.
 const MOST_REPLACED_FILE_NAMES: u32 = 1000;
 
-/// A name beside `path` that nothing has yet, which says what the file is.
-fn free_name_beside(path: &Path) -> PathBuf {
+/// A name beside `path` that nothing has yet, which says what the file is. `None` if a folder has
+/// so many that it does not have one, and then the record keeps the file.
+fn free_name_beside(path: &Path) -> Option<PathBuf> {
     let name = file_name_of(path);
     let first = path.with_file_name(format!("{name}.{REPLACED_FILE_SUFFIX}"));
     std::iter::once(first)
@@ -1334,11 +1342,6 @@ fn free_name_beside(path: &Path) -> PathBuf {
             }),
         )
         .find(|candidate| fs::symlink_metadata(candidate).is_err())
-        .unwrap_or_else(|| {
-            path.with_file_name(format!(
-                "{name}.{REPLACED_FILE_SUFFIX}-{MOST_REPLACED_FILE_NAMES}"
-            ))
-        })
 }
 
 fn file_name_of(path: &Path) -> String {
@@ -1456,7 +1459,7 @@ fn query_shows_state(output: &str, number: &str, state: &str) -> bool {
 }
 
 /// Stop a service if it is running, and say whether it was.
-fn stop_service(name: &str) -> std::result::Result<bool, String> {
+pub(crate) fn stop_service(name: &str) -> std::result::Result<bool, String> {
     let is_stopped = || {
         hidden_command(SC_EXE)
             .args(["query", name])
@@ -2333,6 +2336,35 @@ mod tests {
             read_text(&root.join("settings.ini.before-install-2"))?,
             "what was there before"
         );
+        Ok(())
+    }
+
+    /// As the review found it: with every name taken, the last was used anyway, and what had that
+    /// name was lost. The record keeps the file instead.
+    #[test]
+    fn with_no_name_free_the_record_keeps_what_it_replaced() -> Result<()> {
+        let work =
+            tempfile::tempdir().map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+        let (journal, root, file, hash) = installed_over_a_file(work.path())?;
+        fs::write(&file, b"changed since")
+            .map_err(|error| WinAppMigratorError::io(&file, error))?;
+        let mut taken = vec![root.join("settings.ini.before-install")];
+        taken.extend(
+            (2..=MOST_REPLACED_FILE_NAMES)
+                .map(|number| root.join(format!("settings.ini.before-install-{number}"))),
+        );
+        for name in &taken {
+            fs::write(name, b"already here")
+                .map_err(|error| WinAppMigratorError::io(name, error))?;
+        }
+        let changes = journal.settled_changes();
+        let mut undoer = undoer_for(&journal, &changes, KEEP);
+        undoer.undo_file(&file, &root, ItemKind::UserData, Some(1), Some(&hash), None);
+        assert_eq!(undoer.report.failed.len(), 1, "{:?}", undoer.report);
+        assert!(find_backup(&journal.folder, 1).is_some());
+        for name in &taken {
+            assert_eq!(read_text(name)?, "already here");
+        }
         Ok(())
     }
 

@@ -1,6 +1,8 @@
 //! Removes package-extraction directories left by previous or crashed installer
 //! runs, so nothing accumulates over time regardless of how a prior run ended.
 
+use std::fs::OpenOptions;
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -9,6 +11,14 @@ use winappmigrator_core::journal::{STAGING_PREFIX, admin_only_staging_root, stag
 use winappmigrator_core::path_utils::is_network_path;
 use winappmigrator_core::privilege::{ProtectedFolder, others_could_keep_a_folder_made_in};
 use winappmigrator_core::space::{on_same_volume, volume_stats_at};
+
+const DELETE: u32 = 0x0001_0000;
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const ERROR_SHARING_VIOLATION: i32 = 32;
 
 /// Prefix of the directories the installer extracts its embedded package into.
 pub const EXTRACTION_PREFIX: &str = STAGING_PREFIX;
@@ -58,8 +68,10 @@ fn sweep_extractions_older_than(
     }
 }
 
-/// A real folder, not touched for `age`. Both folders swept are ones another process can
-/// write to, so a link given the right name must not be followed or removed.
+/// A real folder, not touched for `age`, that no installer has a hold on. Both folders swept are ones
+/// another process can write to, so a link given the right name must not be followed or removed. A
+/// folder's time does not change as what is in it is read, so a long install's can look old, and a
+/// hold keeps the folder from going but not what is in it.
 fn is_stale_folder(path: &Path, now: SystemTime, age: Duration) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return false;
@@ -67,11 +79,23 @@ fn is_stale_folder(path: &Path, now: SystemTime, age: Duration) -> bool {
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return false;
     }
-    metadata
+    let is_old = metadata
         .modified()
         .ok()
         .and_then(|modified| now.duration_since(modified).ok())
-        .is_some_and(|elapsed| elapsed >= age)
+        .is_some_and(|elapsed| elapsed >= age);
+    is_old && !is_being_held(path)
+}
+
+/// Whether something has this folder open without letting it be deleted, as a running installer does.
+/// Anything else, as being unable to look, is not that.
+fn is_being_held(path: &Path) -> bool {
+    OpenOptions::new()
+        .access_mode(DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .is_err_and(|error| error.raw_os_error() == Some(ERROR_SHARING_VIOLATION))
 }
 
 /// Create a fresh extraction staging directory, so that a large package never fails to extract for
@@ -104,6 +128,24 @@ pub fn create_staging_dir(
     unpacked_bytes: u64,
     state_root: Option<&Path>,
 ) -> std::io::Result<ProtectedFolder> {
+    create_staging_dir_where(
+        target_root,
+        executable,
+        unpacked_bytes,
+        state_root,
+        &|place| !others_could_keep_a_folder_made_in(place),
+    )
+}
+
+/// [`create_staging_dir`], with whether a place can be used passed in, so that the order can be
+/// tested on its own, as a test's folders are in its account's own folders.
+fn create_staging_dir_where(
+    target_root: Option<&Path>,
+    executable: &Path,
+    unpacked_bytes: u64,
+    state_root: Option<&Path>,
+    may_use: &dyn Fn(&Path) -> bool,
+) -> std::io::Result<ProtectedFolder> {
     let destination = target_root
         .filter(|target| !is_network_path(&target.to_string_lossy()))
         .and_then(|target| target.ancestors().find(|ancestor| is_real_folder(ancestor)))
@@ -115,11 +157,7 @@ pub fn create_staging_dir(
         volume_stats_at(place).is_none_or(|stats| stats.free_bytes >= needed)
     };
     let make_in_protected = |place: &Path| ProtectedFolder::new_in(place, EXTRACTION_PREFIX).ok();
-    let make_in = |place: &Path| {
-        (!others_could_keep_a_folder_made_in(place))
-            .then(|| make_in_protected(place))
-            .flatten()
-    };
+    let make_in = |place: &Path| may_use(place).then(|| make_in_protected(place)).flatten();
     let twice = unpacked_bytes.saturating_mul(2);
 
     if let (Some(admin_only), Some(destination)) = (admin_only.as_deref(), destination)
@@ -198,6 +236,26 @@ mod tests {
         Ok(())
     }
 
+    /// As the review found it: a long install's folder looks old, and a second installer deleted
+    /// what was in it, with the hold only keeping the folder itself.
+    #[test]
+    fn a_folder_held_by_a_running_installer_is_not_stale_however_old_it_looks()
+    -> std::io::Result<()> {
+        let base = tempfile::tempdir()?;
+        let exe = base.path().join("SomeApp_installer.exe");
+        let held = stale_dir_in(base.path());
+        let hold = winappmigrator_core::privilege::hold_folder(&held)?;
+        let later = SystemTime::now() + STALE_AFTER + Duration::from_secs(60);
+
+        assert!(!is_stale_folder(&held, later, STALE_AFTER));
+        sweep_extractions_older_than(&exe, None, later, STALE_AFTER);
+        assert!(held.join("files").join("x.bin").is_file());
+
+        drop(hold);
+        assert!(is_stale_folder(&held, later, STALE_AFTER));
+        Ok(())
+    }
+
     #[test]
     fn leaves_a_folder_a_running_installer_may_be_using() -> std::io::Result<()> {
         let base = tempfile::tempdir()?;
@@ -239,7 +297,10 @@ mod tests {
     {
         let base = tempfile::tempdir()?;
         let target = base.path().join(r"not\there\yet");
-        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"), 0, None)?;
+        let staging =
+            create_staging_dir_where(Some(&target), &base.path().join("x.exe"), 0, None, &|_| {
+                true
+            })?;
         assert_eq!(staging.path().parent(), Some(base.path()));
         Ok(())
     }
@@ -261,7 +322,10 @@ mod tests {
         assert!(made.status.success());
 
         let target = link.join(r"real\app");
-        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"), 0, None)?;
+        let staging =
+            create_staging_dir_where(Some(&target), &base.path().join("x.exe"), 0, None, &|_| {
+                true
+            })?;
 
         assert_eq!(staging.path().parent(), Some(base.path()));
         assert_eq!(std::fs::read_dir(elsewhere.path().join("real"))?.count(), 0);
@@ -271,11 +335,12 @@ mod tests {
     #[test]
     fn staging_is_never_asked_to_look_at_a_share() -> std::io::Result<()> {
         let base = tempfile::tempdir()?;
-        let staging = create_staging_dir(
+        let staging = create_staging_dir_where(
             Some(Path::new(r"\\localhost\c$\Windows\Temp")),
             &base.path().join("x.exe"),
             0,
             None,
+            &|_| true,
         )?;
         assert_eq!(staging.path().parent(), Some(base.path()));
         Ok(())
@@ -286,11 +351,12 @@ mod tests {
         let base = tempfile::tempdir()?;
         // Not on any drive there is, so there is only the temp folder's to fall back on, and more
         // than any drive holds, so nothing has room and the first place that can be is used.
-        let staging = create_staging_dir(
+        let staging = create_staging_dir_where(
             Some(&base.path().join("target")),
             &base.path().join("x.exe"),
             u64::MAX,
             None,
+            &|_| true,
         )?;
         assert_eq!(staging.path().parent(), Some(base.path()));
         Ok(())
@@ -311,10 +377,29 @@ mod tests {
             .output()?;
         assert!(made.status.success());
 
-        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"), 0, None)?;
+        let staging =
+            create_staging_dir_where(Some(&target), &base.path().join("x.exe"), 0, None, &|_| {
+                true
+            })?;
 
         assert_eq!(staging.path().parent(), Some(base.path()));
         assert_eq!(std::fs::read_dir(&elsewhere)?.count(), 0);
+        Ok(())
+    }
+
+    /// Where an account's own folders are all there is, there is nowhere to unpack.
+    #[test]
+    fn nowhere_that_can_be_kept_hold_of_is_used() -> std::io::Result<()> {
+        let base = tempfile::tempdir()?;
+        let staging = create_staging_dir_where(
+            Some(&base.path().join("target")),
+            &base.path().join("x.exe"),
+            0,
+            None,
+            &|_| false,
+        );
+        assert!(staging.is_err());
+        assert_eq!(std::fs::read_dir(base.path())?.count(), 0);
         Ok(())
     }
 }

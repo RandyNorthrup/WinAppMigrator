@@ -4106,7 +4106,12 @@ fn staging_folder_is_locked_down_and_fails_closed() -> TestResult {
     drop(on_fat32);
     let fat32_target = format!(r"{FAT32_DRIVE}WAM E2E App");
     let beside = work.path().join("installer.exe");
-    let fallback = create_staging_dir(Some(Path::new(&fat32_target)), &beside, 0, None)?;
+    let fallback = create_staging_dir(
+        Some(Path::new(&fat32_target)),
+        &beside,
+        0,
+        winappmigrator_core::journal::machine_state_root().as_deref(),
+    )?;
     checks.that(
         "the installer stages somewhere it can protect instead",
         !fallback

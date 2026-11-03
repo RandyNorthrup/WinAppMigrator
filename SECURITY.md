@@ -33,6 +33,8 @@ installer is about to trust, and an honest package reaching too far:
   of what is known to be dangerous, so a package can still do something they do not name. So values it
   writes outside the app's own keys and the kinds on the list show as one row of their own, for a second
   look. What counts as the app's own goes by what the package calls itself, and Windows' own keys never do.
+  A package that calls itself Google can write to Google's keys and not be shown doing it, and what is under
+  `Software\Classes` goes by the rules for what ties an app into Windows and is not counted.
 - **What it says it will do is what it does.** The list a person agrees to and the install go through one
   review, with the same options, and a file from a data folder that is not going back to one can arrive
   under the install location, but nothing is set up to run it. Who a scheduled task runs as is its principal,
@@ -103,7 +105,9 @@ installer is about to trust, and an honest package reaching too far:
   installs keep their records whenever it can be, so nothing else can ever have opened it. Elsewhere it is
   closed just after it is made, in a folder where only administrators have the rights to go on controlling
   what is made there, so a program of the account running this cannot keep a hold on it from the moment it
-  appears. What is unpacked is hashed again as it is copied into place, and the list of what to do comes
+  appears. On a PC whose policy makes an administrator's own account the owner of what they make, in place
+  of Administrators, that goes only for the admin-only folder, and any other place is open to it for that
+  moment. What is unpacked is hashed again as it is copied into place, and the list of what to do comes
   from the package held open since it was checked, so changing what was unpacked gets nowhere. That
   folder and the install location cannot be renamed and replaced, and it will not write through a link at or
   below the install location. From the moment it opens its own file, and a data file if it has one, those

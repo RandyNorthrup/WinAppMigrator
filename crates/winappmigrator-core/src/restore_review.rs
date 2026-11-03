@@ -1214,9 +1214,12 @@ pub fn files_no_install_put_there(folder: &Path, state_root: Option<&Path>) -> O
     })
 }
 
-/// Whether anything is in a folder.
+/// Whether anything is in a folder. One that is there and will not say is not taken to be empty.
 pub fn folder_has_files(folder: &Path) -> bool {
-    std::fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_some())
+    match std::fs::read_dir(folder) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Why this install location must not be used on this PC, if so.
