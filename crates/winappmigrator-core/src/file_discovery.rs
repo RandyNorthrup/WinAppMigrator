@@ -798,12 +798,8 @@ pub(crate) fn user_data_base(anchor: UserDataAnchor) -> Option<PathBuf> {
         // The machine-wide folders come from the admin-only registry, because the
         // environment of an elevated process is partly the user's to set. The marker
         // for the Public profile includes the trailing "public\", so the tail excludes it.
-        UserDataAnchor::ProgramData => program_data_dir()
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::var_os("ProgramData").map(PathBuf::from)),
-        UserDataAnchor::PublicProfile => public_profile_dir()
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::var_os("PUBLIC").map(PathBuf::from)),
+        UserDataAnchor::ProgramData => program_data_dir().map(Path::to_path_buf),
+        UserDataAnchor::PublicProfile => public_profile_dir().map(Path::to_path_buf),
     }
 }
 

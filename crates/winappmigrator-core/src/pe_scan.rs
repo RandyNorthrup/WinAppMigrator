@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -8,7 +9,7 @@ use pelite::{PeFile, Wrap};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::errors::{Result, WinAppMigratorError};
+use crate::errors::{Result, WinAppMigratorError, panic_text};
 use crate::models::{
     AppArchitecture, ExecutableMetadata, FileVersionInfo, ProgramNeed, ProgramRole,
     SignatureStatus, Warning, WarningSeverity,
@@ -49,15 +50,63 @@ pub struct ImportedDll {
 
 pub fn scan_pe(path: &Path) -> Result<PeScanResult> {
     let bytes = read_program(path)?;
-    let pe = PeFile::from_bytes(&bytes)
-        .map_err(|source| WinAppMigratorError::pe(path, source.to_string()))?;
-    let metadata = file_metadata(path, &pe, &bytes)?;
+    not_a_panic(path, || scan_pe_bytes(path, &bytes))
+}
+
+/// What a program's bytes can do to what reads them stays this file's problem. A version resource
+/// that says it is longer than it is makes the parser panic, and that would take the whole scan with
+/// it, when any one file on a drive can be whatever someone made it.
+fn not_a_panic<T>(path: &Path, read: impl FnOnce() -> Result<T>) -> Result<T> {
+    panic::catch_unwind(AssertUnwindSafe(read)).unwrap_or_else(|panicked| {
+        Err(WinAppMigratorError::pe(
+            path,
+            format!("it could not be read: {}", panic_text(&*panicked)),
+        ))
+    })
+}
+
+/// A program's headers, parsed if they can be without trusting what the parser would take on trust:
+/// it makes a slice of section headers wherever the optional header says it ends, and one that is not
+/// on a four-byte boundary is undefined behaviour, whatever it reads as.
+fn parse_program<'a>(path: &Path, bytes: &'a [u8]) -> Result<PeFile<'a>> {
+    if !headers_are_where_they_can_be(bytes) {
+        return Err(WinAppMigratorError::pe(
+            path,
+            "its headers are not on the boundaries a program's have to be".to_owned(),
+        ));
+    }
+    PeFile::from_bytes(bytes).map_err(|source| WinAppMigratorError::pe(path, source.to_string()))
+}
+
+fn headers_are_where_they_can_be(bytes: &[u8]) -> bool {
+    const DOS_HEADER_OFFSET_FIELD: usize = 0x3C;
+    const OPTIONAL_HEADER_SIZE_FIELD: usize = 20;
+    const OPTIONAL_HEADER_START: usize = 24;
+    const BOUNDARY: usize = 4;
+    let Some(field) = bytes.get(DOS_HEADER_OFFSET_FIELD..DOS_HEADER_OFFSET_FIELD + 4) else {
+        return false;
+    };
+    let headers = u32::from_le_bytes([field[0], field[1], field[2], field[3]]) as usize;
+    let Some(size) = headers
+        .checked_add(OPTIONAL_HEADER_SIZE_FIELD)
+        .and_then(|at| bytes.get(at..at.checked_add(2)?))
+    else {
+        return false;
+    };
+    let optional_size = u16::from_le_bytes([size[0], size[1]]) as usize;
+    headers.is_multiple_of(BOUNDARY)
+        && (headers + OPTIONAL_HEADER_START + optional_size).is_multiple_of(BOUNDARY)
+}
+
+fn scan_pe_bytes(path: &Path, bytes: &[u8]) -> Result<PeScanResult> {
+    let pe = parse_program(path, bytes)?;
+    let metadata = file_metadata(path, &pe, bytes)?;
     let architecture = architecture_from_machine(pe.file_header().Machine);
     let mut warnings = Vec::new();
     let mut direct_imports = read_imports(path, &pe, &mut warnings);
     merge_delay_imports(
         &mut direct_imports,
-        read_delay_imports(&pe, &bytes, &mut warnings),
+        read_delay_imports(&pe, bytes, &mut warnings),
     );
 
     Ok(PeScanResult {
@@ -213,11 +262,18 @@ fn read_what_is_looked_at(path: &Path, size: u64) -> Option<Vec<u8>> {
     }
     let mut bytes = vec![0_u8; usize::try_from(size).ok()?];
     bytes.get_mut(..start.len())?.copy_from_slice(&start);
+    // Sections can all say they are the whole file, and a read of a part should not be many of all
+    // of it. Past that, it is read whole, which is one.
+    let mut read_so_far = 0_u64;
     let mut read_section = |bytes: &mut Vec<u8>, section: &SectionPlace| -> Option<()> {
         let from = section.file_offset;
         let to = from.checked_add(section.file_size)?.min(size);
         if from >= to {
             return Some(());
+        }
+        read_so_far = read_so_far.saturating_add(to - from);
+        if read_so_far > size {
+            return None;
         }
         file.seek(SeekFrom::Start(from)).ok()?;
         let place = bytes.get_mut(usize::try_from(from).ok()?..usize::try_from(to).ok()?)?;
@@ -299,30 +355,52 @@ pub(crate) struct ProgramNeeds {
     pub clr_version: Option<String>,
     pub is_managed: bool,
     pub managed: ManagedImageFacts,
+    /// A .NET program packed into one file, with what it runs on inside it.
+    pub is_a_single_file_bundle: bool,
 }
 
 /// Read what a program needs, leaving out everything a scan of the main program also looks at.
 pub(crate) fn read_program_needs(path: &Path) -> Result<ProgramNeeds> {
     let bytes = read_program(path)?;
-    let pe = PeFile::from_bytes(&bytes)
-        .map_err(|source| WinAppMigratorError::pe(path, source.to_string()))?;
+    not_a_panic(path, || program_needs_of_bytes(path, &bytes))
+}
+
+fn program_needs_of_bytes(path: &Path, bytes: &[u8]) -> Result<ProgramNeeds> {
+    let pe = parse_program(path, bytes)?;
     let mut warnings = Vec::new();
     let mut imports = read_imports(path, &pe, &mut warnings);
-    merge_delay_imports(&mut imports, read_delay_imports(&pe, &bytes, &mut warnings));
+    merge_delay_imports(&mut imports, read_delay_imports(&pe, bytes, &mut warnings));
     let is_managed = is_dotnet_image(&pe);
     Ok(ProgramNeeds {
         architecture: architecture_from_machine(pe.file_header().Machine),
         imports,
-        clr_version: is_managed
-            .then(|| dotnet_metadata_version(&bytes))
-            .flatten(),
+        clr_version: is_managed.then(|| dotnet_metadata_version(bytes)).flatten(),
         is_managed,
         managed: if is_managed {
-            managed_image_facts(&bytes)
+            managed_image_facts(bytes)
         } else {
             ManagedImageFacts::default()
         },
+        is_a_single_file_bundle: !is_managed && find_bytes(bytes, &SINGLE_FILE_SIGNATURE).is_some(),
     })
+}
+
+/// What `.NET` writes into a program it has packed into one file, to find what is in it by. It has
+/// no `runtimeconfig.json` on disk and looks like a native program.
+const SINGLE_FILE_SIGNATURE: [u8; 32] = [
+    0x8b, 0x12, 0x02, 0xb9, 0x6a, 0x61, 0x20, 0x38, 0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0, 0x32,
+    0x13, 0xf5, 0xb9, 0xe6, 0xef, 0xae, 0x33, 0x18, 0xee, 0x3b, 0x2d, 0xce, 0x24, 0xb3, 0x6a, 0xae,
+];
+
+/// A file's version as Windows would show it, for telling which of two copies of a runtime is newer.
+pub(crate) fn file_version_of(path: &Path) -> Option<String> {
+    let bytes = read_program(path).ok()?;
+    not_a_panic(path, || {
+        let pe = parse_program(path, &bytes)?;
+        Ok(read_version_info(&pe).and_then(|info| info.file_version))
+    })
+    .ok()
+    .flatten()
 }
 
 /// Which architecture a program is built for, from its headers alone.
@@ -523,11 +601,16 @@ fn read_imports(path: &Path, pe: &PeFile<'_>, warnings: &mut Vec<Warning>) -> Ve
 }
 
 fn read_version_info(pe: &PeFile<'_>) -> Option<FileVersionInfo> {
-    let resources = pe.resources().ok()?;
-    let version_info = resources.version_info().ok()?;
-    let mut collector = VersionCollector::default();
-    version_info.visit(&mut collector);
-    Some(collector.into_version_info())
+    // Its own, so that a program with a resource like this is only a program with no version.
+    panic::catch_unwind(AssertUnwindSafe(|| {
+        let resources = pe.resources().ok()?;
+        let version_info = resources.version_info().ok()?;
+        let mut collector = VersionCollector::default();
+        version_info.visit(&mut collector);
+        Some(collector.into_version_info())
+    }))
+    .ok()
+    .flatten()
 }
 
 #[derive(Default)]
@@ -827,6 +910,25 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// The `#Strings` and `#Blob` streams of the metadata root.
+/// Where a managed image's metadata is, by what its headers say. Its signature can be anywhere else in
+/// a file as well, in a string or in what is appended, and a program's own data can say what it likes.
+/// Only what cannot be parsed as a program at all is searched for it.
+fn metadata_root_offset(bytes: &[u8]) -> Option<usize> {
+    const SIGNATURE: &[u8; 4] = b"BSJB";
+    const CLI_HEADER_DIRECTORY: usize = 14;
+    const METADATA_RVA_FIELD: usize = 8;
+    let Some(layout) = program_layout(bytes) else {
+        return find_bytes(bytes, SIGNATURE);
+    };
+    let (cli_header, _) = layout.directories.get(CLI_HEADER_DIRECTORY).copied()?;
+    let at = usize::try_from(layout.file_offset_of(cli_header)?).ok()?;
+    let field =
+        bytes.get(at.checked_add(METADATA_RVA_FIELD)?..at.checked_add(METADATA_RVA_FIELD + 4)?)?;
+    let metadata = u32::from_le_bytes([field[0], field[1], field[2], field[3]]);
+    let root = usize::try_from(layout.file_offset_of(metadata)?).ok()?;
+    (bytes.get(root..root.checked_add(SIGNATURE.len())?)? == SIGNATURE).then_some(root)
+}
+
 fn metadata_streams(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     const HEADER_PREFIX: usize = 12;
     const MAX_STREAMS: u16 = 16;
@@ -835,7 +937,7 @@ fn metadata_streams(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
         let field = bytes.get(offset..offset.checked_add(4)?)?;
         Some(u32::from_le_bytes([field[0], field[1], field[2], field[3]]) as usize)
     };
-    let root = find_bytes(bytes, b"BSJB")?;
+    let root = metadata_root_offset(bytes)?;
     let version_length = u32_at(root + HEADER_PREFIX)?;
     // The version string, then a `u16` of flags, and a `u16` count of streams.
     let count_at = root
@@ -873,13 +975,10 @@ fn metadata_streams(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
 /// UTF-8 version string of that length. Scanning the file bytes for `BSJB` finds
 /// it without mapping RVAs, and a managed image has exactly one such root.
 fn dotnet_metadata_version(bytes: &[u8]) -> Option<String> {
-    const SIGNATURE: &[u8; 4] = b"BSJB";
     const HEADER_PREFIX: usize = 12; // signature(4) + major(2) + minor(2) + reserved(4)
     const MAX_VERSION_LEN: usize = 256;
 
-    let start = bytes
-        .windows(SIGNATURE.len())
-        .position(|window| window == SIGNATURE)?;
+    let start = metadata_root_offset(bytes)?;
     let length_offset = start + HEADER_PREFIX;
     let string_offset = length_offset + 4;
     if string_offset > bytes.len() {
@@ -1135,6 +1234,83 @@ mod header_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A small generator, so that what this tries is the same each time.
+    struct Mutations(u64);
+
+    impl Mutations {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, limit: usize) -> usize {
+            usize::try_from(self.next() % limit.max(1) as u64).unwrap_or(0)
+        }
+    }
+
+    /// Windows' own programs, changed a little at a time where a parser looks: whatever comes of
+    /// reading them, it comes back as an answer. It found a panic and a misaligned read in 84,000
+    /// tries at first. This is few enough to run each time and says those stay found.
+    #[test]
+    fn no_program_however_damaged_takes_what_reads_it_down() {
+        const TRIES_OF_EACH: usize = 400;
+        const FIRST_PART: usize = 4096;
+        let path = Path::new("fuzzed.exe");
+        let seeds = [
+            crate::path_utils::system_root().join(r"System32\whoami.exe"),
+            crate::path_utils::system_root().join(r"System32\sc.exe"),
+        ];
+        let mut mutations = Mutations(0x5EED_5EED_5EED_5EED);
+        let mut read = 0_usize;
+        for seed in seeds {
+            let Ok(original) = fs::read(&seed) else {
+                continue;
+            };
+            read += 1;
+            for _ in 0..TRIES_OF_EACH {
+                let mut bytes = original.clone();
+                for _ in 0..=mutations.below(8) {
+                    let within = if mutations.below(2) == 0 {
+                        FIRST_PART.min(bytes.len())
+                    } else {
+                        bytes.len()
+                    };
+                    let at = mutations.below(within);
+                    let value = mutations.next().to_le_bytes()[0];
+                    bytes[at] = value;
+                }
+                let _ = not_a_panic(path, || scan_pe_bytes(path, &bytes));
+                let _ = not_a_panic(path, || program_needs_of_bytes(path, &bytes));
+            }
+        }
+        assert!(read > 0, "there was nothing to try this on");
+    }
+
+    #[test]
+    fn a_program_whose_headers_are_not_on_a_boundary_is_not_given_to_the_parser() {
+        let mut bytes = vec![0_u8; 512];
+        bytes[0x3C] = 0x80;
+        bytes[0x80 + 20] = 0xF0;
+        assert!(headers_are_where_they_can_be(&bytes));
+        bytes[0x80 + 20] = 0xF1;
+        assert!(
+            !headers_are_where_they_can_be(&bytes),
+            "an odd optional header"
+        );
+        bytes[0x80 + 20] = 0xF0;
+        bytes[0x3C] = 0x81;
+        assert!(
+            !headers_are_where_they_can_be(&bytes),
+            "headers at an odd place"
+        );
+        assert!(
+            !headers_are_where_they_can_be(&[0_u8; 16]),
+            "too short to say"
+        );
+    }
 
     fn metadata_root(version: &str) -> Vec<u8> {
         // BSJB signature, major(2), minor(2), reserved(4), length(4), version.

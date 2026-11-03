@@ -474,18 +474,26 @@ fn verify_restored_files(
             continue;
         };
         let item = match read_back.remove(destination) {
-            Some(read) => {
-                let ReadBack { size, sha256 } = read?;
-                compare_with_expected(
-                    VerificationCategory::RestoredFile,
-                    relative.display().to_string(),
-                    destination,
-                    size,
-                    Some(&sha256),
-                    file.size_bytes,
-                    file.hash_sha256.as_deref(),
-                )
+            Some(Ok(ReadBack { size, sha256 })) => compare_with_expected(
+                VerificationCategory::RestoredFile,
+                relative.display().to_string(),
+                destination,
+                size,
+                Some(&sha256),
+                file.size_bytes,
+                file.hash_sha256.as_deref(),
+            ),
+            // A cancel stops all of it. Anything else is this file, such as a virus scanner having
+            // it open, and has no bearing on what the rest are.
+            Some(Err(WinAppMigratorError::Cancelled)) => {
+                return Err(WinAppMigratorError::Cancelled);
             }
+            Some(Err(error)) => failed_item(
+                VerificationCategory::RestoredFile,
+                relative.display().to_string(),
+                format!("It could not be read to check it: {error}"),
+                Some(destination.display().to_string()),
+            ),
             None => failed_item(
                 VerificationCategory::RestoredFile,
                 relative.display().to_string(),

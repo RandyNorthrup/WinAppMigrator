@@ -1,5 +1,5 @@
 use std::collections::hash_map::RandomState;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::io;
@@ -9,9 +9,10 @@ use std::sync::OnceLock;
 
 use tempfile::TempDir;
 
+use crate::journal::machine_state_root;
 use crate::path_utils::{
-    POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_SECURITY, hidden_command, powershell_command,
-    without_verbatim_prefix,
+    POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_SECURITY, hidden_command, machine_variable,
+    powershell_command, tool_command, without_verbatim_prefix,
 };
 
 /// SIDs rather than names, because the names are translated on other Windows languages.
@@ -45,6 +46,9 @@ if ($admins -contains $owner -and $others.Count -eq 0) { 'yes' } else { 'no' }";
 /// `CREATOR OWNER` is whoever makes the folder, which is this process. An administrator's own account
 /// is not let off here, unlike in [`ONLY_ADMINISTRATORS_CAN_CHANGE_SCRIPT`]: it is what a program of
 /// theirs runs as with no elevation at all, on nearly any PC, and that is who this is about.
+/// Where a setup program keeps what it unpacks, in the admin-only folder this keeps its state in.
+const TOOL_TEMP_FOLDER: &str = "tool-temp";
+const TOOL_TEMP_PREFIX: &str = "tool-";
 const OTHERS_COULD_KEEP_A_NEW_FOLDER_SCRIPT: &str = "$acl = Get-Acl -LiteralPath $env:WAM_ACL_PATH; \
 $admins = @('S-1-5-32-544', 'S-1-5-18', 'S-1-3-0', \
 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'); \
@@ -99,6 +103,12 @@ pub fn is_elevated() -> bool {
     elevation() == Some(true)
 }
 
+/// Whether this could be running elevated, for what is only safe when it is not. Not being able to
+/// find out counts as could.
+pub(crate) fn may_be_elevated() -> bool {
+    elevation() != Some(false)
+}
+
 /// Asked once, since the answer cannot change during a run. `None` means it could not be
 /// found out, which is not the same as no: asking runs a program, and that can be made to
 /// fail. Asking `whoami` rather than PowerShell also takes a fraction of the time.
@@ -108,7 +118,7 @@ fn elevation() -> Option<bool> {
 }
 
 fn query_elevation() -> Option<bool> {
-    let output = hidden_command("whoami")
+    let output = tool_command(OsStr::new("whoami"))
         .args(["/groups", "/fo", "csv"])
         .output()
         .ok()?;
@@ -588,10 +598,27 @@ pub fn destination_requires_admin(destination: &Path) -> bool {
 fn path_under_any_env(path: &Path, env_vars: &[&str]) -> bool {
     let lower = path.to_string_lossy().to_ascii_lowercase();
     env_vars.iter().any(|env_var| {
-        std::env::var_os(env_var)
-            .map(|value| lower.starts_with(&value.to_string_lossy().to_ascii_lowercase()))
+        machine_variable(env_var)
+            .map(|value| lower.starts_with(&value.to_ascii_lowercase()))
             .unwrap_or(false)
     })
+}
+
+/// Where a setup program this starts elevated keeps what it unpacks. Some load what they have just
+/// unpacked: DISM its host and providers, an older setup engine its own parts. In a folder another
+/// program of the same account can reach, that program can put its own DLL beside them, so each gets
+/// a folder only administrators can write to, which goes when it has finished. Without elevation there
+/// is nothing to protect, and `TEMP` is left as it was given.
+pub(crate) fn protected_temp_for_a_tool() -> io::Result<Option<ProtectedFolder>> {
+    if !is_elevated() {
+        return Ok(None);
+    }
+    let root = machine_state_root()
+        .ok_or_else(|| io::Error::other("Windows does not say where ProgramData is"))?;
+    ensure_protected_folder(&root)?;
+    let temp = root.join(TOOL_TEMP_FOLDER);
+    ensure_protected_folder(&temp)?;
+    ProtectedFolder::new_in(&temp, TOOL_TEMP_PREFIX).map(Some)
 }
 
 #[cfg(test)]

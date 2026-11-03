@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use winreg::RegKey;
 use winreg::enums::HKEY_LOCAL_MACHINE;
 
-use crate::privilege::is_elevated;
+use crate::privilege::{is_elevated, may_be_elevated};
 
 const EXE_EXTENSION: &str = "exe";
 const WINDOWS_VERSION_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
@@ -20,6 +20,9 @@ const POWERSHELL_HOME: &str = r"WindowsPowerShell\v1.0";
 /// The start of a person's SID: a local or domain account, and an Entra ID one.
 const PERSON_SID_PREFIXES: [&str; 2] = ["S-1-5-21-", "S-1-12-1-"];
 const SHELL_FILE: &str = "explorer.exe";
+const TEMP_FOLDER: &str = "Temp";
+/// Where the registry says where `Program Files` is.
+const WINDOWS_VERSION_FOLDERS_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion";
 /// Each `explorer.exe` in this session, with who it runs as, by its path and SID, which read the
 /// same on every language of Windows. `-IncludeUserName` needs elevation, which is the only case
 /// where the question comes up. Not through CIM, which took 20 seconds on Windows Server.
@@ -30,33 +33,32 @@ const SESSION_SHELL_SCRIPT: &str = "$ErrorActionPreference = 'Stop'; \
          '{0}|{1}' -f $process.Path, ([Security.Principal.NTAccount]$process.UserName).\
 Translate([Security.Principal.SecurityIdentifier]).Value } }; \
      exit 0";
-/// What PowerShell and the modules it uses read from the environment, none of which can
-/// load code. Paths to the Windows folder are set separately, from the registry.
-const POWERSHELL_ENVIRONMENT: &[&str] = &[
-    "ALLUSERSPROFILE",
+/// What a tool may take from this process's environment, none of which can load code or say where
+/// Windows is. Where Windows and its folders are is set separately, from the registry.
+const TOOL_ENVIRONMENT: &[&str] = &[
     "APPDATA",
-    "CommonProgramFiles",
-    "CommonProgramFiles(x86)",
-    "CommonProgramW6432",
     "COMPUTERNAME",
     "HOMEDRIVE",
     "HOMEPATH",
     "LOCALAPPDATA",
     "NUMBER_OF_PROCESSORS",
     "OS",
-    "PATHEXT",
     "PROCESSOR_ARCHITECTURE",
-    "ProgramData",
-    "ProgramFiles",
-    "ProgramFiles(x86)",
-    "ProgramW6432",
-    "PUBLIC",
-    "SystemDrive",
-    "TEMP",
-    "TMP",
     "USERDOMAIN",
     "USERNAME",
     "USERPROFILE",
+];
+/// Windows' own, so that it does not go by what an account has said it is.
+const TOOL_EXTENSIONS: &str = ".COM;.EXE;.BAT;.CMD";
+/// The folders every Windows has and where the admin-only registry says each is, as the variable a
+/// program would read and the value there.
+const MACHINE_FOLDER_VARIABLES: [(&str, &str); 6] = [
+    ("ProgramFiles", "ProgramFilesDir"),
+    ("ProgramFiles(x86)", "ProgramFilesDir (x86)"),
+    ("ProgramW6432", "ProgramW6432Dir"),
+    ("CommonProgramFiles", "CommonFilesDir"),
+    ("CommonProgramFiles(x86)", "CommonFilesDir (x86)"),
+    ("CommonProgramW6432", "CommonW6432Dir"),
 ];
 /// Put at the start of a PowerShell script whose output is read back. It otherwise writes
 /// the console's code page, which turns `größe` into bytes that are not UTF-8. This form
@@ -79,14 +81,23 @@ pub const POWERSHELL_IMPORT_APPX: &str = "Import-Module Appx; ";
 /// bundled installers, cmd) must use this so building or installing never flashes
 /// terminal windows over the GUI/app.
 pub fn hidden_command(program: impl AsRef<OsStr>) -> Command {
-    let tool = resolve_tool(program.as_ref());
-    let is_powershell = tool
-        .file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case(POWERSHELL_EXE));
-    let mut command = Command::new(tool);
-    if is_powershell {
-        set_powershell_environment(&mut command);
+    let mut command = tool_command(program.as_ref());
+    // Without elevation there is no one to protect, and a tool may need to write where it can.
+    if !may_be_elevated() {
+        for name in ["TEMP", "TMP"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
     }
+    command
+}
+
+/// [`hidden_command`], for asking whether this is elevated, which that goes by.
+pub(crate) fn tool_command(program: &OsStr) -> Command {
+    let tool = resolve_tool(program);
+    let mut command = Command::new(tool);
+    set_tool_environment(&mut command);
     // Never where this process happens to be. A folder dialog moves that to whatever was chosen,
     // such as a drive from another PC, and a program looks there for what it loads.
     command.current_dir(system_root());
@@ -100,12 +111,52 @@ pub fn hidden_command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
-/// Expand `%VAR%` references using the current process environment. Unknown
-/// variables are left intact.
+/// Expand `%VAR%` references as this PC means them: the folders every Windows has from the registry,
+/// and anything else from the current process environment. Unknown variables are left intact.
 pub(crate) fn expand_env_vars(value: &str) -> String {
     expand_vars_with(value, &|name| {
-        std::env::var_os(name).and_then(|value| value.into_string().ok())
+        machine_variable(name)
+            .or_else(|| std::env::var_os(name).and_then(|value| value.into_string().ok()))
     })
+}
+
+/// What a variable naming one of the folders every Windows has should say, from the admin-only
+/// registry. The variable of that name is an account's to set, and an elevated process gets it.
+pub(crate) fn machine_variable(name: &str) -> Option<String> {
+    let text = |path: &Path| path.display().to_string();
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        "systemroot" | "windir" => Some(text(system_root())),
+        "systemdrive" => system_root()
+            .components()
+            .next()
+            .map(|drive| drive.as_os_str().to_string_lossy().to_string()),
+        "comspec" => Some(text(&system_root().join(r"System32\cmd.exe"))),
+        "programdata" | "allusersprofile" => program_data_dir().map(text),
+        "public" => public_profile_dir().map(text),
+        _ => {
+            let (_, value) = MACHINE_FOLDER_VARIABLES
+                .iter()
+                .find(|(variable, _)| variable.eq_ignore_ascii_case(name))?;
+            RegKey::predef(HKEY_LOCAL_MACHINE)
+                .open_subkey(WINDOWS_VERSION_FOLDERS_KEY)
+                .and_then(|key| key.get_value::<String, _>(value))
+                .ok()
+        }
+    }
+}
+
+/// The `Program Files` folders of this PC, from the admin-only registry, with none listed twice.
+pub fn program_files_folders() -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = Vec::new();
+    for name in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+        if let Some(folder) = machine_variable(name).map(PathBuf::from)
+            && !folders.contains(&folder)
+        {
+            folders.push(folder);
+        }
+    }
+    folders
 }
 
 /// Expand `%VAR%` references using what `lookup` says of each. Unknown variables are left intact.
@@ -144,26 +195,47 @@ pub fn powershell_command(script: impl AsRef<OsStr>) -> Command {
     command
 }
 
-/// Give PowerShell a fixed environment instead of inheriting one. The user's environment
-/// is theirs to change, and an elevated process gets it. PowerShell is a .NET program, so
-/// `COMPLUS_InstallRoot` can load a runtime from any folder, `COR_PROFILER` can load a DLL,
-/// and `PSModulePath` can replace the commands it runs, signature checks included. Those
-/// are the ones known about, so what is passed is a list of what it needs.
-fn set_powershell_environment(command: &mut Command) {
+/// Give a tool a fixed environment instead of inheriting one. The user's environment is theirs to
+/// change, and an elevated process gets it. PowerShell is a .NET program, so `COMPLUS_InstallRoot` can
+/// load a runtime from any folder, `COR_PROFILER` can load a DLL, and `PSModulePath` can replace the
+/// commands it runs, signature checks included. DISM and an older setup engine unpack what they then
+/// load into `TEMP`, and a tool looks along `Path`. Those are the ones known about, so what is passed
+/// is a list of what a tool needs. `TEMP` is Windows' own here, and what an elevated tool would unpack
+/// and load goes in a folder of its own: see [`crate::privilege::run_with_protected_temp`].
+fn set_tool_environment(command: &mut Command) {
     command.env_clear();
-    for name in POWERSHELL_ENVIRONMENT {
+    for name in TOOL_ENVIRONMENT {
         if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    for name in [
+        "SystemRoot",
+        "windir",
+        "SystemDrive",
+        "ComSpec",
+        "ProgramData",
+        "ALLUSERSPROFILE",
+        "PUBLIC",
+    ]
+    .into_iter()
+    .chain(MACHINE_FOLDER_VARIABLES.iter().map(|(name, _)| *name))
+    {
+        if let Some(value) = machine_variable(name) {
             command.env(name, value);
         }
     }
     let system32 = system_root().join("System32");
     let powershell_home = system32.join(POWERSHELL_HOME);
+    let windows_temp = system_root().join(TEMP_FOLDER);
     command
-        .env("SystemRoot", system_root())
-        .env("windir", system_root())
-        .env("ComSpec", system32.join("cmd.exe"))
+        .env("TEMP", &windows_temp)
+        .env("TMP", &windows_temp)
+        .env("PATHEXT", TOOL_EXTENSIONS)
         .env("PSModulePath", powershell_home.join("Modules"));
-    if let Ok(path) = std::env::join_paths([system32, powershell_home]) {
+    if let Ok(path) =
+        std::env::join_paths([system32.clone(), system32.join("Wbem"), powershell_home])
+    {
         command.env("Path", path);
     }
 }
@@ -232,6 +304,11 @@ pub fn program_data_dir() -> Option<&'static Path> {
     FOLDER
         .get_or_init(|| profile_list_folder("ProgramData"))
         .as_deref()
+}
+
+/// The folder profiles are in, from the admin-only registry.
+pub fn profiles_folder() -> Option<PathBuf> {
+    profile_list_folder("ProfilesDirectory")
 }
 
 /// The shared Public profile, from the admin-only registry.
@@ -1105,7 +1182,61 @@ mod tests {
                 "{name}"
             );
         }
-        assert!(hidden_command("sc.exe").get_envs().next().is_none());
+    }
+
+    #[test]
+    fn every_tool_is_given_what_windows_says_and_nothing_of_this_process() {
+        for tool in ["sc.exe", "cmd", "whoami", "powershell.exe"] {
+            let command = hidden_command(tool);
+            let said = |name: &str| {
+                command
+                    .get_envs()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .and_then(|(_, value)| value)
+                    .map(|value| value.to_string_lossy().to_string())
+            };
+            let windows = system_root().display().to_string();
+            assert_eq!(
+                said("SystemRoot").as_deref(),
+                Some(windows.as_str()),
+                "{tool}"
+            );
+            if may_be_elevated() {
+                assert_eq!(
+                    said("TEMP"),
+                    Some(system_root().join("Temp").display().to_string()),
+                    "{tool}"
+                );
+            }
+            assert_eq!(
+                said("ProgramData"),
+                machine_variable("ProgramData"),
+                "{tool}"
+            );
+            assert!(
+                said("Path").is_some_and(|path| path.starts_with(&windows)),
+                "{tool}"
+            );
+            for not_passed in ["COR_PROFILER", "COMPLUS_InstallRoot", "PYTHONPATH"] {
+                assert_eq!(said(not_passed), None, "{tool}");
+            }
+        }
+    }
+
+    #[test]
+    fn what_a_variable_says_of_windows_own_folders_comes_from_the_registry() {
+        assert_eq!(
+            machine_variable("systemroot"),
+            Some(system_root().display().to_string())
+        );
+        assert!(
+            machine_variable("ProgramFiles").is_some_and(|folder| Path::new(&folder).is_absolute())
+        );
+        assert_eq!(machine_variable("WAM_DEFINITELY_MISSING"), None);
+        assert!(!program_files_folders().is_empty());
+        assert!(
+            expand_env_vars(r"%SystemRoot%\x").starts_with(&system_root().display().to_string())
+        );
     }
 
     fn powershell_output(script: &str) -> std::io::Result<String> {

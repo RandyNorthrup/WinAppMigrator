@@ -2964,6 +2964,43 @@ mod tests {
         Ok(())
     }
 
+    /// With no account in what a package says of it, a shortcut still goes to whoever installs it.
+    #[test]
+    fn a_shortcut_said_with_no_account_goes_to_whoever_installs_it() {
+        let folders = KnownFolders {
+            user_desktop: Some(PathBuf::from(r"C:\Users\here\Desktop")),
+            common_desktop: Some(PathBuf::from(r"C:\Users\Public\Desktop")),
+            user_start_menu: Some(PathBuf::from(
+                r"C:\Users\here\AppData\Roaming\Microsoft\Windows\Start Menu",
+            )),
+            common_start_menu: Some(PathBuf::from(
+                r"C:\ProgramData\Microsoft\Windows\Start Menu",
+            )),
+            user_account_known: true,
+            user_account_note: None,
+        };
+        let desktop = shortcut_placement(Path::new(r"%USERPROFILE%\Desktop\Acme.lnk"), &folders)
+            .expect("it goes");
+        assert_eq!(
+            desktop.destination,
+            Path::new(r"C:\Users\here\Desktop\Acme.lnk")
+        );
+        assert!(!desktop.for_all_users);
+        let menu = shortcut_placement(
+            Path::new(r"%USERPROFILE%\Start Menu\Programs\Acme\Acme.lnk"),
+            &folders,
+        )
+        .expect("it goes");
+        assert_eq!(
+            menu.destination,
+            Path::new(
+                r"C:\Users\here\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Acme\Acme.lnk"
+            )
+        );
+        assert!(!menu.for_all_users);
+        assert!(!menu.autostart);
+    }
+
     #[test]
     fn a_trigger_naming_system_does_not_make_a_task_run_as_it() -> Result<()> {
         let definition = crate::restore_policy::read_task_definition(

@@ -14,8 +14,6 @@ use crate::pe_scan::{ImportedDll, read_pe_architecture, scan_pe};
 use crate::system_context::SystemContext;
 
 const DLL_EXTENSION: &str = "dll";
-const WINDOWS_ENV_VAR: &str = "SystemRoot";
-const LEGACY_WINDOWS_ENV_VAR: &str = "windir";
 const SYSTEM32_DIR: &str = "System32";
 const SYSWOW64_DIR: &str = "SysWOW64";
 
@@ -495,12 +493,7 @@ fn push_unique(
 }
 
 fn windows_dir(system: &SystemContext) -> Option<PathBuf> {
-    if system.is_offline() {
-        return Some(system.windows_dir());
-    }
-    env::var_os(WINDOWS_ENV_VAR)
-        .or_else(|| env::var_os(LEGACY_WINDOWS_ENV_VAR))
-        .map(PathBuf::from)
+    Some(system.windows_dir())
 }
 
 fn find_in_system_directories(

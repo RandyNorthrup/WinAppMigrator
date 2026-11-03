@@ -152,10 +152,13 @@ fn create_staging_dir_where(
         .and_then(|target| target.ancestors().find(|ancestor| is_real_folder(ancestor)))
         .filter(|place| first_link_to(place).is_none());
     let last_failure = RefCell::new(None);
+    // Kept apart from the rest. Why this one will not do is the one thing an administrator can act on,
+    // and the places tried after it, which fail for being what they are, would say over it.
+    let mut why_not_the_records_folder = None;
     let admin_only = state_root.and_then(|root| match admin_only_staging_root(root) {
         Ok(admin_only) => Some(admin_only),
         Err(error) => {
-            *last_failure.borrow_mut() = Some(format!("{}: {error}", root.display()));
+            why_not_the_records_folder = Some(format!("{}: {error}", root.display()));
             None
         }
     });
@@ -211,9 +214,12 @@ fn create_staging_dir_where(
         .or_else(|| beside_installer.and_then(make_in))
         .or_else(|| make_in(&temp))
         .ok_or_else(|| {
-            let why = last_failure.take().map_or_else(String::new, |failure| {
-                format!(". The last that failed was {failure}")
-            });
+            let why = why_not_the_records_folder
+                .take()
+                .or_else(|| last_failure.take())
+                .map_or_else(String::new, |failure| {
+                    format!(". The one to look at is {failure}")
+                });
             std::io::Error::other(format!(
                 "there is nowhere to unpack the package that only administrators can get into{why}"
             ))

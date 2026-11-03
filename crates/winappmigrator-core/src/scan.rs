@@ -174,7 +174,12 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         AppSelection::InstalledApp(app) => app.owner_profile.as_deref(),
         AppSelection::ExecutablePath(_) => None,
     };
-    let system = SystemContext::open_for_scan(&options.source, &options.user_profile, owner)?;
+    let system = SystemContext::open_for_scan(
+        &options.source,
+        &options.user_profile,
+        owner,
+        monitor.cancel_flag(),
+    )?;
     let mut source_app = match &options.selection {
         AppSelection::InstalledApp(app) => Some((**app).clone()),
         AppSelection::ExecutablePath(_) => None,
@@ -936,6 +941,18 @@ fn runtime_prerequisites(
                  PC without Visual Studio."
             ),
             Some(dll.clone()),
+        ));
+    }
+    for program in &runtimes.single_file_programs {
+        warnings.push(Warning::new(
+            "runtime_of_a_single_file_program_unknown",
+            WarningSeverity::Warning,
+            format!(
+                "{program} is a .NET program packed into one file, which says nothing of which .NET \
+                 it needs, so none is planned for it. If it needs one, it will not start on a PC \
+                 without it."
+            ),
+            Some(program.clone()),
         ));
     }
     if runtimes.programs_left_out > 0 {

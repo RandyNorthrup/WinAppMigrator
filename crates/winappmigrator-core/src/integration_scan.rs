@@ -1335,11 +1335,17 @@ pub(crate) fn parse_firewall_rule(text: &str) -> Option<FirewallRuleEntry> {
         profiles: Vec::new(),
         not_carried: Vec::new(),
     };
+    let mut said_once = std::collections::HashSet::new();
     for field in text.split('|').skip(1) {
         let Some((name, value)) = field.split_once('=') else {
             continue;
         };
         match name {
+            // Windows writes each of these once. A second would be something a name or a description
+            // was made to hold, and the last would otherwise win.
+            "App" | "Name" | "Desc" | "Action" | "Dir" if !said_once.insert(name.to_owned()) => {
+                rule.not_carried.push(name.to_owned());
+            }
             "Action" => value.clone_into(&mut rule.action),
             "Active" => rule.enabled = value.eq_ignore_ascii_case("TRUE"),
             "Dir" => value.clone_into(&mut rule.direction),
@@ -1353,8 +1359,9 @@ pub(crate) fn parse_firewall_rule(text: &str) -> Option<FirewallRuleEntry> {
             "RPort" | "RPort2_10" => rule.remote_ports.push(value.to_owned()),
             "LA4" | "LA6" => rule.local_addresses.push(value.to_owned()),
             "RA4" | "RA6" => rule.remote_addresses.push(value.to_owned()),
-            // What group it is in, and what Windows Firewall uses to show it. It works without.
-            "EmbedCtxt" | "PCat" | "LUOwn" | "TTK" => {}
+            // What group it is in, and what Windows Firewall uses to show it. It works without. A
+            // `TTK` is a condition, and without it a rule would let in more, so it is not one of these.
+            "EmbedCtxt" | "PCat" | "LUOwn" => {}
             // Leaving it to the app whether to come in through NAT, which Windows' prompt for a new
             // program sets. Without it the rule does less, so this is not a reason to refuse it.
             "Defer" => {}

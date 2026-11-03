@@ -18,7 +18,7 @@ use serde::Deserialize;
 use crate::dll_resolver::{VisualCppRuntime, visual_cpp_dll};
 use crate::models::{AppArchitecture, DotNetFlavor, FileClassification, FileEntry};
 use crate::path_utils::{is_auxiliary_executable, path_has_extension, strip_prefix_ignore_case};
-use crate::pe_scan::{ProgramNeeds, read_program_needs};
+use crate::pe_scan::{ProgramNeeds, read_pe_architecture, read_program_needs};
 use crate::system_context::SystemContext;
 
 const EXE_EXTENSION: &str = "exe";
@@ -79,6 +79,8 @@ pub(crate) struct AppRuntimes {
     pub debug_dlls: BTreeSet<String>,
     /// Programs that could not all be looked at, which is said rather than taken to mean anything.
     pub programs_left_out: usize,
+    /// .NET programs packed into one file, which say nothing of which .NET they need.
+    pub single_file_programs: BTreeSet<String>,
 }
 
 /// [`AppArchitecture`], in an order.
@@ -247,6 +249,7 @@ struct RuntimeFramework {
 
 /// What a `.runtimeconfig.json` says an app runs on. Nothing it says goes anywhere but this.
 pub(crate) fn dotnet_needs_of_runtime_config(text: &str) -> Vec<DotNetNeed> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let Ok(config) = serde_json::from_str::<RuntimeConfigFile>(text) else {
         return Vec::new();
     };
@@ -307,6 +310,7 @@ pub(crate) fn inspect_app_runtimes(
             files_read += 1;
             bytes_read += size;
             let Ok(needs) = read_program_needs(&path) else {
+                runtimes.programs_left_out += usize::from(path == *program);
                 continue;
             };
             let build = ArchitectureKey::of(&needs.architecture);
@@ -317,6 +321,9 @@ pub(crate) fn inspect_app_runtimes(
             }
             let is_the_program = path == *program;
             if is_the_program {
+                if needs.is_a_single_file_bundle {
+                    runtimes.single_file_programs.insert(program_name.clone());
+                }
                 architecture = Some(build);
                 if let Some(dotnet) = dotnet_need_of(&needs) {
                     runtimes
@@ -420,6 +427,12 @@ fn note_runtime_config(
     if !has_something_to_run {
         return;
     }
+    // What it says is for the program of its name, whichever build the app's main program is.
+    let architecture = system
+        .may_read(&program)
+        .then(|| read_pe_architecture(&program).ok())
+        .flatten()
+        .map_or(architecture, |build| ArchitectureKey::of(&build));
     for need in dotnet_needs_of_runtime_config(&text) {
         let need = if ships_its_own {
             DotNetNeed::SelfContained
@@ -438,6 +451,17 @@ mod tests {
     use super::*;
     use crate::pe_scan::ManagedImageFacts;
 
+    #[test]
+    fn a_runtime_config_with_a_byte_order_mark_says_what_it_says() {
+        let config = r#"{"runtimeOptions":{"framework":{"name":"Microsoft.NETCore.App","version":"8.0.0"}}}"#;
+        let plain = dotnet_needs_of_runtime_config(config);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(
+            dotnet_needs_of_runtime_config(&format!("\u{feff}{config}")),
+            plain
+        );
+    }
+
     fn managed(clr: &str, facts: ManagedImageFacts) -> ProgramNeeds {
         ProgramNeeds {
             architecture: AppArchitecture::X64,
@@ -445,6 +469,7 @@ mod tests {
             clr_version: Some(clr.to_owned()),
             is_managed: true,
             managed: facts,
+            is_a_single_file_bundle: false,
         }
     }
 

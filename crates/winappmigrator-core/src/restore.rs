@@ -42,7 +42,8 @@ use crate::path_utils::{
     system_root, text_mentions_path,
 };
 use crate::prerequisites::{
-    PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
+    PrerequisiteInstallOutcome, PrerequisiteSpec, bundled_installer_is_newer, install_bundle,
+    is_present, spec_for_bundle,
 };
 use crate::privilege::{destination_requires_admin, is_elevated, target_requires_admin};
 use crate::progress::{InstallMonitor, InstallPhase, InstallStep};
@@ -521,12 +522,49 @@ pub fn restore_package_monitored(
     Ok(result)
 }
 
+/// A path without `.\` steps, which go nowhere and are the same file to whoever reads it.
+fn without_current_folder_steps(text: &str) -> String {
+    let mut said = text.replace('/', "\\");
+    while said.contains(r"\.\") {
+        said = said.replace(r"\.\", r"\");
+    }
+    said
+}
+
+/// Whether a command line names this file. In quotes a path goes on to the closing quote, so
+/// `"C:\App\my file.txt"` does not name `C:\App\my`, as the same words with no quotes would.
+fn text_names_file(text: &str, file: &Path) -> bool {
+    let mut unquoted = String::with_capacity(text.len());
+    for (index, part) in text.split('"').enumerate() {
+        if index % 2 == 0 {
+            unquoted.push_str(part);
+            unquoted.push(' ');
+        } else if paths_equal(Path::new(part), file)
+            || part
+                .rsplit_once('=')
+                .is_some_and(|(_, value)| paths_equal(Path::new(value), file))
+        {
+            return true;
+        }
+    }
+    text_mentions_path(&unquoted, file, true)
+}
+
 /// What a package sets up that would run or rely on this file, if anything. Going by what it says as
 /// it will be read here, by whoever reads it, which is where a path in a command's arguments is too.
 fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
-    let is_it = |path: &Path| paths_equal(path, file);
-    let names_it =
-        |text: &str| text_mentions_path(&expand_env_vars(&review.map.rewrite(text)), file, true);
+    let is_it = |path: &Path| {
+        paths_equal(
+            Path::new(&without_current_folder_steps(&path.to_string_lossy())),
+            file,
+        )
+    };
+    let names_it = |text: &str| {
+        text_names_file(
+            &without_current_folder_steps(&expand_env_vars(&review.map.rewrite(text))),
+            file,
+        )
+    };
     if let Some(service) = review.services.iter().find(|service| {
         is_it(&service.binary)
             || service.arguments.as_deref().is_some_and(names_it)
@@ -1616,7 +1654,9 @@ impl Run<'_, '_> {
                 ));
                 continue;
             };
-            if spec.probe.as_ref().is_some_and(is_present) {
+            if spec.probe.as_ref().is_some_and(is_present)
+                && !bundled_installer_is_newer(&spec, bundle, &self.options.package_root)
+            {
                 self.changes.prerequisites.push(format!(
                     "prerequisite already present: {}",
                     prerequisite.name
@@ -5267,6 +5307,20 @@ mod tests {
     }
 
     /// A file left as it was, because a data folder was already there, and what relies on it.
+    #[test]
+    fn a_quoted_name_goes_on_to_its_closing_quote() {
+        let file = Path::new(r"C:\App\my");
+        assert!(!text_names_file(r#"--config "C:\App\my file.txt""#, file));
+        assert!(text_names_file(r#"--config "C:\App\my""#, file));
+        assert!(text_names_file(r#""--config=C:\App\my""#, file));
+        assert!(text_names_file(r"--config C:\App\my --fast", file));
+        assert!(text_names_file(r#""C:\App\other.txt" C:\App\my"#, file));
+        assert_eq!(
+            without_current_folder_steps(r"C:\App\.\.\sub/./x.exe"),
+            r"C:\App\sub\x.exe"
+        );
+    }
+
     #[test]
     fn what_relies_on_a_file_is_found_however_it_names_it() -> Result<()> {
         let data = r"C:\ProgramData\Acme\plugin.dll";

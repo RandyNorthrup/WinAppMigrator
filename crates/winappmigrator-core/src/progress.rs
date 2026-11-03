@@ -141,6 +141,11 @@ impl<S> Monitor<S> {
         }
     }
 
+    /// What says it was cancelled, for what has to outlive this.
+    pub(crate) fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
     }

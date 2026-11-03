@@ -30,10 +30,16 @@ use crate::models::{
     RuntimePrerequisiteKind,
 };
 use crate::path_utils::{
-    POWERSHELL_IMPORT_APPX, POWERSHELL_IMPORT_UTILITY, hidden_command, powershell_command,
+    POWERSHELL_IMPORT_APPX, POWERSHELL_IMPORT_UTILITY, hidden_command, path_is_within,
+    powershell_command, program_files_folders,
+};
+use crate::pe_scan::file_version_of;
+use crate::privilege::{
+    ProtectedFolder, only_administrators_can_change, protected_temp_for_a_tool,
 };
 
 const WINGET_EXE: &str = "winget.exe";
+const WINDOWS_APPS_FOLDER: &str = "WindowsApps";
 const WINGET_NOT_INSTALLED: &str = "winget is not installed";
 const DISM_EXE: &str = "dism";
 /// Where the package keeps prerequisite payloads, and the only place one can be run from.
@@ -172,6 +178,67 @@ pub fn is_present(probe: &PrerequisiteRegistryProbe) -> bool {
         }
     }
     false
+}
+
+/// A runtime's version, as far as telling which is newer goes.
+type RuntimeVersion = (u32, u32, u32);
+
+/// What the runtime a probe is for says it is, for those that say.
+fn registered_version(probe: &PrerequisiteRegistryProbe) -> Option<RuntimeVersion> {
+    let root = RegKey::predef(HKEY_LOCAL_MACHINE);
+    probe.key_paths.iter().find_map(|key_path| {
+        [KEY_WOW64_64KEY, KEY_WOW64_32KEY].iter().find_map(|view| {
+            let key = root
+                .open_subkey_with_flags(key_path, KEY_READ | view)
+                .ok()?;
+            let part = |name: &str| key.get_value::<u32, _>(name).ok();
+            Some((part("Major")?, part("Minor")?, part("Bld")?))
+        })
+    })
+}
+
+/// `14.44.35211.0` as a version. `None` for what does not read as one.
+fn version_of_text(text: &str) -> Option<RuntimeVersion> {
+    let mut parts = text
+        .split(['.', ',', ' '])
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u32>().ok());
+    Some((parts.next()??, parts.next()??, parts.next()??))
+}
+
+/// Whether what is here is older than what a package would install. One that is older can read as
+/// there and still not be enough: a program that imports `vcruntime140_1.dll` does not start on a
+/// runtime from before it, and every one of them says it is 14.0 by its key's name.
+fn is_stale(registered: Option<RuntimeVersion>, bundled: Option<RuntimeVersion>) -> bool {
+    matches!((registered, bundled), (Some(registered), Some(bundled)) if registered < bundled)
+}
+
+/// Whether a runtime on this PC is older than the installer this package brings for it. With no way
+/// to tell either side, it is taken to be enough, as it was before this could be asked.
+pub fn bundled_installer_is_newer(
+    spec: &PrerequisiteSpec,
+    bundle: &PrerequisiteBundle,
+    package_root: &Path,
+) -> bool {
+    let Some(probe) = spec.probe.as_ref() else {
+        return false;
+    };
+    let Some(relative) = bundle
+        .package_relative_path
+        .as_ref()
+        .filter(|relative| spec.bundleable && is_expected_payload_path(relative, spec))
+    else {
+        return false;
+    };
+    let Ok(payload) = package_destination_path(package_root, relative) else {
+        return false;
+    };
+    is_stale(
+        registered_version(probe),
+        file_version_of(&payload)
+            .as_deref()
+            .and_then(version_of_text),
+    )
 }
 
 /// The bundle record for a prerequisite: which build it is, and its embedded payload when
@@ -318,7 +385,7 @@ pub fn install_bundle(
         };
     }
     if let Some(winget_id) = spec.winget_id.as_deref() {
-        return run_winget(winget_id);
+        return run_winget(winget_id, &bundle.architecture);
     }
     PrerequisiteInstallOutcome::Skipped(format!(
         "no bundled installer or winget id; acquire it from {}",
@@ -342,6 +409,19 @@ fn is_expected_payload_path(relative: &Path, spec: &PrerequisiteSpec) -> bool {
     }
 }
 
+/// Have a setup program keep what it unpacks where only administrators can write. Whatever is
+/// returned has to outlive it. If there is no such place, it does not run.
+fn give_a_protected_temp(
+    command: &mut std::process::Command,
+) -> std::result::Result<Option<ProtectedFolder>, String> {
+    let temp = protected_temp_for_a_tool()
+        .map_err(|error| format!("could not make a folder for it to unpack in: {error}"))?;
+    if let Some(temp) = temp.as_ref() {
+        command.env("TEMP", temp.path()).env("TMP", temp.path());
+    }
+    Ok(temp)
+}
+
 fn run_payload(payload: &Path, spec: &PrerequisiteSpec) -> PrerequisiteInstallOutcome {
     // Checked again here, just before it runs elevated. The check at build time is on
     // another PC, and nothing authenticates the package in between.
@@ -352,6 +432,10 @@ fn run_payload(payload: &Path, spec: &PrerequisiteSpec) -> PrerequisiteInstallOu
     }
     let mut command = hidden_command(payload);
     command.args(&spec.silent_install_args);
+    let _temp = match give_a_protected_temp(&mut command) {
+        Ok(temp) => temp,
+        Err(reason) => return PrerequisiteInstallOutcome::Failed(reason),
+    };
     match wait_with_timeout(command, INSTALL_TIMEOUT) {
         WaitOutcome::Exited(code) => classify_exit_code(code, spec),
         WaitOutcome::TimedOut => PrerequisiteInstallOutcome::Failed(
@@ -377,6 +461,13 @@ fn run_windows_feature(feature: &str) -> PrerequisiteInstallOutcome {
         "/all",
         "/norestart",
     ]);
+    let temp = match give_a_protected_temp(&mut command) {
+        Ok(temp) => temp,
+        Err(reason) => return PrerequisiteInstallOutcome::Failed(reason),
+    };
+    if let Some(temp) = temp.as_ref() {
+        command.arg(format!("/ScratchDir:{}", temp.path().display()));
+    }
     match wait_with_timeout(command, INSTALL_TIMEOUT) {
         // 0 = enabled, 3010 = enabled but a reboot is required to complete it.
         WaitOutcome::Exited(Some(0)) => PrerequisiteInstallOutcome::Installed,
@@ -397,6 +488,12 @@ fn run_windows_feature(feature: &str) -> PrerequisiteInstallOutcome {
     }
 }
 
+fn is_where_windows_keeps_packages(path: &Path) -> bool {
+    program_files_folders()
+        .iter()
+        .any(|folder| path_is_within(path, &folder.join(WINDOWS_APPS_FOLDER)))
+}
+
 /// Where winget really is, checked the same way as a payload. The `winget` on `PATH` is a
 /// shortcut in a folder the user can write to, so it could be anything.
 fn trusted_winget_path() -> std::result::Result<PathBuf, String> {
@@ -410,6 +507,14 @@ fn trusted_winget_path() -> std::result::Result<PathBuf, String> {
         return Err(WINGET_NOT_INSTALLED.to_owned());
     }
     let winget = Path::new(&location).join(WINGET_EXE);
+    // With Developer Mode on, an account can register a package from any folder of its own, by this
+    // name, with a higher version, and a signed copy of winget in it would pass the check below.
+    if !is_where_windows_keeps_packages(&winget) || !only_administrators_can_change(&winget) {
+        return Err(format!(
+            "{} is not where Windows keeps its own packages, so it was not run",
+            winget.display()
+        ));
+    }
     check_microsoft_signature(&winget).map_err(|reason| {
         format!(
             "{} failed its signature check and was not run: {reason}",
@@ -419,7 +524,23 @@ fn trusted_winget_path() -> std::result::Result<PathBuf, String> {
     Ok(winget)
 }
 
-fn run_winget(winget_id: &str) -> PrerequisiteInstallOutcome {
+/// What winget calls a build, for one it can be told to get. Left to itself, it gets the one for this
+/// PC, and says it has installed what it was asked for, whichever the app needed.
+fn winget_architecture(architecture: &AppArchitecture) -> Option<&'static str> {
+    match architecture {
+        AppArchitecture::X64 => Some("x64"),
+        AppArchitecture::X86 => Some("x86"),
+        AppArchitecture::Arm64 => Some("arm64"),
+        _ => None,
+    }
+}
+
+fn run_winget(winget_id: &str, architecture: &AppArchitecture) -> PrerequisiteInstallOutcome {
+    let Some(build) = winget_architecture(architecture) else {
+        return PrerequisiteInstallOutcome::Failed(format!(
+            "could not use winget to install {winget_id}: which build it needs is not known"
+        ));
+    };
     let winget = match trusted_winget_path() {
         Ok(winget) => winget,
         Err(reason) => {
@@ -429,6 +550,10 @@ fn run_winget(winget_id: &str) -> PrerequisiteInstallOutcome {
         }
     };
     let mut command = hidden_command(winget);
+    let _temp = match give_a_protected_temp(&mut command) {
+        Ok(temp) => temp,
+        Err(reason) => return PrerequisiteInstallOutcome::Failed(reason),
+    };
     command.args([
         "install",
         "--id",
@@ -438,6 +563,8 @@ fn run_winget(winget_id: &str) -> PrerequisiteInstallOutcome {
         "--accept-package-agreements",
         "--accept-source-agreements",
         "--disable-interactivity",
+        "--architecture",
+        build,
     ]);
     match wait_with_timeout(command, INSTALL_TIMEOUT) {
         WaitOutcome::Exited(Some(0)) => PrerequisiteInstallOutcome::Installed,
@@ -708,6 +835,48 @@ fn dotnet_framework4x_spec() -> PrerequisiteSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runtime_older_than_what_is_bundled_gets_what_is_bundled() {
+        let older = Some((14, 16, 27012));
+        let bundled = version_of_text("14.44.35211.0");
+        assert_eq!(bundled, Some((14, 44, 35211)));
+        assert!(is_stale(older, bundled), "from before vcruntime140_1.dll");
+        assert!(!is_stale(Some((14, 51, 0)), bundled), "newer stays");
+        assert!(!is_stale(bundled, bundled), "the same stays");
+        assert!(
+            !is_stale(None, bundled),
+            "one that does not say is taken at its word"
+        );
+        assert!(!is_stale(older, None), "nor is anything run on a guess");
+        assert_eq!(version_of_text("not a version"), None);
+        assert_eq!(version_of_text("14.44"), None);
+    }
+
+    #[test]
+    fn winget_is_told_which_build_or_not_asked() {
+        assert_eq!(winget_architecture(&AppArchitecture::X86), Some("x86"));
+        assert_eq!(winget_architecture(&AppArchitecture::X64), Some("x64"));
+        assert_eq!(winget_architecture(&AppArchitecture::Arm64), Some("arm64"));
+        assert_eq!(winget_architecture(&AppArchitecture::Unknown), None);
+    }
+
+    #[test]
+    fn winget_only_counts_where_windows_keeps_packages() {
+        let folders = program_files_folders();
+        let Some(program_files) = folders.first() else {
+            return;
+        };
+        assert!(is_where_windows_keeps_packages(
+            &program_files
+                .join(WINDOWS_APPS_FOLDER)
+                .join("Microsoft.DesktopAppInstaller_1_x64__8wekyb3d8bbwe")
+                .join(WINGET_EXE)
+        ));
+        assert!(!is_where_windows_keeps_packages(Path::new(
+            r"C:\Users\someone\Loose\Microsoft.DesktopAppInstaller\winget.exe"
+        )));
+    }
 
     #[test]
     fn visual_cpp_spec_is_arch_specific() {

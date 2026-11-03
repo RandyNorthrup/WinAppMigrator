@@ -36,7 +36,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Read as _;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf, Prefix};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -48,10 +49,11 @@ use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::opens_as_device_on;
 use crate::journal::machine_state_root;
 use crate::models::{Warning, WarningSeverity};
-use crate::package::copy_file_backup_mode;
+use crate::package::copy_file_backup_mode_unless;
 use crate::path_utils::{
     SignedInUser, file_name_string, has_parent_step, hidden_command, is_on_a_local_disk,
-    is_person_sid, location_can_be_told, path_is_within, resolved_location, signed_in_user,
+    is_person_sid, location_can_be_told, machine_variable, path_is_within, profiles_folder,
+    program_data_dir, program_files_folders, public_profile_dir, resolved_location, signed_in_user,
     strip_prefix_ignore_case, system_root, windows_architecture_name, windows_build,
 };
 use crate::privilege::{
@@ -268,7 +270,8 @@ fn as_windows_reads_it(recorded: &Path) -> Option<PathBuf> {
             Component::Normal(name) => match name.to_str() {
                 Some(text) => {
                     let name = text.trim_end_matches(['.', ' ']);
-                    if name.is_empty() {
+                    // A stream's name, which on its own would read as a drive and replace all of this.
+                    if name.is_empty() || name.contains(':') {
                         return None;
                     }
                     read.push(name);
@@ -385,6 +388,8 @@ struct HiveMounts {
     id: String,
     next_folder: usize,
     bytes_left: u64,
+    /// What says a person has stopped waiting, for a copy of what can be very large.
+    cancel: Option<Arc<AtomicBool>>,
     mounts: Vec<String>,
     // In this order, because a field drops in the order it is declared, and the folder cannot
     // be removed while anything in it is held.
@@ -427,6 +432,7 @@ impl HiveMounts {
             id,
             next_folder: 0,
             bytes_left: MAX_HIVE_BYTES_IN_ALL,
+            cancel: None,
             mounts: Vec::new(),
             _lease: lease,
             folder,
@@ -437,7 +443,12 @@ impl HiveMounts {
     fn load(&mut self, label: &str, hive_file: &Path) -> Result<String> {
         let copy_folder = self.folder.path().join(self.next_folder.to_string());
         self.next_folder += 1;
-        let copy = copy_hive(hive_file, &copy_folder, &mut self.bytes_left)?;
+        let copy = copy_hive(
+            hive_file,
+            &copy_folder,
+            &mut self.bytes_left,
+            self.cancel.as_deref(),
+        )?;
         let mount = format!("{MOUNT_PREFIX}{}_{label}", self.id);
         reg_load(&mount, &copy)?;
         self.mounts.push(mount.clone());
@@ -586,19 +597,24 @@ fn lease_is_held(lease: &Path) -> bool {
 /// copy replays them into the copy, so that what was on the drive is read in full and the drive
 /// is not written to. Failing to copy a log loses at most what it held, and says nothing is wrong
 /// with the hive.
-fn copy_hive(hive_file: &Path, into: &Path, bytes_left: &mut u64) -> Result<PathBuf> {
+fn copy_hive(
+    hive_file: &Path,
+    into: &Path,
+    bytes_left: &mut u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<PathBuf> {
     let name = hive_file.file_name().ok_or_else(|| {
         WinAppMigratorError::InvalidInput(format!("not a hive file: {}", hive_file.display()))
     })?;
     fs::create_dir_all(into).map_err(|error| WinAppMigratorError::io(into, error))?;
     let copy = into.join(name);
-    copy_a_hive_file(hive_file, &copy, bytes_left)?;
+    copy_a_hive_file(hive_file, &copy, bytes_left, cancel)?;
     for suffix in HIVE_LOG_SUFFIXES {
         let mut log_name = name.to_os_string();
         log_name.push(suffix);
         let log = hive_file.with_file_name(&log_name);
         if fs::symlink_metadata(&log).is_ok_and(|metadata| metadata.is_file())
-            && let Err(error) = copy_a_hive_file(&log, &into.join(&log_name), bytes_left)
+            && let Err(error) = copy_a_hive_file(&log, &into.join(&log_name), bytes_left, cancel)
         {
             warn!(%error, log = %log.display(), "could not copy a hive's log");
         }
@@ -609,14 +625,16 @@ fn copy_hive(hive_file: &Path, into: &Path, bytes_left: &mut u64) -> Result<Path
 /// Hives are protected on a drive that kept its permissions, and its accounts are not this PC's,
 /// so a plain read may be refused where one in backup mode is not. A copy has to be writable to
 /// load, whatever the original was marked.
-fn copy_a_hive_file(source: &Path, destination: &Path, bytes_left: &mut u64) -> Result<()> {
+fn copy_a_hive_file(
+    source: &Path,
+    destination: &Path,
+    bytes_left: &mut u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<()> {
     let size = fs::symlink_metadata(source).map_or(0, |metadata| metadata.len());
-    if size > MAX_HIVE_BYTES.min(*bytes_left) {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "{} is {size} bytes, too large to be a registry hive, or more than this drive's \
-             hives could add up to",
-            source.display()
-        )));
+    let most_of_it = MAX_HIVE_BYTES.min(*bytes_left);
+    if size > most_of_it {
+        return Err(too_large_for_a_hive(source, size));
     }
     *bytes_left -= size;
     // By reading it, since `fs::copy` also brings the streams stored under its name, of any size.
@@ -628,7 +646,7 @@ fn copy_a_hive_file(source: &Path, destination: &Path, bytes_left: &mut u64) -> 
                 .map_err(|error| WinAppMigratorError::io(source, error))?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            copy_file_backup_mode(source, destination)?;
+            copy_a_denied_hive_file(source, destination, most_of_it, bytes_left, cancel)?;
         }
         Err(error) => return Err(WinAppMigratorError::io(source, error)),
     }
@@ -641,6 +659,49 @@ fn copy_a_hive_file(source: &Path, destination: &Path, bytes_left: &mut u64) -> 
         fs::set_permissions(destination, permissions)
             .map_err(|error| WinAppMigratorError::io(destination, error))?;
     }
+    Ok(())
+}
+
+fn too_large_for_a_hive(source: &Path, size: u64) -> WinAppMigratorError {
+    WinAppMigratorError::InvalidInput(format!(
+        "{} is {size} bytes, too large to be a registry hive, or more than this drive's hives could \
+         add up to",
+        source.display()
+    ))
+}
+
+/// Copy what only backup mode can read. A size says nothing of the streams stored under the same name,
+/// which that copy brings too, and a drive can make those any size at all. So this watches how much
+/// room the copy is taking, and stops it there.
+fn copy_a_denied_hive_file(
+    source: &Path,
+    destination: &Path,
+    most: u64,
+    bytes_left: &mut u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<()> {
+    let folder = destination.parent().unwrap_or(destination);
+    let room_at_first = fs4::available_space(folder).unwrap_or(u64::MAX);
+    let taken =
+        || room_at_first.saturating_sub(fs4::available_space(folder).unwrap_or(room_at_first));
+    let too_much = AtomicBool::new(false);
+    let should_stop = || {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+            return true;
+        }
+        let over = taken() > most;
+        if over {
+            too_much.store(true, Ordering::Relaxed);
+        }
+        over
+    };
+    let copied = copy_file_backup_mode_unless(source, destination, &should_stop);
+    if too_much.load(Ordering::Relaxed) {
+        let _ = fs::remove_file(destination);
+        return Err(too_large_for_a_hive(source, taken().max(most)));
+    }
+    copied?;
+    *bytes_left = bytes_left.saturating_sub(taken());
     Ok(())
 }
 
@@ -758,6 +819,7 @@ impl SystemContext {
         source: &ScanSource,
         choice: &ProfileChoice,
         owner: Option<&str>,
+        cancel: Arc<AtomicBool>,
     ) -> Result<Self> {
         match source {
             ScanSource::Live => {
@@ -769,6 +831,7 @@ impl SystemContext {
             }
             ScanSource::OfflineVolume { volume_root } => {
                 let mut mounts = HiveMounts::begin()?;
+                mounts.cancel = Some(cancel);
                 let offline = mount_machine_hives(volume_root, &mut mounts)?;
                 let mut context = Self::with_offline(offline);
                 context.listed = context.read_listed_profiles();
@@ -1239,17 +1302,7 @@ impl SystemContext {
     /// `Program Files` roots to search for install directories.
     pub fn program_files_dirs(&self) -> Vec<PathBuf> {
         match &self.offline {
-            None => {
-                let mut dirs = Vec::new();
-                for env_var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
-                    if let Some(path) = std::env::var_os(env_var).map(PathBuf::from)
-                        && !dirs.contains(&path)
-                    {
-                        dirs.push(path);
-                    }
-                }
-                dirs
-            }
+            None => program_files_folders(),
             Some(hives) => ["Program Files", "Program Files (x86)"]
                 .into_iter()
                 .map(|name| hives.map.volume_root.join(name))
@@ -1261,7 +1314,7 @@ impl SystemContext {
     /// The machine-wide `ProgramData` root.
     pub fn program_data(&self) -> Option<PathBuf> {
         match &self.offline {
-            None => std::env::var_os("ProgramData").map(PathBuf::from),
+            None => program_data_dir().map(Path::to_path_buf),
             Some(hives) => {
                 Some(hives.map.volume_root.join("ProgramData")).filter(|dir| self.may_read(dir))
             }
@@ -1271,8 +1324,8 @@ impl SystemContext {
     /// The shared `Public` profile (`C:\Users\Public`).
     pub fn public_dir(&self) -> Option<PathBuf> {
         match &self.offline {
-            None => std::env::var_os("PUBLIC")
-                .map(PathBuf::from)
+            None => public_profile_dir()
+                .map(Path::to_path_buf)
                 .or_else(|| Some(PathBuf::from(r"C:\Users\Public"))),
             Some(hives) => {
                 Some(hives.map.volume_root.join(r"Users\Public")).filter(|dir| self.may_read(dir))
@@ -1283,10 +1336,7 @@ impl SystemContext {
     /// The Windows directory (`%SystemRoot%`). On a drive, mounting checked that it is real.
     pub fn windows_dir(&self) -> PathBuf {
         match &self.offline {
-            None => std::env::var_os("SystemRoot")
-                .or_else(|| std::env::var_os("windir"))
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(r"C:\Windows")),
+            None => system_root().to_path_buf(),
             Some(hives) => hives.map.volume_root.join(WINDOWS_FOLDER),
         }
     }
@@ -1299,11 +1349,18 @@ impl SystemContext {
         match &self.offline {
             None => {
                 let mut profiles = Vec::new();
-                if let Some(current) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
-                    profiles.push(current.clone());
-                    if let Some(users_root) = current.parent() {
-                        collect_profile_dirs(users_root, &mut profiles, &Path::is_dir);
-                    }
+                // Whoever this is about first, by what the admin-only registry says of them.
+                if let Some(account) = signed_in_user().account() {
+                    profiles.push(account.profile.clone());
+                }
+                let users_root = profiles_folder().or_else(|| {
+                    profiles
+                        .first()
+                        .and_then(|profile| profile.parent())
+                        .map(Path::to_path_buf)
+                });
+                if let Some(users_root) = users_root {
+                    collect_profile_dirs(&users_root, &mut profiles, &Path::is_dir);
                 }
                 profiles
             }
@@ -1499,7 +1556,8 @@ impl SystemContext {
     /// to come first, since nearly any other look at a path follows a link.
     pub fn may_read(&self, path: &Path) -> bool {
         let Some(hives) = &self.offline else {
-            return is_on_a_local_disk(path)
+            return path.is_absolute()
+                && is_on_a_local_disk(path)
                 && path.components().all(|component| match component {
                     Component::Normal(name) => is_ordinary_name(name),
                     _ => true,
@@ -1549,7 +1607,7 @@ impl SystemContext {
             return Some(folder.display().to_string());
         }
         let Some(hives) = &self.offline else {
-            return std::env::var(name).ok();
+            return machine_variable(name).or_else(|| std::env::var(name).ok());
         };
         let drive = hives.map.system_drive;
         let folder = match lower.as_str() {
