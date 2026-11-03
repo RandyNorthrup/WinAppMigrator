@@ -404,14 +404,10 @@ impl Undoer<'_> {
                 item,
             } => {
                 let label = value_label(hive, key, name);
-                if self.keeps(*item) {
-                    let replaced = if prior.is_some() {
-                        " What it replaced is not being put back."
-                    } else {
-                        ""
-                    };
+                // What it replaced was someone's own, and goes back as any other value does.
+                if self.keeps(*item) && prior.is_none() {
                     self.kept(format!(
-                        "{label} stays, since it was not asked to be removed.{replaced}"
+                        "{label} stays, since it was not asked to be removed."
                     ));
                     return;
                 }

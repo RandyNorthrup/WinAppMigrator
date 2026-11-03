@@ -12,6 +12,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::errors::Result;
 use crate::file_discovery::{
@@ -38,6 +40,14 @@ fn folded_path(path: &Path) -> String {
     folded.trim_end_matches('\\').to_owned()
 }
 
+/// How many bytes of a value are looked at to find what to rewrite in it, which is far past what a
+/// path in any real value takes. A package can name a rule and a value of any size, and the cost of
+/// looking otherwise grows with one times the other. Past this a value is left as it stands from there
+/// on, and what is checked of it afterward goes by what it then says.
+const MOST_BYTES_LOOKED_AT_IN_A_VALUE: usize = 32 * 1024 * 1024;
+/// The same for all the values of a package together.
+const MOST_BYTES_LOOKED_AT: u64 = 2 * 1024 * 1024 * 1024;
+
 /// The source machine's paths mapped to where this restore puts them.
 #[derive(Debug, Clone, Default)]
 pub struct RestoreMap {
@@ -54,6 +64,10 @@ pub struct RestoreMap {
     roots: HashMap<String, String>,
     /// The longest source path of any rule, which bounds the search at each position.
     longest_rule: usize,
+    /// The length of each rule's source path, as only a text of one of these can be one.
+    rule_lengths: HashSet<usize>,
+    /// What has been looked at so far, of [`MOST_BYTES_LOOKED_AT`].
+    looked_at: Arc<AtomicU64>,
     target_root: PathBuf,
     /// Files whose destination is not allowed, and why. They are not in this map, so
     /// nothing can count on them being on the target.
@@ -143,7 +157,7 @@ impl RestoreMap {
 
     fn add_file(&mut self, source: &Path, destination: PathBuf, put_aside: bool) {
         let source = folded_path(source);
-        self.longest_rule = self.longest_rule.max(source.len());
+        self.note_rule_length(source.len());
         let destination_key = folded_path(&destination);
         if put_aside {
             self.set_aside.insert(source.clone());
@@ -159,9 +173,14 @@ impl RestoreMap {
         }
     }
 
+    fn note_rule_length(&mut self, length: usize) {
+        self.longest_rule = self.longest_rule.max(length);
+        self.rule_lengths.insert(length);
+    }
+
     fn add_root(&mut self, source: &Path, destination: &Path) {
         let source = folded_path(source);
-        self.longest_rule = self.longest_rule.max(source.len());
+        self.note_rule_length(source.len());
         let text = destination.to_string_lossy();
         self.roots
             .insert(source, text.trim_end_matches(['\\', '/']).to_owned());
@@ -235,8 +254,12 @@ impl RestoreMap {
         let mut output = String::with_capacity(text.len());
         let mut written = 0;
         let mut index = 0;
+        let mut budget = MOST_BYTES_LOOKED_AT_IN_A_VALUE;
         while let Some(start) = next_path_start(bytes, index) {
-            let Some((end, destination)) = self.longest_rule_at(&search, start) else {
+            let Some(looked) = self.look_at(start, bytes.len(), &mut budget) else {
+                break;
+            };
+            let Some((end, destination)) = self.longest_rule_at(&search, start, looked) else {
                 index = start + 1;
                 continue;
             };
@@ -292,14 +315,38 @@ impl RestoreMap {
         Ok(output)
     }
 
+    /// How far from `start` there is to look, counted against what can be looked at. `None` once
+    /// either limit has been reached.
+    fn look_at(&self, start: usize, length: usize, budget: &mut usize) -> Option<usize> {
+        let limit = start.saturating_add(self.longest_rule).min(length);
+        let cost = limit - start;
+        if cost > *budget
+            || self.looked_at.fetch_add(cost as u64, Ordering::Relaxed) > MOST_BYTES_LOOKED_AT
+        {
+            return None;
+        }
+        *budget -= cost;
+        Some(limit)
+    }
+
     /// The longest rule whose source path starts at `start` and ends at a path boundary.
-    fn longest_rule_at(&self, search: &str, start: usize) -> Option<(usize, Destination<'_>)> {
+    fn longest_rule_at(
+        &self,
+        search: &str,
+        start: usize,
+        limit: usize,
+    ) -> Option<(usize, Destination<'_>)> {
         let bytes = search.as_bytes();
-        let limit = start.saturating_add(self.longest_rule).min(bytes.len());
         let mut best = None;
         for end in start + 2..=limit {
             let next = bytes.get(end).copied();
             if !ends_a_path_at(next) {
+                if next.is_some_and(cannot_be_in_a_path) {
+                    break;
+                }
+                continue;
+            }
+            if !self.rule_lengths.contains(&(end - start)) {
                 if next.is_some_and(cannot_be_in_a_path) {
                     break;
                 }
@@ -453,6 +500,47 @@ mod tests {
         };
         map.add_root(Path::new(source), Path::new(target));
         map
+    }
+
+    /// As the review found it: one rule of 6 KB and a value of 24 KB took 17.5 seconds, and a value
+    /// is rewritten when a package is loaded, before anyone has agreed to anything.
+    #[test]
+    fn a_long_rule_and_a_long_value_cost_next_to_nothing() {
+        let mut map = RestoreMap::for_tests(r"D:\T");
+        let long_source = format!(r"C:\{}", "a".repeat(6 * 1024));
+        map.add_test_root(&long_source, r"D:\T");
+        map.add_test_root(r"C:\App", r"D:\T");
+        let value = format!(r"{}C:\App\a.exe", r"C:\a ".repeat(24 * 1024 / 5));
+        let started = std::time::Instant::now();
+        let rewritten = map.rewrite(&value);
+        let took = started.elapsed();
+        assert!(took.as_secs() < 2, "{took:?}");
+        assert!(rewritten.ends_with(r"D:\T\a.exe"), "it still does its job");
+    }
+
+    #[test]
+    fn past_what_can_be_looked_at_a_value_is_left_as_it_stands() {
+        let mut map = RestoreMap::for_tests(r"D:\T");
+        let long_source = format!(r"C:\{}", "a".repeat(32 * 1024));
+        map.add_test_root(&long_source, r"D:\T");
+        map.add_test_root(r"C:\App", r"D:\T");
+        // Each of these starts a path, and costs the length of the longest rule to look along.
+        let far_too_much = format!(r"{}C:\App\a.exe", r"C:\a ".repeat(4 * 1024));
+        let rewritten = map.rewrite(&far_too_much);
+        assert!(rewritten.ends_with(r"C:\App\a.exe"), "it stopped looking");
+        assert!(
+            map.rewrite(r"C:\App\b.exe").ends_with(r"D:\T\b.exe"),
+            "and the next is fine"
+        );
+    }
+
+    #[test]
+    fn past_what_can_be_looked_at_altogether_values_are_left_as_they_stand() {
+        let mut map = RestoreMap::for_tests(r"D:\T");
+        map.add_test_root(r"C:\App", r"D:\T");
+        map.looked_at
+            .store(MOST_BYTES_LOOKED_AT + 1, Ordering::Relaxed);
+        assert_eq!(map.rewrite(r"C:\App\a.exe"), r"C:\App\a.exe");
     }
 
     #[test]

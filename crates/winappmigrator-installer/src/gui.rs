@@ -30,9 +30,9 @@ use winappmigrator_core::{
     EmbeddedPackage, InstallMonitor, InstallPhase, InstallStep, PackageManifest, RestoreOptions,
     RestoreResult, RoomCheck, RuntimePrerequisite, RuntimePrerequisiteKind, SystemChange,
     SystemChanges, UndoReport, Warning, WarningSeverity, WinAppMigratorError,
-    default_install_location, hidden_command, install_location_problem, install_places, panic_text,
-    preview_needs, read_embedded_manifest, refuse_without_room_to_install,
-    restore_package_monitored, system_changes_restoring,
+    default_install_location, files_no_install_put_there, folder_has_files, hidden_command,
+    install_location_problem, install_places, panic_text, preview_needs, read_embedded_manifest,
+    refuse_without_room_to_install, restore_package_monitored, system_changes_restoring,
 };
 use winappmigrator_ui::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
@@ -374,8 +374,9 @@ impl InstallerApp {
         {
             return problem.clone();
         }
-        let problem = install_location_problem(Path::new(text))
-            .or_else(|| files_no_install_put_there(Path::new(text)));
+        let problem = install_location_problem(Path::new(text)).or_else(|| {
+            files_no_install_put_there(Path::new(text), machine_state_root().as_deref())
+        });
         *checked = Some((text.to_owned(), problem.clone()));
         problem
     }
@@ -410,6 +411,9 @@ impl InstallerApp {
     }
 
     fn start(&mut self, apply: bool, ctx: &egui::Context) {
+        // What was found when the text last changed could be a long time ago, and an install is told
+        // it may replace what is there.
+        *self.checked_target.borrow_mut() = None;
         if self.phase == Phase::Running || !self.target_is_valid() {
             return;
         }
@@ -1134,18 +1138,6 @@ fn refused_ui(ui: &mut egui::Ui, theme: &Theme, refused: &[String]) {
 /// location is one a package suggests, and this window replaces what it finds, so without this a
 /// package could say its home was another app's folder and put its own program in place of one that
 /// app's service runs, with nothing on the list to say so.
-fn files_no_install_put_there(folder: &Path) -> Option<String> {
-    let on_record = machine_state_root()
-        .is_some_and(|state_root| install_on_record_at(&state_root, folder, None));
-    (folder_has_files(folder) && !on_record).then(|| {
-        "it already has files, and no install is on record here, so use an empty folder".to_owned()
-    })
-}
-
-fn folder_has_files(folder: &Path) -> bool {
-    std::fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_some())
-}
-
 /// What a running install or preview is doing, and how much of that is done. A cancel takes
 /// effect at the next item, and once the install has begun means putting back what it did.
 fn step_label(
@@ -1764,6 +1756,29 @@ mod tests {
         Ok(())
     }
 
+    /// A window can sit open, and what it found when the text last changed is not what is there now.
+    #[test]
+    fn a_folder_is_looked_at_again_when_install_is_clicked() -> std::io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.target_root = folder.path().display().to_string();
+        app.checked_target = std::cell::RefCell::new(None);
+        assert_eq!(app.target_problem(), None);
+
+        std::fs::write(folder.path().join("appeared.txt"), b"x")?;
+        assert_eq!(
+            app.target_problem(),
+            None,
+            "it is only asked when the text changes"
+        );
+        app.start(true, &egui::Context::default());
+
+        assert!(app.phase == Phase::Idle);
+        assert!(app.error.is_none(), "it went on to look for a package");
+        assert!(app.target_problem().is_some());
+        Ok(())
+    }
+
     /// A package names where its app was, so this is what a hostile one can make a window ask.
     #[test]
     fn the_window_does_not_ask_a_share_how_much_room_it_has() {
@@ -1940,9 +1955,9 @@ mod tests {
     #[test]
     fn a_folder_with_files_no_install_put_there_is_not_offered() -> std::io::Result<()> {
         let folder = tempfile::tempdir()?;
-        assert_eq!(files_no_install_put_there(folder.path()), None);
+        assert_eq!(files_no_install_put_there(folder.path(), None), None);
         std::fs::write(folder.path().join("theirs.exe"), b"theirs")?;
-        assert!(files_no_install_put_there(folder.path()).is_some());
+        assert!(files_no_install_put_there(folder.path(), None).is_some());
         Ok(())
     }
 

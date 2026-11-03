@@ -15,10 +15,10 @@ use winappmigrator_core::logging;
 use winappmigrator_core::rollback::report_lines;
 use winappmigrator_core::{
     EmbeddedPackage, InstallMonitor, PackageManifest, RestoreOptions, Result, VerificationOptions,
-    WinAppMigratorError, default_install_location, has_embedded_self_archive,
-    install_location_problem, install_places, preview_needs, read_embedded_manifest,
-    refuse_what_cannot_run_here, refuse_without_room_to_install, restore_package_monitored,
-    system_changes_restoring, verify_unpacked_package,
+    WinAppMigratorError, default_install_location, files_no_install_put_there,
+    has_embedded_self_archive, install_location_problem, install_places, preview_needs,
+    read_embedded_manifest, refuse_what_cannot_run_here, refuse_without_room_to_install,
+    restore_package_monitored, system_changes_restoring, verify_unpacked_package,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -134,6 +134,9 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
                 .to_owned(),
         )
     })?;
+    if cli.apply {
+        refuse_a_folder_with_files(&target_root, cli.force, &state_root)?;
+    }
 
     // An app that cannot run here stops here, with nothing unpacked for it.
     refuse_what_cannot_run_here(&manifest)?;
@@ -278,6 +281,21 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     }
 }
 
+/// A window will not use a folder with files in it and no install on record. For a script that is
+/// what `--force` is for: without it, the same goes, whether or not any file would be replaced.
+fn refuse_a_folder_with_files(target_root: &Path, force: bool, state_root: &Path) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+    match files_no_install_put_there(target_root, Some(state_root)) {
+        Some(problem) => Err(WinAppMigratorError::InvalidInput(format!(
+            "{} cannot be used: {problem}. Give --force only if you know it is this app's",
+            target_root.display()
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// The install location asked for, or else where the package's app was, if the same checks
 /// the window makes allow it. A package names that itself, so it is not to be taken on trust.
 fn choose_target_root(asked_for: Option<PathBuf>, manifest: &PackageManifest) -> Result<PathBuf> {
@@ -305,6 +323,28 @@ mod tests {
     use winappmigrator_core::path_utils::system_root;
 
     use super::*;
+
+    /// As the review found it: nothing to replace, so nothing stopped it, and a DLL added beside
+    /// another app's programs is loaded by them.
+    #[test]
+    fn a_folder_with_files_is_refused_without_force_even_if_nothing_would_be_replaced() -> Result<()>
+    {
+        let io = |error| WinAppMigratorError::io("temp", error);
+        let work = tempfile::tempdir().map_err(io)?;
+        let state_root = work.path().join("state");
+        let empty = work.path().join("empty");
+        let other_apps = work.path().join("other");
+        for folder in [&empty, &other_apps] {
+            std::fs::create_dir_all(folder).map_err(io)?;
+        }
+        std::fs::write(other_apps.join("other.exe"), b"x").map_err(io)?;
+
+        assert!(refuse_a_folder_with_files(&empty, false, &state_root).is_ok());
+        assert!(refuse_a_folder_with_files(&work.path().join("none"), false, &state_root).is_ok());
+        assert!(refuse_a_folder_with_files(&other_apps, false, &state_root).is_err());
+        assert!(refuse_a_folder_with_files(&other_apps, true, &state_root).is_ok());
+        Ok(())
+    }
 
     fn manifest_with_app_at(location: &Path) -> Result<PackageManifest> {
         let mut manifest: PackageManifest = serde_json::from_str(

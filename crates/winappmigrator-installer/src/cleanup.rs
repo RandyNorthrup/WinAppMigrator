@@ -239,7 +239,44 @@ mod tests {
     {
         let base = tempfile::tempdir()?;
         let target = base.path().join(r"not\there\yet");
-        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"), 0)?;
+        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"), 0, None)?;
+        assert_eq!(staging.path().parent(), Some(base.path()));
+        Ok(())
+    }
+
+    /// As the review found it: the folder found was real, and a link was further up the way to it.
+    #[test]
+    fn staging_is_not_made_through_a_link_anywhere_on_the_way() -> std::io::Result<()> {
+        let base = tempfile::tempdir()?;
+        let elsewhere = tempfile::tempdir()?;
+        std::fs::create_dir_all(elsewhere.path().join("real"))?;
+        let link = base.path().join("link");
+        let made = winappmigrator_core::hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&link)
+            .arg(elsewhere.path())
+            .output()?;
+        assert!(made.status.success());
+
+        let target = link.join(r"real\app");
+        let staging = create_staging_dir(Some(&target), &base.path().join("x.exe"), 0, None)?;
+
+        assert_eq!(staging.path().parent(), Some(base.path()));
+        assert_eq!(std::fs::read_dir(elsewhere.path().join("real"))?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn staging_is_never_asked_to_look_at_a_share() -> std::io::Result<()> {
+        let base = tempfile::tempdir()?;
+        let staging = create_staging_dir(
+            Some(Path::new(r"\\localhost\c$\Windows\Temp")),
+            &base.path().join("x.exe"),
+            0,
+            None,
+        )?;
         assert_eq!(staging.path().parent(), Some(base.path()));
         Ok(())
     }

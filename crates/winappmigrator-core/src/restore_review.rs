@@ -1202,6 +1202,23 @@ pub fn refuse_without_room_to_install(needs: &[PlaceNeed]) -> Result<RoomCheck> 
     )))
 }
 
+/// Why this folder is not one to install to without being told to: it has files in it, and no
+/// install on record put them there. They would be another app's or a person's. It holds for a file
+/// that is new as much as for one that replaces something, since a DLL added beside another app's
+/// programs is loaded by them.
+pub fn files_no_install_put_there(folder: &Path, state_root: Option<&Path>) -> Option<String> {
+    let on_record =
+        state_root.is_some_and(|state_root| install_on_record_at(state_root, folder, None));
+    (folder_has_files(folder) && !on_record).then(|| {
+        "it already has files, and no install is on record here, so use an empty folder".to_owned()
+    })
+}
+
+/// Whether anything is in a folder.
+pub fn folder_has_files(folder: &Path) -> bool {
+    std::fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_some())
+}
+
 /// Why this install location must not be used on this PC, if so.
 pub fn install_location_problem(target_root: &Path) -> Option<String> {
     let state_root = machine_state_root();

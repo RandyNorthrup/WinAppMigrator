@@ -1008,8 +1008,13 @@ fn a_row_can_be_worked_from_the_keyboard_and_says_what_it_is() {
     heading.focus();
     harness.run_steps(1);
     harness.key_press(egui::Key::Enter);
-    harness.run_steps(3);
-    assert!(harness.query_by_label_contains("samples,").is_none());
+    // What goes with the choice above comes from a worker, and until it does the frames are busy.
+    let closed = (0..500).any(|_| {
+        harness.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        harness.query_by_label_contains("samples,").is_none()
+    });
+    assert!(closed);
 }
 
 #[test]
