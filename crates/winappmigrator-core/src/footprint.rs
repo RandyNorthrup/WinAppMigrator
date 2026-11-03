@@ -28,10 +28,10 @@ use crate::prerequisites::handling_before_a_build;
 use crate::registry_target::is_path_variable;
 use crate::restore_policy::is_autostart_entry;
 use crate::restore_review::{
-    CERTIFICATES_LEFT_OUT_TEXT, CREDENTIALS_LEFT_OUT_TEXT, ChangeRow, FONTS_LEFT_OUT_TEXT,
+    AppKeys, CERTIFICATES_LEFT_OUT_TEXT, CREDENTIALS_LEFT_OUT_TEXT, ChangeRow, FONTS_LEFT_OUT_TEXT,
     NO_TARGET_YET, ReviewedPackage, SETTINGS_LEFT_OUT_TEXT, SystemChange, SystemChangeKind,
-    autostart_choice, certificate_label, change_kind_of, described_rows, driver_choice, notes_of,
-    registry_item, service_choice, shortcut_choice, task_choice,
+    autostart_choice, certificate_label, change_kind_of, described_rows, driver_choice,
+    is_other_setting, notes_of, registry_item, service_choice, shortcut_choice, task_choice,
 };
 use crate::space::BuildInputs;
 
@@ -1004,6 +1004,8 @@ fn take_out_what_was_chosen(manifest: &mut PackageManifest, choices: &FootprintC
             _ => None,
         })
         .collect();
+    let app = AppKeys::of(manifest);
+    let other_settings_out = has(&ChoiceId::Integration(SystemChangeKind::OtherSettings));
     manifest.registry_keys_exported.retain(|entry| {
         let is_under_a_service = entry.hive == RegistryHive::LocalMachine && {
             let key = entry.key_path.to_ascii_lowercase();
@@ -1015,6 +1017,7 @@ fn take_out_what_was_chosen(manifest: &mut PackageManifest, choices: &FootprintC
         !is_under_a_service
             && !(is_autostart_entry(entry) && has(&autostart_choice(entry)))
             && !change_kind_of(entry).is_some_and(|kind| has(&ChoiceId::Integration(kind)))
+            && !(other_settings_out && is_other_setting(entry, &app))
     });
     if has(&ChoiceId::Integration(SystemChangeKind::FirewallRule)) {
         manifest.firewall_rules_detected.clear();

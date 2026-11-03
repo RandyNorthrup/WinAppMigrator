@@ -1075,7 +1075,7 @@ fn system_changes_ui(ui: &mut egui::Ui, theme: &Theme, changes: &SystemChanges) 
         widgets::hint(
             ui,
             theme,
-            "Nothing: it only copies files and registry settings.",
+            "Nothing: it only copies files, and settings in the app's own registry keys.",
         );
     }
     for change in &changes.changes {

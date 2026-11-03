@@ -303,8 +303,38 @@ const REFUSED_SOFTWARE_KEYS: &[&str] = &[
     r"software\microsoft\windows nt\currentversion\drivers32",
     r"software\microsoft\windows nt\currentversion\appcompatflags\custom",
     r"software\microsoft\windows nt\currentversion\appcompatflags\installedsdb",
+    // A command Windows' own compatibility telemetry runs, as SYSTEM.
+    r"software\microsoft\windows nt\currentversion\appcompatflags\telemetrycontroller",
+    // What runs in the accessibility tools, and at the sign-in screen.
+    r"software\microsoft\windows nt\currentversion\accessibility",
+    r"software\microsoft\windows nt\currentversion\font drivers",
+    r"software\microsoft\windows nt\currentversion\notify",
     r"software\microsoft\windows\currentversion\policies",
     r"software\microsoft\windows\currentversion\authentication",
+    // What Windows runs at startup and sign-in, as policy says to.
+    r"software\microsoft\windows\currentversion\group policy",
+    r"software\microsoft\windows\currentversion\group policy objects",
+    // Like the Run keys, on older Windows.
+    r"software\microsoft\windows\currentversion\runservices",
+    r"software\microsoft\windows\currentversion\runservicesonce",
+    // DLLs that load whenever Control Panel does, and that each host of remote management loads.
+    r"software\microsoft\windows\currentversion\control panel\cpls",
+    r"software\microsoft\windows\currentversion\wsman",
+    r"software\microsoft\wsman",
+    // Which proxy everything goes through, including a script it runs to decide.
+    r"software\microsoft\windows\currentversion\internet settings",
+    // Loaded by Internet Explorer's engine, and a command on its toolbar.
+    r"software\microsoft\internet explorer\extensions",
+    // What Office loads each time it starts, which it only looks for to test itself.
+    r"software\microsoft\office test",
+    // What each Windows security notification runs.
+    r"software\microsoft\windows defender security center",
+    // Text services, which load into every program that takes typing.
+    r"software\microsoft\ctf",
+    // Whether scripts run, for each PowerShell.
+    r"software\microsoft\powershell\1\shellids",
+    r"software\microsoft\powershell\3\shellids",
+    r"software\microsoft\powershellcore",
     r"software\microsoft\windows\currentversion\shellserviceobjectdelayload",
     r"software\microsoft\windows\currentversion\explorer\shellserviceobjects",
     // Where the Startup folder is. Pointing it at the app makes every file there run.
@@ -368,6 +398,8 @@ const REFUSED_CLASSES: &[&str] = &[
 /// Values that name a debugger for every .NET program.
 const NET_DEBUGGER_KEY: &str = r"software\microsoft\.netframework";
 const NET_DEBUGGER_VALUES: &[&str] = &["dbgmanageddebugger", "dbgjitdebuglaunchsetting"];
+/// Which folder .NET Framework loads itself from, for every program that uses it.
+const NET_INSTALL_ROOT_VALUE: &str = "installroot";
 const CLASSES_KEY: &str = r"software\classes";
 const CLASSES_PREFIX: &str = r"software\classes\";
 /// File types and protocols every program shares. An app can add a command to them, which
@@ -584,6 +616,7 @@ const REFUSED_USER_KEYS: &[&str] = &[
     "environment",
     "volatile environment",
     r"control panel\desktop",
+    r"control panel\cpls",
 ];
 const ENVIRONMENT_KEY: &str = r"system\currentcontrolset\control\session manager\environment";
 /// Variables Windows and other programs treat as telling them where to find themselves, or
@@ -862,6 +895,14 @@ pub fn registry_refusal(
             .is_some_and(|name| NET_DEBUGGER_VALUES.contains(&name.to_ascii_lowercase().as_str()))
     {
         return Some("it would name a debugger for every .NET program".to_owned());
+    }
+    if key == NET_DEBUGGER_KEY
+        && entry
+            .value_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(NET_INSTALL_ROOT_VALUE))
+    {
+        return Some("it would change where every .NET program loads .NET from".to_owned());
     }
     if let Some(class) = key.strip_prefix(CLASSES_PREFIX) {
         if class_key_redirects_programs(class) {
@@ -4049,7 +4090,7 @@ mod tests {
             Some("DbgManagedDebugger"),
             "x",
         );
-        let other = entry(RegistryHive::LocalMachine, key, Some("InstallRoot"), "x");
+        let other = entry(RegistryHive::LocalMachine, key, Some("Comment"), "x");
         assert!(refusal(&debugger).is_some());
         assert_eq!(refusal(&other), None);
     }
@@ -5130,6 +5171,111 @@ mod tests {
             value_refusal(&flags),
             None,
             "this one is only read as what it is"
+        );
+    }
+
+    /// All of these are read by Windows and run or loaded what they say, and none is an app's.
+    #[test]
+    fn keys_windows_acts_on_are_not_for_an_app_to_change() {
+        let data = "cmd.exe /c calc";
+        for (hive, key, name) in [
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\TelemetryController\x",
+                Some("Command"),
+            ),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\.NETFramework",
+                Some("InstallRoot"),
+            ),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\WOW6432Node\Microsoft\.NETFramework",
+                Some("installroot"),
+            ),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Accessibility\ATs\x",
+                Some("StartExe"),
+            ),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cpls",
+                Some("x"),
+            ),
+            (RegistryHive::CurrentUser, r"Control Panel\Cpls", Some("x")),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0\0",
+                Some("Script"),
+            ),
+            (
+                RegistryHive::CurrentUser,
+                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                Some("AutoConfigURL"),
+            ),
+            (
+                RegistryHive::CurrentUser,
+                r"Software\Microsoft\Office test\Special\Perf",
+                None,
+            ),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Plugin\x",
+                Some("ConfigXML"),
+            ),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\WSMAN\Plugin\x",
+                Some("ConfigXML"),
+            ),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Font Drivers",
+                Some("x"),
+            ),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell",
+                Some("ExecutionPolicy"),
+            ),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\PowerShellCore\x",
+                Some("ExecutionPolicy"),
+            ),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\Windows Defender Security Center\Notifications",
+                Some("x"),
+            ),
+            (
+                RegistryHive::LocalMachine,
+                r"SOFTWARE\Microsoft\Internet Explorer\Extensions\{x}",
+                Some("Exec"),
+            ),
+        ] {
+            let entry = RegistryEntry {
+                hive,
+                key_path: key.to_owned(),
+                value_name: name.map(str::to_owned),
+                value_data: Some(data.to_owned()),
+                value_kind: Some(RegistryValueKind::String),
+                value_bytes_hex: None,
+                confidence: MatchConfidence::High,
+                requires_admin: false,
+            };
+            assert!(
+                registry_refusal(&entry, &app_map(), &HashSet::new(), &no_expanding).is_some(),
+                "{key}"
+            );
+        }
+        // What is beside them is left alone.
+        let beside = machine(r"SOFTWARE\Microsoft\.NETFramework", Some("Comment"), "x");
+        assert_eq!(
+            registry_refusal(&beside, &app_map(), &HashSet::new(), &no_expanding),
+            None
         );
     }
 

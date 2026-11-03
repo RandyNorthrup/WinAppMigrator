@@ -40,9 +40,9 @@ use crate::restore_policy::{
     ShortcutPlacement, WindowsHere, architecture_from_name, driver_destination,
     environment_refusal, existing_service_refusal, firewall_refusal, install_location_refusal,
     install_placement_refusal, is_autostart_entry, is_source_uninstall_value,
-    is_uninstall_entry_key, is_valid_service_name, license_destination, platform_fit,
-    read_task_definition, registered_value_refusal, registration_of, registration_refusal,
-    registration_unit_of, registry_refusal, shortcut_placement, task_refusal,
+    is_uninstall_entry_key, is_valid_service_name, license_destination, normalized_key,
+    platform_fit, read_task_definition, registered_value_refusal, registration_of,
+    registration_refusal, registration_unit_of, registry_refusal, shortcut_placement, task_refusal,
 };
 use crate::space::{
     DRIVER_ALLOWANCE_BYTES, PlaceNeed, PlannedFile, RoomCheck, install_needs, on_same_volume,
@@ -968,6 +968,8 @@ pub enum SystemChangeKind {
     DefaultApps,
     /// A name for the program that Run and other programs can find it by.
     ProgramName,
+    /// Values somewhere other than the app's own keys and the kinds above.
+    OtherSettings,
 }
 
 impl SystemChangeKind {
@@ -994,6 +996,7 @@ impl SystemChangeKind {
             Self::CompatibilitySetting => "Compatibility setting",
             Self::DefaultApps => "Default apps",
             Self::ProgramName => "Program name",
+            Self::OtherSettings => "Other settings",
         }
     }
 }
@@ -1445,7 +1448,128 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>, target_root: &Path) -
             .map(by_kind),
     );
     changes.extend(describe_registrations(review).into_iter().map(by_kind));
+    changes.extend(describe_other_settings(review).map(by_kind));
     changes
+}
+
+/// How many of the keys are named before saying how many more there are.
+const OTHER_SETTINGS_KEYS_NAMED: usize = 3;
+
+/// Whatever a package writes that is not the app's own and not a kind this list has words for. The
+/// refusals can never name every key Windows acts on, so what is outside them is at least said.
+fn describe_other_settings(review: &ReviewedPackage<'_>) -> Option<SystemChange> {
+    let app = AppKeys::of(review.manifest);
+    let entries: Vec<&RegistryEntry> = review
+        .registry
+        .iter()
+        .chain(&review.license_registry)
+        .copied()
+        .filter(|entry| is_other_setting(entry, &app))
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    let keys: BTreeSet<String> = entries
+        .iter()
+        .map(|entry| {
+            let hive = match entry.hive {
+                RegistryHive::LocalMachine => "HKLM",
+                RegistryHive::CurrentUser => "HKCU",
+            };
+            format!(r"{hive}\{}", entry.key_path)
+        })
+        .collect();
+    let more = keys.len().saturating_sub(OTHER_SETTINGS_KEYS_NAMED);
+    let named: Vec<String> = keys.into_iter().take(OTHER_SETTINGS_KEYS_NAMED).collect();
+    let values = entries.len();
+    Some(SystemChange {
+        kind: SystemChangeKind::OtherSettings,
+        title: format!(
+            "{values} {} outside the app's own keys",
+            if values == 1 { "setting" } else { "settings" }
+        ),
+        detail: if more > 0 {
+            format!("In {}, and {more} more", named.join(", "))
+        } else {
+            format!("In {}", named.join(", "))
+        },
+        high_rights: true,
+    })
+}
+
+/// What a package says an app goes by, for telling its own keys. It comes from the package, and this
+/// only decides what a person is told about, so the worst a package can do by lying is go unmentioned
+/// in a vendor's keys it claims. Windows' own are never taken for an app's, whatever it claims.
+pub(crate) struct AppKeys {
+    names: Vec<String>,
+}
+
+/// Fewer letters than this say nothing about whose a key is.
+const SHORTEST_NAME_FOR_A_KEY: usize = 3;
+const WINDOWS_VENDOR_KEY: &str = "microsoft";
+
+impl AppKeys {
+    pub(crate) fn of(manifest: &PackageManifest) -> Self {
+        let app = manifest.application_metadata.as_ref();
+        let of_path = |path: Option<&Path>, stem: bool| {
+            path.and_then(|path| {
+                if stem {
+                    path.file_stem()
+                } else {
+                    path.file_name()
+                }
+            })
+            .map(|name| name.to_string_lossy().into_owned())
+        };
+        let names = [
+            app.map(|app| app.display_name.clone()),
+            app.and_then(|app| app.publisher.clone()),
+            of_path(app.and_then(|app| app.install_location.as_deref()), false),
+            of_path(Some(&manifest.main_executable_path), true),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|name| letters_of(&name))
+        .filter(|name| name.len() >= SHORTEST_NAME_FOR_A_KEY)
+        .collect();
+        Self { names }
+    }
+
+    /// Whether a key under `Software` is the app's or its publisher's, going by the key below it.
+    fn holds(&self, key: &str) -> bool {
+        let Some(below) = key.strip_prefix(r"software\") else {
+            return false;
+        };
+        let vendor = below.split('\\').next().unwrap_or_default();
+        if vendor == WINDOWS_VENDOR_KEY {
+            return false;
+        }
+        let vendor = letters_of(vendor);
+        vendor.len() >= SHORTEST_NAME_FOR_A_KEY
+            && self
+                .names
+                .iter()
+                .any(|name| name.contains(&vendor) || vendor.contains(name.as_str()))
+    }
+}
+
+fn letters_of(name: &str) -> String {
+    name.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+/// Whether a value is written somewhere other than the app's own keys and what the list already has
+/// a kind for. A service's own values, and what makes the entry in Settings, are the service and the
+/// entry.
+pub(crate) fn is_other_setting(entry: &RegistryEntry, app: &AppKeys) -> bool {
+    let key = normalized_key(&entry.key_path);
+    change_kind_of(entry).is_none()
+        && !is_autostart_entry(entry)
+        && !is_uninstall_entry_key(&entry.key_path)
+        && !key.starts_with(r"system\")
+        && !app.holds(&key)
 }
 
 /// Which of the kinds on the list of what is set up a value is part of, if it is part of one. All of
@@ -2645,71 +2769,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn a_tasks_account_is_read_from_its_definition_not_the_manifest() -> Result<()> {
-        let mut manifest = acme_manifest();
-        let hidden = task_xml(
-            r"C:\Program Files\Acme\acme.exe",
-            "<!-- looks empty -->S-1-5-18",
-        );
-        manifest.scheduled_tasks_detected = vec![task(r"\Acme\", "Updater", Some(hidden))];
-        let changes = describe(&review(&manifest)?, Path::new(TARGET));
-        assert!(changes.changes[0].high_rights);
-        assert!(changes.changes[0].detail.contains("SYSTEM"));
-        Ok(())
-    }
-
-    #[test]
-    fn this_pc_refuses_its_own_windows_folder_as_an_install_location() {
-        assert!(install_location_problem(system_root()).is_some());
-        assert!(install_location_problem(&system_root().join("System32")).is_some());
-        assert_eq!(install_location_problem(Path::new(TARGET)), None);
-    }
-
-    #[test]
-    fn license_data_stays_out_of_the_review_when_it_is_not_being_restored() -> Result<()> {
-        let mut manifest = acme_manifest();
-        manifest.license_artifacts_detected = vec![license_file(r"C:\Windows\evil.dll")];
-        let reviewed = ReviewedPackage::with_folders(
-            &manifest,
-            Path::new(TARGET),
-            false,
-            false,
-            &folders(),
-            &|text| text.to_owned(),
-            &|_| Ok(None),
-        )?;
-        assert!(reviewed.license.is_empty());
-        assert!(reviewed.refused.is_empty());
-        Ok(())
-    }
-
-    fn variable(name: &str, value: &str) -> EnvironmentVariableEntry {
-        EnvironmentVariableEntry {
-            scope: EnvironmentScope::Machine,
-            name: name.to_owned(),
-            value: value.to_owned(),
-            value_kind: RegistryValueKind::String,
-            requires_admin: true,
-            confidence: MatchConfidence::High,
-        }
-    }
-
-    #[test]
-    fn environment_variables_that_steer_other_programs_are_refused() -> Result<()> {
-        let mut manifest = acme_manifest();
-        manifest.environment_variables_detected = vec![
-            variable("ACME_HOME", SOURCE),
-            variable("Path", r"C:\Windows;C:\Program Files\Acme\bin"),
-            variable("COR_PROFILER_PATH", r"C:\Program Files\Acme\evil.dll"),
-            variable("ComSpec", r"C:\Program Files\Acme\acme.exe"),
-        ];
-        let reviewed = review(&manifest)?;
-        assert_eq!(reviewed.environment.len(), 2);
-        assert_eq!(reviewed.refused.len(), 2);
-        Ok(())
-    }
-
     /// Who a trigger waits for is not who a task runs as, and a package can name anyone there.
     #[test]
     fn a_task_runs_as_its_principal_and_what_a_trigger_names_says_nothing() -> Result<()> {
@@ -2826,6 +2885,71 @@ mod tests {
             &format!(r"{SOURCE}\acme.exe"),
         )];
         assert_eq!(other_settings_row(&manifest)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_tasks_account_is_read_from_its_definition_not_the_manifest() -> Result<()> {
+        let mut manifest = acme_manifest();
+        let hidden = task_xml(
+            r"C:\Program Files\Acme\acme.exe",
+            "<!-- looks empty -->S-1-5-18",
+        );
+        manifest.scheduled_tasks_detected = vec![task(r"\Acme\", "Updater", Some(hidden))];
+        let changes = describe(&review(&manifest)?, Path::new(TARGET));
+        assert!(changes.changes[0].high_rights);
+        assert!(changes.changes[0].detail.contains("SYSTEM"));
+        Ok(())
+    }
+
+    #[test]
+    fn this_pc_refuses_its_own_windows_folder_as_an_install_location() {
+        assert!(install_location_problem(system_root()).is_some());
+        assert!(install_location_problem(&system_root().join("System32")).is_some());
+        assert_eq!(install_location_problem(Path::new(TARGET)), None);
+    }
+
+    #[test]
+    fn license_data_stays_out_of_the_review_when_it_is_not_being_restored() -> Result<()> {
+        let mut manifest = acme_manifest();
+        manifest.license_artifacts_detected = vec![license_file(r"C:\Windows\evil.dll")];
+        let reviewed = ReviewedPackage::with_folders(
+            &manifest,
+            Path::new(TARGET),
+            false,
+            false,
+            &folders(),
+            &|text| text.to_owned(),
+            &|_| Ok(None),
+        )?;
+        assert!(reviewed.license.is_empty());
+        assert!(reviewed.refused.is_empty());
+        Ok(())
+    }
+
+    fn variable(name: &str, value: &str) -> EnvironmentVariableEntry {
+        EnvironmentVariableEntry {
+            scope: EnvironmentScope::Machine,
+            name: name.to_owned(),
+            value: value.to_owned(),
+            value_kind: RegistryValueKind::String,
+            requires_admin: true,
+            confidence: MatchConfidence::High,
+        }
+    }
+
+    #[test]
+    fn environment_variables_that_steer_other_programs_are_refused() -> Result<()> {
+        let mut manifest = acme_manifest();
+        manifest.environment_variables_detected = vec![
+            variable("ACME_HOME", SOURCE),
+            variable("Path", r"C:\Windows;C:\Program Files\Acme\bin"),
+            variable("COR_PROFILER_PATH", r"C:\Program Files\Acme\evil.dll"),
+            variable("ComSpec", r"C:\Program Files\Acme\acme.exe"),
+        ];
+        let reviewed = review(&manifest)?;
+        assert_eq!(reviewed.environment.len(), 2);
+        assert_eq!(reviewed.refused.len(), 2);
         Ok(())
     }
 
