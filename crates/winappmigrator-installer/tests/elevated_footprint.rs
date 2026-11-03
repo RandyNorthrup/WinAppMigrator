@@ -853,7 +853,6 @@ fn package_options(app: &InstalledApp, work: &Path) -> PackageOptions {
         bundle_prerequisites: false,
         source: ScanSource::Live,
         user_profile: ProfileChoice::Default,
-        ui_theme: None,
     }
 }
 

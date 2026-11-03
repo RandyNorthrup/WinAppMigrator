@@ -262,6 +262,12 @@ be run again from there.
 - Colors must meet WCAG AA contrast; a test in `theme.rs` checks every text color
   against every surface in both themes.
 - Custom-painted controls report themselves to screen readers with `widget_info`.
+- All three windows open the same way, by `winappmigrator-ui/src/window.rs`. Until a person chooses a mode, which
+  only the app lets them, a window is in the one Windows is in. A window that would not fit the screen comes to a
+  size that does and maximizes, since only Windows knows exactly what of a screen can be used, and its smallest
+  size comes down with it. Everything has to stay usable at those sizes, so the buttons that matter are in a
+  panel pinned to the bottom, and the rest scrolls. CI opens real windows at 1024x768 and checks with Windows that
+  they fit.
 - No restore/verify-against-target code lives in the app. The app only builds
   and confirms the package's own hashes.
 

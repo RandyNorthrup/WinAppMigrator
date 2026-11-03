@@ -618,7 +618,6 @@ fn options_for(app: InstalledApp, output: &Path, id: &str, work: &Path) -> Packa
         bundle_prerequisites: false,
         source: ScanSource::Live,
         user_profile: ProfileChoice::Default,
-        ui_theme: None,
     }
 }
 

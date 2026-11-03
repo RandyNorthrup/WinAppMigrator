@@ -52,7 +52,35 @@ public static class WamWindow {
 
     delegate bool EachWindow(IntPtr window, IntPtr unused);
     [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr window, EachWindow each, IntPtr unused);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EachWindow each, IntPtr unused);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr window, uint message, IntPtr first, IntPtr second);
+
+    // What a person would call a program's window: the biggest it has showing. What .NET calls its main
+    // window can be a little one that something it uses made, on Windows Server 2022 at least.
+    public static IntPtr BiggestOf(int processId) {
+        IntPtr biggest = IntPtr.Zero;
+        long most = 0;
+        EnumWindows((window, unused) => {
+            uint owner;
+            GetWindowThreadProcessId(window, out owner);
+            WamRect rect;
+            if (owner == processId && IsWindowVisible(window) && GetWindowRect(window, out rect)) {
+                long area = (long)(rect.Right - rect.Left) * (rect.Bottom - rect.Top);
+                if (area > most) { most = area; biggest = window; }
+            }
+            return true;
+        }, IntPtr.Zero);
+        return biggest;
+    }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr most, System.Text.StringBuilder text, uint flags, uint milliseconds, out IntPtr result);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr window, System.Text.StringBuilder text, int most);
+    public static string TitleOf(IntPtr window) {
+        var text = new System.Text.StringBuilder(512);
+        GetWindowTextW(window, text, text.Capacity);
+        return text.ToString();
+    }
 
     // What the windows in this one say, which is what a plain message box's text is. They are another
     // program's, so this asks each with WM_GETTEXT, as GetWindowText would not answer for them.
@@ -134,8 +162,9 @@ function Open-And-Look([string]$Program, [string]$Name, [string]$WindowTitle, [i
     $opened = Wait-Until {
         $process.Refresh()
         if ($process.HasExited) { return $true }
-        if ($process.MainWindowHandle -ne [IntPtr]::Zero -and [WamWindow]::IsWindowVisible($process.MainWindowHandle)) {
-            $state.Window = $process.MainWindowHandle
+        $window = [WamWindow]::BiggestOf($process.Id)
+        if ($window -ne [IntPtr]::Zero) {
+            $state.Window = $window
             return $true
         }
         return $false
@@ -152,8 +181,8 @@ function Open-And-Look([string]$Program, [string]$Name, [string]$WindowTitle, [i
     $process.Refresh()
     Check "$Name`: it is still running" (-not $process.HasExited) "exit $(if ($process.HasExited) { $process.ExitCode })"
     if ($process.HasExited) { return $null }
-    $state.Window = $process.MainWindowHandle
-    $title = $process.MainWindowTitle
+    $state.Window = [WamWindow]::BiggestOf($process.Id)
+    $title = [WamWindow]::TitleOf($state.Window)
     Write-Host "  its window says it is [$title]"
     Check "$Name`: its window is called what it should be" ($title -eq $WindowTitle) "[$title]"
 
@@ -197,10 +226,12 @@ function Open-And-Look([string]$Program, [string]$Name, [string]$WindowTitle, [i
     return $process
 }
 
+# 16 is WM_CLOSE, which is what clicking its close button sends.
+
 function Ask-To-Close($Process, [string]$Name, [int]$ExpectedExit) {
     $Process.Refresh()
     if ($Process.HasExited) { return }
-    $asked = $Process.CloseMainWindow()
+    $asked = [WamWindow]::PostMessageW($script:LastWindow, 16, [IntPtr]::Zero, [IntPtr]::Zero)
     $closed = $Process.WaitForExit(30000)
     Check "$Name`: it closes when asked" ($asked -and $closed) "asked $asked, closed $closed"
     if ($closed) {

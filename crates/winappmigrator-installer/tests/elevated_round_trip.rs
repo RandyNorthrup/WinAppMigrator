@@ -2265,7 +2265,6 @@ fn round_trip_of_a_real_app() -> TestResult {
         bundle_prerequisites: true,
         source: ScanSource::Live,
         user_profile: ProfileChoice::Default,
-        ui_theme: None,
     })?;
     for warning in &package.warnings {
         println!("packaging warning {}: {}", warning.code, warning.message);
@@ -6435,7 +6434,6 @@ fn integrations_come_and_go_and_take_nothing_else() -> TestResult {
         bundle_prerequisites: false,
         source: ScanSource::Live,
         user_profile: ProfileChoice::Default,
-        ui_theme: None,
     };
     let scanned_at = Instant::now();
     let off = create_package(&options_of(work.path().join("off"), false))?;

@@ -498,7 +498,6 @@ fn build_package(
     );
     manifest.scan_timestamp_utc = OffsetDateTime::now_utc().format(&Rfc3339)?;
     manifest.warnings.clone_from(&warnings);
-    manifest.ui_theme.clone_from(&options.ui_theme);
     manifest.secrets_left_out.extend(secrets_since);
     manifest
         .left_out_by_choice
@@ -606,7 +605,6 @@ fn manifest_of(
         included_user_data: flags.include_user_data,
         included_program_data: flags.include_program_data,
         included_license_data: flags.include_license_data,
-        ui_theme: None,
         user_data_profile: report.user_data_profile.clone(),
     }
 }

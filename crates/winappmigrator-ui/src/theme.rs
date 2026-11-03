@@ -49,8 +49,7 @@ impl ThemeMode {
         }
     }
 
-    /// A stable string tag for persisting the mode (e.g. in a package manifest),
-    /// so a produced installer can render in the theme active when it was built.
+    /// A stable string tag for remembering the mode a person chose.
     pub fn as_tag(self) -> &'static str {
         match self {
             ThemeMode::Dark => "dark",

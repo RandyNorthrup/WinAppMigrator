@@ -16,11 +16,13 @@ use winappmigrator_core::{
 };
 
 use crate::theme::{self, Role, SPACE_LG, SPACE_SM, SPACE_XS, Theme};
-use crate::widgets::{self, ButtonKind, LIST_ROW_HEIGHT, metric};
+use crate::views::is_short;
+use crate::widgets::{self, ButtonKind, LIST_ROW_HEIGHT, TileSize, metric};
 use crate::{ListGroup, ScanState, WinAppMigratorApp};
 
 /// How many rows of a list are in view before it scrolls by itself.
 const MOST_ROWS_IN_VIEW: usize = 6;
+const MOST_IT_COULD_NEED_TEXT: &str = "The most it could need, before compressing.";
 /// How long ago a look at an app has to have been, before it is worth saying.
 const LONG_AGO: Duration = Duration::from_secs(10 * 60);
 
@@ -242,21 +244,34 @@ impl WinAppMigratorApp {
         let fits = room
             .as_ref()
             .is_none_or(|room| room.shortfalls().is_empty());
-        widgets::metric_tiles(
-            ui,
-            theme,
-            &[
-                metric("Files", inputs.payload_files.to_string(), Role::Accent),
-                metric("Up to", widgets::format_bytes(needed), Role::Accent),
-                metric(
-                    free_label,
-                    free_text,
-                    if fits { Role::Neutral } else { Role::Danger },
-                ),
-            ],
-        );
-        ui.add_space(SPACE_XS);
-        widgets::hint(ui, theme, "The most it could need, before compressing.");
+        let short = is_short(ui.ctx());
+        let tiles = ui.scope(|ui| {
+            widgets::metric_tiles_sized(
+                ui,
+                theme,
+                &[
+                    metric("Files", inputs.payload_files.to_string(), Role::Accent),
+                    metric("Up to", widgets::format_bytes(needed), Role::Accent),
+                    metric(
+                        free_label,
+                        free_text,
+                        if fits { Role::Neutral } else { Role::Danger },
+                    ),
+                ],
+                if short {
+                    TileSize::Tight
+                } else {
+                    TileSize::Normal
+                },
+            );
+        });
+        // Worth saying, and not worth a line of a window with few to spare.
+        if short {
+            tiles.response.on_hover_text(MOST_IT_COULD_NEED_TEXT);
+        } else {
+            ui.add_space(SPACE_XS);
+            widgets::hint(ui, theme, MOST_IT_COULD_NEED_TEXT);
+        }
         if let Some(room) = room.as_ref() {
             self.draw_room_problems(ui, theme, room);
         }

@@ -2110,7 +2110,6 @@ mod tests {
                 user_sid: None,
                 started_at_utc: String::new(),
                 staging: None,
-                ui_theme: None,
             },
             changes,
             committed: false,

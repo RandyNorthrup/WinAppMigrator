@@ -14,6 +14,8 @@ use winappmigrator_core::{
     ProfilePicker, ProfileRow, RoomCheck, VerificationReport, Warning, WarningSeverity,
 };
 
+use winappmigrator_ui::window::Opening;
+
 use crate::theme::{Role, ThemeMode};
 use crate::views::{compare_versions, outcome_summary};
 use crate::{
@@ -179,7 +181,7 @@ pub(crate) fn harness_sized(
         .build_ui_state(
             |ui, app: &mut WinAppMigratorApp| {
                 // What a frame of the real window does before it draws.
-                app.take_up_the_theme_of_windows(ui.ctx());
+                app.opening.settle(ui.ctx(), &mut app.theme);
                 app.poll_workers();
                 app.keep_scan_current();
                 // The harness adds a margin around its UI. The real window has none.
@@ -485,14 +487,15 @@ fn a_person_who_picks_an_app_and_clicks_create_gets_an_installer()
 
 #[test]
 fn the_first_time_it_takes_the_theme_windows_is_in_and_a_choice_stays() {
-    let mut first = harness_with(ThemeMode::Dark, |app| app.follows_windows_theme = true);
+    let mut first = harness_with(ThemeMode::Dark, |app| {
+        app.opening = Opening::new(crate::WINDOW_SIZES);
+    });
     first.input_mut().system_theme = Some(egui::Theme::Light);
     first.run_steps(2);
     assert_eq!(first.state().theme.mode, ThemeMode::Light);
-    assert!(!first.state().follows_windows_theme);
 
     let mut chosen = harness_with(ThemeMode::Dark, |app| {
-        app.follows_windows_theme = true;
+        app.opening = Opening::new(crate::WINDOW_SIZES);
         app.toggle_theme();
         app.toggle_theme();
     });

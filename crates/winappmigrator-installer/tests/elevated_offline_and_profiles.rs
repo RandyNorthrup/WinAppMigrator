@@ -1592,7 +1592,6 @@ fn package_options(
         bundle_prerequisites: false,
         source,
         user_profile,
-        ui_theme: None,
     }
 }
 

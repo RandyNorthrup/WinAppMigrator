@@ -174,7 +174,6 @@ fn main() {
         bundle_prerequisites: false,
         source: ScanSource::Live,
         user_profile: ProfileChoice::Default,
-        ui_theme: None,
     };
     let result = create_package_monitored(&options, &monitor);
     if let Ok(mut marks) = marks.lock() {

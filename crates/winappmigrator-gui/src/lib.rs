@@ -35,13 +35,14 @@ use winappmigrator_core::{
 };
 use winappmigrator_ui::theme::{self, Theme, ThemeMode};
 use winappmigrator_ui::widgets;
+use winappmigrator_ui::window::{Opening, WindowSizes};
 
 use crate::worker::LatestWorker;
 
-const DEFAULT_WINDOW_WIDTH: f32 = 1240.0;
-const DEFAULT_WINDOW_HEIGHT: f32 = 780.0;
-const MIN_WINDOW_WIDTH: f32 = 1000.0;
-const MIN_WINDOW_HEIGHT: f32 = 640.0;
+const WINDOW_SIZES: WindowSizes = WindowSizes {
+    opens_at: egui::vec2(1240.0, 780.0),
+    at_least: egui::vec2(1000.0, 640.0),
+};
 const WINDOW_TITLE: &str = "WinAppMigrator";
 const STAGING_PREFIX: &str = ".winappmigrator-build-";
 const SETTINGS_DIR: &str = "WinAppMigrator";
@@ -60,15 +61,8 @@ pub fn run() -> eframe::Result {
         sweep_leaked_hive_mounts();
         signed_in_user();
     });
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT])
-        .with_min_inner_size([MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
-        .with_app_id("winappmigrator");
-    if let Some(icon) = widgets::window_icon() {
-        viewport = viewport.with_icon(icon);
-    }
     let native_options = eframe::NativeOptions {
-        viewport,
+        viewport: WINDOW_SIZES.viewport("winappmigrator"),
         ..Default::default()
     };
 
@@ -86,7 +80,9 @@ pub fn run() -> eframe::Result {
             let saved = saved_theme_mode();
             let mut app =
                 WinAppMigratorApp::new(cc.egui_ctx.clone(), saved.unwrap_or(ThemeMode::Dark));
-            app.follows_windows_theme = saved.is_none();
+            if saved.is_none() {
+                app.opening = Opening::new(WINDOW_SIZES);
+            }
             app.theme.apply(&cc.egui_ctx);
             // Remove a stub temp directory left behind by an older version.
             sweep_legacy_stub_temp_dirs();
@@ -98,13 +94,6 @@ pub fn run() -> eframe::Result {
 
 fn fonts_dir() -> PathBuf {
     system_root().join("Fonts")
-}
-
-fn system_theme_mode(ctx: &egui::Context) -> Option<ThemeMode> {
-    ctx.system_theme().map(|system| match system {
-        egui::Theme::Dark => ThemeMode::Dark,
-        egui::Theme::Light => ThemeMode::Light,
-    })
 }
 
 fn theme_file() -> Option<PathBuf> {
@@ -287,9 +276,8 @@ pub(crate) enum ListGroup {
 pub struct WinAppMigratorApp {
     ctx: egui::Context,
     theme: Theme,
-    /// Until a person chooses a theme, it is whichever mode Windows is in, which egui only knows
-    /// once there is a window.
-    follows_windows_theme: bool,
+    /// Fitting the screen, and until a person chooses a theme, being in whichever mode Windows is in.
+    opening: Opening,
     /// What a test builds with, where there may be no stub to find yet.
     #[cfg(test)]
     stub_for_tests: Option<InstallerStub>,
@@ -396,7 +384,7 @@ impl WinAppMigratorApp {
         Self {
             ctx,
             theme: Theme::new(mode),
-            follows_windows_theme: false,
+            opening: Opening::in_a_chosen_mode(WINDOW_SIZES),
             #[cfg(test)]
             stub_for_tests: None,
             inventory_state: InventoryState::Loading,
@@ -912,8 +900,6 @@ impl WinAppMigratorApp {
             include_license_data: self.backup_license,
             source: self.scan_source.clone(),
             user_profile: self.profile_choice(),
-            // Record the active theme so the produced installer presents to match.
-            ui_theme: self.theme.mode.as_tag().to_owned(),
         };
 
         self.migrate_receiver = Some(receiver);
@@ -1146,22 +1132,8 @@ impl WinAppMigratorApp {
         self.scroll_details_to_top = true;
     }
 
-    fn take_up_the_theme_of_windows(&mut self, ctx: &egui::Context) {
-        if !self.follows_windows_theme {
-            return;
-        }
-        let Some(mode) = system_theme_mode(ctx) else {
-            return;
-        };
-        self.follows_windows_theme = false;
-        if mode != self.theme.mode {
-            self.theme = Theme::new(mode);
-            self.theme.apply(ctx);
-        }
-    }
-
     fn toggle_theme(&mut self) {
-        self.follows_windows_theme = false;
+        self.opening.person_chose_a_mode();
         let mode = self.theme.mode.toggled();
         self.theme = Theme::new(mode);
         self.theme.apply(&self.ctx);
@@ -1175,7 +1147,7 @@ impl eframe::App for WinAppMigratorApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.take_up_the_theme_of_windows(ctx);
+        self.opening.settle(ctx, &mut self.theme);
         self.poll_workers();
         self.keep_scan_current();
     }
@@ -1201,7 +1173,6 @@ fn scan_options_of(app: InstalledApp, key: &ScanKey) -> ScanOptions {
         bundle_prerequisites: true,
         source: key.source.clone(),
         user_profile: key.user_profile.clone(),
-        ui_theme: None,
     });
     options.near_matches.clone_from(&key.near_matches);
     options
@@ -1220,7 +1191,6 @@ struct BuildJob {
     include_license_data: bool,
     source: ScanSource,
     user_profile: ProfileChoice,
-    ui_theme: String,
 }
 
 fn run_build(
@@ -1275,7 +1245,6 @@ fn run_build(
         // Read the app from the live OS or the connected offline drive.
         source: job.source,
         user_profile: job.user_profile,
-        ui_theme: Some(job.ui_theme),
     };
 
     let package = match create_package_from_scan(&options, &job.report, &job.choices, monitor) {

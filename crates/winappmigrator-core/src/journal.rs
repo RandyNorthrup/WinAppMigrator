@@ -307,9 +307,6 @@ pub struct JournalHeader {
     pub started_at_utc: String,
     /// Left behind if the installer is killed. Only ever a folder it made.
     pub staging: Option<PathBuf>,
-    /// The theme the installer used, for the uninstaller to match.
-    #[serde(default)]
-    pub ui_theme: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -388,20 +385,12 @@ impl Journal {
         app_name: &str,
         target_root: &Path,
         staging: Option<&Path>,
-        ui_theme: Option<&str>,
     ) -> Result<Self> {
         let installs = prepare_state_folders(state_root)?;
         let (folder, hold) = ProtectedFolder::new_in(&installs, ID_PREFIX)
             .map_err(|error| WinAppMigratorError::io(&installs, error))?
             .keep();
-        let started = Self::start_in(
-            folder.clone(),
-            hold,
-            app_name,
-            target_root,
-            staging,
-            ui_theme,
-        );
+        let started = Self::start_in(folder.clone(), hold, app_name, target_root, staging);
         if started.is_err() {
             let _ = fs::remove_dir_all(&folder);
         }
@@ -414,7 +403,6 @@ impl Journal {
         app_name: &str,
         target_root: &Path,
         staging: Option<&Path>,
-        ui_theme: Option<&str>,
     ) -> Result<Self> {
         let id = folder
             .file_name()
@@ -459,7 +447,6 @@ impl Journal {
                     .map(str::to_owned),
                 started_at_utc: OffsetDateTime::now_utc().format(&Rfc3339)?,
                 staging: staging.map(Path::to_path_buf),
-                ui_theme: ui_theme.map(str::to_owned),
             }),
             Durability::Now,
         )?;
@@ -952,7 +939,6 @@ impl ReadJournal {
             app_name: self.header.app_name.clone(),
             target_root: self.header.target_root.clone(),
             finished: self.committed,
-            ui_theme: self.header.ui_theme.clone(),
             ..InstallSummary::default()
         };
         for change in self.settled_changes() {
@@ -1013,7 +999,6 @@ pub struct InstallSummary {
     pub license: usize,
     /// Runtimes that were installed, which stay.
     pub runtimes_left: Vec<String>,
-    pub ui_theme: Option<String>,
 }
 
 /// A journal locked against being written to or undone by anyone else. A failure with
@@ -1126,7 +1111,7 @@ mod tests {
         let (_work, state) = temp_state()?;
         let place = Path::new(r"C:\Acme");
         assert!(!install_on_record_at(&state, place, None));
-        let journal = Journal::begin(&state, "Acme", place, None, None)?;
+        let journal = Journal::begin(&state, "Acme", place, None)?;
         let folder = journal.folder().to_path_buf();
         drop(journal);
         assert!(install_on_record_at(&state, place, None));
@@ -1150,7 +1135,7 @@ mod tests {
     fn what_is_added_to_a_held_record_can_be_read_back() -> Result<()> {
         for (finished, cut_off) in [(false, false), (false, true), (true, false), (true, true)] {
             let (_work, state) = temp_state()?;
-            let mut journal = Journal::begin(&state, "Acme", Path::new(r"C:\Acme"), None, None)?;
+            let mut journal = Journal::begin(&state, "Acme", Path::new(r"C:\Acme"), None)?;
             journal.note(Change::Prerequisite {
                 name: "Runtime".to_owned(),
             })?;
@@ -1218,7 +1203,6 @@ mod tests {
                     user_sid: None,
                     started_at_utc: String::new(),
                     staging: None,
-                    ui_theme: None,
                 },
                 changes: vec![
                     file(&left),
@@ -1249,13 +1233,7 @@ mod tests {
     }
 
     fn journal_in(state: &Path) -> Result<Journal> {
-        Journal::begin(
-            state,
-            "Acme",
-            Path::new(r"C:\Program Files\Acme"),
-            None,
-            None,
-        )
+        Journal::begin(state, "Acme", Path::new(r"C:\Program Files\Acme"), None)
     }
 
     #[test]
@@ -1345,7 +1323,6 @@ mod tests {
             user_sid: None,
             started_at_utc: String::new(),
             staging: None,
-            ui_theme: None,
         }))?;
         let change = serde_json::to_string(&Record::Change(Change::Prerequisite {
             name: "Runtime".to_owned(),
@@ -1380,7 +1357,6 @@ mod tests {
             user_sid: None,
             started_at_utc: String::new(),
             staging: None,
-            ui_theme: None,
         }))?;
         let change = serde_json::to_string(&Record::Change(Change::Prerequisite {
             name: "Runtime".to_owned(),
@@ -1442,7 +1418,6 @@ mod tests {
                 user_sid: None,
                 started_at_utc: String::new(),
                 staging: None,
-                ui_theme: None,
             }))?)
         };
         assert!(parse_journal(&header("wam-abc", SCHEMA_VERSION)?, "wam-abc", &folder).is_ok());
@@ -1612,7 +1587,6 @@ mod tests {
                 user_sid: None,
                 started_at_utc: String::new(),
                 staging: None,
-                ui_theme: None,
             },
             changes: vec![
                 file(ItemKind::Program, None),

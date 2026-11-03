@@ -136,7 +136,6 @@ fn manifest_for(files: Vec<FileEntry>) -> PackageManifest {
         included_user_data: false,
         included_program_data: false,
         included_license_data: true,
-        ui_theme: None,
         user_data_profile: None,
     }
 }

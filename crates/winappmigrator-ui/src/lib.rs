@@ -7,6 +7,7 @@
 pub mod hardening;
 pub mod theme;
 pub mod widgets;
+pub mod window;
 
 /// What a person is told of why a window could not open, whatever the error was.
 pub const NEEDS_DIRECT3D_12_TEXT: &str = "This needs Direct3D 12 to draw its window, which an old \

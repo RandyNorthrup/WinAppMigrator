@@ -462,30 +462,47 @@ fn capsule(ui: &mut Ui, theme: &Theme, text: &str, color: Color32, dot: bool) {
     painter.galley(pos2(x, top), galley, theme.text);
 }
 
+/// How much room a row of tiles takes up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileSize {
+    Normal,
+    /// For a window short of room, with what is on either side of them more use than the space.
+    Tight,
+}
+
 /// Lay metric tiles out in one row of equal widths.
 pub fn metric_tiles(ui: &mut Ui, theme: &Theme, metrics: &[Metric]) {
+    metric_tiles_sized(ui, theme, metrics, TileSize::Normal);
+}
+
+/// [`metric_tiles`], of a given size.
+pub fn metric_tiles_sized(ui: &mut Ui, theme: &Theme, metrics: &[Metric], size: TileSize) {
     if metrics.is_empty() {
         return;
     }
     ui.columns(metrics.len(), |columns| {
         for (column, metric) in columns.iter_mut().zip(metrics) {
-            metric_tile(column, theme, metric);
+            metric_tile(column, theme, metric, size);
         }
     });
 }
 
-fn metric_tile(ui: &mut Ui, theme: &Theme, metric: &Metric) {
+fn metric_tile(ui: &mut Ui, theme: &Theme, metric: &Metric, size: TileSize) {
+    let (margin, value_size) = match size {
+        TileSize::Normal => (8, 17.0),
+        TileSize::Tight => (3, 14.5),
+    };
     egui::Frame::new()
         .fill(theme.surface)
         .stroke(Stroke::new(1.0, theme.border))
         .corner_radius(RADIUS_MD)
-        .inner_margin(Margin::symmetric(10, 8))
+        .inner_margin(Margin::symmetric(10, margin))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.label(
                 RichText::new(&metric.value)
-                    .font(theme::semibold(17.0))
+                    .font(theme::semibold(value_size))
                     .color(theme.role(metric.role)),
             );
             ui.label(

@@ -21,11 +21,19 @@ use crate::{
 /// The details panel takes what share of the window this says, within these, so that a list of what
 /// goes in has room to read on a large window and the list of apps has room on a small one.
 const DETAIL_PANEL_SHARE: f32 = 0.40;
-const MIN_DETAIL_PANEL_WIDTH: f32 = 420.0;
+const MIN_DETAIL_PANEL_WIDTH: f32 = 380.0;
 const MAX_DETAIL_PANEL_WIDTH: f32 = 600.0;
+/// A window shorter than this has what is at the top of the details panel come closer together, so
+/// that what goes in the installer is still what the panel is about.
+const SHORT_WINDOW_HEIGHT: f32 = 720.0;
 const ROW_HEIGHT: f32 = 36.0;
 const COLUMN_GUTTER: f32 = 12.0;
-const COLUMN_FRACTIONS: [f32; 5] = [0.38, 0.25, 0.14, 0.13, 0.10];
+/// Enough for what is in each of these, whatever the window, with a gutter. What is left goes to the
+/// names, which take as much as they get.
+const VERSION_COLUMN: f32 = 84.0;
+const SCOPE_COLUMN: f32 = 88.0;
+const ARCH_COLUMN: f32 = 58.0;
+const NAME_SHARE: f32 = 0.6;
 const LICENSE_OPTION_TEXT: &str = "May be tied to this PC and need reactivation on the new one.";
 const USER_DATA_OPTION_TEXT: &str =
     "Settings and history, Documents, Saved Games, and ProgramData.";
@@ -42,15 +50,24 @@ const COLUMNS: [(&str, SortColumn); 5] = [
     ("Arch", SortColumn::Architecture),
 ];
 
+/// Whether this window is short of room, going up and down.
+pub(crate) fn is_short(ctx: &egui::Context) -> bool {
+    ctx.content_rect().height() < SHORT_WINDOW_HEIGHT
+}
+
 impl WinAppMigratorApp {
     pub(crate) fn draw(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
+        let short = is_short(ui.ctx());
 
         egui::Panel::top("header")
             .frame(
                 egui::Frame::new()
                     .fill(theme.surface)
-                    .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_MD as i8)),
+                    .inner_margin(Margin::symmetric(
+                        SPACE_XL as i8,
+                        if short { SPACE_SM } else { SPACE_MD } as i8,
+                    )),
             )
             .show(ui, |ui| self.draw_header(ui, &theme));
 
@@ -427,11 +444,12 @@ impl WinAppMigratorApp {
             return;
         };
 
+        let short = is_short(ui.ctx());
         egui::Panel::bottom("details-actions")
             .frame(
                 egui::Frame::new()
                     .fill(theme.surface)
-                    .inner_margin(Margin::same(SPACE_LG as i8)),
+                    .inner_margin(Margin::same(if short { SPACE_MD } else { SPACE_LG } as i8)),
             )
             .show(ui, |ui| self.draw_actions(ui, theme));
 
@@ -450,13 +468,13 @@ impl WinAppMigratorApp {
                         .inner_margin(Margin::same(SPACE_LG as i8))
                         .show(ui, |ui| {
                             ui.set_max_width(ui.available_width());
-                            draw_app_title(ui, theme, &app);
+                            draw_app_title(ui, theme, &app, short);
                             // The result goes first: it is what the user is waiting
                             // for, and it holds the installer's path and folder button.
                             self.draw_build_result(ui, theme);
-                            ui.add_space(SPACE_SM);
-                            draw_app_facts(ui, theme, &app);
-                            ui.add_space(SPACE_MD);
+                            ui.add_space(if short { SPACE_XS } else { SPACE_SM });
+                            draw_app_facts(ui, theme, &app, short);
+                            ui.add_space(if short { SPACE_SM } else { SPACE_MD });
                             self.draw_footprint(ui, theme);
                         });
                 });
@@ -774,7 +792,7 @@ impl WinAppMigratorApp {
 
 // ----- Free helpers ----------------------------------------------------------
 
-fn draw_app_title(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp) {
+fn draw_app_title(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp, short: bool) {
     ui.add(
         egui::Label::new(
             RichText::new(&app.display_name)
@@ -793,18 +811,35 @@ fn draw_app_title(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp) {
             scope_role(&app.install_scope),
         );
         widgets::badge(ui, theme, arch_label(&app.architecture), theme.text_muted);
+        if short {
+            ui.add_space(SPACE_XS);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(who_and_which_version(app))
+                        .size(12.5)
+                        .color(theme.text_muted),
+                )
+                .truncate(),
+            );
+        }
     });
 }
 
-/// Who made it, which version, and where it is, on as few lines as that takes, so that what goes
-/// in the installer is what the panel is about.
-fn draw_app_facts(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp) {
+fn who_and_which_version(app: &InstalledApp) -> String {
     let publisher = app.publisher.as_deref().unwrap_or("Unknown publisher");
-    let line = match app.version.as_deref() {
+    match app.version.as_deref() {
         Some(version) => format!("{publisher}, version {version}"),
         None => publisher.to_owned(),
-    };
-    widgets::hint(ui, theme, &line);
+    }
+}
+
+/// Who made it, which version, and where it is, on as few lines as that takes, so that what goes
+/// in the installer is what the panel is about. In a short window, the first of those is up beside
+/// the app's name.
+fn draw_app_facts(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp, short: bool) {
+    if !short {
+        widgets::hint(ui, theme, &who_and_which_version(app));
+    }
     if let Some(location) = app.install_location.as_ref() {
         widgets::hint(ui, theme, &location.display().to_string());
     }
@@ -1047,11 +1082,18 @@ fn app_row(
 }
 
 /// The cell rectangles of a table row, with a gutter between columns.
-fn column_rects(rect: egui::Rect) -> [egui::Rect; 5] {
+pub(crate) fn column_rects(rect: egui::Rect) -> [egui::Rect; 5] {
     let usable = rect.width() - COLUMN_GUTTER;
+    let names = (usable - VERSION_COLUMN - SCOPE_COLUMN - ARCH_COLUMN).max(0.0);
     let mut left = rect.left() + COLUMN_GUTTER;
-    COLUMN_FRACTIONS.map(|fraction| {
-        let width = usable * fraction;
+    [
+        names * NAME_SHARE,
+        names * (1.0 - NAME_SHARE),
+        VERSION_COLUMN,
+        SCOPE_COLUMN,
+        ARCH_COLUMN,
+    ]
+    .map(|width| {
         let cell = egui::Rect::from_min_size(
             egui::pos2(left, rect.top()),
             egui::vec2((width - COLUMN_GUTTER).max(0.0), rect.height()),
@@ -1107,7 +1149,7 @@ fn scope_matches(filter: ScopeFilter, scope: &InstallScope) -> bool {
     }
 }
 
-fn arch_label(arch: &AppArchitecture) -> &'static str {
+pub(crate) fn arch_label(arch: &AppArchitecture) -> &'static str {
     match arch {
         AppArchitecture::X86 => "x86",
         AppArchitecture::X64 => "x64",
@@ -1116,7 +1158,7 @@ fn arch_label(arch: &AppArchitecture) -> &'static str {
     }
 }
 
-fn scope_label(scope: &InstallScope) -> &'static str {
+pub(crate) fn scope_label(scope: &InstallScope) -> &'static str {
     match scope {
         InstallScope::PerUser => "Per-user",
         InstallScope::PerMachine => "Per-machine",

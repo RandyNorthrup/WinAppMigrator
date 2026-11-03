@@ -18,29 +18,27 @@ use winappmigrator_ui::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
 };
 use winappmigrator_ui::widgets::{self, ButtonKind};
+use winappmigrator_ui::window::{Opening, WindowSizes};
 
 use crate::uninstall::UninstallCli;
 
 const WINDOW_TITLE: &str = "Uninstall";
+const WINDOW_SIZES: WindowSizes = WindowSizes {
+    opens_at: egui::vec2(620.0, 560.0),
+    at_least: egui::vec2(520.0, 420.0),
+};
 /// How often to redraw while uninstalling, enough for smooth animation.
 const BUSY_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 /// How many things left in place are listed, before saying how many more there are.
 const MAX_LISTED_ITEMS: usize = 30;
 
 pub fn run(cli: UninstallCli) -> eframe::Result {
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([620.0, 560.0])
-        .with_min_inner_size([520.0, 420.0])
-        .with_app_id("winappmigrator-uninstaller");
-    if let Some(icon) = widgets::window_icon() {
-        viewport = viewport.with_icon(icon);
-    }
     let finished: Arc<Mutex<Option<UninstallOutcome>>> = Arc::new(Mutex::new(None));
     let for_window = Arc::clone(&finished);
     let result = eframe::run_native(
         WINDOW_TITLE,
         eframe::NativeOptions {
-            viewport,
+            viewport: WINDOW_SIZES.viewport("winappmigrator-uninstaller"),
             ..Default::default()
         },
         Box::new(move |cc| {
@@ -78,6 +76,7 @@ enum Msg {
 }
 
 struct UninstallApp {
+    opening: Opening,
     theme: Theme,
     id: String,
     stage: Stage,
@@ -98,6 +97,7 @@ impl UninstallApp {
         finished: Arc<Mutex<Option<UninstallOutcome>>>,
     ) -> Self {
         Self {
+            opening: Opening::new(WINDOW_SIZES),
             theme: Theme::new(ThemeMode::Dark),
             id,
             stage: Stage::Opening,
@@ -164,10 +164,6 @@ impl UninstallApp {
         loop {
             match receiver.try_recv() {
                 Ok(Msg::Opened(opened, summary)) => {
-                    if let Some(tag) = summary.ui_theme.as_deref() {
-                        self.theme = Theme::new(ThemeMode::from_tag(tag));
-                        self.theme.apply(ctx);
-                    }
                     self.opened = Some(*opened);
                     self.summary = *summary;
                     self.stage = Stage::Ready;
@@ -367,6 +363,7 @@ impl eframe::App for UninstallApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.opening.settle(ctx, &mut self.theme);
         self.poll(ctx);
         // It can be run again if it is killed, but it has nearly finished by the time anyone
         // would want to, and undoing has no good place to stop.
@@ -534,8 +531,29 @@ mod tests {
     }
 
     fn harness_for(app: UninstallApp) -> Harness<'static, UninstallApp> {
+        harness_sized(app, egui::vec2(620.0, 560.0))
+    }
+
+    #[test]
+    fn on_a_small_screen_uninstall_can_be_reached() {
+        for (width, height, name) in [
+            (536.0, 393.0, "smallest-on-1280x720-150"),
+            (911.0, 441.0, "1366x768-150"),
+        ] {
+            let mut harness = harness_sized(sample(ThemeMode::Dark), egui::vec2(width, height));
+            let button = harness.get_by_label("Uninstall").rect();
+            let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height));
+            assert!(
+                window.contains_rect(button),
+                "{name}: Uninstall is at {button:?}"
+            );
+            preview(&mut harness, &format!("uninstall-on-{name}-dark"));
+        }
+    }
+
+    fn harness_sized(app: UninstallApp, size: egui::Vec2) -> Harness<'static, UninstallApp> {
         let mode = app.theme.mode;
-        let builder = Harness::builder().with_size(egui::vec2(620.0, 560.0));
+        let builder = Harness::builder().with_size(size);
         let builder = if preview_dir().is_some() {
             builder.wgpu()
         } else {

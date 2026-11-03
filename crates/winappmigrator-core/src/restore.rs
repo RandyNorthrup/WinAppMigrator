@@ -345,7 +345,7 @@ pub fn restore_package_monitored(
     let app_name = app_display_name(&manifest);
     let mut target_hold = None;
     let journal = if options.apply {
-        let mut journal = start_journal(&effective_options, &manifest, &app_name, installer)?;
+        let mut journal = start_journal(&effective_options, &app_name, installer)?;
         match prepare_target(&mut journal, &options.target_root, &options.state_root) {
             Ok(hold) => target_hold = Some(hold),
             Err(error) => {
@@ -498,7 +498,6 @@ fn nowhere_to_keep_a_record(error: WinAppMigratorError) -> WinAppMigratorError {
 /// means nothing has changed, and it should not go ahead, since it could not be undone.
 fn start_journal(
     options: &RestoreOptions,
-    manifest: &PackageManifest,
     app_name: &str,
     installer: Option<&EmbeddedPackage>,
 ) -> Result<Journal> {
@@ -508,14 +507,8 @@ fn start_journal(
         .file_name()
         .is_some_and(|name| name.to_string_lossy().starts_with(STAGING_PREFIX))
         .then_some(options.package_root.as_path());
-    let mut journal = Journal::begin(
-        &options.state_root,
-        app_name,
-        &options.target_root,
-        staging,
-        manifest.ui_theme.as_deref(),
-    )
-    .map_err(nowhere_to_keep_a_record)?;
+    let mut journal = Journal::begin(&options.state_root, app_name, &options.target_root, staging)
+        .map_err(nowhere_to_keep_a_record)?;
     if let Some(installer) = installer
         && let Err(error) = journal.write_uninstaller(installer)
     {
@@ -3978,13 +3971,7 @@ mod tests {
     }
 
     fn journal_for_test(options: &RestoreOptions) -> Result<Journal> {
-        Journal::begin(
-            &options.state_root,
-            "Acme",
-            &options.target_root,
-            None,
-            None,
-        )
+        Journal::begin(&options.state_root, "Acme", &options.target_root, None)
     }
 
     fn file_entry(relative: &str, hash: Option<String>, size: u64) -> FileEntry {
@@ -4039,7 +4026,6 @@ mod tests {
             included_user_data: false,
             included_program_data: false,
             included_license_data: false,
-            ui_theme: None,
             user_data_profile: None,
         }
     }
@@ -4392,7 +4378,7 @@ mod tests {
 
     /// Copy through a journal of its own, for what only cares about the copying.
     fn copy_file(source: &Path, destination: &Path, root: &Path, state: &Path) -> Result<()> {
-        let mut journal = Journal::begin(state, "Acme", root, None, None)?;
+        let mut journal = Journal::begin(state, "Acme", root, None)?;
         copy_restore_file(
             &mut journal,
             source,

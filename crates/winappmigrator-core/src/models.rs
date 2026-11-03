@@ -431,11 +431,6 @@ pub struct PackageManifest {
     /// installer's "Restore license" checkbox: it is only shown when true.
     #[serde(default)]
     pub included_license_data: bool,
-    /// The UI theme tag ("light"/"dark") active in the app when the installer was
-    /// built, so the produced installer can present in the same theme. `None` on
-    /// older packages, which the installer treats as the default (dark).
-    #[serde(default)]
-    pub ui_theme: Option<String>,
     /// The account on the source PC whose per-user data is in the package, if any is.
     #[serde(default)]
     pub user_data_profile: Option<String>,
@@ -577,10 +572,6 @@ pub struct PackageOptions {
     /// Whose per-user data and settings to package. One account's, whoever else is on the PC.
     #[serde(default)]
     pub user_profile: ProfileChoice,
-    /// UI theme tag ("light"/"dark") to record in the package so the produced
-    /// installer presents in the theme the app used when building it.
-    #[serde(default)]
-    pub ui_theme: Option<String>,
 }
 
 impl PackageOptions {
@@ -601,7 +592,6 @@ impl PackageOptions {
             bundle_prerequisites: false,
             source: ScanSource::Live,
             user_profile: ProfileChoice::Default,
-            ui_theme: None,
         }
     }
 }

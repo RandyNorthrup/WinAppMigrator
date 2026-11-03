@@ -38,8 +38,13 @@ use winappmigrator_ui::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
 };
 use winappmigrator_ui::widgets::{self, ButtonKind, Icon, metric};
+use winappmigrator_ui::window::{Opening, WindowSizes};
 
 const WINDOW_TITLE: &str = "WinAppMigrator Installer";
+const WINDOW_SIZES: WindowSizes = WindowSizes {
+    opens_at: egui::vec2(760.0, 720.0),
+    at_least: egui::vec2(620.0, 520.0),
+};
 /// How often to redraw while installing, enough for smooth animation.
 const BUSY_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 /// How many logged changes a preview lists before summarizing the rest.
@@ -57,15 +62,8 @@ const BEYOND_FILES_TEXT: &str = "All of this is done with administrator rights. 
                                  come back, and runtimes it installs stay.";
 
 pub fn run() -> eframe::Result {
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([760.0, 720.0])
-        .with_min_inner_size([620.0, 520.0])
-        .with_app_id("winappmigrator-installer");
-    if let Some(icon) = widgets::window_icon() {
-        viewport = viewport.with_icon(icon);
-    }
     let native_options = eframe::NativeOptions {
-        viewport,
+        viewport: WINDOW_SIZES.viewport("winappmigrator-installer"),
         ..Default::default()
     };
     eframe::run_native(
@@ -165,6 +163,7 @@ struct InstallerApp {
     checked_room: std::cell::RefCell<Option<(String, RoomCheck)>>,
     /// How much room the package takes unpacked, and what goes to the install location.
     unpacked_bytes: u64,
+    opening: Opening,
     theme: Theme,
     screen: Screen,
     /// The package, checked and held open. Every read goes through this.
@@ -205,6 +204,7 @@ struct InstallerApp {
 impl InstallerApp {
     fn blank() -> Self {
         Self {
+            opening: Opening::new(WINDOW_SIZES),
             theme: Theme::new(ThemeMode::Dark),
             screen: Screen::Checking,
             package: None,
@@ -332,11 +332,6 @@ impl InstallerApp {
         self.show_license = manifest.included_license_data;
         self.restore_user_data = self.show_user_data;
         self.restore_license = self.show_license;
-        // Present in the theme the app used when this installer was built (older
-        // packages carry no tag and keep the default dark theme).
-        if let Some(tag) = manifest.ui_theme.as_deref() {
-            self.theme = Theme::new(ThemeMode::from_tag(tag));
-        }
         self.prereqs = manifest
             .runtime_prerequisites
             .iter()
@@ -656,6 +651,7 @@ impl eframe::App for InstallerApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.opening.settle(ctx, &mut self.theme);
         self.poll_load(ctx);
         self.poll(ctx);
         // Closing the window while an install runs would kill it part-way, to be undone only
@@ -1505,6 +1501,28 @@ mod tests {
         std::env::var_os(PREVIEW_DIR_VARIABLE).map(PathBuf::from)
     }
 
+    /// What a maximized window has on 1024x768, and on 1366x768 at 125% and 150%.
+    const WHAT_SMALL_SCREENS_LEAVE: [(f32, f32, &str); 3] = [
+        (1024.0, 697.0, "1024x768"),
+        (1093.0, 543.0, "1366x768-125"),
+        (911.0, 441.0, "1366x768-150"),
+    ];
+
+    #[test]
+    fn on_a_small_screen_install_can_be_reached() {
+        for (width, height, name) in WHAT_SMALL_SCREENS_LEAVE {
+            let mut harness =
+                harness_sized(sample_installer(ThemeMode::Dark), egui::vec2(width, height));
+            let button = harness.get_by_label("Install").rect();
+            let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height));
+            assert!(
+                window.contains_rect(button),
+                "{name}: Install is at {button:?}"
+            );
+            preview(&mut harness, &format!("installer-on-{name}-dark"));
+        }
+    }
+
     #[test]
     fn it_only_says_what_pc_an_app_came_from_if_the_package_does() {
         let harness = harness_for(sample_installer(ThemeMode::Dark));
@@ -1568,8 +1586,12 @@ mod tests {
     }
 
     fn harness_for(app: InstallerApp) -> Harness<'static, InstallerApp> {
+        harness_sized(app, egui::vec2(760.0, 720.0))
+    }
+
+    fn harness_sized(app: InstallerApp, size: egui::Vec2) -> Harness<'static, InstallerApp> {
         let mode = app.theme.mode;
-        let builder = Harness::builder().with_size(egui::vec2(760.0, 720.0));
+        let builder = Harness::builder().with_size(size);
         let builder = if preview_dir().is_some() {
             builder.wgpu()
         } else {

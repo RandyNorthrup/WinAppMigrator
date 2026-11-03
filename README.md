@@ -120,8 +120,8 @@ work there, such as on a Windows older than the one it came from.
   </picture>
 </p>
 
-<sub>Screenshots use sample data, and follow your GitHub theme. The app has light and dark modes, and an
-installer opens in the theme it was built with.</sub>
+<sub>Screenshots use sample data, and follow your GitHub theme. The app has light and dark modes and starts
+in the one Windows is in. An installer opens in the one Windows is in where it runs.</sub>
 
 ## What gets captured
 

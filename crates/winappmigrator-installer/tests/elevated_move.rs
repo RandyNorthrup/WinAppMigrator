@@ -256,7 +256,6 @@ fn real_app_options(output: &Path, installers: &Path) -> TestResult<PackageOptio
         bundle_prerequisites: false,
         source: ScanSource::Live,
         user_profile: ProfileChoice::Default,
-        ui_theme: None,
     })
 }
 

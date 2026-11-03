@@ -575,6 +575,13 @@ fn it_reads_the_same_at_the_smallest_window() {
             button.bottom() <= 640.0,
             "the button stays in view: {button:?}"
         );
+        // Not just the top of the panel: what goes in is what the panel is about.
+        let panel_top = harness.get_by_label("Output folder").rect().top();
+        let row = harness.get_by_label_contains("plugins").rect();
+        assert!(
+            row.bottom() <= panel_top,
+            "{row:?} is behind what starts at {panel_top}"
+        );
         preview(&mut harness, &format!("footprint-small-{name}"));
     }
     let mut harness = harness_sized(ThemeMode::Dark, egui::vec2(1000.0, 640.0), |app| {
@@ -583,6 +590,67 @@ fn it_reads_the_same_at_the_smallest_window() {
     });
     harness.run_steps(2);
     preview(&mut harness, "footprint-small-open-dark");
+}
+
+/// What a maximized window has, on what people have, by the size of the screen and how much it is
+/// scaled: 1024x768, then 1366x768 at 100%, 125% and 150%, and 1280x720 at 150%.
+const WHAT_SMALL_SCREENS_LEAVE: [(f32, f32, &str); 5] = [
+    (1024.0, 697.0, "1024x768"),
+    (1366.0, 697.0, "1366x768"),
+    (1093.0, 543.0, "1366x768-125"),
+    (911.0, 441.0, "1366x768-150"),
+    (853.0, 409.0, "1280x720-150"),
+];
+
+#[test]
+fn on_a_small_screen_what_matters_can_be_reached() {
+    for (width, height, name) in WHAT_SMALL_SCREENS_LEAVE {
+        let mut harness = harness_sized(ThemeMode::Dark, egui::vec2(width, height), ready_app);
+        harness.run_steps(2);
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height));
+        for label in [
+            "Create installer",
+            "Browse",
+            "Fabrikam Data Sync, Fabrikam Inc., version 1.7.3",
+        ] {
+            let at = harness.get_by_label(label).rect();
+            assert!(window.contains_rect(at), "{name}: {label} is at {at:?}");
+        }
+        assert!(harness.query_by_label("Up to").is_some(), "{name}");
+        // It scrolls, and whatever it scrolls to is not behind what is pinned below it.
+        let panel_top = harness.get_by_label("Output folder").rect().top();
+        assert!(
+            panel_top > 120.0,
+            "{name}: only {panel_top} above the panel"
+        );
+        preview(&mut harness, &format!("footprint-on-{name}-dark"));
+    }
+}
+
+/// What is in the columns with a width of their own is all there, however little there is of the rest.
+#[test]
+fn a_small_window_does_not_cut_what_a_row_says_of_how_it_was_installed() {
+    let ctx = egui::Context::default();
+    crate::theme::install_fonts(&ctx, &crate::fonts_dir());
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let width_of = |text: &str, font: egui::FontId| {
+            ui.painter()
+                .layout_no_wrap(text.to_owned(), font, egui::Color32::WHITE)
+                .size()
+                .x
+        };
+        let cells = crate::views::column_rects(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(400.0, 36.0),
+        ));
+        let font = crate::theme::regular(13.0);
+        assert!(width_of("Per-machine", font.clone()) <= cells[3].width());
+        assert!(width_of("Per-user", font.clone()) <= cells[3].width());
+        assert!(width_of("ARM64", font.clone()) <= cells[4].width());
+        assert!(width_of("10.0.10007", font) <= cells[2].width());
+        assert!(cells[0].width() > cells[1].width());
+    });
+    output.textures_delta.clear();
 }
 
 #[test]
