@@ -1341,7 +1341,11 @@ fn free_name_beside(path: &Path) -> Option<PathBuf> {
                 path.with_file_name(format!("{name}.{REPLACED_FILE_SUFFIX}-{number}"))
             }),
         )
-        .find(|candidate| fs::symlink_metadata(candidate).is_err())
+        .find(|candidate| {
+            // A name that cannot be looked at may well be taken.
+            fs::symlink_metadata(candidate)
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        })
 }
 
 fn file_name_of(path: &Path) -> String {

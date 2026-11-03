@@ -1,6 +1,7 @@
 //! Removes package-extraction directories left by previous or crashed installer
 //! runs, so nothing accumulates over time regardless of how a prior run ended.
 
+use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
@@ -18,7 +19,6 @@ const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 const FILE_SHARE_DELETE: u32 = 0x0000_0004;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-const ERROR_SHARING_VIOLATION: i32 = 32;
 
 /// Prefix of the directories the installer extracts its embedded package into.
 pub const EXTRACTION_PREFIX: &str = STAGING_PREFIX;
@@ -88,14 +88,15 @@ fn is_stale_folder(path: &Path, now: SystemTime, age: Duration) -> bool {
 }
 
 /// Whether something has this folder open without letting it be deleted, as a running installer does.
-/// Anything else, as being unable to look, is not that.
+/// Whatever else stops it being opened to be deleted is taken for that too, as all that is lost by
+/// being wrong is a folder staying a while longer.
 fn is_being_held(path: &Path) -> bool {
     OpenOptions::new()
         .access_mode(DELETE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
-        .is_err_and(|error| error.raw_os_error() == Some(ERROR_SHARING_VIOLATION))
+        .is_err()
 }
 
 /// Create a fresh extraction staging directory, so that a large package never fails to extract for
@@ -156,7 +157,14 @@ fn create_staging_dir_where(
     let has_room = |place: &Path, needed: u64| {
         volume_stats_at(place).is_none_or(|stats| stats.free_bytes >= needed)
     };
-    let make_in_protected = |place: &Path| ProtectedFolder::new_in(place, EXTRACTION_PREFIX).ok();
+    let last_failure = RefCell::new(None);
+    let make_in_protected = |place: &Path| match ProtectedFolder::new_in(place, EXTRACTION_PREFIX) {
+        Ok(staging) => Some(staging),
+        Err(error) => {
+            *last_failure.borrow_mut() = Some(format!("{}: {error}", place.display()));
+            None
+        }
+    };
     let make_in = |place: &Path| may_use(place).then(|| make_in_protected(place)).flatten();
     let twice = unpacked_bytes.saturating_mul(2);
 
@@ -197,9 +205,12 @@ fn create_staging_dir_where(
         .or_else(|| beside_installer.and_then(make_in))
         .or_else(|| make_in(&temp))
         .ok_or_else(|| {
-            std::io::Error::other(
-                "there is nowhere to unpack the package that only administrators can get into",
-            )
+            let why = last_failure.take().map_or_else(String::new, |failure| {
+                format!(". The last that failed was {failure}")
+            });
+            std::io::Error::other(format!(
+                "there is nowhere to unpack the package that only administrators can get into{why}"
+            ))
         })
 }
 

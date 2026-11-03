@@ -37,8 +37,9 @@ use crate::package::{PreparedPackage, read_embedded_manifest, read_manifest};
 use crate::path_rewrite::RestoreMap;
 use crate::path_utils::{
     POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_TASKS, POWERSHELL_IMPORT_UTILITY,
-    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, hidden_command, path_is_strictly_inside,
-    path_is_within, powershell_command, strip_prefix_ignore_case, system_root, text_mentions_path,
+    POWERSHELL_UTF8_OUTPUT, escape_powershell_single, expand_env_vars, hidden_command,
+    path_is_strictly_inside, path_is_within, powershell_command, strip_prefix_ignore_case,
+    system_root, text_mentions_path,
 };
 use crate::prerequisites::{
     PrerequisiteInstallOutcome, PrerequisiteSpec, install_bundle, is_present, spec_for_bundle,
@@ -520,20 +521,29 @@ pub fn restore_package_monitored(
     Ok(result)
 }
 
-/// What a package sets up that would run this file, if anything.
+/// What a package sets up that would run or rely on this file, if anything. Going by what it says as
+/// it will be read here, by whoever reads it, which is where a path in a command's arguments is too.
 fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
     let is_it = |path: &Path| paths_equal(path, file);
-    if let Some(service) = review
-        .services
-        .iter()
-        .find(|service| is_it(&service.binary))
-    {
+    let names_it =
+        |text: &str| text_mentions_path(&expand_env_vars(&review.map.rewrite(text)), file, true);
+    if let Some(service) = review.services.iter().find(|service| {
+        is_it(&service.binary)
+            || service.arguments.as_deref().is_some_and(names_it)
+            || service
+                .entry
+                .parameters
+                .iter()
+                .filter_map(|entry| entry.value_data.as_deref())
+                .any(names_it)
+    }) {
         return Some(format!("the service {}", service.entry.service_name));
     }
     if let Some(task) = review.tasks.iter().find(|task| {
         task.commands
             .iter()
             .any(|command| is_it(Path::new(command.trim().trim_matches('"'))))
+            || names_it(&task.xml)
     }) {
         return Some(format!("the scheduled task {}", task.entry.task_name));
     }
@@ -544,11 +554,9 @@ fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
     {
         return Some(format!("the firewall rule {}", rule.entry.name));
     }
-    if let Some(shortcut) = review
-        .shortcuts
-        .iter()
-        .find(|shortcut| is_it(&shortcut.target))
-    {
+    if let Some(shortcut) = review.shortcuts.iter().find(|shortcut| {
+        is_it(&shortcut.target) || shortcut.arguments.as_deref().is_some_and(names_it)
+    }) {
         return Some(format!(
             "the shortcut {}",
             shortcut.original_lnk_path.display()
@@ -558,12 +566,7 @@ fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
         .registry
         .iter()
         .filter(|entry| is_autostart_entry(entry) || change_kind_of(entry).is_some())
-        .find(|entry| {
-            entry
-                .value_data
-                .as_deref()
-                .is_some_and(|data| text_mentions_path(&review.map.rewrite(data), file, true))
-        })
+        .find(|entry| entry.value_data.as_deref().is_some_and(names_it))
         .map(|entry| format!("the registry value {}", registry_item(entry)))
 }
 
@@ -965,18 +968,32 @@ impl Run<'_, '_> {
     /// use cannot be, or the old program would go on running with the new one in its place, so it
     /// is stopped first, and what happens to it after that is for the end of the install to say.
     fn stop_what_is_being_replaced(&mut self) {
-        if self.journal.is_none() {
+        if self.journal.is_none() || !self.earlier_install_here || self.stopped() {
             return;
         }
+        let earlier_place = place_of_an_earlier_install(self.options, self.earlier_install_here);
         for service in &self.review.services {
             let name = &service.entry.service_name;
+            // Only one of this install's own. What is on this PC under that name may be another's,
+            // which is refused when it comes to it, and until then is not to be touched.
+            let is_ours = service_image_path(name).is_ok_and(|current| {
+                current.is_some_and(|current| {
+                    existing_service_refusal(name, &current, earlier_place, system_root()).is_none()
+                })
+            });
+            if !is_ours {
+                continue;
+            }
             match stop_service(name) {
                 Ok(true) => self.stopped_services.push(name.clone()),
                 Ok(false) => {}
                 Err(reason) => self.warnings.push(Warning::new(
                     "service_not_stopped",
                     WarningSeverity::Warning,
-                    format!("The service {name} could not be stopped first: {reason}."),
+                    format!(
+                        "The service {name} could not be stopped first: {reason}. It may go on \
+                         running the old program until this PC next starts."
+                    ),
                     Some(name.clone()),
                 )),
             }
@@ -1148,8 +1165,8 @@ impl Run<'_, '_> {
                         "program_left_alone_would_run",
                         WarningSeverity::Error,
                         format!(
-                            "{} is not this package's to replace, and {runner} is set up to run \
-                             it, so nothing was installed: {refusal}",
+                            "{} is not this package's to replace, and {runner} relies on it, so \
+                             nothing was installed: {refusal}",
                             destination.display()
                         ),
                         Some(destination.display().to_string()),
@@ -5244,6 +5261,67 @@ mod tests {
             arguments: None,
             account: ServiceAccount::from_recorded(account, &entry.service_name),
         }
+    }
+
+    /// A file left as it was, because a data folder was already there, and what relies on it.
+    #[test]
+    fn what_relies_on_a_file_is_found_however_it_names_it() -> Result<()> {
+        let data = r"C:\ProgramData\Acme\plugin.dll";
+        let manifest_with = |change: &dyn Fn(&mut PackageManifest)| {
+            let mut manifest: PackageManifest = serde_json::from_str(
+                r#"{
+                    "schema_version": "",
+                    "source_computer_name": null,
+                    "source_windows_version": null,
+                    "scan_timestamp_utc": "",
+                    "main_executable_path": "C:\\Program Files\\Acme\\acme.exe",
+                    "application_metadata": null,
+                    "file_inventory": [],
+                    "registry_keys_exported": [],
+                    "services_detected": [],
+                    "scheduled_tasks_detected": [],
+                    "shortcuts_detected": [],
+                    "environment_variables_detected": [],
+                    "runtime_prerequisites": [],
+                    "warnings": [],
+                    "items_intentionally_excluded": []
+                }"#,
+            )?;
+            let program = PathBuf::from(r"C:\Program Files\Acme\acme.exe");
+            manifest.file_inventory = vec![FileEntry {
+                path: program.clone(),
+                original_path: program.clone(),
+                package_relative_path: Some(PathBuf::from(r"files\acme.exe")),
+                size_bytes: Some(1),
+                hash_sha256: Some("00".repeat(32)),
+                classification: FileClassification::AppOwned,
+                should_copy: true,
+                reason: String::new(),
+                user_folder: None,
+            }];
+            change(&mut manifest);
+            Ok::<_, WinAppMigratorError>(manifest)
+        };
+        let target = Path::new(r"D:\Apps\Acme");
+        let file = Path::new(data);
+
+        let nothing = manifest_with(&|_| {})?;
+        let review = ReviewedPackage::new(&nothing, target, true, false)?;
+        assert_eq!(what_would_run(&review, file), None);
+
+        let in_arguments = manifest_with(&|manifest| {
+            let mut service = service_starting("Acme", "manual", &[]);
+            service.binary_path = PathBuf::from(r"C:\Program Files\Acme\acme.exe");
+            service.arguments = Some(format!("--plugin \"{data}\""));
+            manifest.services_detected = vec![service];
+        })?;
+        let review = ReviewedPackage::new(&in_arguments, target, true, false)?;
+        assert!(review.refused.is_empty(), "{:?}", review.refused);
+        assert_eq!(
+            what_would_run(&review, file),
+            Some("the service Acme".to_owned())
+        );
+        Ok(())
     }
 
     #[test]
