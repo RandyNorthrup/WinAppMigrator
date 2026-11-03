@@ -329,7 +329,7 @@ foreach ($case in @(
         @{ Program = $installer; Name = 'The installer, chosen light with Windows dark'; Title = "Install $($expected.app.name)"; Settle = 15; Colors = 32; Arguments = @() },
         @{ Program = $installer; Name = 'The uninstaller, chosen light with Windows dark'; Title = 'Uninstall'; Settle = 8; Colors = 8; Arguments = @('--uninstall', 'no-such-install') }
     )) {
-    $opened = Open-And-Look $case.Program $case.Name $case.Title $case.Colors $case.Settle -Arguments $case.Arguments
+    $opened = Open-And-Look $case.Program $case.Name $case.Title $case.Colors $case.Settle -Arguments $case.Arguments -HasToFit
     if ($opened) {
         Check-Mode $case.Name 'light'
         Ask-To-Close $opened $case.Name 0

@@ -17,9 +17,15 @@ function Run-Program([string]$Program, [string[]]$Arguments, [double]$Minutes = 
     if (-not $finished) { $process.Kill($true) }
     $process.WaitForExit()
     # Something it left running can keep these open after it has gone, and all it said by then is here.
-    [void][Threading.Tasks.Task]::WaitAll($copying, 10000)
+    # Whatever went wrong reading them, what it did is still what the caller wants to know.
+    $trouble = ''
+    try {
+        [void][Threading.Tasks.Task]::WaitAll($copying, 10000)
+    } catch {
+        $trouble = "`n(reading what it said stopped: $($_.Exception.Message))"
+    }
     $encoding = [Console]::OutputEncoding
-    $said = $encoding.GetString($out.ToArray()) + $encoding.GetString($err.ToArray())
+    $said = $encoding.GetString($out.ToArray()) + $encoding.GetString($err.ToArray()) + $trouble
     if (-not $finished) {
         return [pscustomobject]@{ Code = -1; Output = "It was still running after $Minutes minutes, so it was stopped.`n$said" }
     }

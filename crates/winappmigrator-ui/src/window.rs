@@ -5,7 +5,9 @@
 //! shown once its first frame is painted. So the first frame finds out, and what that changes is done
 //! before anything else can be drawn.
 
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Rect, Vec2, ViewportCommand, vec2};
 
@@ -16,33 +18,73 @@ use crate::widgets;
 const WINDOW_FRAME: Vec2 = vec2(16.0, 39.0);
 /// How much of a screen to leave for the taskbar, which can be on any edge. Windows 11's is this tall.
 const TASKBAR: f32 = 48.0;
-/// Below this, a window has no room for its own title bar, so it is no use asking for less.
-const SMALLEST: Vec2 = vec2(160.0, 100.0);
 const SETTINGS_DIR: &str = "WinAppMigrator";
 const MODE_FILE: &str = "theme.txt";
+/// More than either word it can hold.
+const MOST_MODE_FILE_BYTES: u64 = 16;
 
 fn file_of_the_chosen_mode() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
     Some(base.join(SETTINGS_DIR).join(MODE_FILE))
 }
 
-/// The mode a person chose in the app, if they have, on this account. Only ever one of two words is
-/// taken from this, so it does not matter who could have written it.
+/// The mode a person chose in the app, if they have, on this account.
 fn chosen_mode() -> Option<ThemeMode> {
-    let tag = std::fs::read_to_string(file_of_the_chosen_mode()?).ok()?;
+    mode_in(&file_of_the_chosen_mode()?)
+}
+
+/// These programs run elevated, and this file is in a folder the account they were started from can
+/// change. So it is only ever one of two words, and only if it is really a file there, as something
+/// else could be made to keep a window from opening.
+fn mode_in(path: &Path) -> Option<ThemeMode> {
+    if !fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut tag = String::new();
+    File::open(path)
+        .ok()?
+        .take(MOST_MODE_FILE_BYTES)
+        .read_to_string(&mut tag)
+        .ok()?;
     ThemeMode::from_tag(tag.trim())
 }
 
 /// Remember the mode a person chose. Losing this is harmless, so a failure to write it is not worth
 /// interrupting them for.
 pub fn remember_chosen_mode(mode: ThemeMode) {
-    let Some(path) = file_of_the_chosen_mode() else {
+    if let Some(path) = file_of_the_chosen_mode() {
+        write_mode(&path, mode);
+    }
+}
+
+/// With the app elevated, writing to what is already there would write through a link to it, to any
+/// file an administrator can change. A new file put in its place replaces the name, and leaves alone
+/// whatever else that name led to. And a link in the way of the folder is not written through at all.
+fn write_mode(path: &Path, mode: ThemeMode) {
+    let Some(folder) = path.parent() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let _ = fs::create_dir_all(folder);
+    let is_a_link = |place: &Path| {
+        fs::symlink_metadata(place).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    };
+    if folder.ancestors().any(is_a_link) {
+        return;
     }
-    let _ = std::fs::write(path, mode.as_tag());
+    let beside = folder.join(format!("{MODE_FILE}.{}", std::process::id()));
+    // Not over anything already there, which is not to be written through either.
+    let Ok(mut file) = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&beside)
+    else {
+        return;
+    };
+    let written = file.write_all(mode.as_tag().as_bytes());
+    drop(file);
+    if written.is_err() || fs::rename(&beside, path).is_err() {
+        let _ = fs::remove_file(&beside);
+    }
 }
 
 /// How big a window would like to be, in points.
@@ -70,7 +112,7 @@ impl WindowSizes {
     /// other than the main one starts cannot be told from here, so that only goes by a window that
     /// starts inside what would be the main one, and being wrong about it only means it is maximized.
     fn on_a_screen_of(self, screen: Vec2, placed_at: Option<Rect>) -> Option<Self> {
-        let room = screen - WINDOW_FRAME - vec2(TASKBAR, TASKBAR);
+        let room = (screen - WINDOW_FRAME - vec2(TASKBAR, TASKBAR)).max(Vec2::splat(1.0));
         let too_big = self.opens_at.x > room.x || self.opens_at.y > room.y;
         let placed_off_it = placed_at.is_some_and(|placed| {
             let starts_on_it = placed.min.x >= 0.0
@@ -80,8 +122,8 @@ impl WindowSizes {
             starts_on_it && (placed.max.x > screen.x || placed.max.y > screen.y - TASKBAR)
         });
         (too_big || placed_off_it).then(|| Self {
-            opens_at: self.opens_at.min(room).max(SMALLEST),
-            at_least: self.at_least.min(room).max(SMALLEST),
+            opens_at: self.opens_at.min(room),
+            at_least: self.at_least.min(room),
         })
     }
 }
@@ -282,23 +324,117 @@ mod tests {
         }
     }
 
-    /// 1280x720 at 300%, where what is left is less than any of them would ask for.
+    /// 1280x720 at 300% and 400%, where what is left is less than any of them would ask for.
     #[test]
     fn the_smallest_a_window_can_be_made_is_never_more_than_a_screen_has() {
-        let screen = vec2(426.7, 240.0);
-        let room = screen - WINDOW_FRAME - vec2(TASKBAR, TASKBAR);
-        for sizes in [APP, INSTALLER, UNINSTALLER] {
-            let Some(fitting) = sizes.on_a_screen_of(screen, None) else {
-                panic!("none of them fit");
-            };
-            assert!(fitting.at_least.x <= room.x && fitting.at_least.y <= room.y);
+        for screen in [vec2(426.7, 240.0), vec2(320.0, 180.0)] {
+            let room = screen - WINDOW_FRAME - vec2(TASKBAR, TASKBAR);
+            for sizes in [APP, INSTALLER, UNINSTALLER] {
+                let Some(fitting) = sizes.on_a_screen_of(screen, None) else {
+                    panic!("none of them fit");
+                };
+                assert!(fitting.at_least.x <= room.x && fitting.at_least.y <= room.y);
+                assert!(fitting.at_least.x <= fitting.opens_at.x);
+                assert!(fitting.at_least.y <= fitting.opens_at.y);
+            }
         }
     }
 
     #[test]
-    fn a_screen_too_small_to_tell_about_still_asks_for_a_window_there_is_some_of() {
-        let fitting = APP.on_a_screen_of(vec2(100.0, 80.0), None);
-        assert_eq!(fitting.map(|fitting| fitting.at_least), Some(SMALLEST));
+    fn a_screen_with_no_room_at_all_still_asks_for_a_size_there_can_be() {
+        let fitting = APP.on_a_screen_of(vec2(50.0, 50.0), None);
+        assert_eq!(
+            fitting.map(|fitting| (fitting.opens_at, fitting.at_least)),
+            Some((Vec2::splat(1.0), Vec2::splat(1.0)))
+        );
+    }
+
+    /// A folder of its own, gone at the end of the test.
+    struct Place(PathBuf);
+
+    impl Place {
+        fn new(name: &str) -> Self {
+            let folder =
+                std::env::temp_dir().join(format!("wam-window-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&folder);
+            assert!(fs::create_dir_all(&folder).is_ok());
+            Self(folder)
+        }
+    }
+
+    impl Drop for Place {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_mode_that_was_chosen_is_read_back_and_nothing_else_is_taken_for_one() {
+        let place = Place::new("read");
+        let file = place.0.join(MODE_FILE);
+        assert_eq!(mode_in(&file), None, "nothing is there");
+        for (mode, text) in [(ThemeMode::Light, "light"), (ThemeMode::Dark, "dark")] {
+            write_mode(&file, mode);
+            assert_eq!(fs::read_to_string(&file).ok().as_deref(), Some(text));
+            assert_eq!(mode_in(&file), Some(mode));
+        }
+        assert!(fs::write(&file, " light\r\n").is_ok());
+        assert_eq!(mode_in(&file), Some(ThemeMode::Light));
+        for text in ["", "nonsense", "lightly"] {
+            assert!(fs::write(&file, text).is_ok());
+            assert_eq!(mode_in(&file), None, "{text}");
+        }
+        // However much of it there is, only as much as could be a word is read.
+        assert!(fs::write(&file, "light".repeat(1000)).is_ok());
+        assert_eq!(mode_in(&file), None);
+        assert!(fs::remove_file(&file).is_ok());
+        assert!(fs::create_dir(&file).is_ok());
+        assert_eq!(mode_in(&file), None, "a folder of that name");
+    }
+
+    #[test]
+    fn choosing_a_mode_does_not_write_through_a_link_to_another_file() {
+        let place = Place::new("hard-link");
+        let protected = place.0.join("protected.txt");
+        let file = place.0.join(MODE_FILE);
+        assert!(fs::write(&protected, "keep this").is_ok());
+        assert!(fs::hard_link(&protected, &file).is_ok());
+        write_mode(&file, ThemeMode::Light);
+        assert_eq!(
+            fs::read_to_string(&protected).ok().as_deref(),
+            Some("keep this")
+        );
+        assert_eq!(mode_in(&file), Some(ThemeMode::Light));
+    }
+
+    #[test]
+    fn choosing_a_mode_writes_nothing_through_a_link_in_the_way_of_its_folder() {
+        let place = Place::new("junction");
+        let protected = place.0.join("protected");
+        let linked = place.0.join("settings");
+        assert!(fs::create_dir(&protected).is_ok());
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&linked)
+            .arg(&protected)
+            .output();
+        assert!(made.is_ok_and(|output| output.status.success()));
+        write_mode(&linked.join(MODE_FILE), ThemeMode::Light);
+        assert_eq!(fs::read_dir(&protected).map(Iterator::count).ok(), Some(0));
+    }
+
+    #[test]
+    fn choosing_a_mode_goes_no_further_if_its_scratch_file_is_there_already() {
+        let place = Place::new("scratch");
+        let file = place.0.join(MODE_FILE);
+        let scratch = place.0.join(format!("{MODE_FILE}.{}", std::process::id()));
+        assert!(fs::write(&scratch, "someone else's").is_ok());
+        write_mode(&file, ThemeMode::Light);
+        assert_eq!(
+            fs::read_to_string(&scratch).ok().as_deref(),
+            Some("someone else's")
+        );
+        assert_eq!(mode_in(&file), None);
     }
 
     fn input_with(screen: Option<Vec2>, system: Option<egui::Theme>) -> RawInput {

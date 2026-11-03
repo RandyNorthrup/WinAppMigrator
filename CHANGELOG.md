@@ -10,6 +10,10 @@ All notable project changes are tracked here.
   read was still listed as going in, and what the build found to say was missing from them. They are written last now.
 - **Empty folders are capped by what is left.** The limit on how many are made again was applied by the scan, so folders a
   person went on to leave out counted toward it, and some that were staying were lost. A build applies it now.
+- **Choosing light or dark cannot be made to write somewhere else.** The app runs elevated, and remembers the mode in a folder
+  the account it was started from can change, so a link put there could have had it overwrite any file an administrator can.
+  Now it puts a new file in place, and writes nothing if a link is in the way of the folder. What it reads back is at most a few
+  bytes of a real file.
 - **Windows fit the screen they open on.** At 1024x768 the app hung off the right edge with its close button out of reach, and
   an installer ran under the taskbar. On a laptop at 125% or 150% scaling there is less room still. A window that would not
   fit now opens maximized, and can be made as small as the screen is. CI opens all three and has Windows check.
