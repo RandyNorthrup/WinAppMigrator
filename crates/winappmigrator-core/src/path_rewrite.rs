@@ -12,15 +12,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::errors::Result;
+use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
     MAX_EMPTY_FOLDERS, data_location_of, is_external_package_path, restore_destination_for_entry,
 };
-use crate::models::PackageManifest;
+use crate::models::{PackageManifest, RegistryEntry};
 use crate::path_utils::{is_drive_root, path_is_within};
+use crate::registry_target::hex_decode;
 use crate::restore_policy::data_location_refusal;
 
 /// What the source and destination of each rule are known by: lowercase, with forward
@@ -42,11 +41,25 @@ fn folded_path(path: &Path) -> String {
 
 /// How many bytes of a value are looked at to find what to rewrite in it, which is far past what a
 /// path in any real value takes. A package can name a rule and a value of any size, and the cost of
-/// looking otherwise grows with one times the other. Past this a value is left as it stands from there
-/// on, and what is checked of it afterward goes by what it then says.
+/// looking otherwise grows with one times the other. A package that holds such a value is refused.
 const MOST_BYTES_LOOKED_AT_IN_A_VALUE: usize = 32 * 1024 * 1024;
 /// The same for all the values of a package together.
 const MOST_BYTES_LOOKED_AT: u64 = 2 * 1024 * 1024 * 1024;
+const TOO_MUCH_TO_LOOK_THROUGH: &str =
+    "this package holds too much in its settings for what they name to be checked";
+
+/// What it would take to look through what a package holds.
+#[derive(Default)]
+struct LookingCost {
+    all: u64,
+    most_in_one: u64,
+}
+
+impl LookingCost {
+    fn too_much(&self) -> bool {
+        self.all > MOST_BYTES_LOOKED_AT || self.most_in_one > MOST_BYTES_LOOKED_AT_IN_A_VALUE as u64
+    }
+}
 
 /// The source machine's paths mapped to where this restore puts them.
 #[derive(Debug, Clone, Default)]
@@ -66,8 +79,6 @@ pub struct RestoreMap {
     longest_rule: usize,
     /// The length of each rule's source path, as only a text of one of these can be one.
     rule_lengths: HashSet<usize>,
-    /// What has been looked at so far, of [`MOST_BYTES_LOOKED_AT`].
-    looked_at: Arc<AtomicU64>,
     target_root: PathBuf,
     /// Files whose destination is not allowed, and why. They are not in this map, so
     /// nothing can count on them being on the target.
@@ -82,7 +93,7 @@ impl RestoreMap {
     /// Build the map for restoring `manifest` to `target_root`.
     ///
     /// Fails if any copied file has an unsafe destination, so a package naming one is
-    /// refused before anything happens.
+    /// refused before anything happens, and if there is too much in it to go through.
     pub fn new(
         manifest: &PackageManifest,
         target_root: &Path,
@@ -152,7 +163,98 @@ impl RestoreMap {
         if let Some(source_root) = source_root.filter(|root| !is_drive_root(root)) {
             map.add_root(source_root, target_root);
         }
+        map.refuse_too_much_to_look_through(manifest)?;
         Ok(map)
+    }
+
+    /// A text is rewritten the same however many times it is asked, so what a review checks is what
+    /// is written and what is verified. That leaves no limit that can run out part way through an
+    /// install, so what would be too much is found here, before any of it is looked at, by adding up
+    /// the most each text could cost. An honest package comes nowhere near.
+    fn refuse_too_much_to_look_through(&self, manifest: &PackageManifest) -> Result<()> {
+        let mut cost = LookingCost::default();
+        for entry in manifest
+            .registry_keys_exported
+            .iter()
+            .chain(&manifest.license_registry_entries)
+        {
+            self.add_entry_cost(entry, &mut cost);
+        }
+        for service in &manifest.services_detected {
+            for entry in &service.parameters {
+                self.add_entry_cost(entry, &mut cost);
+            }
+            self.add_cost(service.arguments.as_deref().unwrap_or_default(), &mut cost);
+            self.add_cost(&service.binary_path.to_string_lossy(), &mut cost);
+        }
+        for driver in &manifest.drivers_detected {
+            self.add_cost(&driver.image_path.to_string_lossy(), &mut cost);
+        }
+        for task in &manifest.scheduled_tasks_detected {
+            self.add_cost(
+                task.definition_xml.as_deref().unwrap_or_default(),
+                &mut cost,
+            );
+        }
+        for shortcut in &manifest.shortcuts_detected {
+            self.add_cost(&shortcut.target_path.to_string_lossy(), &mut cost);
+            self.add_cost(shortcut.arguments.as_deref().unwrap_or_default(), &mut cost);
+            for path in [&shortcut.working_directory, &shortcut.icon_path]
+                .into_iter()
+                .flatten()
+            {
+                self.add_cost(&path.to_string_lossy(), &mut cost);
+            }
+        }
+        for variable in &manifest.environment_variables_detected {
+            self.add_cost(&variable.value, &mut cost);
+        }
+        for rule in &manifest.firewall_rules_detected {
+            self.add_cost(&rule.program.to_string_lossy(), &mut cost);
+        }
+        for artifact in &manifest.license_artifacts_detected {
+            if let Some(path) = artifact.path.as_deref() {
+                self.add_cost(&path.to_string_lossy(), &mut cost);
+            }
+        }
+        if cost.too_much() {
+            return Err(WinAppMigratorError::InvalidInput(
+                TOO_MUCH_TO_LOOK_THROUGH.to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn add_entry_cost(&self, entry: &RegistryEntry, cost: &mut LookingCost) {
+        self.add_cost(entry.value_name.as_deref().unwrap_or_default(), cost);
+        self.add_cost(entry.value_data.as_deref().unwrap_or_default(), cost);
+        let Some(bytes) = entry
+            .value_bytes_hex
+            .as_deref()
+            .and_then(|hex| hex_decode(hex).ok())
+        else {
+            return;
+        };
+        let (pairs, _) = bytes.as_chunks::<2>();
+        let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+        for part in String::from_utf16_lossy(&units).split('\0') {
+            self.add_cost(part, cost);
+        }
+    }
+
+    /// The most [`Self::rewrite`] could look at in this text.
+    fn add_cost(&self, text: &str, cost: &mut LookingCost) {
+        let search = folded(text);
+        let bytes = search.as_bytes();
+        let mut this_text = 0u64;
+        let mut index = 0;
+        while let Some(start) = next_path_start(bytes, index) {
+            let limit = start.saturating_add(self.longest_rule).min(bytes.len());
+            this_text = this_text.saturating_add((limit - start) as u64);
+            index = start + 1;
+        }
+        cost.all = cost.all.saturating_add(this_text);
+        cost.most_in_one = cost.most_in_one.max(this_text);
     }
 
     fn add_file(&mut self, source: &Path, destination: PathBuf, put_aside: bool) {
@@ -315,14 +417,12 @@ impl RestoreMap {
         Ok(output)
     }
 
-    /// How far from `start` there is to look, counted against what can be looked at. `None` once
-    /// either limit has been reached.
+    /// How far from `start` there is to look, counted against what can be looked at in one text.
+    /// `None` once that is reached, which goes by the text alone, so that it says the same each time.
     fn look_at(&self, start: usize, length: usize, budget: &mut usize) -> Option<usize> {
         let limit = start.saturating_add(self.longest_rule).min(length);
         let cost = limit - start;
-        if cost > *budget
-            || self.looked_at.fetch_add(cost as u64, Ordering::Relaxed) > MOST_BYTES_LOOKED_AT
-        {
+        if cost > *budget {
             return None;
         }
         *budget -= cost;
@@ -534,13 +634,31 @@ mod tests {
         );
     }
 
+    /// What a review checks and what is then written are two asks of this.
     #[test]
-    fn past_what_can_be_looked_at_altogether_values_are_left_as_they_stand() {
+    fn however_much_has_been_looked_at_a_text_says_the_same() {
         let mut map = RestoreMap::for_tests(r"D:\T");
+        let long_source = format!(r"C:\{}", "a".repeat(32 * 1024));
+        map.add_test_root(&long_source, r"D:\T");
         map.add_test_root(r"C:\App", r"D:\T");
-        map.looked_at
-            .store(MOST_BYTES_LOOKED_AT + 1, Ordering::Relaxed);
-        assert_eq!(map.rewrite(r"C:\App\a.exe"), r"C:\App\a.exe");
+        let expensive = r"C:\a ".repeat(4 * 1024);
+        for _ in 0..100 {
+            map.rewrite(&expensive);
+        }
+        assert_eq!(map.rewrite(r"C:\App\a.exe"), r"D:\T\a.exe");
+    }
+
+    #[test]
+    fn a_text_is_found_to_be_too_much_by_what_it_would_cost() {
+        let mut map = RestoreMap::for_tests(r"D:\T");
+        map.add_test_root(&format!(r"C:\{}", "a".repeat(1024)), r"D:\T");
+        let mut cost = LookingCost::default();
+        map.add_cost(r"no path at all", &mut cost);
+        assert_eq!(cost.all, 0);
+        map.add_cost(r"C:\a ", &mut cost);
+        assert!(!cost.too_much());
+        map.add_cost(&r"C:\a ".repeat(40 * 1024), &mut cost);
+        assert!(cost.too_much(), "{} in one", cost.most_in_one);
     }
 
     #[test]

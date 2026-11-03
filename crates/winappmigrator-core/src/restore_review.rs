@@ -3446,6 +3446,54 @@ mod tests {
         Ok(())
     }
 
+    /// A value is checked as it will read once moved. A limit on looking that ran out between that
+    /// check and the write left it as it was, so `cmd.exe` was checked as a file of this package and
+    /// written as the real one.
+    #[test]
+    fn what_there_is_too_much_of_to_check_is_refused_and_not_written_unchecked() {
+        const RULE: usize = 64 * 1024;
+        let mut manifest = acme_manifest();
+        acme_app(&mut manifest);
+        let mut long = file("long.dat");
+        long.original_path = PathBuf::from(format!(r"{SOURCE}\{}", "a".repeat(RULE)));
+        long.path = long.original_path.clone();
+        let mut named_as_cmd = file("cmd.exe");
+        named_as_cmd.original_path = PathBuf::from(r"C:\Windows\System32\cmd.exe");
+        named_as_cmd.path = named_as_cmd.original_path.clone();
+        manifest.file_inventory.push(long);
+        manifest.file_inventory.push(named_as_cmd);
+        let ballast = format!(
+            "{}{}",
+            r#"C:\" "#.repeat((32 * 1024 * 1024) / RULE),
+            "x".repeat(RULE)
+        );
+        let mut entries: Vec<RegistryEntry> = (0..70)
+            .map(|index| {
+                value(
+                    RegistryHive::LocalMachine,
+                    r"Software\Acme",
+                    &format!("b{index}"),
+                    &ballast,
+                )
+            })
+            .collect();
+        entries.push(value(
+            RegistryHive::LocalMachine,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            "Evil",
+            r"C:\Windows\System32\cmd.exe /c calc",
+        ));
+        manifest.registry_keys_exported = entries;
+
+        let reviewed = review(&manifest);
+        let refusal = reviewed
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(refusal.contains("too much"), "it was accepted: {refusal:?}");
+    }
+
     /// With nowhere usable suggested, nothing has been asked of it and the list is for a stand-in.
     #[test]
     fn a_list_is_not_worked_out_for_a_location_on_another_pc() {
