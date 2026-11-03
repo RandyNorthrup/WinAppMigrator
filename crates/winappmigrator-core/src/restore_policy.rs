@@ -2259,7 +2259,7 @@ pub fn firewall_refusal(
     if rule.program.as_os_str().is_empty() {
         return Some("it applies to every program, and a rule can only be for one".to_owned());
     }
-    if map.destination_of(&rule.program).is_none() {
+    if map.runnable_destination_of(&rule.program).is_none() {
         return Some(format!(
             "it is for {}, which this package does not install",
             rule.program.display()

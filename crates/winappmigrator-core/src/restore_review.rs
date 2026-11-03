@@ -545,7 +545,7 @@ impl<'a> ReviewedPackage<'a> {
         let destinations: Vec<&Path> = self
             .files
             .iter()
-            .filter_map(|file| self.map.destination_of(&file.original_path))
+            .filter_map(|file| self.map.runnable_destination_of(&file.original_path))
             .collect();
         self.registrations =
             PackageRegistrations::of(&entries, &destinations, &self.map, expand, system_root());

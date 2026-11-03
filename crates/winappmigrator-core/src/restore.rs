@@ -3743,7 +3743,7 @@ fn write_partial_copy_of(
         .open(partial)
         .map_err(|error| WinAppMigratorError::io(partial, error))?;
     let mut output = BufWriter::with_capacity(COPY_BUFFER_BYTES, output);
-    let mut hasher = Sha256::new();
+    let mut hasher = sha256.map(|_| Sha256::new());
     let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
     loop {
         let read = input
@@ -3752,12 +3752,14 @@ fn write_partial_copy_of(
         if read == 0 {
             break;
         }
-        hasher.update(&buffer[..read]);
+        if let Some(hasher) = hasher.as_mut() {
+            hasher.update(&buffer[..read]);
+        }
         output
             .write_all(&buffer[..read])
             .map_err(|error| WinAppMigratorError::io(partial, error))?;
     }
-    if let Some(expected) = sha256 {
+    if let (Some(expected), Some(hasher)) = (sha256, hasher) {
         let copied = crate::hashing::hex_lower(&hasher.finalize());
         if !copied.eq_ignore_ascii_case(expected) {
             return Err(WinAppMigratorError::InvalidInput(format!(

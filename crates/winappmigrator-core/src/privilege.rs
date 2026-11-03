@@ -10,7 +10,8 @@ use std::sync::OnceLock;
 use tempfile::TempDir;
 
 use crate::path_utils::{
-    POWERSHELL_IMPORT_SECURITY, hidden_command, powershell_command, without_verbatim_prefix,
+    POWERSHELL_IMPORT_MANAGEMENT, POWERSHELL_IMPORT_SECURITY, hidden_command, powershell_command,
+    without_verbatim_prefix,
 };
 
 /// SIDs rather than names, because the names are translated on other Windows languages.
@@ -41,13 +42,12 @@ if ($admins -contains $owner -and $others.Count -eq 0) { 'yes' } else { 'no' }";
 /// `yes` if a folder made here would give someone other than administrators what lets them keep it:
 /// the right to change its permissions or take it over, by what it inherits. A process can open a new
 /// folder in the moment before its permissions are closed, and a handle keeps what it was given.
-/// `CREATOR OWNER` is whoever makes the folder, which is this process.
-const OTHERS_COULD_KEEP_A_NEW_FOLDER_SCRIPT: &str = "Import-Module Microsoft.PowerShell.LocalAccounts \
--ErrorAction Ignore; \
-$acl = Get-Acl -LiteralPath $env:WAM_ACL_PATH; \
+/// `CREATOR OWNER` is whoever makes the folder, which is this process. An administrator's own account
+/// is not let off here, unlike in [`ONLY_ADMINISTRATORS_CAN_CHANGE_SCRIPT`]: it is what a program of
+/// theirs runs as with no elevation at all, on nearly any PC, and that is who this is about.
+const OTHERS_COULD_KEEP_A_NEW_FOLDER_SCRIPT: &str = "$acl = Get-Acl -LiteralPath $env:WAM_ACL_PATH; \
 $admins = @('S-1-5-32-544', 'S-1-5-18', 'S-1-3-0', \
-'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464') + \
-@(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Ignore | ForEach-Object { $_.SID.Value }); \
+'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'); \
 $control = 0x40000 -bor 0x80000 -bor 0x10000000; \
 $others = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | \
 Where-Object { $_.AccessControlType -eq 'Allow' -and ([int]$_.FileSystemRights -band $control) -and \
@@ -255,7 +255,7 @@ fn protect_new_folder(folder: &Path) -> io::Result<()> {
 fn only_administrators_made_what_is_in(folder: &Path) -> bool {
     let text = folder.to_string_lossy();
     powershell_command(format!(
-        "{POWERSHELL_IMPORT_SECURITY}{ONLY_ADMINISTRATORS_MADE_WHAT_IS_INSIDE_SCRIPT}"
+        "{POWERSHELL_IMPORT_SECURITY}{POWERSHELL_IMPORT_MANAGEMENT}{ONLY_ADMINISTRATORS_MADE_WHAT_IS_INSIDE_SCRIPT}"
     ))
     .env(ACL_PATH_VARIABLE, without_verbatim_prefix(&text))
     .output()
