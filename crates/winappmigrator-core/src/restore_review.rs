@@ -758,10 +758,22 @@ impl<'a> ReviewedPackage<'a> {
                     );
                     continue;
                 };
-                if definition.account.as_deref() == Some(WHOEVER_INSTALLS_IT) {
+                let runs_as_whoever_installs_it =
+                    definition.account.as_deref() == Some(WHOEVER_INSTALLS_IT);
+                let xml = xml.replace(WHOEVER_INSTALLS_IT, &account.sid);
+                // What is asked of it below has to be what will be registered, and a package can put
+                // this anywhere in a task, not only where a build does.
+                definition = match read_task_definition(&xml) {
+                    Ok(definition) => definition,
+                    Err(error) => {
+                        self.refuse(item, format!("its definition could not be read: {error}"));
+                        continue;
+                    }
+                };
+                if runs_as_whoever_installs_it {
                     definition.account = Some(THE_PERSON_INSTALLING.to_owned());
                 }
-                xml.replace(WHOEVER_INSTALLS_IT, &account.sid)
+                xml
             } else {
                 xml
             };
@@ -1649,7 +1661,7 @@ pub(crate) fn is_other_setting(entry: &RegistryEntry, app: &AppKeys) -> bool {
     change_kind_of(entry).is_none()
         && !is_autostart_entry(entry)
         && !is_uninstall_entry_key(&entry.key_path)
-        && !key.starts_with(r"system\")
+        && !(entry.hive == RegistryHive::LocalMachine && key.starts_with(r"system\"))
         && !key.starts_with(r"software\classes\")
         && !key.starts_with(r"software\{")
         && !app.holds(&key)
@@ -3492,6 +3504,60 @@ mod tests {
             .map(ToString::to_string)
             .unwrap_or_default();
         assert!(refusal.contains("too much"), "it was accepted: {refusal:?}");
+    }
+
+    /// What a task will run is what it says once who it runs as has been filled in.
+    #[test]
+    fn a_placeholder_in_a_tasks_command_is_not_taken_for_a_file() -> Result<()> {
+        let mut manifest = acme_manifest();
+        manifest
+            .file_inventory
+            .push(file("WinAppMigrator-whoever-installs-it.exe"));
+        manifest.scheduled_tasks_detected = vec![task(
+            "\\Acme\\",
+            "T",
+            Some(task_running_as(
+                &format!(r"{SOURCE}\WinAppMigrator-whoever-installs-it.exe"),
+                "S-1-5-18",
+            )),
+        )];
+        let reviewed = review(&manifest)?;
+        for task in &reviewed.tasks {
+            let registered =
+                read_task_definition(&task.xml).map_err(WinAppMigratorError::InvalidInput)?;
+            for command in &registered.commands {
+                assert!(
+                    reviewed.map.is_restored_file(Path::new(command)),
+                    "it would run {command}, where nothing is put"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_value_under_an_accounts_system_key_is_on_the_list() -> Result<()> {
+        let mut manifest = acme_manifest();
+        acme_app(&mut manifest);
+        manifest.registry_keys_exported = vec![
+            value(
+                RegistryHive::CurrentUser,
+                r"System\CurrentControlSet\Control\Whatever",
+                "Hook",
+                "x",
+            ),
+            value(RegistryHive::LocalMachine, r"Software\Acme", "Theme", "x"),
+        ];
+        let reviewed = review(&manifest)?;
+        assert!(
+            describe(&reviewed)
+                .changes
+                .iter()
+                .any(|change| change.kind == SystemChangeKind::OtherSettings),
+            "{:?}",
+            describe(&reviewed)
+        );
+        Ok(())
     }
 
     /// With nowhere usable suggested, nothing has been asked of it and the list is for a stand-in.
