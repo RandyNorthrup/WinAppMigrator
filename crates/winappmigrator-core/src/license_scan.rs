@@ -54,6 +54,8 @@ const USER_ENVIRONMENT_KEY: &str = "Environment";
 const MAX_VENDOR_SUBKEYS: usize = 256;
 /// `serial` by itself is a word many a setting has: `SerialPort` says nothing about a license.
 const SERIAL_WORD: &str = "serial";
+/// `Inno Setup: User Info: Serial`, where Inno Setup keeps a serial typed into a setup.
+const INNO_SETUP_SERIAL: &str = "innosetupuserinfoserial";
 /// What says an app uses a license framework, by how a file of it starts, in lowercase. A store is
 /// on the PC for whatever uses that framework, and without one of these, this app is not one.
 const FLEXLM_CLIENT_FILES: &[&str] = &["lmgr", "lmutil", "lmgrd", "flexnet", "fnp_", "fnpcommsvc"];
@@ -545,6 +547,7 @@ pub(crate) fn is_license_registry_name(name: &str) -> bool {
         .iter()
         .any(|signal| normalized.contains(signal))
         || normalized == SERIAL_WORD
+        || normalized == INNO_SETUP_SERIAL
 }
 
 fn is_protected_path(path: &Path) -> bool {
@@ -764,6 +767,8 @@ mod tests {
         assert!(is_license_registry_name("Serial Number"));
         assert!(is_license_registry_name("ProductKey"));
         assert!(is_license_registry_name("Serial"));
+        assert!(is_license_registry_name("Inno Setup: User Info: Serial"));
+        assert!(!is_license_registry_name("Inno Setup: User Info: Name"));
         assert!(!is_license_registry_name("InstallPath"));
         assert!(!is_license_registry_name("SerialPort"));
         assert!(!is_license_registry_name("Serializer"));

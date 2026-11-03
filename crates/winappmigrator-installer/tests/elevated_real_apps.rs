@@ -250,8 +250,18 @@ fn files_below(root: &Path) -> TestResult<Vec<PathBuf>> {
     Ok(found)
 }
 
-/// Nothing of the runner's account or its tokens goes out with a package.
-fn check_nothing_of_the_runners(installer: &Path, work: &Path) -> TestResult {
+/// Every Inno Setup uninstall log names the PC and the account that ran the setup, and the app's own
+/// uninstaller cannot work without it, so it stays, and SECURITY.md says so. That is all it may do.
+fn is_an_inno_log_naming_its_account(relative: &Path, found: &str) -> bool {
+    let is_log = relative
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|name| name.starts_with("unins") && name.ends_with(".dat"));
+    is_log && found == "the value of USERNAME"
+}
+
+/// What of the runner's account or its tokens would go out with this package.
+fn what_of_the_runners_it_holds(installer: &Path, work: &Path) -> TestResult<Vec<String>> {
     let (names, unpacked) = unpack_package(installer, work)?;
     let named = runner_literals();
     let literals: Vec<String> = named.iter().map(|(value, _)| value.clone()).collect();
@@ -267,21 +277,23 @@ fn check_nothing_of_the_runners(installer: &Path, work: &Path) -> TestResult {
     }
     for file in files_below(&unpacked)? {
         let bytes = fs::read(&file)?;
+        let relative = file.strip_prefix(&unpacked)?;
         for found in say_what_was_found(what_is_the_runners(&bytes, &literals), &named) {
-            problems.push(format!(
-                "{found} in {}",
-                file.strip_prefix(&unpacked)?.display()
-            ));
+            if is_an_inno_log_naming_its_account(relative, &found) {
+                println!(
+                    "  {} names the account, as such a log does",
+                    relative.display()
+                );
+            } else {
+                problems.push(format!("{found} in {}", relative.display()));
+            }
         }
     }
     println!(
         "  looked through {} entries for the runner's account, folders, and tokens",
         names.len()
     );
-    if problems.is_empty() {
-        return Ok(());
-    }
-    Err(format!("the package holds the runner's own: {problems:#?}").into())
+    Ok(problems)
 }
 
 /// What the scan took, for a person to read in the log, with what is outside the app's folder by name.
@@ -426,6 +438,29 @@ fn the_search_finds_what_is_the_runners_however_it_is_written() {
 }
 
 #[test]
+fn only_an_inno_log_may_name_the_account_and_nothing_may_hold_a_token() {
+    let named = "the value of USERNAME";
+    assert!(is_an_inno_log_naming_its_account(
+        Path::new(r"files\unins000.dat"),
+        named
+    ));
+    for (file, found) in [
+        (r"manifest.json", named),
+        (r"files\unins000.exe", named),
+        (r"files\unins000.dat", "the value of GITHUB_TOKEN"),
+        (
+            r"files\unins000.dat",
+            "something the shape of a GitHub token",
+        ),
+    ] {
+        assert!(
+            !is_an_inno_log_naming_its_account(Path::new(file), found),
+            "{file} {found}"
+        );
+    }
+}
+
+#[test]
 fn the_search_goes_by_the_shape_of_a_token_and_not_by_a_prefix_alone() {
     let classic = format!("x ghs_{} y", "a1B2c3D4e5".repeat(4));
     assert!(has_token_shape(classic.as_bytes()));
@@ -447,6 +482,7 @@ fn build_what_goes_to_the_other_pcs() -> TestResult {
     let listed = list_installed_apps_from(&SystemContext::live())?;
 
     let mut built = Vec::new();
+    let mut holding_the_runners = Vec::new();
     for spec in the_apps()? {
         let id = text_of(&spec, "id")?;
         let name = text_of(&spec, "name")?;
@@ -505,7 +541,9 @@ fn build_what_goes_to_the_other_pcs() -> TestResult {
             output.join("manifests").join(format!("{id}.json")),
             &manifest_bytes,
         )?;
-        check_nothing_of_the_runners(&installer, work.path())?;
+        for problem in what_of_the_runners_it_holds(&installer, work.path())? {
+            holding_the_runners.push(format!("{name}: {problem}"));
+        }
 
         built.push(json!({
             "id": id,
@@ -515,6 +553,10 @@ fn build_what_goes_to_the_other_pcs() -> TestResult {
                 .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
             "source_root": root.display().to_string(),
         }));
+    }
+
+    if !holding_the_runners.is_empty() {
+        return Err(format!("these hold the runner's own: {holding_the_runners:#?}").into());
     }
 
     let build = powershell(

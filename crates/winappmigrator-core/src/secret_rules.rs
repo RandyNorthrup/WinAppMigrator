@@ -619,6 +619,24 @@ pub(crate) fn registry_entry_name(entry: &RegistryEntry) -> String {
     format!(r"{hive}\{}\{name}", entry.key_path)
 }
 
+/// What Inno Setup keeps in an app's entry in Settings of who ran it: their account, and what they
+/// typed as their name and organization. A real package of Git LFS gave an account away by this.
+const WHO_RAN_THE_SETUP_VALUES: [&str; 3] = [
+    "Inno Setup: User",
+    "Inno Setup: User Info: Name",
+    "Inno Setup: User Info: Organization",
+];
+
+/// Whether a value says who installed an app. Nothing on another PC goes by these, whoever is
+/// installing it there, so they stay behind whatever else was asked for.
+pub(crate) fn names_who_ran_the_setup(entry: &RegistryEntry) -> bool {
+    entry.value_name.as_deref().is_some_and(|name| {
+        WHO_RAN_THE_SETUP_VALUES
+            .iter()
+            .any(|value| name.eq_ignore_ascii_case(value))
+    })
+}
+
 /// Whether a value under an app's keys is license data: its own name says so, or the name of a key
 /// it is under, other than one named for the product itself, or a kind of key that says nothing.
 pub(crate) fn is_license_registry_entry(entry: &RegistryEntry, names: &ProductNames) -> bool {
@@ -1382,6 +1400,33 @@ mod tests {
         );
         assert_eq!(services[0].parameters.len(), 1);
         assert!(left_out.licenses.is_empty());
+    }
+
+    #[test]
+    fn what_inno_setup_keeps_of_who_ran_it_stays_behind_and_the_rest_of_its_entry_goes() {
+        let named = |name: &str| entry(name, RegistryValueKind::String, "someone", "");
+        for who in [
+            "Inno Setup: User",
+            "inno setup: user",
+            "Inno Setup: User Info: Name",
+            "Inno Setup: User Info: Organization",
+        ] {
+            assert!(names_who_ran_the_setup(&named(who)), "{who}");
+        }
+        for not_who in [
+            "Inno Setup: App Path",
+            "Inno Setup: Icon Group",
+            "Inno Setup: Language",
+            "Inno Setup: Setup Version",
+            "User",
+            "DisplayName",
+        ] {
+            assert!(!names_who_ran_the_setup(&named(not_who)), "{not_who}");
+        }
+        assert!(!names_who_ran_the_setup(&RegistryEntry {
+            value_name: None,
+            ..named("x")
+        }));
     }
 
     #[test]
