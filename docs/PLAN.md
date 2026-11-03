@@ -41,6 +41,9 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   need, which refuses what cannot run there and warns of what may not.
 - A real move between PCs on CI: built on one runner and installed on others, on Windows Server 2022 and 2025
   and Windows 11 on Arm, and checked with Windows' own tools.
+- The same with real open-source apps from their publishers, with Windows asked to use what was restored: a real
+  archive, a COM class activated, a file type opened, a shortcut started, and services answering a real client, each shown
+  to fail without the app, and the machine compared with how it was after an uninstall.
 - Scan source selector: **this PC or a connected offline drive** (a disk from
   another PC). Offline reads load copies of the disk's registry hives, compare what
   its registry says with what that PC called things, and map a path to the volume in one

@@ -479,9 +479,13 @@ data folder goes by the User data option, like any other.
 - `shortcut_scan.rs` captures the Start Menu and Desktop shortcuts of the account being scanned and
   of everyone. On this PC, WScript.Shell reads them. On a drive, the `.lnk` files are parsed directly,
   since COM would resolve what it found against this PC.
-- `env_scan.rs` captures environment variables whose value contains the app's path. A
-  captured `Path` is merged on restore: only entries under the install location are added
-  to the target's value, which is otherwise left alone.
+- `env_scan.rs` captures environment variables whose value contains the app's path. Of a `Path`, only the app's
+  entries are captured, since the rest is what else is on that PC. It is merged on restore: only entries under the
+  install location are added to the target's value, which is otherwise left alone.
+- An app's entry in Settings goes, with its uninstall string replaced by this project's uninstaller, less what is only true
+  where it was installed: `InstallSource`, `ModifyPath`, and `WindowsInstaller`, because Windows Installer has never heard of
+  the app on another PC, and Inno Setup's `Inno Setup: User`, `User Info: Name`, and `User Info: Organization`, because they
+  say who ran the setup. `Inno Setup: User Info: Serial` goes by the License option.
 
 ### What ties an app into Windows
 
@@ -784,3 +788,5 @@ The ones that most affect what gets captured:
   the app, so one named anything else stays behind.
 - **A secret can be missed.** The rules go by names and a few shapes of text. See
   [What is not captured at all](#what-is-not-captured-at-all).
+- **A folder with nothing in it does not come along.** A package goes by files, so windows_exporter's empty
+  `textfile_inputs` is not on the other PC. It starts and serves without it, and an app that expects one to be there may not.

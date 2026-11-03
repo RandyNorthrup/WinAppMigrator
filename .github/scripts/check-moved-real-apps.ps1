@@ -82,6 +82,10 @@ foreach ($round in $rounds) {
         Check "$($app.id): the installer exits with 0" ($run.Code -eq 0) $run.Output
         Check "$($app.id): the package's hashes are right" ($run.Output -match 'Package hashes valid: true') ''
         Check "$($app.id): it read back what it installed" ($run.Output -match 'Reinstall hashes valid: true') ''
+        foreach ($entry in @(Uninstall-Entries $app.name)) {
+            $says = (Get-ItemProperty -LiteralPath "HKLM:\$($entry.Key)").WindowsInstaller
+            Check "$($app.id): its entry does not say Windows Installer has it" ($says -ne 1) "$says"
+        }
         Check "$($app.id): no errors" ($run.Output -match '(?m)^Errors: 0\s*$') ''
         if ($build -lt $expected.source_build) {
             Check "$($app.id): it says this Windows is older than the one the app came from" ($run.Output -match 'This app was on Windows build') ''
@@ -104,9 +108,10 @@ foreach ($round in $rounds) {
             }
         }
         Check "$($app.id): all $(@($app.files).Count) files of its folder were looked at, by .NET" (@($app.files).Count -gt 0) ''
-        foreach ($folder in @($app.empty_folders)) {
-            $there = Test-Path -LiteralPath (Join-Path $roots[$app.id] $folder) -PathType Container
-            Write-Host "  note: the empty folder $folder is $(if ($there) { 'here' } else { 'NOT here' })"
+        # PowerShell's names go by no case, so this must not be called anything like the folder of installers.
+        foreach ($emptyOne in @($app.empty_folders)) {
+            $there = Test-Path -LiteralPath (Join-Path $roots[$app.id] $emptyOne) -PathType Container
+            Write-Host "  note: the empty folder $emptyOne is $(if ($there) { 'here' } else { 'NOT here' })"
         }
         $status = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -in 'mosquitto', 'windows_exporter' } | ForEach-Object { "$($_.Name)=$($_.Status)/$($_.StartType)" }
         Write-Host "services now: $($status -join ', ')"

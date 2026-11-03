@@ -84,6 +84,21 @@ installers of a fake app and uploads them, unsigned and kept for a day, and othe
 have never seen it, each on a Windows of its own, which build nothing and check out only that script. They install
 them there and look with Windows' own tools, and say what differed.
 
+`elevated_real_apps.rs`, `.github/scripts/real-apps.json`, and the `real-app` scripts beside it do that with real apps.
+`install-real-apps.ps1` runs each publisher's installer on a runner, at the version and SHA-256 in the JSON, and asks the
+same of it as `check-moved-real-apps.ps1` later asks of the move, so a failure there is no fault of this project's. The test
+builds the installers the way the app does, with the License and User data options off and no runtime bundled, and looks
+through each package for the runner's account, folders, and tokens before anything is uploaded. On each fresh runner the script removes any
+copy it came with, shows that every check fails, installs, shows that every check works, removes each app by the string its
+entry recorded, shows that every check fails again, and compares the machine with how it was, once where each app was and
+once in a folder of another name. A check in `real-app-checks.ps1` asks Windows to do the thing rather than looking for a file or a key,
+so that only what was restored can make it pass. **Add a check only if it can fail, and never widen one to go green.**
+
+What those jobs upload is a redistribution of those apps, for a day, to anyone signed in to GitHub, so an app goes
+in the list only if it is open source and its license allows that, and the workflow says which license. They hold no
+secrets, keep no credentials from the checkout, and do not use the `release` environment. Windows' own packages add
+firewall rules of their own whenever one first starts, so those are the one thing the comparison does not count.
+
 They do nothing unless `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`, and
 `WAM_ELEVATED_E2E=1` are all set, and with them set they fail if not elevated. **Never set those on a real
 PC.** Without them they skip, so they are safe to run locally, and that shows only that they compile.

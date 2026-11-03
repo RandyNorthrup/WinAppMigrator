@@ -593,12 +593,13 @@ function State-Differences($Before, $After) {
         $set = [Collections.Generic.HashSet[string]]::new([string[]]$Before[$kind], [StringComparer]::OrdinalIgnoreCase)
         $now = [Collections.Generic.HashSet[string]]::new([string[]]$After[$kind], [StringComparer]::OrdinalIgnoreCase)
         foreach ($item in $After[$kind]) {
+            if ($set.Contains($item)) { continue }
             # Windows adds these itself for its own packages, whenever it first starts one.
             if ($kind -eq 'Firewall' -and $item -match '_8wekyb3d8bbwe') {
                 Write-Host "  (Windows' own, and not counted: $item)"
-                continue
+            } else {
+                "$kind, new: $item"
             }
-            if (-not $set.Contains($item)) { "$kind, new: $item" }
         }
         foreach ($item in $Before[$kind]) { if (-not $now.Contains($item)) { "$kind, gone: $item" } }
     }

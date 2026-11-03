@@ -313,7 +313,8 @@ that find them when it is on. With it on, licenses come along and credentials st
   an uninstall log, `unins000.dat`, that names the PC and the account that ran its setup, and can hold paths from that
   account's folders. It goes in the package, because the app's own uninstaller cannot work without it. What that setup
   wrote in the app's entry in Settings of who ran it, their account, name, and organization, stays behind. So does a
-  serial typed into it, unless the License option is on.
+  serial typed into it, unless the License option is on, and where a Windows Installer setup was run from. A shortcut or
+  a service of the app can also name the account, if that is where it points.
 - What is encrypted some other way than DPAPI is copied as it is, and is not decrypted to look.
 
 So an installer can contain secrets, and **it has to be handled accordingly**: do not post one or send it to anyone you

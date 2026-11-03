@@ -139,10 +139,26 @@ installer opens in the theme it was built with.</sub>
 | **Near matches** | Only if you tick them | Folders with a close name, and parts of the app no list shows. [What is never offered](docs/discovery.md#near-matches) |
 | **Credentials** | Never | Values and files that look like passwords, tokens, or private keys are left out and named before you build, and cannot be ticked. [This cannot catch everything](#security) |
 
+## What it has been tried on
+
+Every push moves five real open-source apps from one CI runner to fresh ones: 7-Zip, PuTTY, Eclipse Mosquitto,
+windows_exporter, and Git LFS, installed by their publishers' own setups, which are custom, MSI, NSIS, and Inno Setup. They go to
+Windows Server 2022, Windows Server 2025, and Windows 11 on Arm, where each was and in a folder of another name, and
+Windows is asked to use what was restored: an archive made and unpacked, a COM class activated, a file type
+opened, a shortcut started, a service answering a real client, and an uninstall that leaves the machine as it was. Each
+check is shown to fail without the app.
+
+Those are small, well-behaved apps on clean machines. Desktop Windows 10 and Windows 11 on x64 have not been run, and nor has
+an app with online activation, a driver, or the size of an office suite. So try an installer before you rely on it.
+
 ## Limitations
 
 Please read these before relying on it, especially on a one-way trip from a failing PC.
 
+- **The app's own setup does not know it moved.** Windows Installer has no record of an MSI app on the new PC, so
+  Settings removes it with this project's uninstaller, and the app's own updater or repair can treat it as not installed.
+- **A folder with nothing in it does not come along,** because a package goes by files. An app that expects one to
+  be there may need it made again.
 - **It can miss what is kept under another name.** Beyond what the install records name, folders and
   registry keys are matched by the product's exact name. What is close to that is offered for you to tick, and what is
   under a name nothing like it stays behind. Check what the screen lists. If it looks wrong, don't rely on that installer.

@@ -4,6 +4,23 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- **Real apps are moved between PCs on every push.** 7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter, and Git LFS, from
+  their publishers at exact versions and hashes, go through custom, MSI, NSIS, and Inno Setup installers into real
+  installers on one runner, and on to fresh runners on Windows Server 2022 and 2025 and Windows 11 on Arm, where each was
+  and in a folder of another name. Windows is then asked to use what was restored: 7-Zip packs and unpacks, its shell
+  extension is activated by CLSID from the new folder, a `.ppk` opens with Pageant, shortcuts start their programs,
+  Windows finds a program by name, a new prompt finds what `Path` adds, and two services start, answer a real client over a
+  socket, and stop. Every check has to fail with the app not there, before the install and after the uninstall, which
+  runs the string each entry recorded, and the machine is compared with how it was. The publishers' own installers are
+  asked the same first. See [CONTRIBUTING](CONTRIBUTING.md#tests-must-not-change-the-machine).
+- **What real apps found.** A COM class's DLL path with a space in it was read as stopping there, as `C:\Program`, so a class
+  in a folder you left out still went, pointing at nothing. Every package named the account it was built by, even with the
+  User data option off. A shortcut with no icon of its own was given one of `,0`. An Inno Setup app's entry in Settings
+  took along the account that ran its setup and what was typed as a name and organization, and a serial typed into
+  a setup went even with the License option off. A Windows Installer app's entry took along where its setup was run from,
+  usually someone's Downloads, and said Windows Installer has it, which on another PC it does not. A captured `Path` held the
+  whole of the variable, which is all of what else is on the PC, when only the app's entries are ever used. An app with a
+  32-bit setup and 64-bit programs was listed as x86.
 - **You see what goes in an installer before you build it.** Selecting an app looks at it in the background, and the
   screen says how big the installer can be and whether it fits, what it holds, in plain groups and in the words the
   installer's own list uses, and what is left out and why, with credentials, licenses, and certificates by name. Picking

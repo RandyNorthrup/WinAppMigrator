@@ -200,10 +200,13 @@ fn what_is_the_runners(bytes: &[u8], literals: &[String]) -> Vec<String> {
     let forms = [bytes.to_ascii_lowercase(), every_other(0), every_other(1)];
     for literal in literals.iter().filter(|literal| !literal.is_empty()) {
         let wanted = literal.to_ascii_lowercase();
-        if forms
-            .iter()
-            .any(|form| form.windows(wanted.len()).any(|at| at == wanted.as_bytes()))
-        {
+        // And as JSON and a `.reg` file write a path.
+        let escaped = wanted.replace('\\', r"\\");
+        if [&wanted, &escaped].iter().any(|text| {
+            forms
+                .iter()
+                .any(|form| form.windows(text.len()).any(|at| at == text.as_bytes()))
+        }) {
             found.push(literal.clone());
         }
     }
@@ -469,6 +472,11 @@ fn the_search_finds_what_is_the_runners_however_it_is_written() {
         .flat_map(u16::to_le_bytes)
         .collect();
     assert_eq!(what_is_the_runners(&wide, &literals), ["runneradmin"]);
+    let folder = vec![r"D:\a\_temp".to_owned()];
+    assert_eq!(
+        what_is_the_runners(br#"{"InstallSource": "D:\\a\\_temp\\x\\"}"#, &folder),
+        folder
+    );
     // A blank value of a variable that is not set finds nothing.
     assert!(what_is_the_runners(b"anything", &[String::new()]).is_empty());
 }
