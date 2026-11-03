@@ -41,9 +41,9 @@ use crate::reporting::{artifact_paths, write_scan_reports};
 use crate::restore_policy::architecture_from_name;
 use crate::runtime_detection::{AppRuntimes, ArchitectureKey, DotNetNeed, inspect_app_runtimes};
 use crate::secret_rules::{
-    LeftOut, ScannedSettings, is_license_registry_entry, names_who_ran_the_setup,
-    take_licenses_from_settings, take_secret_files, take_secrets_from_license_values,
-    take_secrets_from_settings,
+    LeftOut, ScannedSettings, is_license_registry_entry, is_only_true_where_it_was_installed,
+    names_who_ran_the_setup, take_licenses_from_settings, take_secret_files,
+    take_secrets_from_license_values, take_secrets_from_settings,
 };
 use crate::service_scan::{ServiceScanContext, scan_drivers, scan_services};
 use crate::shortcut_scan::{ShortcutScanContext, scan_shortcuts};
@@ -557,7 +557,9 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     // What is license data goes by the License option, and nowhere else: a value, a file, or a
     // variable that was captured to be restored as anything else would not.
     registry_artifacts.entries.retain(|entry| {
-        !is_license_registry_entry(entry, &names) && !names_who_ran_the_setup(entry)
+        !is_license_registry_entry(entry, &names)
+            && !names_who_ran_the_setup(entry)
+            && !is_only_true_where_it_was_installed(entry)
     });
     file_inventory.retain(|file| !is_license_file(&file.original_path));
     if !options.include_license_data {

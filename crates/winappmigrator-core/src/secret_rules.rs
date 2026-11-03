@@ -637,6 +637,27 @@ pub(crate) fn names_who_ran_the_setup(entry: &RegistryEntry) -> bool {
     })
 }
 
+/// What a Windows Installer app's entry in Settings says that is only true where it was installed:
+/// where its setup was run from, usually someone's Downloads, how to change it, and that Windows
+/// Installer has it. On another PC, Windows Installer has never heard of it.
+const ONLY_TRUE_WHERE_IT_WAS_INSTALLED: [&str; 3] =
+    ["InstallSource", "ModifyPath", "WindowsInstaller"];
+const UNINSTALL_KEY_PART: &str = r"\currentversion\uninstall\";
+
+/// Whether a value of an app's entry in Settings is one of those. Anywhere else, those names can mean
+/// anything.
+pub(crate) fn is_only_true_where_it_was_installed(entry: &RegistryEntry) -> bool {
+    entry
+        .key_path
+        .to_ascii_lowercase()
+        .contains(UNINSTALL_KEY_PART)
+        && entry.value_name.as_deref().is_some_and(|name| {
+            ONLY_TRUE_WHERE_IT_WAS_INSTALLED
+                .iter()
+                .any(|value| name.eq_ignore_ascii_case(value))
+        })
+}
+
 /// Whether a value under an app's keys is license data: its own name says so, or the name of a key
 /// it is under, other than one named for the product itself, or a kind of key that says nothing.
 pub(crate) fn is_license_registry_entry(entry: &RegistryEntry, names: &ProductNames) -> bool {
@@ -1427,6 +1448,49 @@ mod tests {
             value_name: None,
             ..named("x")
         }));
+    }
+
+    #[test]
+    fn what_only_windows_installer_on_that_pc_goes_by_stays_behind() {
+        let at = |key: &str, name: &str| RegistryEntry {
+            key_path: key.to_owned(),
+            ..entry(name, RegistryValueKind::String, "x", "")
+        };
+        let entries = [
+            r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{3B0346D3-155D-43E5-9561-B9BE51CF2EB6}",
+            r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Acme",
+        ];
+        for key in entries {
+            for name in [
+                "InstallSource",
+                "ModifyPath",
+                "WindowsInstaller",
+                "windowsinstaller",
+            ] {
+                assert!(
+                    is_only_true_where_it_was_installed(&at(key, name)),
+                    "{key} {name}"
+                );
+            }
+            for name in [
+                "DisplayName",
+                "InstallLocation",
+                "UninstallString",
+                "DisplayVersion",
+            ] {
+                assert!(
+                    !is_only_true_where_it_was_installed(&at(key, name)),
+                    "{key} {name}"
+                );
+            }
+        }
+        // In the app's own settings, those names are whatever the app says.
+        for name in ["InstallSource", "ModifyPath", "WindowsInstaller"] {
+            assert!(!is_only_true_where_it_was_installed(&at(
+                r"Software\Acme",
+                name
+            )));
+        }
     }
 
     #[test]
