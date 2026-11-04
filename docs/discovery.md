@@ -152,16 +152,20 @@ file name is not the app.
 
 ### The uninstaller
 
-The folder an app's uninstaller is in is a root only if it is the app's (`uninstaller_folder_is_the_apps`): it says so by its name,
-or it is inside where the app's entry says the app is, or with no such place said, it is in `Program Files`. Anywhere else that
-file comes by itself, so a setup run from `D:\Downloads` does not bring all of `D:\Downloads`.
+The folder an app's uninstaller is in is a root only if it is the app's (`uninstaller_folder_is_the_apps`): it is inside where the
+app's entry says the app is, or with no such place said, it holds the app's program, says so by its name, or is in `Program Files`. A
+folder named only for the publisher is not, as it can hold all they make, and neither is a person's own, such as `Downloads`. That file
+comes by itself if it is somewhere programs are put, `Program Files` or `ProgramData`, and otherwise stays, so a setup run from
+`D:\Downloads` brings nothing. With no location on record, Windows Installer is asked whether another app has a file in that folder
+(`another_app_has_a_file_in`), which takes some seconds, and if so it is left out.
 
 ### What every record's folder is asked
 
 Each folder something on record names, other than where the app itself is, is asked by `root_refusal` whether it may be read, is
-written as it is really called, holds what is shared or is Windows', or holds another app's folder. Microsoft's own apps are in
-`Program Files` under the names that say a folder is everyone's, so those names do not count there for them. A folder known only
-because an uninstaller is there is also refused if it is in another app's folder. What a record names of a folder that fails still
+there, is written as it is really called, holds what is shared or is Windows', is named only for the publisher, or holds another app's
+folder or a file Windows Installer says is another app's, as far as that has been asked. Microsoft's own apps are in `Program Files`
+under the names that say a folder is everyone's, so those names do not count there for them. A folder known only because an
+uninstaller is there is also refused if it is in another app's folder. What a record names of a folder that fails still
 goes, file by file, and the folder is said to be left out, by `folder_left_out_of_the_app`.
 
 ### Install roots from recorded files

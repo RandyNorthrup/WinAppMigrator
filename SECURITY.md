@@ -56,7 +56,9 @@ installer is about to trust, and an honest package reaching too far:
   A package that calls itself Google can write to Google's keys and not be shown doing it, and what is under
   `Software\Classes` goes by the rules for what ties an app into Windows and is not counted.
 - **What it says it will do is what it does.** The list a person agrees to and the install go through one
-  review, with the same options, and a file from a data folder that is not going back to one can arrive
+  review, for the location in the box and with the same options, as a value written with a variable can be a file of the
+  package at one location and nothing at another. **Install** waits for that list, works it out once more when clicked, and if it
+  has changed shows the new one and installs nothing. A file from a data folder that is not going back to one can arrive
   under the install location, but nothing is set up to run it. Who a scheduled task runs as is its principal,
   and asking for the highest rights it can have is marked as high rights. What depends on what is on this PC cannot be known until
   the install gets there, such as a service or a driver of that name already being another app's. Those are on the list as asked
@@ -367,19 +369,26 @@ is called.
 
 So does what a scan finds of an app's data with the option off, which only the screen is told of: a package says nothing of
 those files, what they are called, or a credential among them, and a folder of an account's that you left out is named without
-its path. What says a folder is an account's is mostly that it is under one called `Users`, so an account's folders somewhere else,
-as an administrator can arrange, can be named in a warning or in what you left out, unless that is the folder of the account being
-scanned or building, which is known.
+its path. What says a folder is an account's is that it is under one called `Users`, or that the account's own settings say it
+keeps something there, as a Desktop or Documents moved to another drive. The account's settings are only there for an account being
+scanned or building, so another account's folders somewhere else can still be named in a warning or in what you left out.
 
 An account's environment variables only go if all they say is where the app is. A service that ran as someone is said to have run
-as an account of its PC, and is set up as `LocalService` as before. A scheduled task goes without who it was for, and a shortcut in
-an account's folders only if it just opens the app.
+as an account of its PC, and is set up as `LocalService` as before. One told to work on a place in an account's folders goes only
+with the option on, and a setting of one that names such a place stays behind. A scheduled task goes without who it was for or what
+anyone wrote about it, and a task or shortcut that has been given a path, an address, or a person that is not the app's goes only with
+the option on. Plain words stay: they are how an app is told what to do, though one person's word could be `bank-prod`. A shortcut in an
+account's folders goes only if it just opens the app, or for an app installed for that one account, if all it says is about the app.
 
-With the option off, a build looks through all it wrote for those last, in each form a value can be held in, and says on the done
-screen where it found any. It does not change them, and it does not look in the app's own files. What stays can still say something:
-an ODBC source can name a server and a user, and a plainly named value in an app's own key that points in its folder could be called
-anything. With the License option on as well, a license value in an account's key goes where it was, so its key's name goes with
-it, and so does the path of a license file in an account's folders.
+With the option off, a build looks through all it wrote for those last, and says first on the done screen where it found any. It goes
+by the names and folders it knows of and, by what they look like, anyone's folder under `Users` and anyone's id, in UTF-8, UTF-16 either
+way round from any byte, and Windows-1252, ignoring case, and in what is written as hex or a list of numbers, with a known id in binary
+too. A name only counts where it is used as one, so an account called `Will` is not found in every sentence. It does not see anything
+encoded another way, such as Base64, or a name by itself in a place nothing says it is one. It does not change what it finds, and it
+does not look in the app's own files. What stays can still say something: an ODBC source can name a server and a user, and a plainly
+named value in an app's own key that points in its folder could be called anything. With the License option on as well, a license
+value in an account's key goes where it was, so its key's name goes with it, and so does the path of a license file in an account's
+folders.
 
 **What this cannot catch.** This goes by names and a few shapes of text, and a heuristic cannot find every secret:
 
@@ -395,8 +404,7 @@ it, and so does the path of a license file in an account's folders.
   account and can hold paths in that account's folders, the account, name, and organization in its entry in Settings, and where a
   Windows Installer setup was run from. A serial typed into a setup is a license like any other, so it stays behind with the License option off, and
   with it on, one for a machine-wide app is only reported. An app installed for one account has that account's folders in
-  the paths a package records. A shortcut in an account's own folders with the option off goes only if all it does is open the
-  app, and is said with no account in it, but a shortcut of any app can name the account in where it points.
+  the paths a package records. A shortcut in an account's own folders with the option off is said with no account in it.
 - What is encrypted some other way than DPAPI is copied as it is, and is not decrypted to look.
 
 So an installer can contain secrets, and **it has to be handled accordingly**: do not post one or send it to anyone you

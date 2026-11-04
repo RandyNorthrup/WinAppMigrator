@@ -221,8 +221,10 @@ why. Then it reads only the manifest, straight out of the package, and shows the
 `included_license_data`, are set), and a **Dependencies** list.
 
 Before anything is installed, a card lists what the package sets up beyond files, from
-`restore_review::system_changes_restoring`, which goes through the same review as the install, with the same options, so a list is
-kept for each state of the boxes. That is every `SystemChangeKind`: services, drivers, scheduled tasks, autostart entries, shortcuts,
+`restore_review::system_changes_restoring`, which goes through the same review as the install, for the location in the box and with
+the same options, so a list is kept for each state of the boxes, and they are worked out again behind the window when the location
+changes. **Install** waits for that, and when clicked works the list out once more, and if it is not what was on the screen, shows
+the new one and installs nothing. That is every `SystemChangeKind`: services, drivers, scheduled tasks, autostart entries, shortcuts,
 `Path` changes, environment variables, shell extensions, menu commands, link types, file types, COM, firewall rules, event log
 sources, fonts, ODBC drivers and sources, compatibility settings, Default apps, program names, and other settings, which is what is outside the
 app's own keys and all of those. It also lists what

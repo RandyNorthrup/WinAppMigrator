@@ -39,8 +39,11 @@ Run from a script, an installer does more than it did, and refuses more:
 - **More stops an install before it starts:** an app that cannot run on this PC, not enough room on any drive it writes to, a
   network share or anything under a link as the location, a part of a location Windows would read differently, a whole drive
   or a folder of Windows', and nowhere private to unpack.
-- **A service set to start automatically is started** once what was installed has been read back. One that starts only when
-  asked stays stopped. Rollback and uninstall stop what they remove.
+- **A service set to start automatically is started** once what was installed has been read back, if it was really set up. One that
+  starts only when asked stays stopped. Rollback and uninstall stop what they remove, and an install cut off after stopping a
+  service to replace what it runs starts it again the next time an installer runs.
+- **What the rewriting of a value costs is refused up front.** A package holding too much to check is refused whole, where a limit
+  could run out part way and leave a value written as it was.
 - **What it prints has grown:** how much room it needs on each drive, what it sets up, each warning and error and what it is
   about, what it refused, the install's id, and where the log is. An installer is a windowed program, so pipe it, for example
   to `Out-String`, to read that and to have `$LASTEXITCODE` set.
@@ -110,6 +113,10 @@ Run from a script, an installer does more than it did, and refuses more:
   that broke the JSON lost all of them. A task with two programs is one task, and a task whose second program is the app's is found.
 - **Fourteen warnings about old folder names are gone.** Every elevated scan warned about `Application Data`, `My Music`, and the
   junctions like them.
+- **What a program says of itself is held to what can be believed before it is parsed.** Its headers, sections, and resources have to
+  be where any linker puts them, on 66,677 real programs that refused none, and 84,000 damaged ones took nothing down. A folder an
+  uninstaller is in is the app's if it holds the program, so `D:\Games\MyGame\Content` comes along, and is not if it is named only for the
+  publisher, or if Windows Installer says another app has a file there. A setup in someone's Downloads, on any drive, stays.
 
 ### What a package says about who built it
 
@@ -142,6 +149,11 @@ Either way:
   a trigger waited for go too, a password nobody has comes to running while they are signed in, and one run for a group of theirs
   runs as whoever installs it as well, and not as everyone on the PC. With the option off, what else it runs from someone's folders
   goes, and one told to work on something there goes whole.
+
+- **How an app was removed where it was is not said.** `UninstallString` and `QuietUninstallString` can be a setup in someone's
+  Downloads, and nothing on another PC reads them.
+- **The last look at a package is first on the done screen,** and "Installer ready" no longer reads as all clear above it. It goes
+  through each file once and can be cancelled. See [what it looks for](SECURITY.md#an-installer-can-contain-secrets).
 
 ### Credentials and licenses
 
