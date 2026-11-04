@@ -1406,9 +1406,11 @@ pub(crate) fn put_back_backup(backup: &Backup, path: &Path) -> Result<()> {
                 let _ = fs::remove_file(&partial);
                 return copied;
             }
-            forget_permissions_of(from);
+            // Last, as a backup that could not be removed is used again, and needs these.
             make_replaceable(from)?;
-            fs::remove_file(from).map_err(|error| WinAppMigratorError::io(from, error))
+            fs::remove_file(from).map_err(|error| WinAppMigratorError::io(from, error))?;
+            forget_permissions_of(from);
+            Ok(())
         }
     }
 }
