@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use eframe::egui::Role as A11yRole;
 use eframe::egui::{self, Key, Margin, Modifiers, RichText, Sense, Stroke, WidgetInfo};
 
+use winappmigrator_core::account_traces::MENTIONS_CODE;
 use winappmigrator_core::{AppArchitecture, InstallScope, InstalledApp, ScanSource, Warning};
 use winappmigrator_core::{BuildStep, WarningSeverity};
 
@@ -724,6 +725,18 @@ impl WinAppMigratorApp {
             ],
         );
 
+        // Each by itself, first, however many other warnings there are, as it is about what anyone who
+        // is given the installer can read.
+        let (mentions, other_warnings): (Vec<Warning>, Vec<Warning>) = package
+            .warnings
+            .iter()
+            .cloned()
+            .partition(|warning| warning.code == MENTIONS_CODE);
+        for warning in &mentions {
+            ui.add_space(SPACE_SM);
+            widgets::notice(ui, theme, Role::Warning, &warning.message);
+        }
+
         let mut folder_error = None;
         if let Some(path) = package.self_extracting_archive_path.as_ref() {
             if let Some(data_file) = package.data_file_path.as_ref() {
@@ -783,7 +796,7 @@ impl WinAppMigratorApp {
             ui,
             theme,
             "Warnings",
-            &package.warnings,
+            &other_warnings,
             role == Role::Warning,
         );
 
@@ -900,6 +913,13 @@ pub(crate) fn outcome_summary(outcome: &MigrationOutcome) -> (Role, String) {
                 if missed == 1 { "it" } else { "them" },
             ),
         )
+    } else if count_of(MENTIONS_CODE) > 0 {
+        (
+            Role::Warning,
+            "Installer built, and it still says something of who it came from. Read what it says \
+             below before you give it to anyone."
+                .to_owned(),
+        )
     } else {
         (
             Role::Success,
@@ -1012,6 +1032,14 @@ fn progress_label(progress: Option<&BuildProgress>) -> (String, Option<f32>) {
                 widgets::format_count(*total)
             ),
             (*bytes_total > 0).then(|| *bytes_done as f32 / *bytes_total as f32),
+        ),
+        Some(BuildProgress::Build(BuildStep::LookingOverWhatItSays { done, total })) => (
+            format!(
+                "Looking over what the installer says: {} of {}…",
+                widgets::format_count(*done),
+                widgets::format_count(*total)
+            ),
+            None,
         ),
         Some(BuildProgress::Build(BuildStep::WritingInstaller)) => {
             ("Writing the installer…".to_owned(), None)

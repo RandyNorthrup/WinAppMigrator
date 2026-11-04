@@ -6,19 +6,24 @@
 //! this goes by what each thing is, and is one function, which runs when a scan is asked for none of
 //! an account's data, and again when a person has left all of that data out of one that was.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::account_settings::say_no_more_of_licenses_than_the_apps_key;
+use crate::account_settings::{
+    say_no_more_of_licenses_than_the_apps_key, say_no_more_than_the_apps_key,
+};
+use crate::errors::Result;
+use crate::file_discovery::folders_an_account_has_moved;
 use crate::models::{
     DependencyEntry, EnvironmentScope, EnvironmentVariableEntry, FileEntry, InstallScope,
     LeftOutItem, PackageManifest, RegistryHive, ScanReport, ScheduledTaskEntry, ServiceEntry,
     ShortcutEntry, Warning, WarningSeverity,
 };
 use crate::path_utils::{
-    comparable_path, current_user_sid, is_person_sid, path_is_within, signed_in_user,
+    comparable_path, current_user_sid, expand_env_vars, is_person_sid, path_is_within,
+    signed_in_user,
 };
 use crate::restore_policy::ServiceAccount;
 use crate::secret_rules::LeftOut;
@@ -29,7 +34,21 @@ use crate::task_scan::{
 };
 
 const USERS_FOLDER: &str = r"\users\";
-const PUBLIC_NAME: &str = "public";
+/// What is under `Users` and nobody's.
+const NOBODYS_FOLDERS: [&str; 4] = ["public", "default", "default user", "all users"];
+/// What a path can be written with that is wherever an account's folder is, by what is below that.
+const ACCOUNTS_FOLDER_VARIABLES: [(&str, &str); 3] = [
+    ("%userprofile%", ""),
+    ("%appdata%", r"\AppData\Roaming"),
+    ("%localappdata%", r"\AppData\Local"),
+];
+/// What can only be said of whoever reads it, wherever the app is.
+const ONLY_AN_ACCOUNTS_VARIABLES: [&str; 5] =
+    ["%username%", "%homepath%", "%homedrive%", "%temp%", "%tmp%"];
+/// The words a name comes after when that is what it is, in what a package says of someone.
+const WORDS_BEFORE_A_NAME: [&str; 9] = [
+    "account", "as", "by", "for", "from", "of", "on", "owner", "user",
+];
 const START_MENU_PART: &str = r"\start menu\";
 const DESKTOP_PART: &str = r"\desktop\";
 /// Where a shortcut in an account's own folders goes, wherever that account's folders are. A restore
@@ -68,10 +87,19 @@ const NAMES_THAT_ARE_WORDS: [&str; 14] = [
 ];
 const NETWORK_PATH_START: &str = r"\\";
 const NOT_A_NETWORK_PATH: [&str; 2] = [r"\\?\", r"\\.\"];
-const MENTIONS_CODE: &str = "package_mentions_an_account";
+/// What a warning from the last look over a package is known by, which a screen has to put where it
+/// will be read: it is about what strangers can read in an installer that looks finished.
+pub const MENTIONS_CODE: &str = "package_mentions_an_account";
 const ENDS_A_PATH_ON_A_COMMAND_LINE: [char; 6] = ['"', '<', '>', '|', ';', ','];
 /// The shortest run of hex that can be a value's bytes, rather than a number.
 const SHORTEST_HEX_VALUE: usize = 6;
+/// What Windows-1252 has where Latin-1 has control characters, from `0x80`.
+const WINDOWS_1252_FROM_0X80: [char; 32] = [
+    '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž', '\u{8F}',
+    '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
+];
+const SID_PREFIX: &str = "S-1-";
+const FOLDER_UNREADABLE_CODE: &str = "file_discovery_dir_unreadable";
 
 /// Who a scan was of and who is building, for what a package with none of an account's data has no
 /// reason to say. Only ever in memory: nothing here goes in a package.
@@ -185,7 +213,7 @@ impl AccountTraces {
                 traces.add_account(&name.to_string_lossy(), None, Some(&folder));
             }
         }
-        // Where its own settings say its Desktop and Start Menu are, which can be anywhere.
+        // Where its own settings say its folders are, which can be anywhere.
         let shared = shared_shortcut_folders(system);
         for folder in folders_of_the_accounts_shortcuts(system) {
             if !shared
@@ -193,6 +221,11 @@ impl AccountTraces {
                 .any(|base| comparable_path(&folder) == comparable_path(base))
             {
                 traces.add_folder(&system.logical_path(&folder));
+            }
+        }
+        for user in system.user_hives() {
+            for folder in folders_an_account_has_moved(&user, system) {
+                traces.add_folder(&folder);
             }
         }
         if let Some(computer) = system.source_identity().computer_name {
@@ -272,6 +305,24 @@ fn is_part_of_a_word(character: Option<char>) -> bool {
     character.is_some_and(|character| character.is_alphanumeric() || character == '_')
 }
 
+/// Whether a name at this place in text is being used as one, by what is around it: part of a path,
+/// someone's, or after a word that comes before a name. An account can be called what a word is, and
+/// a PC what a product is, and neither of those is to be taken out of a sentence.
+fn is_said_as_a_name(lower: &str, at: usize, length: usize) -> bool {
+    let before = &lower[..at];
+    let after = &lower[at + length..];
+    let word_before = before
+        .trim_end()
+        .rsplit(|character: char| !character.is_alphanumeric())
+        .next()
+        .unwrap_or_default();
+    (before.is_empty() && !after.starts_with('.'))
+        || before.ends_with(['\\', '/', '=', ':', '"', '\'', '<', '>'])
+        || after.starts_with(['\\', '/', '@'])
+        || after.starts_with("'s")
+        || WORDS_BEFORE_A_NAME.contains(&word_before)
+}
+
 /// Where a name is in text as itself, not as part of something longer. One that is also a word only
 /// counts as a folder of that name, or after an authority.
 fn places_of_name(lower: &str, name: &str) -> Vec<usize> {
@@ -287,6 +338,9 @@ fn places_of_name(lower: &str, name: &str) -> Vec<usize> {
             continue;
         }
         if is_a_word && before != Some('\\') && after != Some('\\') {
+            continue;
+        }
+        if !is_said_as_a_name(lower, at, name.len()) {
             continue;
         }
         places.push(at);
@@ -359,7 +413,11 @@ fn without_accounts_folders(text: &str) -> String {
         if name_length == 0 {
             continue;
         }
-        let start = if at >= 2 && lower.as_bytes()[at - 1] == b':' {
+        // A drive's letter, if it is one: what comes before the colon can be anything.
+        let start = if at >= 2
+            && lower.as_bytes()[at - 1] == b':'
+            && lower.as_bytes()[at - 2].is_ascii_alphabetic()
+        {
             at - 2
         } else {
             at
@@ -396,9 +454,9 @@ fn without_person_sids(text: &str) -> String {
     output
 }
 
-/// The text a value can hold under another form: hex, as a binary registry value is written, of
-/// bytes that are text in either encoding. `None` for what is not that.
-fn text_in_hex(text: &str) -> Option<String> {
+/// The bytes a value can hold under another form: hex, as a binary registry value is written. `None`
+/// for what is not that.
+fn bytes_in_hex(text: &str) -> Option<Vec<u8>> {
     let digits: String = text
         .chars()
         .filter(|character| !matches!(character, ',' | ' ' | '\\' | '\r' | '\n'))
@@ -409,61 +467,175 @@ fn text_in_hex(text: &str) -> Option<String> {
     {
         return None;
     }
-    let bytes: Vec<u8> = (0..digits.len())
-        .step_by(2)
-        .filter_map(|at| u8::from_str_radix(&digits[at..at + 2], 16).ok())
-        .collect();
-    Some(text_of_bytes(&bytes))
-}
-
-/// Bytes read each way a value's can be, side by side.
-fn text_of_bytes(bytes: &[u8]) -> String {
-    let (pairs, _) = bytes.as_chunks::<2>();
-    let wide: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
-    format!(
-        "{}\n{}",
-        String::from_utf8_lossy(bytes),
-        String::from_utf16_lossy(&wide)
+    Some(
+        (0..digits.len())
+            .step_by(2)
+            .filter_map(|at| u8::from_str_radix(&digits[at..at + 2], 16).ok())
+            .collect(),
     )
 }
 
-fn mentions(text: &str, kind: TraceKind, what: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    let what = what.to_ascii_lowercase();
-    match kind {
-        TraceKind::Folder | TraceKind::Sid => lower.contains(&what),
-        TraceKind::Account | TraceKind::Computer => !places_of_name(&lower, &what).is_empty(),
+fn windows_1252(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&byte| match byte {
+            0x80..=0x9F => WINDOWS_1252_FROM_0X80[usize::from(byte - 0x80)],
+            other => char::from(other),
+        })
+        .collect()
+}
+
+fn wide_text(bytes: &[u8], from: fn([u8; 2]) -> u16) -> String {
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let wide: Vec<u16> = pairs.iter().map(|pair| from(*pair)).collect();
+    String::from_utf16_lossy(&wide)
+}
+
+/// Bytes read each way a value's or a file's can be, one string for each. Text that is one or two
+/// bytes to a character has no zeros in it, so the ways that are two only go if there are any, and
+/// each from both places it could start, as a file need not hold only text.
+fn text_forms_of(bytes: &[u8]) -> Vec<String> {
+    let mut forms = vec![
+        String::from_utf8_lossy(bytes).into_owned(),
+        windows_1252(bytes),
+    ];
+    if bytes.contains(&0) {
+        for start in [0, 1] {
+            let part = bytes.get(start..).unwrap_or_default();
+            forms.push(wide_text(part, u16::from_le_bytes));
+            forms.push(wide_text(part, u16::from_be_bytes));
+        }
+    }
+    forms
+}
+
+/// An account's id as Windows holds it, which is how a binary value would.
+fn sid_as_bytes(sid: &str) -> Option<Vec<u8>> {
+    let mut parts = sid.strip_prefix(SID_PREFIX)?.split('-');
+    let authority: u64 = parts.next()?.parse().ok()?;
+    let below: Vec<u32> = parts
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()
+        .ok()?;
+    let mut bytes = vec![1, u8::try_from(below.len()).ok()?];
+    bytes.extend(authority.to_be_bytes().get(2..)?);
+    for part in below {
+        bytes.extend(part.to_le_bytes());
+    }
+    Some(bytes)
+}
+
+/// What has been seen of who someone is, by its kind and which of what was looked for it is.
+type Found = BTreeSet<(TraceKind, usize)>;
+/// What is seen by what it looks like, and not as any one thing that was looked for.
+const BY_ITS_SHAPE: usize = usize::MAX;
+
+/// What to look for in a package, each once.
+struct LastLook {
+    words: Vec<(TraceKind, String)>,
+    ids: Vec<Vec<u8>>,
+}
+
+impl LastLook {
+    fn for_traces(traces: &AccountTraces) -> Self {
+        Self {
+            words: traces
+                .to_look_for()
+                .into_iter()
+                .map(|(kind, text)| (kind, text.to_lowercase()))
+                .collect(),
+            ids: traces
+                .sids
+                .iter()
+                .filter_map(|sid| sid_as_bytes(sid))
+                .collect(),
+        }
+    }
+
+    /// What of who someone is this says. Anyone's folder and anyone's id say so by their shape, as an
+    /// account can have gone from a PC, and a folder can be called by its short name.
+    fn in_text(&self, text: &str, found: &mut Found) {
+        let lower = text.to_lowercase();
+        for (which, (kind, what)) in self.words.iter().enumerate() {
+            if !found.contains(&(*kind, which)) && mentions(&lower, *kind, what) {
+                found.insert((*kind, which));
+            }
+        }
+        if without_accounts_folders(&lower) != lower {
+            found.insert((TraceKind::Folder, BY_ITS_SHAPE));
+        }
+        if mentions_a_person_id(text) {
+            found.insert((TraceKind::Sid, BY_ITS_SHAPE));
+        }
+    }
+
+    fn in_bytes(&self, bytes: &[u8], found: &mut Found) {
+        for form in text_forms_of(bytes) {
+            self.in_text(&form, found);
+        }
+        let has_id = self
+            .ids
+            .iter()
+            .any(|id| bytes.windows(id.len()).any(|window| window == id));
+        if has_id {
+            found.insert((TraceKind::Sid, BY_ITS_SHAPE));
+        }
+    }
+
+    /// As a manifest holds it: text, or what is written as hex or as a list of numbers.
+    fn in_value_text(&self, text: &str, found: &mut Found) {
+        self.in_text(text, found);
+        if let Some(bytes) = bytes_in_hex(text) {
+            self.in_bytes(&bytes, found);
+        }
+    }
+
+    /// Each value under a part of a manifest, by what each says.
+    fn in_value(&self, value: &Value, said: &mut dyn FnMut(Found)) {
+        match value {
+            Value::String(text) => {
+                let mut found = Found::new();
+                self.in_value_text(text, &mut found);
+                said(found);
+            }
+            Value::Array(items) if items.iter().all(Value::is_u64) && !items.is_empty() => {
+                let bytes: Vec<u8> = items
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .filter_map(|number| u8::try_from(number).ok())
+                    .collect();
+                let mut found = Found::new();
+                self.in_bytes(&bytes, &mut found);
+                said(found);
+            }
+            Value::Array(items) => {
+                for item in items {
+                    self.in_value(item, said);
+                }
+            }
+            Value::Object(fields) => {
+                for (name, item) in fields {
+                    let mut found = Found::new();
+                    self.in_text(name, &mut found);
+                    said(found);
+                    self.in_value(item, said);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
-fn text_mentions(text: &str, kind: TraceKind, what: &str) -> bool {
-    mentions(text, kind, what)
-        || text_in_hex(text).is_some_and(|decoded| mentions(&decoded, kind, what))
+/// Whether text holds an id of the kind only a person has, however it is written.
+fn mentions_a_person_id(text: &str) -> bool {
+    let upper = text.to_ascii_uppercase();
+    without_person_sids(&upper) != upper
 }
 
-/// How many of the values under a part of a manifest mention this.
-fn count_mentions(value: &Value, kind: TraceKind, what: &str) -> usize {
-    match value {
-        Value::String(text) => usize::from(text_mentions(text, kind, what)),
-        Value::Array(items) if items.iter().all(Value::is_u64) && !items.is_empty() => {
-            let bytes: Vec<u8> = items
-                .iter()
-                .filter_map(Value::as_u64)
-                .filter_map(|number| u8::try_from(number).ok())
-                .collect();
-            usize::from(mentions(&text_of_bytes(&bytes), kind, what))
-        }
-        Value::Array(items) => items
-            .iter()
-            .map(|item| count_mentions(item, kind, what))
-            .sum(),
-        Value::Object(fields) => fields
-            .iter()
-            .map(|(name, item)| {
-                usize::from(mentions(name, kind, what)) + count_mentions(item, kind, what)
-            })
-            .sum(),
-        _ => 0,
+fn mentions(lower: &str, kind: TraceKind, what: &str) -> bool {
+    match kind {
+        TraceKind::Folder | TraceKind::Sid => lower.contains(what),
+        TraceKind::Account | TraceKind::Computer => !places_of_name(lower, what).is_empty(),
     }
 }
 
@@ -487,43 +659,53 @@ fn part_called(field: &str) -> String {
 /// this, and it stops nothing, since what is left can be what makes the app work. It is here because
 /// every way a name has got into a package so far was one way nobody had thought of, and the next one
 /// should at least be seen. Files other than the manifest repeat it, so they are named if it does not.
+///
+/// It goes by each thing that says who someone is in each form text is held in, and anyone's folder
+/// and anyone's id by their shape. Nothing encoded any other way is seen. `looked_at` is told how far
+/// it has got, and is how it is stopped.
 pub(crate) fn what_a_package_still_says(
     manifest: &PackageManifest,
     written: &[(String, Vec<u8>)],
     traces: &AccountTraces,
-) -> Vec<Warning> {
+    looked_at: &dyn Fn(usize, usize) -> Result<()>,
+) -> Result<Vec<Warning>> {
     let Ok(Value::Object(fields)) = serde_json::to_value(manifest) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
+    let look = LastLook::for_traces(traces);
+    let total = fields.len() + written.len();
+    let mut done = 0;
     let mut said: BTreeMap<TraceKind, BTreeMap<String, usize>> = BTreeMap::new();
-    for (kind, what) in traces.to_look_for() {
-        let mut in_the_manifest = false;
-        for (field, value) in &fields {
-            let count = count_mentions(value, kind, what);
-            if count > 0 {
-                in_the_manifest = true;
-                *said
-                    .entry(kind)
-                    .or_default()
-                    .entry(part_called(field))
-                    .or_default() += count;
-            }
+    let mut in_the_manifest = Found::new();
+    let note = |found: &Found, place: &str, said: &mut BTreeMap<_, BTreeMap<String, usize>>| {
+        let kinds: BTreeSet<TraceKind> = found.iter().map(|(kind, _)| *kind).collect();
+        for kind in kinds {
+            *said
+                .entry(kind)
+                .or_default()
+                .entry(place.to_owned())
+                .or_default() += 1;
         }
-        if in_the_manifest {
-            continue;
-        }
-        for (name, bytes) in written {
-            let decoded = text_of_bytes(bytes);
-            if text_mentions(&decoded, kind, what) {
-                *said
-                    .entry(kind)
-                    .or_default()
-                    .entry(name.clone())
-                    .or_default() += 1;
-            }
-        }
+    };
+    for (field, value) in &fields {
+        looked_at(done, total)?;
+        done += 1;
+        let place = part_called(field);
+        look.in_value(value, &mut |found| {
+            note(&found, &place, &mut said);
+            in_the_manifest.extend(found);
+        });
     }
-    said.into_iter()
+    for (name, bytes) in written {
+        looked_at(done, total)?;
+        done += 1;
+        let mut found = Found::new();
+        look.in_bytes(bytes, &mut found);
+        let only_here: Found = found.difference(&in_the_manifest).copied().collect();
+        note(&only_here, name, &mut said);
+    }
+    Ok(said
+        .into_iter()
         .map(|(kind, places)| {
             let places: Vec<String> = places
                 .into_iter()
@@ -541,7 +723,7 @@ pub(crate) fn what_a_package_still_says(
                 None,
             )
         })
-        .collect()
+        .collect())
 }
 
 /// Whether a path is under `Users` and past the `Public` there, whose name has to be all of it.
@@ -549,7 +731,7 @@ fn is_in_a_users_folder(lower: &str) -> bool {
     lower.find(USERS_FOLDER).is_some_and(|at| {
         let name = &lower[at + USERS_FOLDER.len()..];
         let name = name.split('\\').next().unwrap_or_default();
-        !name.is_empty() && name != PUBLIC_NAME
+        !name.is_empty() && !NOBODYS_FOLDERS.contains(&name)
     })
 }
 
@@ -579,6 +761,23 @@ fn names_a_place_of_an_account(
             .iter()
             .any(|folder| path_is_within(Path::new(path), folder))
     };
+    if ONLY_AN_ACCOUNTS_VARIABLES
+        .iter()
+        .any(|variable| lower.contains(variable))
+    {
+        return true;
+    }
+    // Written as whoever reads it would have it, which only the app's own folder can be let off.
+    for (variable, _) in ACCOUNTS_FOLDER_VARIABLES {
+        let mut from = 0;
+        while let Some(found) = lower[from..].find(variable) {
+            let at = from + found;
+            from = at + variable.len();
+            if !reads_as_the_apps(path_on_a_command_line(&lower, at), app_folders, traces) {
+                return true;
+            }
+        }
+    }
     // A folder known to be someone's, which need not be anywhere called `Users`.
     for folder in &traces.profile_folders {
         let folder = folder.replace('/', "\\").to_ascii_lowercase();
@@ -615,6 +814,135 @@ fn names_a_place_of_an_account(
         }
     }
     false
+}
+
+/// Whether a path written with a variable of an account's is in the app's folder, for any account
+/// whose folder is known. Not by this process's environment, which is whoever is running this.
+fn reads_as_the_apps(path: &str, app_folders: &[PathBuf], traces: &AccountTraces) -> bool {
+    traces.profile_folders.iter().any(|profile| {
+        let mut read = path.to_owned();
+        for (variable, below) in ACCOUNTS_FOLDER_VARIABLES {
+            read = replace_ignoring_case(&read, variable, &format!("{profile}{below}"));
+        }
+        app_folders
+            .iter()
+            .any(|folder| path_is_within(Path::new(&read), folder))
+    })
+}
+
+/// The words of a command line, as whatever it runs would be given them: split by spaces, apart from
+/// in quotes.
+fn words_of(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_quotes = false;
+    for character in text.chars() {
+        match character {
+            '"' => in_quotes = !in_quotes,
+            ' ' | '\t' if !in_quotes => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            other => word.push(other),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// What a word says, apart from being an option: all of it, or what is given to an option in it, as in
+/// `--open=C:\a.txt` and `/open:C:\a.txt`. An option on its own says nothing.
+fn what_a_word_says(word: &str) -> Option<&str> {
+    if word.starts_with("//") {
+        return Some(word);
+    }
+    let Some(option) = word.strip_prefix('-').or_else(|| word.strip_prefix('/')) else {
+        return Some(word);
+    };
+    let at = option.find(['=', ':'])?;
+    option.get(at + 1..).filter(|value| !value.is_empty())
+}
+
+/// Whether something is written as a place or as someone, rather than as a word.
+fn is_written_as_a_place(value: &str) -> bool {
+    value.contains(['\\', '/', '%', '@', ':'])
+}
+
+/// Whether something written as a place is the app's. With no way up and nothing to say where else it
+/// is, it is relative to wherever the app is running.
+fn is_a_place_of_the_app(value: &str, app_folders: &[PathBuf], traces: &AccountTraces) -> bool {
+    if value.contains('@') || value.contains("://") {
+        return false;
+    }
+    if reads_as_the_apps(value, app_folders, traces) {
+        return true;
+    }
+    let expanded = expand_env_vars(value);
+    let path = Path::new(&expanded);
+    if path.is_absolute() {
+        return app_folders
+            .iter()
+            .any(|folder| path_is_within(path, folder));
+    }
+    !expanded.contains(['%', ':'])
+        && !expanded.starts_with(['\\', '/'])
+        && !expanded.split(['\\', '/']).any(|part| part == "..")
+}
+
+/// With none of an account's data going: a machine-wide shortcut or task can be given anything to work
+/// with, and what is written as a place or as someone and is not the app's is what a person gave it.
+/// Plain words are how an app is told what to do.
+fn arguments_name_what_is_not_the_apps(
+    arguments: &str,
+    app_folders: &[PathBuf],
+    traces: &AccountTraces,
+) -> bool {
+    words_of(arguments).iter().any(|word| {
+        what_a_word_says(word).is_some_and(|value| {
+            is_written_as_a_place(value) && !is_a_place_of_the_app(value, app_folders, traces)
+        })
+    })
+}
+
+/// The names of what an app has in its folders, as what an app of one account's starts itself with
+/// goes by them.
+pub(crate) fn names_in_the_app(files: &[FileEntry]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for file in files.iter().filter(|file| file.should_copy) {
+        names.extend(
+            file.original_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_lowercase()),
+        );
+    }
+    names
+}
+
+/// What an app of one account's starts itself with has to be about the app: every word of it says
+/// nothing, or names something of the app's. `--processStart Discord.exe` does, and
+/// `-load bank-prod` is someone's. A switch can be given a number, or told yes or no.
+fn every_word_is_about_the_app(
+    arguments: &str,
+    app_folders: &[PathBuf],
+    names: &HashSet<String>,
+    traces: &AccountTraces,
+) -> bool {
+    words_of(arguments)
+        .iter()
+        .filter_map(|word| what_a_word_says(word))
+        .all(|value| {
+            let lower = value.to_lowercase();
+            if is_written_as_a_place(value) {
+                return is_a_place_of_the_app(value, app_folders, traces);
+            }
+            names.contains(&lower)
+                || lower == "true"
+                || lower == "false"
+                || lower.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 /// The path starting here. An apostrophe can be in a name, as `O'Neil` has, so it only ends one that
@@ -655,6 +983,7 @@ fn withhold_shortcuts(
     app_folders: &[PathBuf],
     main_program: &Path,
     installed_for_one_account: bool,
+    names: &HashSet<String>,
     traces: &AccountTraces,
     left_out: &mut LeftOut,
 ) {
@@ -664,18 +993,33 @@ fn withhold_shortcuts(
                 .iter()
                 .any(|folder| path_is_within(path, folder))
     };
+    let says_nothing_of_anyone = |path: &PathBuf| {
+        is_the_apps(path)
+            || (!is_in_an_accounts_folders(path, traces)
+                && !names_a_place_of_an_account(&path.to_string_lossy(), app_folders, traces))
+    };
     let mut withheld = 0_usize;
     shortcuts.retain_mut(|shortcut| {
         let arguments = shortcut.arguments.as_deref().unwrap_or_default();
-        if names_a_place_of_an_account(arguments, app_folders, traces) {
+        if names_a_place_of_an_account(arguments, app_folders, traces)
+            || arguments_name_what_is_not_the_apps(arguments, app_folders, traces)
+            || !says_nothing_of_anyone(&shortcut.target_path)
+        {
             withheld += 1;
             return false;
         }
+        shortcut.working_directory = shortcut
+            .working_directory
+            .take()
+            .filter(says_nothing_of_anyone);
+        shortcut.icon_path = shortcut.icon_path.take().filter(says_nothing_of_anyone);
         if !is_in_an_accounts_folders(&shortcut.original_lnk_path, traces) {
             return true;
         }
         let its_own = is_the_apps(&shortcut.target_path)
-            && (installed_for_one_account || arguments.trim().is_empty());
+            && (arguments.trim().is_empty()
+                || (installed_for_one_account
+                    && every_word_is_about_the_app(arguments, app_folders, names, traces)));
         if !its_own {
             withheld += 1;
             return false;
@@ -687,9 +1031,6 @@ fn withhold_shortcuts(
             return false;
         };
         shortcut.original_lnk_path = location;
-        let keep = |path: &PathBuf| !is_in_an_accounts_folders(path, traces) || is_the_apps(path);
-        shortcut.working_directory = shortcut.working_directory.take().filter(keep);
-        shortcut.icon_path = shortcut.icon_path.take().filter(keep);
         true
     });
     if withheld > 0 {
@@ -715,6 +1056,9 @@ fn withhold_tasks(
     left_out: &mut LeftOut,
 ) {
     let names_them = |text: &str| names_a_place_of_an_account(text, app_folders, traces);
+    let arguments_are_theirs = |text: &str| {
+        names_them(text) || arguments_name_what_is_not_the_apps(text, app_folders, traces)
+    };
     let is_named_for_them = |task: &ScheduledTaskEntry| {
         let name = format!("{}{}", task.task_path, task.task_name).to_ascii_lowercase();
         traces
@@ -725,12 +1069,12 @@ fn withhold_tasks(
     tasks.retain_mut(|task| {
         let item = format!("The scheduled task {}{}", task.task_path, task.task_name);
         let goes_whole =
-            is_named_for_them(task) || task.arguments.as_deref().is_some_and(names_them);
+            is_named_for_them(task) || task.arguments.as_deref().is_some_and(arguments_are_theirs);
         let cut = if goes_whole {
             TaskThatNames::GoesWhole
         } else {
             match task.definition_xml.as_deref() {
-                Some(xml) => without_what_names_an_account(xml, &names_them),
+                Some(xml) => without_what_names_an_account(xml, &names_them, &arguments_are_theirs),
                 None => TaskThatNames::NothingOfTheirs,
             }
         };
@@ -773,6 +1117,8 @@ pub(crate) struct Withholding<'a> {
     pub app_folders: &'a [PathBuf],
     pub main_program: &'a Path,
     pub installed_for_one_account: bool,
+    /// What the app has in its folders, by name.
+    pub names_in_the_app: &'a HashSet<String>,
     pub traces: &'a AccountTraces,
 }
 
@@ -783,6 +1129,7 @@ pub(crate) fn withhold_settings(from: &mut Withholding<'_>, left_out: &mut LeftO
         from.app_folders,
         from.main_program,
         from.installed_for_one_account,
+        from.names_in_the_app,
         from.traces,
         left_out,
     );
@@ -799,11 +1146,13 @@ fn withhold_variables(
     left_out: &mut LeftOut,
 ) {
     let is_the_apps = |entry: &str| {
-        let expanded = expand(entry.trim().trim_matches('"'));
-        Path::new(&expanded).is_absolute()
-            && app_folders
-                .iter()
-                .any(|folder| path_is_within(Path::new(&expanded), folder))
+        let entry = entry.trim().trim_matches('"');
+        let expanded = expand(entry);
+        reads_as_the_apps(entry, app_folders, traces)
+            || (Path::new(&expanded).is_absolute()
+                && app_folders
+                    .iter()
+                    .any(|folder| path_is_within(Path::new(&expanded), folder)))
     };
     let mut withheld = 0_usize;
     variables.retain_mut(|variable| {
@@ -863,10 +1212,44 @@ fn withhold_service_account(account: &mut Option<String>, service_name: &str) {
     }
 }
 
-fn withhold_services(services: &mut [ServiceEntry]) {
-    for service in services {
+/// A service keeps what runs it. Told to work on a place of someone's, what it does is theirs, as for a
+/// task, and a setting of its that names one goes without it.
+fn withhold_services(
+    services: &mut Vec<ServiceEntry>,
+    app_folders: &[PathBuf],
+    traces: &AccountTraces,
+    left_out: &mut LeftOut,
+) {
+    let names_them = |text: &str| {
+        names_a_place_of_an_account(text, app_folders, traces)
+            || bytes_in_hex(text).is_some_and(|bytes| {
+                text_forms_of(&bytes)
+                    .iter()
+                    .any(|form| names_a_place_of_an_account(form, app_folders, traces))
+            })
+    };
+    services.retain_mut(|service| {
         withhold_service_account(&mut service.account_name, &service.service_name);
-    }
+        if names_them(&service.restore_command_suggestion) {
+            service.restore_command_suggestion.clear();
+        }
+        if service.arguments.as_deref().is_some_and(|arguments| {
+            names_them(arguments)
+                || arguments_name_what_is_not_the_apps(arguments, app_folders, traces)
+        }) {
+            left_out.setting_of(
+                format!("The service {}", service.service_name),
+                "It works on a place in an account's folders, and only goes with the User data \
+                 option",
+            );
+            return false;
+        }
+        service.parameters.retain(|entry| {
+            !entry.value_data.as_deref().is_some_and(names_them)
+                && !entry.value_bytes_hex.as_deref().is_some_and(names_them)
+        });
+        true
+    });
 }
 
 /// A DLL found in someone's folders by what their `Path` said is known by its name.
@@ -899,6 +1282,35 @@ fn withhold_files_staying(
                 traces,
             )
     });
+}
+
+/// What could not be read while looking through `ProgramData` and an account's folders is mostly other
+/// software's, and what that is called is no one's to know from an installer.
+fn say_only_how_many_folders_of_others_could_not_be_read(
+    warnings: &mut Vec<Warning>,
+    app_folders: &[PathBuf],
+) {
+    let before = warnings.len();
+    warnings.retain(|warning| {
+        warning.code != FOLDER_UNREADABLE_CODE
+            || warning.source.as_deref().is_some_and(|source| {
+                app_folders
+                    .iter()
+                    .any(|folder| path_is_within(Path::new(source), folder))
+            })
+    });
+    let gone = before - warnings.len();
+    if gone > 0 {
+        warnings.push(Warning::new(
+            FOLDER_UNREADABLE_CODE,
+            WarningSeverity::Info,
+            format!(
+                "{gone} folders outside the app could not be read, so data of the app's there may be \
+                 missing."
+            ),
+            None,
+        ));
+    }
 }
 
 /// The folders of a report that are the app's own.
@@ -941,7 +1353,10 @@ pub(crate) fn withhold_what_is_an_accounts(report: &mut ScanReport, include_lice
             }
         }
     }
+    say_no_more_than_the_apps_key(&mut report.warnings);
     let folders = folders_of_the_app_in(report);
+    say_only_how_many_folders_of_others_could_not_be_read(&mut report.warnings, &folders);
+    let names = names_in_the_app(&report.file_inventory);
     let installed_for_one_account = report
         .source_app
         .as_ref()
@@ -956,6 +1371,7 @@ pub(crate) fn withhold_what_is_an_accounts(report: &mut ScanReport, include_lice
             app_folders: &folders,
             main_program: &main_program,
             installed_for_one_account,
+            names_in_the_app: &names,
             traces: &traces,
         },
         &mut left_out,
@@ -967,7 +1383,7 @@ pub(crate) fn withhold_what_is_an_accounts(report: &mut ScanReport, include_lice
         &traces,
         &mut left_out,
     );
-    withhold_services(&mut report.services);
+    withhold_services(&mut report.services, &folders, &traces, &mut left_out);
     for driver in &mut report.drivers {
         withhold_service_account(&mut driver.account_name, &driver.service_name);
     }
@@ -1022,6 +1438,19 @@ fn scrub_warnings(warnings: &mut [Warning], traces: &AccountTraces) {
 mod tests {
     use super::*;
 
+    fn still_says(
+        manifest: &PackageManifest,
+        written: &[(String, Vec<u8>)],
+        traces: &AccountTraces,
+    ) -> Vec<Warning> {
+        what_a_package_still_says(manifest, written, traces, &|_, _| Ok(()))
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn names_of_the_app() -> HashSet<String> {
+        ["discord.exe".to_owned()].into_iter().collect()
+    }
+
     const APP: &str = r"C:\Program Files\Acme";
     const MAIN: &str = r"C:\Program Files\Acme\acme.exe";
 
@@ -1047,6 +1476,7 @@ mod tests {
             folders,
             Path::new(MAIN),
             one_account,
+            &names_of_the_app(),
             &AccountTraces::default(),
             &mut left_out,
         );
@@ -1149,6 +1579,7 @@ mod tests {
             &folders,
             Path::new(&main),
             true,
+            &names_of_the_app(),
             &AccountTraces::default(),
             &mut left_out,
         );
@@ -1174,6 +1605,7 @@ mod tests {
             &folders,
             Path::new(MAIN),
             false,
+            &names_of_the_app(),
             &traces,
             &mut left_out,
         );
@@ -1199,6 +1631,7 @@ mod tests {
             &folders,
             Path::new(MAIN),
             false,
+            &names_of_the_app(),
             &traces,
             &mut left_out,
         );
@@ -1221,6 +1654,212 @@ mod tests {
         assert!(withheld(&mut shortcuts, &folders, false).is_empty());
         assert_eq!(shortcuts.len(), again.len());
         assert_eq!(shortcuts[0].original_lnk_path, again[0].original_lnk_path);
+    }
+
+    const PUBLIC_DESKTOP: &str = r"C:\Users\Public\Desktop\Acme.lnk";
+
+    fn on_a_shared_desktop_with(arguments: &str, traces: &AccountTraces) -> bool {
+        let mut shortcuts = vec![shortcut(PUBLIC_DESKTOP, MAIN, Some(arguments))];
+        let mut left_out = LeftOut::default();
+        withhold_shortcuts(
+            &mut shortcuts,
+            &[PathBuf::from(APP)],
+            Path::new(MAIN),
+            false,
+            &names_of_the_app(),
+            traces,
+            &mut left_out,
+        );
+        !shortcuts.is_empty()
+    }
+
+    /// Who it is for need not be under `Users`, or written as it is on this PC.
+    #[test]
+    fn a_machine_wide_shortcut_given_a_place_or_a_person_that_is_not_the_apps_goes_with_user_data()
+    {
+        let traces = AccountTraces {
+            profile_folders: vec![r"E:\Data\MyDocs".to_owned()],
+            ..AccountTraces::default()
+        };
+        for arguments in [
+            r"--open E:\Data\MyDocs\salary.xlsx",
+            r"--open %USERPROFILE%\Documents\bank.xlsx",
+            r"--open %LOCALAPPDATA%\Other\a.txt",
+            r"--user alice.smith@example.com",
+            r#""D:\Private\a.txt""#,
+            r"/open:E:\x.txt",
+            r"--open=https://example.com/mine",
+            "%USERNAME%",
+            r"\\server\share\a.txt",
+        ] {
+            assert!(!on_a_shared_desktop_with(arguments, &traces), "{arguments}");
+        }
+    }
+
+    #[test]
+    fn a_machine_wide_shortcut_told_what_to_do_or_given_a_place_of_the_apps_stays() {
+        let traces = AccountTraces::default();
+        for arguments in [
+            "--minimized",
+            "--mode fast",
+            "game1",
+            r#"--config "C:\Program Files\Acme\a.ini""#,
+            r#""--config=C:\Program Files\Acme\a.ini""#,
+            r#""%ProgramFiles%\Acme\a.ini""#,
+            r"--config data\a.ini",
+        ] {
+            assert!(on_a_shared_desktop_with(arguments, &traces), "{arguments}");
+        }
+        assert!(!on_a_shared_desktop_with(r"--config ..\..\a.ini", &traces));
+    }
+
+    #[test]
+    fn a_machine_wide_shortcut_keeps_no_folder_or_icon_of_someones() {
+        let mut one = shortcut(PUBLIC_DESKTOP, MAIN, None);
+        one.working_directory = Some(PathBuf::from(r"C:\Users\alice\Work"));
+        one.icon_path = Some(PathBuf::from(r"C:\Users\alice\i.ico"));
+        let mut two = shortcut(PUBLIC_DESKTOP, MAIN, None);
+        two.working_directory = Some(PathBuf::from(APP));
+        two.icon_path = Some(PathBuf::from(MAIN));
+        let mut shortcuts = vec![one, two];
+        let mut left_out = LeftOut::default();
+        withhold_shortcuts(
+            &mut shortcuts,
+            &[PathBuf::from(APP)],
+            Path::new(MAIN),
+            false,
+            &names_of_the_app(),
+            &AccountTraces::default(),
+            &mut left_out,
+        );
+        assert_eq!(shortcuts.len(), 2);
+        assert_eq!(shortcuts[0].working_directory, None);
+        assert_eq!(shortcuts[0].icon_path, None);
+        assert_eq!(shortcuts[1].working_directory, Some(PathBuf::from(APP)));
+        assert_eq!(shortcuts[1].icon_path, Some(PathBuf::from(MAIN)));
+    }
+
+    /// An app of one account's starts itself with arguments of its own, and those stay. What else
+    /// its shortcut says is that person's.
+    #[test]
+    fn an_app_of_one_accounts_shortcut_keeps_only_arguments_about_the_app() {
+        let keep = |arguments: &str| {
+            every_word_is_about_the_app(
+                arguments,
+                &[PathBuf::from(APP)],
+                &names_of_the_app(),
+                &AccountTraces::default(),
+            )
+        };
+        for arguments in [
+            "--processStart Discord.exe",
+            "--processStart discord.exe --start-minimized",
+            "--count=2 --hidden=true",
+            r#"--processStart "C:\Program Files\Acme\x.exe""#,
+        ] {
+            assert!(keep(arguments), "{arguments}");
+        }
+        for arguments in [
+            "-load bank-prod",
+            "--user alice.smith@example.com",
+            r"--open %USERPROFILE%\Documents\Taxes 2024.xlsx",
+            "--profile-directory=Default",
+        ] {
+            assert!(!keep(arguments), "{arguments}");
+        }
+    }
+
+    /// A variable that says where the app is, of whichever account's folder it is in, says nothing else
+    /// of them, whoever is running this now.
+    #[test]
+    fn a_variable_written_with_an_accounts_variable_stays_if_it_is_the_apps() {
+        let traces = AccountTraces {
+            profile_folders: vec![r"E:\Users\bob".to_owned()],
+            ..AccountTraces::default()
+        };
+        let folders = [PathBuf::from(r"E:\Users\bob\AppData\Local\Acme")];
+        let variable = |value: &str| EnvironmentVariableEntry {
+            scope: EnvironmentScope::User,
+            name: "ACME_HOME".to_owned(),
+            value: value.to_owned(),
+            value_kind: crate::models::RegistryValueKind::ExpandString,
+            requires_admin: false,
+            confidence: crate::models::MatchConfidence::High,
+        };
+        let mut variables = vec![
+            variable(r"%LOCALAPPDATA%\Acme"),
+            variable(r"%LOCALAPPDATA%\Other"),
+        ];
+        let mut left_out = LeftOut::default();
+        withhold_variables(
+            &mut variables,
+            &folders,
+            &|text| text.to_owned(),
+            &traces,
+            &mut left_out,
+        );
+        assert_eq!(variables.len(), 1, "{variables:?}");
+        assert_eq!(variables[0].value, r"%LOCALAPPDATA%\Acme");
+    }
+
+    fn service_named(arguments: Option<&str>) -> ServiceEntry {
+        ServiceEntry {
+            service_name: "AcmeSvc".to_owned(),
+            display_name: None,
+            binary_path: PathBuf::from(MAIN),
+            arguments: arguments.map(str::to_owned),
+            parameters: Vec::new(),
+            start_type: None,
+            account_name: None,
+            dependencies: Vec::new(),
+            description: None,
+            requires_admin: true,
+            restore_command_suggestion: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_service_says_nothing_of_a_place_of_someones() {
+        let mut quiet = service_named(Some("--port 80"));
+        quiet.restore_command_suggestion = r"sc create AcmeSvc C:\Users\alice\a.exe".to_owned();
+        quiet.parameters = vec![
+            crate::models::RegistryEntry {
+                hive: RegistryHive::LocalMachine,
+                key_path: "Parameters".to_owned(),
+                value_name: Some("Port".to_owned()),
+                value_data: Some("80".to_owned()),
+                value_kind: None,
+                value_bytes_hex: None,
+                confidence: crate::models::MatchConfidence::High,
+                requires_admin: true,
+            },
+            crate::models::RegistryEntry {
+                hive: RegistryHive::LocalMachine,
+                key_path: "Parameters".to_owned(),
+                value_name: Some("Data".to_owned()),
+                value_data: Some(r"C:\Users\alice\work".to_owned()),
+                value_kind: None,
+                value_bytes_hex: None,
+                confidence: crate::models::MatchConfidence::High,
+                requires_admin: true,
+            },
+        ];
+        let mut services = vec![quiet, service_named(Some(r"--data C:\Users\alice\work"))];
+        let mut left_out = LeftOut::default();
+        withhold_services(
+            &mut services,
+            &[PathBuf::from(APP)],
+            &AccountTraces::default(),
+            &mut left_out,
+        );
+        assert_eq!(services.len(), 1, "{services:?}");
+        assert_eq!(services[0].restore_command_suggestion, "");
+        assert_eq!(services[0].parameters.len(), 1);
+        assert_eq!(
+            services[0].parameters[0].value_name.as_deref(),
+            Some("Port")
+        );
+        assert_eq!(left_out.settings.len(), 1);
     }
 
     fn traces() -> AccountTraces {
@@ -1304,23 +1943,166 @@ mod tests {
             "61,00,6c,00,69,00,63,00,65,00".to_owned(),
         ];
         for form in forms {
-            let warnings = what_a_package_still_says(&manifest_saying(&form), &[], &traces());
-            assert_eq!(warnings.len(), 1, "{form}: {warnings:?}");
-            assert_eq!(warnings[0].code, MENTIONS_CODE);
-            assert!(!warnings[0].message.contains("alice"), "{warnings:?}");
-            assert!(
-                warnings[0]
-                    .message
-                    .contains("items intentionally excluded (1)"),
-                "{warnings:?}"
-            );
+            let warnings = still_says(&manifest_saying(&form), &[], &traces());
+            assert!(!warnings.is_empty(), "{form}");
+            for warning in &warnings {
+                assert_eq!(warning.code, MENTIONS_CODE);
+                assert!(!warning.message.contains("alice"), "{warnings:?}");
+                assert!(
+                    warning.message.contains("items intentionally excluded (1)"),
+                    "{warnings:?}"
+                );
+            }
         }
+    }
+
+    fn utf16_le(text: &str) -> Vec<u8> {
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    fn says_of_a_report(bytes: Vec<u8>) -> Vec<Warning> {
+        let traces = AccountTraces {
+            account_names: vec!["alice".to_owned(), "josé".to_owned()],
+            sids: vec!["S-1-5-21-111-222-333-1001".to_owned()],
+            ..AccountTraces::default()
+        };
+        still_says(
+            &manifest_saying("nothing"),
+            &[("report.bin".to_owned(), bytes)],
+            &traces,
+        )
+    }
+
+    /// Each as the review found one that was missed.
+    #[test]
+    fn a_last_look_finds_what_a_file_holds_in_any_of_the_forms_text_is_held_in() {
+        let mut odd_offset = vec![0x41_u8];
+        odd_offset.extend(utf16_le("owner alice here"));
+        let big_endian: Vec<u8> = "owner alice here"
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect();
+        let forms: Vec<(&str, Vec<u8>)> = vec![
+            ("UTF-16", utf16_le("owner alice here")),
+            ("UTF-16 at an odd offset", odd_offset),
+            ("UTF-16 big-endian", big_endian),
+            ("Windows-1252", b"by Jos\xE9, of here".to_vec()),
+            ("another case", "by JOSÉ, of here".as_bytes().to_vec()),
+            (
+                "a folder of someone no longer on this PC",
+                br"C:\Users\oldadmin\a.txt".to_vec(),
+            ),
+            (
+                "a short name of a folder",
+                br"C:\Users\RANDYN~1\a.txt".to_vec(),
+            ),
+            (
+                "someone's id that is not known here",
+                b"S-1-5-21-999-888-777-1002".to_vec(),
+            ),
+            (
+                "a known id as Windows holds it",
+                sid_as_bytes("S-1-5-21-111-222-333-1001")
+                    .unwrap_or_default()
+                    .into_iter()
+                    .chain([0, 1, 2])
+                    .collect(),
+            ),
+        ];
+        for (form, bytes) in forms {
+            let warnings = says_of_a_report(bytes);
+            assert!(!warnings.is_empty(), "{form}");
+            assert!(warnings[0].message.contains("report.bin"), "{warnings:?}");
+        }
+    }
+
+    #[test]
+    fn a_last_look_can_be_stopped_and_says_how_far_it_has_got() {
+        let stopped =
+            what_a_package_still_says(&manifest_saying("nothing"), &[], &traces(), &|_, _| {
+                Err(crate::errors::WinAppMigratorError::Cancelled)
+            });
+        assert!(matches!(
+            stopped,
+            Err(crate::errors::WinAppMigratorError::Cancelled)
+        ));
+        let furthest = std::cell::Cell::new(0);
+        let total_said = std::cell::Cell::new(0);
+        let written = [("report.md".to_owned(), b"x".to_vec())];
+        assert!(
+            what_a_package_still_says(
+                &manifest_saying("nothing"),
+                &written,
+                &traces(),
+                &|done, total| {
+                    furthest.set(done);
+                    total_said.set(total);
+                    Ok(())
+                }
+            )
+            .is_ok()
+        );
+        assert_eq!(furthest.get() + 1, total_said.get());
+    }
+
+    #[test]
+    fn a_name_that_is_a_word_stays_in_a_sentence_and_goes_from_a_path() {
+        let traces = AccountTraces {
+            account_names: vec!["Will".to_owned(), "acme".to_owned()],
+            computer_names: vec!["OFFICE".to_owned()],
+            ..AccountTraces::default()
+        };
+        for text in [
+            "the installer will try winget",
+            "Microsoft OFFICE is here",
+            "Acme.lnk stays",
+            "It is called Acme Tools",
+        ] {
+            assert_eq!(traces.scrub(text), text);
+        }
+        assert!(!traces.scrub(r"\\OFFICE\share").contains("OFFICE"));
+        assert!(
+            !traces
+                .scrub("The settings of Will could not be read")
+                .contains("Will")
+        );
+        assert!(!traces.scrub("Will's Documents").contains("Will"));
+        assert!(!traces.scrub(r"Z:\Will\a.txt").contains("Will"));
+    }
+
+    #[test]
+    fn a_folder_of_other_softwares_that_could_not_be_read_is_only_counted() {
+        let unreadable = |path: &str| {
+            Warning::new(
+                FOLDER_UNREADABLE_CODE,
+                WarningSeverity::Info,
+                format!("Could not read {path}"),
+                Some(path.to_owned()),
+            )
+        };
+        let mut warnings = vec![
+            unreadable(r"C:\ProgramData\SomeoneElse"),
+            unreadable(r"C:\ProgramData\AnotherOne"),
+            unreadable(&format!(r"{APP}\data")),
+        ];
+        say_only_how_many_folders_of_others_could_not_be_read(&mut warnings, &[PathBuf::from(APP)]);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].message.contains(r"Acme\data"));
+        assert!(warnings[1].message.contains("2 folders"));
+        assert!(!warnings[1].message.contains("SomeoneElse"));
+    }
+
+    /// As one a drive's garbage could have: what comes before a colon need not be a letter of a drive.
+    #[test]
+    fn a_path_with_something_else_for_a_drive_does_not_stop_a_build() {
+        let said = traces().scrub(r"é:\Users\bob\x");
+        assert!(!said.contains("bob"), "{said}");
     }
 
     #[test]
     fn a_last_look_is_quiet_about_a_package_that_says_nothing() {
         let quiet = manifest_saying("malice and an admin tool");
-        assert!(what_a_package_still_says(&quiet, &[], &traces()).is_empty());
+        assert!(still_says(&quiet, &[], &traces()).is_empty());
     }
 
     #[test]
@@ -1330,7 +2112,7 @@ mod tests {
             account_names: vec!["alice".to_owned(), "bob".to_owned()],
             ..AccountTraces::default()
         };
-        let warnings = what_a_package_still_says(
+        let warnings = still_says(
             &manifest_saying("by alice"),
             &[("report.md".to_owned(), b"and by bob".to_vec())],
             &in_both,
@@ -1342,7 +2124,7 @@ mod tests {
             ..AccountTraces::default()
         };
         assert_eq!(
-            what_a_package_still_says(&manifest_saying("426f62"), &[], &three).len(),
+            still_says(&manifest_saying("426f62"), &[], &three).len(),
             1,
             "three letters, as a binary value holds them"
         );
@@ -1353,7 +2135,7 @@ mod tests {
                 .flat_map(u16::to_le_bytes)
                 .collect(),
         )];
-        let warnings = what_a_package_still_says(&quiet, &written, &traces());
+        let warnings = still_says(&quiet, &written, &traces());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].message.contains("warnings.md"), "{warnings:?}");
         assert!(

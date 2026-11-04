@@ -539,6 +539,49 @@ fn a_clean_build_reads_as_success() {
     }
 }
 
+/// The last look over a package is about what a stranger could read, and it comes last of however
+/// many warnings a build has. A green line above a closed list of them would hide it.
+#[test]
+fn what_a_package_still_says_of_who_it_came_from_cannot_be_missed() {
+    let mut warnings: Vec<Warning> = (0..300)
+        .map(|index| {
+            Warning::new(
+                "something_else",
+                WarningSeverity::Info,
+                format!("Something else {index}"),
+                None,
+            )
+        })
+        .collect();
+    warnings.push(Warning::new(
+        winappmigrator_core::account_traces::MENTIONS_CODE,
+        WarningSeverity::Warning,
+        "This package mentions an account's name in scheduled tasks (1).",
+        None,
+    ));
+    let outcome = sample_outcome(warnings.clone(), true);
+    assert!(outcome_summary(&outcome).0 == Role::Warning);
+
+    let mut harness = harness_with(ThemeMode::Dark, |app| {
+        select_first_looked_at(app);
+        app.migrate_state = OperationState::Completed;
+        app.last_outcome = Some(sample_outcome(warnings.clone(), true));
+    });
+    harness.run();
+    assert!(harness.query_by_label_contains("Installer ready").is_none());
+    assert!(
+        harness
+            .query_by_label_contains("This package mentions an account")
+            .is_some(),
+        "it is on the screen with nothing opened"
+    );
+    assert!(
+        harness
+            .query_by_label_contains("still says something of who it came from")
+            .is_some()
+    );
+}
+
 #[test]
 fn a_build_too_big_for_one_file_says_its_two_files_must_stay_together() {
     let two_files = || {

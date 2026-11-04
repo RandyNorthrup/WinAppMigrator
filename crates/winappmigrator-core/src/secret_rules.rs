@@ -766,11 +766,17 @@ pub(crate) fn take_inno_setup_logs(files: &mut Vec<FileEntry>) -> bool {
     files.len() != before
 }
 
-/// What a Windows Installer app's entry in Settings says that is only true where it was installed:
-/// where its setup was run from, usually someone's Downloads, how to change it, and that Windows
-/// Installer has it. On another PC, Windows Installer has never heard of it.
-const ONLY_TRUE_WHERE_IT_WAS_INSTALLED: [&str; 3] =
-    ["InstallSource", "ModifyPath", "WindowsInstaller"];
+/// What an app's entry in Settings says that is only true where it was installed: where its setup was
+/// run from, usually someone's Downloads, how to change or remove it, and that Windows Installer has
+/// it. On another PC, Windows Installer has never heard of it, and an install gives the entry a way of
+/// removing it of its own.
+const ONLY_TRUE_WHERE_IT_WAS_INSTALLED: [&str; 5] = [
+    "InstallSource",
+    "ModifyPath",
+    "WindowsInstaller",
+    "UninstallString",
+    "QuietUninstallString",
+];
 const UNINSTALL_KEY_PART: &str = r"\currentversion\uninstall\";
 
 /// Whether a value of an app's entry in Settings is one of those. Anywhere else, those names can mean
@@ -1731,12 +1737,7 @@ mod tests {
                     "{key} {name}"
                 );
             }
-            for name in [
-                "DisplayName",
-                "InstallLocation",
-                "UninstallString",
-                "DisplayVersion",
-            ] {
+            for name in ["DisplayName", "InstallLocation", "DisplayVersion"] {
                 assert!(
                     !is_only_true_where_it_was_installed(&at(key, name)),
                     "{key} {name}"

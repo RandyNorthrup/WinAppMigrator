@@ -22,6 +22,7 @@ use winreg::RegKey;
 use winreg::enums::{KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
 use crate::models::{InstallMethod, InstallScope, InstalledApp};
+use crate::path_utils::normalize_name_for_match;
 use crate::path_utils::{
     comparable_path, is_auxiliary_executable, is_drive_root, looks_like_executable, path_is_within,
     split_command_executable_path, walk_asking,
@@ -32,6 +33,15 @@ use crate::registry_scan::{RecordedRegistryKey, RecordedRegistryRoot, registry_v
 use crate::shortcut_scan::{lnk_target_path, read_shortcut_file};
 use crate::system_context::SystemContext;
 
+/// Folders a person keeps things in, which being above a program does not make the app's.
+const WHERE_A_PERSON_PUTS_THINGS: &[&str] = &[
+    "desktop",
+    "documents",
+    "downloads",
+    "my documents",
+    "temp",
+    "tmp",
+];
 const USERDATA_PATH: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
 const APP_PATHS_PREFIX: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
 const SIGNATURE_SCAN_BYTES: u64 = 2_000_000;
@@ -129,6 +139,8 @@ pub struct InstallSource {
     pub evidence: Vec<String>,
     /// The folder its uninstaller is in, when that is one of `roots`, and all that says it is.
     pub uninstaller_folder: Option<PathBuf>,
+    /// Folders the app's App Paths entry says to look in that are not the app's, which it may need.
+    pub folders_left_alone: Vec<PathBuf>,
 }
 
 /// Authoritative key paths recorded for a product in the MSI component database.
@@ -275,11 +287,17 @@ pub(crate) fn detect_install_source_unless(
     }
 
     let mut uninstaller_folder = None;
+    let mut folders_left_alone = Vec::new();
     // App Paths registration is an authoritative, documented source of the
     // launcher location and any extra DLL search directories.
     if let Some(executable) = app.main_executable.as_ref() {
-        let app_paths =
-            app_paths_roots(executable, app.install_location.as_deref(), &names, system);
+        let app_paths = app_paths_roots(
+            executable,
+            app.install_location.as_deref(),
+            &names,
+            system,
+            &mut folders_left_alone,
+        );
         if !app_paths.is_empty() {
             evidence.push("App Paths registration".to_owned());
             roots.extend(app_paths);
@@ -299,7 +317,7 @@ pub(crate) fn detect_install_source_unless(
         if uninstaller_folder_is_the_apps(app, &parent, &names, system) {
             uninstaller_folder = Some(parent.clone());
             roots.push(parent);
-        } else {
+        } else if is_where_programs_are_put(&parent, system) {
             loose_files.extend(system.resolve_source_path(&executable));
         }
     }
@@ -314,6 +332,7 @@ pub(crate) fn detect_install_source_unless(
         registry_keys,
         evidence,
         uninstaller_folder,
+        folders_left_alone,
     }
 }
 
@@ -332,8 +351,42 @@ fn is_named_for_the_app(folder: &Path, names: &ProductNames) -> bool {
             .is_some_and(|parent| names.matches_nested(parent, name, MatchScope::ProgramFolders))
 }
 
+/// Where an installer puts a program, so that one left there alone is the app's to bring. A setup
+/// run from someone's Downloads is theirs, on whatever drive that is, and removes the app there and
+/// nowhere else.
+fn is_where_programs_are_put(folder: &Path, system: &SystemContext) -> bool {
+    system
+        .program_files_dirs()
+        .iter()
+        .chain(&system.program_data())
+        .any(|base| path_is_within(folder, base))
+}
+
+/// Whether a folder is where things are put by whoever uses a PC, and is nobody's whole.
+fn is_where_a_person_puts_things(folder: &Path) -> bool {
+    folder.file_name().is_some_and(|name| {
+        WHERE_A_PERSON_PUTS_THINGS.contains(&name.to_string_lossy().to_ascii_lowercase().as_str())
+    })
+}
+
+/// Whether a folder holding the uninstaller, and somewhere inside it the app's program, is the app's.
+/// That is where an installer was told to put it, and the program being deep in it says nothing of
+/// what is beside that, like the `Content` of `D:\Games\MyGame\Binaries\Win64\game.exe`. Not a folder
+/// a vendor keeps its products in, or anywhere a person keeps anything.
+fn is_above_the_program(folder: &Path, program: &Path, names: &ProductNames) -> bool {
+    path_is_within(program, folder)
+        && !is_shared_folder(folder)
+        && !is_drive_root(folder)
+        && !is_where_a_person_puts_things(folder)
+        && !folder
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| names.is_named_only_for_publisher(name))
+}
+
 /// Whether the folder an uninstaller is in is the app's. Inside where its entry says the app is, it
-/// is. With no such place said, one in `Program Files` is what an installer made, and anywhere else
+/// is. With no such place said, one that holds its program is, and one in `Program Files` is what an
+/// installer made, unless it is only named for who made it, as it may hold all they make. Anywhere else
 /// it has to say so by its name, which is what tells `D:\Tools\Acme` from `D:\Downloads`.
 fn uninstaller_folder_is_the_apps(
     app: &InstalledApp,
@@ -341,21 +394,34 @@ fn uninstaller_folder_is_the_apps(
     names: &ProductNames,
     system: &SystemContext,
 ) -> bool {
+    let location = app
+        .install_location
+        .as_deref()
+        .and_then(|location| system.resolve_source_path(location));
+    if location
+        .as_deref()
+        .is_some_and(|location| path_is_within(folder, location))
+    {
+        return true;
+    }
+    let is_only_the_vendors = folder
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| names.is_named_only_for_publisher(name) && !is_app_called(app, name));
+    if is_only_the_vendors {
+        return false;
+    }
     if is_named_for_the_app(folder, names) {
         return true;
     }
-    if let Some(location) = app
-        .install_location
-        .as_deref()
-        .and_then(|location| system.resolve_source_path(location))
-    {
-        return path_is_within(folder, &location);
+    if location.is_some() {
+        return false;
     }
-    if app
-        .main_executable
-        .as_deref()
-        .and_then(Path::parent)
-        .is_some_and(|parent| path_is_within(folder, parent))
+    if let Some(program) = app.main_executable.as_deref()
+        && (program
+            .parent()
+            .is_some_and(|parent| path_is_within(folder, parent))
+            || is_above_the_program(folder, program, names))
     {
         return true;
     }
@@ -363,6 +429,39 @@ fn uninstaller_folder_is_the_apps(
         .program_files_dirs()
         .iter()
         .any(|base| path_is_within(folder, base))
+}
+
+/// Whether an app is called what this folder is, as `Notepad++` is by `Notepad++ Team`.
+fn is_app_called(app: &InstalledApp, folder: &str) -> bool {
+    normalize_name_for_match(&app.display_name) == normalize_name_for_match(folder)
+}
+
+/// With the program only known now, as nothing in the app's entry said which it was: the folder the
+/// uninstaller is in is where the app is if that folder holds it.
+pub fn add_the_uninstallers_folder_above_the_program(
+    source: &mut InstallSource,
+    app: &InstalledApp,
+    executable: &Path,
+    system: &SystemContext,
+) {
+    if app.install_location.is_some() || source.uninstaller_folder.is_some() {
+        return;
+    }
+    let names = app_product_names(app);
+    let folder = app
+        .uninstall_string
+        .as_deref()
+        .and_then(split_command_executable_path)
+        .and_then(|uninstaller| uninstaller.parent().map(Path::to_path_buf))
+        .and_then(|folder| system.resolve_source_path(&folder))
+        .filter(|folder| !is_windows_or_installer_cache_path(folder, system))
+        .filter(|folder| is_above_the_program(folder, executable, &names));
+    if let Some(folder) = folder {
+        source.uninstaller_folder = Some(folder.clone());
+        let mut roots = std::mem::take(&mut source.roots);
+        roots.push(folder);
+        source.roots = dedup_existing_dirs(roots, system);
+    }
 }
 
 /// Add the App Paths directories of an executable that was only chosen after
@@ -374,7 +473,13 @@ pub fn add_app_paths_roots(
     system: &SystemContext,
 ) {
     let names = app_product_names(app);
-    let app_paths = app_paths_roots(executable, app.install_location.as_deref(), &names, system);
+    let app_paths = app_paths_roots(
+        executable,
+        app.install_location.as_deref(),
+        &names,
+        system,
+        &mut source.folders_left_alone,
+    );
     if !app_paths.is_empty() {
         source.evidence.push("App Paths registration".to_owned());
         let mut roots = std::mem::take(&mut source.roots);
@@ -1379,6 +1484,7 @@ fn app_paths_roots(
     install_location: Option<&Path>,
     names: &ProductNames,
     system: &SystemContext,
+    left_alone: &mut Vec<PathBuf>,
 ) -> Vec<PathBuf> {
     let Some(executable_name) = executable.file_name().and_then(|value| value.to_str()) else {
         return Vec::new();
@@ -1414,9 +1520,12 @@ fn app_paths_roots(
                 let trimmed = segment.trim().trim_matches('"');
                 if !trimmed.is_empty()
                     && let Some(folder) = system.resolve_source_path(Path::new(trimmed))
-                    && is_the_apps(&folder)
                 {
-                    roots.push(folder);
+                    if is_the_apps(&folder) {
+                        roots.push(folder);
+                    } else {
+                        left_alone.push(folder);
+                    }
                 }
             }
         }
@@ -2472,9 +2581,118 @@ mod tests {
         }
     }
 
+    fn folder_of_an_uninstaller(
+        name: &str,
+        publisher: &str,
+        location: Option<&str>,
+        program: Option<&str>,
+        folder: &str,
+    ) -> bool {
+        let mut app = test_app(name, Some(publisher));
+        app.install_location = location.map(PathBuf::from);
+        app.main_executable = program.map(PathBuf::from);
+        uninstaller_folder_is_the_apps(
+            &app,
+            Path::new(folder),
+            &app_product_names(&app),
+            &SystemContext::live(),
+        )
+    }
+
+    /// `Content` is beside `Binaries`, and an app with no location on record would lose it.
+    #[test]
+    fn the_folder_an_uninstaller_is_in_is_the_apps_if_it_holds_the_program() {
+        assert!(folder_of_an_uninstaller(
+            "My Game: Deluxe Edition",
+            "Indie",
+            None,
+            Some(r"D:\Games\MyGame\Binaries\Win64\game.exe"),
+            r"D:\Games\MyGame",
+        ));
+        assert!(folder_of_an_uninstaller(
+            "Awesome Chat",
+            "Acme",
+            None,
+            Some(r"C:\Users\a\AppData\Local\achat\app-3.0\achat.exe"),
+            r"C:\Users\a\AppData\Local\achat",
+        ));
+    }
+
+    /// A vendor's folder can hold all it makes, and a person's holds anything.
+    #[test]
+    fn the_folder_an_uninstaller_is_in_is_not_the_apps_if_it_is_a_vendors_or_a_persons() {
+        assert!(!folder_of_an_uninstaller(
+            "Acme Widget",
+            "Acme Corp",
+            None,
+            Some(r"C:\Program Files\Acme Corp\Widget\widget.exe"),
+            r"C:\Program Files\Acme Corp",
+        ));
+        for folder in [r"D:\Downloads", r"C:\Users\a\Desktop", r"E:\Temp"] {
+            assert!(
+                !folder_of_an_uninstaller(
+                    "Widget Maker",
+                    "Acme",
+                    None,
+                    Some(&format!(r"{folder}\Widget\widget.exe")),
+                    folder,
+                ),
+                "{folder}"
+            );
+        }
+        assert!(!folder_of_an_uninstaller(
+            "Widget Maker",
+            "Acme",
+            None,
+            Some(r"C:\Program Files\Widget\widget.exe"),
+            r"D:\Downloads",
+        ));
+    }
+
+    /// One named for itself is still its own, whoever published it.
+    #[test]
+    fn an_app_named_as_its_publisher_keeps_its_folder() {
+        assert!(folder_of_an_uninstaller(
+            "Notepad++",
+            "Notepad++",
+            None,
+            Some(r"C:\Program Files\Notepad++\notepad++.exe"),
+            r"C:\Program Files\Notepad++",
+        ));
+        assert!(folder_of_an_uninstaller(
+            "Acme Widget",
+            "Acme Corp",
+            Some(r"C:\Program Files\Acme Corp"),
+            None,
+            r"C:\Program Files\Acme Corp",
+        ));
+    }
+
+    /// A setup run from someone's Downloads is theirs, on whatever drive that is. One in a program
+    /// folder, or in a cache an installer keeps in `ProgramData`, is what removes the app.
+    #[test]
+    fn an_uninstaller_alone_comes_only_from_where_programs_are_put() {
+        let system = SystemContext::live();
+        assert!(!is_where_programs_are_put(
+            Path::new(r"E:\alice\Downloads"),
+            &system
+        ));
+        assert!(!is_where_programs_are_put(
+            Path::new(r"C:\Users\alice\Downloads"),
+            &system
+        ));
+        for base in system.program_files_dirs() {
+            assert!(is_where_programs_are_put(&base.join("Acme"), &system));
+        }
+        if let Some(data) = system.program_data() {
+            assert!(is_where_programs_are_put(&data.join("{GUID}"), &system));
+        }
+    }
+
     fn test_source(method: InstallMethod) -> InstallSource {
         InstallSource {
             uninstaller_folder: None,
+            folders_left_alone: Vec::new(),
             method,
             product_code: None,
             authoritative_file_count: 0,

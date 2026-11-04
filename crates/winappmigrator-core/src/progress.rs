@@ -43,6 +43,8 @@ pub enum BuildStep {
         bytes_done: u64,
         bytes_total: u64,
     },
+    /// Going through what the package says, for anything left of who it came from.
+    LookingOverWhatItSays { done: usize, total: usize },
     /// Finishing the executable, and the data file if there is one.
     WritingInstaller,
 }

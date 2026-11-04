@@ -9,7 +9,7 @@ use crate::account_settings::{
     say_no_more_of_licenses_than_the_apps_key, say_no_more_than_the_apps_key, take_account_settings,
 };
 use crate::account_traces::{
-    AccountTraces, Withholding, withhold_settings, withhold_what_is_an_accounts,
+    AccountTraces, Withholding, names_in_the_app, withhold_settings, withhold_what_is_an_accounts,
 };
 use crate::dll_resolver::{
     DllResolutionContext, VisualCppRuntime, find_app_local_dlls, resolve_imports,
@@ -127,10 +127,16 @@ fn read_program_needs_of(
         }
         needs.extend(need);
     };
+    // Until a scan has gone over to what its PC called things, a file on a drive is known by where the
+    // drive is now, and what a service says it runs is by what that PC called it.
     let copied = |logical: &Path| {
         files
             .iter()
-            .find(|file| file.should_copy && file.original_path.as_path() == logical)
+            .find(|file| {
+                file.should_copy
+                    && comparable_path(&system.logical_path(&file.original_path))
+                        == comparable_path(logical)
+            })
             .map(|file| file.path.clone())
     };
     if let Some(readable) =
@@ -153,7 +159,11 @@ fn read_program_needs_of(
         .filter(|file| file.should_copy && looks_like_executable(&file.original_path))
         .take(MOST_PROGRAMS_RECORDED);
     for file in others {
-        note(&file.path, &file.original_path, ProgramRole::Other);
+        note(
+            &file.path,
+            &system.logical_path(&file.original_path),
+            ProgramRole::Other,
+        );
     }
     needs
 }
@@ -237,11 +247,12 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
             let real = resolved_location(recorded);
             path_is_within(&real, recorded) && path_is_within(recorded, &real)
         });
+    let is_of_a_listed_app = source_app.is_some();
     let is_someone_elses = |path: &Path| {
         let is_where_its_record_says = machine_record
             .as_deref()
             .is_some_and(|recorded| is_really_within(path, recorded));
-        source_app.is_some()
+        is_of_a_listed_app
             && !is_where_its_record_says
             && (system.is_in_another_profile(path)
                 || (installed_for_one_account && !system.is_the_accounts_own(path)))
@@ -260,6 +271,12 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         && app.main_executable.is_none()
     {
         add_app_paths_roots(source, app, &executable_path, &system);
+        crate::install_source::add_the_uninstallers_folder_above_the_program(
+            source,
+            app,
+            &executable_path,
+            &system,
+        );
     }
 
     let mut pe_scan = scan_pe(&executable_path)?;
@@ -302,7 +319,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     let (dependencies, resolver_warnings) =
         resolve_imports(&pe_scan.direct_imports, &context, &system);
     let app_local_dlls = find_app_local_dlls(&executable_path, &system)?;
-    let install_location = match (source_app.as_ref(), install_source.as_ref()) {
+    let mut install_location = match (source_app.as_ref(), install_source.as_ref()) {
         (Some(app), Some(source)) => resolve_install_location(app, &executable_path, source),
         _ => executable_path
             .parent()
@@ -329,7 +346,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     // it that mentions them still means where they were. Disks are read by where they are now,
     // and what a PC recorded is compared with this.
     let logical_executable = system.logical_path(&executable_path);
-    let logical_location = install_location
+    let mut logical_location = install_location
         .as_deref()
         .map(|location| system.logical_path(location));
 
@@ -342,7 +359,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         app_name.as_deref(),
         publisher.as_deref(),
     );
-    let (near_look, mut picks) = match source_app.as_ref() {
+    let (mut near_look, mut picks) = match source_app.as_ref() {
         Some(app) => {
             let scan = AppBeingScanned {
                 app,
@@ -356,6 +373,26 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         }
         None => (NearMatchLook::default(), Picks::default()),
     };
+    monitor.checkpoint()?;
+    // A folder taken for the app's because its uninstaller is there, with nothing on record to say so,
+    // can hold another app that says nothing of where it is but what Windows Installer has of it.
+    let mut uninstallers_folder_left_out = None;
+    if let (Some(app), Some(source)) = (source_app.as_mut(), install_source.as_mut())
+        && recorded_location.is_none()
+        && let Some(folder) = source.uninstaller_folder.clone()
+        && install_location.as_deref() == Some(folder.as_path())
+        && near_look.another_app_has_a_file_in(&folder, &system, &is_cancelled)
+    {
+        source.roots.retain(|root| *root != folder);
+        source.uninstaller_folder = None;
+        install_location = resolve_install_location(app, &executable_path, source)
+            .filter(|location| !is_someone_elses(location));
+        logical_location = install_location
+            .as_deref()
+            .map(|location| system.logical_path(location));
+        app.install_location.clone_from(&install_location);
+        uninstallers_folder_left_out = Some(folder);
+    }
     monitor.checkpoint()?;
     let also_the_apps = std::mem::take(&mut picks.also_the_apps);
 
@@ -443,6 +480,27 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         .as_deref()
         .is_some_and(|publisher| publisher.to_ascii_lowercase().starts_with(MICROSOFT));
     let mut folders_left_out = Vec::new();
+    for folder in install_source
+        .iter()
+        .flat_map(|source| &source.folders_left_alone)
+    {
+        folders_left_out.push(Warning::new(
+            "folder_left_out_of_the_app",
+            WarningSeverity::Warning,
+            "This app's App Paths entry says it looks in a folder that is not its own, so that \
+             folder does not come along. It may not start on a PC without what is there.",
+            Some(folder.display().to_string()),
+        ));
+    }
+    if let Some(folder) = uninstallers_folder_left_out {
+        folders_left_out.push(Warning::new(
+            "folder_left_out_of_the_app",
+            WarningSeverity::Warning,
+            "The folder this app's uninstaller is in was left out, because Windows Installer says \
+             another app has a file there.",
+            Some(folder.display().to_string()),
+        ));
+    }
     extra_roots.retain(|root| {
         let is_its_own = own_folders
             .iter()
@@ -456,7 +514,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         let refusal = (!is_its_own)
             .then(|| {
                 near_look
-                    .root_refusal(root, is_microsofts_own, &system)
+                    .root_refusal(root, &near_names, is_microsofts_own, &system)
                     .or_else(|| {
                         (is_only_where_an_uninstaller_is && near_look.is_in_another_apps_folder(root))
                             .then_some("it is in another app's folder")
@@ -671,6 +729,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
                 app_folders: &registry_context.folders_of_the_app(),
                 main_program: &logical_executable,
                 installed_for_one_account,
+                names_in_the_app: &names_in_the_app(&file_inventory),
                 traces: &account_traces,
             },
             &mut left_out,
@@ -707,11 +766,14 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     warnings.extend(shortcut_warnings);
     warnings.extend(environment_warnings);
     warnings.extend(runtime_warnings);
-    warnings.extend(missing_dependency_warnings(&dependencies));
+    warnings.extend(missing_dependency_warnings(
+        &dependencies,
+        install_location.as_deref(),
+    ));
     warnings.extend(driver_component_warnings(&drivers));
     warnings.extend(license_warnings);
     warnings.extend(left_out_warnings(&left_out));
-    say_which_driver_files_stay(&mut warnings, &drivers);
+    say_which_driver_files_stay(&mut warnings, &drivers, &system);
 
     let artifacts = artifact_paths(&options.output_dir);
 
@@ -878,6 +940,10 @@ fn use_what_the_source_pc_calls_things(report: &mut ScanReport, system: &SystemC
     }
     for file in &mut report.app_local_dlls {
         file.original_path = logical(&file.original_path);
+        file.path = logical(&file.path);
+    }
+    for need in &mut report.program_needs {
+        need.path = logical(&need.path);
     }
     for file in &mut report.file_inventory {
         file.original_path = logical(&file.path);
@@ -1302,7 +1368,10 @@ fn left_out_warnings(left_out: &LeftOut) -> Vec<Warning> {
         .collect()
 }
 
-fn missing_dependency_warnings(dependencies: &[DependencyEntry]) -> Vec<Warning> {
+fn missing_dependency_warnings(
+    dependencies: &[DependencyEntry],
+    install_location: Option<&Path>,
+) -> Vec<Warning> {
     dependencies
         .iter()
         .filter_map(|dependency| {
@@ -1314,11 +1383,18 @@ fn missing_dependency_warnings(dependencies: &[DependencyEntry]) -> Vec<Warning>
                     None,
                 ));
             }
-            // Where this PC happens to find it says nothing of the other PC.
-            matches!(
-                dependency.source_category,
-                DependencySourceCategory::Path | DependencySourceCategory::CurrentDirectory
-            )
+            // Where this PC happens to find it says nothing of the other PC, unless that is in the app,
+            // which brings it along wherever it is found from.
+            let comes_with_the_app = dependency
+                .resolved_path
+                .as_deref()
+                .zip(install_location)
+                .is_some_and(|(path, location)| path_is_within(path, location));
+            (!comes_with_the_app
+                && matches!(
+                    dependency.source_category,
+                    DependencySourceCategory::Path | DependencySourceCategory::CurrentDirectory
+                ))
             .then(|| {
                 Warning::new(
                     "dependency_only_found_on_this_pc",
@@ -1337,7 +1413,11 @@ fn missing_dependency_warnings(dependencies: &[DependencyEntry]) -> Vec<Warning>
 
 /// A driver the app registers goes with it. Any other driver file does not, and an app that loads
 /// its own on demand will not work without it, which is something to say and not just to note.
-fn say_which_driver_files_stay(warnings: &mut [Warning], drivers: &[DriverEntry]) {
+fn say_which_driver_files_stay(
+    warnings: &mut [Warning],
+    drivers: &[DriverEntry],
+    system: &SystemContext,
+) {
     for warning in warnings
         .iter_mut()
         .filter(|warning| warning.code == DRIVER_FILE_NOT_COPIED_CODE)
@@ -1345,7 +1425,8 @@ fn say_which_driver_files_stay(warnings: &mut [Warning], drivers: &[DriverEntry]
         let registered = warning.source.as_deref().is_some_and(|source| {
             drivers.iter().any(|driver| {
                 driver.app_owned
-                    && comparable_path(&driver.image_path) == comparable_path(Path::new(source))
+                    && comparable_path(&driver.image_path)
+                        == comparable_path(&system.logical_path(Path::new(source)))
             })
         });
         if !registered {

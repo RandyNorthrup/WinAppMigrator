@@ -126,6 +126,8 @@ const NEVER_OFFERED_IN_COMMON_FILES: &[&str] = &[
 /// Why an entry is not offered for what it calls itself.
 const GOES_BY_ANOTHER_APPS_NAME: &str = "it goes by another app's name";
 const IS_ANOTHER_APPS: &str = "it is another app's";
+const NAMED_ONLY_FOR_THE_PUBLISHER: &str =
+    "it is named only for the publisher, and may hold its other products";
 const COMMON_FILES: &str = "common files";
 const USERS: &str = "users";
 
@@ -532,7 +534,7 @@ impl NearMatchLook {
             return Some("its name says nothing of whose it is");
         }
         if scan.names.is_named_only_for_publisher(&name) {
-            return Some("it is named only for the publisher, and may hold its other products");
+            return Some(NAMED_ONLY_FOR_THE_PUBLISHER);
         }
         if scan
             .install_location
@@ -555,11 +557,15 @@ impl NearMatchLook {
     pub(crate) fn root_refusal(
         &self,
         path: &Path,
+        names: &ProductNames,
         is_microsofts_own: bool,
         system: &SystemContext,
     ) -> Option<&'static str> {
         if has_parent_step(path) || !system.may_read(path) {
             return Some("it may not be read");
+        }
+        if !system.is_dir(path) {
+            return Some("it is not there");
         }
         if !is_written_as_it_is_called(path) {
             return Some("it is not written the way it is really called");
@@ -577,13 +583,33 @@ impl NearMatchLook {
         {
             return Some("it holds what is shared, or is part of Windows");
         }
+        if !is_where_microsoft_keeps_its_own
+            && names.is_named_only_for_publisher(&file_name_string(path))
+        {
+            return Some(NAMED_ONLY_FOR_THE_PUBLISHER);
+        }
         let holds_another_app = self.others.iter().any(|other| {
             other
                 .folders
                 .iter()
                 .any(|folder| path_is_within(folder, path))
         });
-        holds_another_app.then_some(IS_ANOTHER_APPS)
+        (holds_another_app || self.holds_a_file_of_another_app(path)).then_some(IS_ANOTHER_APPS)
+    }
+
+    /// Whether Windows Installer says another app has a file in this folder, asking it if a scan has
+    /// not had reason to yet. It goes through every product on the PC, which takes some seconds.
+    pub(crate) fn another_app_has_a_file_in(
+        &mut self,
+        folder: &Path,
+        system: &SystemContext,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> bool {
+        if self.files_of_others.is_empty() {
+            self.files_of_others =
+                msi_files_of_others(&self.products_of_others, system, is_cancelled);
+        }
+        self.holds_a_file_of_another_app(folder)
     }
 
     /// Whether another app has on record that it is somewhere inside this folder.
@@ -1167,6 +1193,31 @@ mod tests {
         }
     }
 
+    /// As a folder is asked about being offered: one named for who made an app can hold all they make,
+    /// and one Windows Installer says another app has a file in is that app's as well.
+    #[test]
+    fn a_folder_on_record_is_asked_what_a_folder_on_offer_is() {
+        let work = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let base = crate::path_utils::resolved_location(work.path());
+        let vendor = base.join("Acme Corp");
+        let shared = base.join("Shared Things");
+        std::fs::create_dir_all(&vendor).unwrap_or_else(|error| panic!("{error}"));
+        std::fs::create_dir_all(&shared).unwrap_or_else(|error| panic!("{error}"));
+        let system = SystemContext::live();
+        let names = ProductNames::new(Some("Acme Widget"), Some("Acme Corp"), &[], &[]);
+        let mut look = look_with_others(&[]);
+        assert_eq!(
+            look.root_refusal(&vendor, &names, false, &system),
+            Some(NAMED_ONLY_FOR_THE_PUBLISHER)
+        );
+        assert_eq!(look.root_refusal(&shared, &names, false, &system), None);
+        look.files_of_others = vec![comparable_path(&shared.join("sibling.exe"))];
+        assert_eq!(
+            look.root_refusal(&shared, &names, false, &system),
+            Some(IS_ANOTHER_APPS)
+        );
+    }
+
     #[test]
     fn a_folder_on_record_is_refused_for_what_it_holds_and_not_for_what_it_is_in() {
         let work = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
@@ -1178,18 +1229,19 @@ mod tests {
         let system = SystemContext::live();
         let other = other_app_record("Vendor Agent", Some(&vendor));
         let look = look_with_others(std::slice::from_ref(&other));
+        let no_names = ProductNames::new(Some("Nothing Like It"), Some("Nobody"), &[], &[]);
         assert_eq!(
-            look.root_refusal(&dist, false, &system),
+            look.root_refusal(&dist, &no_names, false, &system),
             None,
             "a vendor's products can be all in one folder"
         );
         assert_eq!(
-            look.root_refusal(&vendor, false, &system),
+            look.root_refusal(&vendor, &no_names, false, &system),
             Some(IS_ANOTHER_APPS),
             "that folder is the other app's"
         );
         assert_eq!(
-            look.root_refusal(&base, false, &system),
+            look.root_refusal(&base, &no_names, false, &system),
             Some(IS_ANOTHER_APPS),
             "and what holds it holds that"
         );
@@ -1199,6 +1251,7 @@ mod tests {
     fn a_folder_on_record_is_not_shared_by_a_record_saying_so() {
         let system = SystemContext::live();
         let look = NearMatchLook::default();
+        let no_names = ProductNames::new(Some("Nothing Like It"), Some("Nobody"), &[], &[]);
         for shared in [
             r"C:\Program Files\Common Files\System\ado",
             r"C:\Program Files\Common Files\Microsoft Shared\VC",
@@ -1208,7 +1261,7 @@ mod tests {
             let path = Path::new(shared);
             if path.is_dir() {
                 assert!(
-                    look.root_refusal(path, false, &system).is_some(),
+                    look.root_refusal(path, &no_names, false, &system).is_some(),
                     "{shared}"
                 );
             }

@@ -27,6 +27,9 @@ const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 const SYSTEM_ROOT_MARKER: &str = r"\SystemRoot\";
 const SYSTEM_ROOT_VARIABLE: &str = r"%SystemRoot%\";
 /// A person's SID as a security descriptor names one.
+const CDATA_START: &str = "<![CDATA[";
+/// What Windows calls the one principal a task has.
+const PRINCIPAL_ID: &str = "Author";
 const PERSON_IN_A_DESCRIPTOR: &str = "S-1-5-21-";
 const ONLINE_PERSON_IN_A_DESCRIPTOR: &str = "S-1-12-1-";
 /// What says an account is one of Windows' own, whatever comes after it.
@@ -335,6 +338,11 @@ impl DocumentEdits {
         }
     }
 
+    fn set_attribute(&mut self, attribute: roxmltree::Attribute<'_, '_>, value: &str) {
+        self.edits
+            .push((attribute.range_value(), escape_xml_text(value)));
+    }
+
     fn replace_with(&mut self, element: roxmltree::Node<'_, '_>, written: &str) {
         self.edits.push((element.range(), written.to_owned()));
     }
@@ -367,9 +375,18 @@ impl DocumentEdits {
 /// and a password nobody has comes to running when they are signed in. Anything that
 /// will not parse stays as it is, and a restore refuses it. Says whether it came to running as anyone.
 pub(crate) fn task_for_whoever_installs_it(xml: &str) -> Option<(String, bool)> {
+    // Windows does not write this in a task, whose text would not be what it seems to whatever edits
+    // it, and a restore refuses one.
+    if xml.contains(CDATA_START) {
+        return None;
+    }
     let document = roxmltree::Document::parse(xml).ok()?;
     let mut edits = DocumentEdits::default();
     let mut runs_as_a_person = false;
+    // What is only ever read by a person can say anything of whoever wrote it.
+    for comment in document.descendants().filter(roxmltree::Node::is_comment) {
+        edits.remove(comment);
+    }
     for element in document.descendants().filter(roxmltree::Node::is_element) {
         let is_under = |name: &str| {
             element
@@ -377,14 +394,36 @@ pub(crate) fn task_for_whoever_installs_it(xml: &str) -> Option<(String, bool)> 
                 .is_some_and(|parent| parent.tag_name().name() == name)
         };
         match element.tag_name().name() {
-            "Author" if is_under("RegistrationInfo") => edits.remove(element),
+            "Author" | "Description" | "Documentation" | "Source" | "URI"
+                if is_under("RegistrationInfo") =>
+            {
+                edits.remove(element);
+            }
+            // Mail and messages say who to and what, and a restore refuses a task that does either.
+            "SendEmail" | "ShowMessage" | "Data" => edits.remove(element),
             "SecurityDescriptor" if is_under("RegistrationInfo") => {
                 // Who may see and change it, by SID. Its default is what is left.
-                let descriptor = node_text(element);
+                let descriptor = node_text(element).to_ascii_uppercase();
                 if descriptor.contains(PERSON_IN_A_DESCRIPTOR)
                     || descriptor.contains(ONLINE_PERSON_IN_A_DESCRIPTOR)
                 {
                     edits.remove(element);
+                }
+            }
+            // What a principal is called is only for the actions to say which they run as. Both become
+            // what Windows itself calls one.
+            "Principal" => {
+                if let Some(id) = element.attribute_node("id")
+                    && id.value() != PRINCIPAL_ID
+                {
+                    edits.set_attribute(id, PRINCIPAL_ID);
+                }
+            }
+            "Actions" => {
+                if let Some(context) = element.attribute_node("Context")
+                    && context.value() != PRINCIPAL_ID
+                {
+                    edits.set_attribute(context, PRINCIPAL_ID);
                 }
             }
             "DisplayName" if is_under("Principal") => edits.remove(element),
@@ -472,6 +511,7 @@ fn part_of<'a, 'input>(
 pub(crate) fn without_what_names_an_account(
     xml: &str,
     names_them: &dyn Fn(&str) -> bool,
+    arguments_are_theirs: &dyn Fn(&str) -> bool,
 ) -> TaskThatNames {
     let Ok(document) = roxmltree::Document::parse(xml) else {
         return TaskThatNames::NothingOfTheirs;
@@ -483,9 +523,11 @@ pub(crate) fn without_what_names_an_account(
         .descendants()
         .filter(|node| node.tag_name().name() == "Exec")
         .collect();
-    let (theirs, others): (Vec<_>, Vec<_>) = actions
-        .into_iter()
-        .partition(|action| names(*action, "Command") || names(*action, "Arguments"));
+    let (theirs, others): (Vec<_>, Vec<_>) = actions.into_iter().partition(|action| {
+        names(*action, "Command")
+            || part_of(*action, "Arguments")
+                .is_some_and(|part| arguments_are_theirs(&node_text(part)))
+    });
     if !theirs.is_empty() && others.is_empty() {
         return TaskThatNames::GoesWhole;
     }
@@ -755,6 +797,45 @@ mod tests {
         assert_eq!(again, kept, "running again changes nothing");
     }
 
+    /// Each of these is free text someone wrote, or who to mail, and none of it makes a task run.
+    #[test]
+    fn a_task_says_nothing_else_of_who_wrote_it() {
+        let task = r#"<?xml version="1.0"?>
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <!-- written by acct-comment -->
+  <RegistrationInfo>
+    <Author>PC\acct-author</Author>
+    <Description>What acct-description uses this for</Description>
+    <Documentation>acct-documentation</Documentation>
+    <Source>acct-source</Source>
+    <URI>\acct-uri</URI>
+    <SecurityDescriptor>D:(A;;FA;;;s-1-5-21-1-2-3-1001)</SecurityDescriptor>
+  </RegistrationInfo>
+  <Principals><Principal id="acct-principal"><UserId>S-1-5-18</UserId></Principal></Principals>
+  <Data>acct-data</Data>
+  <Actions Context="acct-principal">
+    <Exec><Command>C:\App\a.exe</Command></Exec>
+    <SendEmail><To>acct-mail@example.com</To></SendEmail>
+    <ShowMessage><Title>acct-message</Title></ShowMessage>
+  </Actions>
+</Task>"#;
+        let (kept, _) = task_for_whoever_installs_it(task).unwrap_or_else(|| panic!("it parses"));
+        assert!(!kept.contains("acct-"), "{kept}");
+        assert!(!kept.to_ascii_lowercase().contains("s-1-5-21"), "{kept}");
+        assert!(kept.contains(r"C:\App\a.exe"), "{kept}");
+        let parsed = parse_task_xml(&kept).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(parsed.actions.len(), 1);
+        assert!(kept.contains(r#"id="Author""#), "{kept}");
+        assert!(kept.contains(r#"Context="Author""#), "{kept}");
+    }
+
+    /// Windows does not write this, and part of a name in one would not be seen by what edits it.
+    #[test]
+    fn a_task_with_cdata_in_it_cannot_be_made_to_say_nobody() {
+        let task = r#"<Task><Principals><Principal id="Author"><UserId>PC\<![CDATA[alice]]></UserId></Principal></Principals></Task>"#;
+        assert_eq!(task_for_whoever_installs_it(task), None);
+    }
+
     #[test]
     fn a_task_of_windows_own_accounts_stays_as_it_was() {
         for account in [
@@ -835,7 +916,7 @@ mod tests {
     fn a_task_loses_what_it_runs_from_someones_folders_unless_that_is_all_it_runs() {
         let names_them = |text: &str| text.contains(r"\Users\");
         let TaskThatNames::LostSome { xml, actions } =
-            without_what_names_an_account(PERSONAL_TASK, &names_them)
+            without_what_names_an_account(PERSONAL_TASK, &names_them, &names_them)
         else {
             panic!("it had one of each");
         };
@@ -846,24 +927,24 @@ mod tests {
 
         let only = r"<Task><Actions><Exec><Command>C:\Users\randy\mine.exe</Command></Exec></Actions></Task>";
         assert_eq!(
-            without_what_names_an_account(only, &names_them),
+            without_what_names_an_account(only, &names_them, &names_them),
             TaskThatNames::GoesWhole
         );
         let told = r"<Task><Actions><Exec><Command>C:\A\a.exe</Command><Arguments>C:\Users\randy\b.txt</Arguments></Exec></Actions></Task>";
         assert_eq!(
-            without_what_names_an_account(told, &names_them),
+            without_what_names_an_account(told, &names_them, &names_them),
             TaskThatNames::GoesWhole
         );
         let folder = r"<Task><Actions><Exec><Command>C:\A\a.exe</Command><WorkingDirectory>C:\Users\randy\work</WorkingDirectory></Exec></Actions></Task>";
         let TaskThatNames::LostSome { xml, actions } =
-            without_what_names_an_account(folder, &names_them)
+            without_what_names_an_account(folder, &names_them, &names_them)
         else {
             panic!("the folder goes");
         };
         assert_eq!(actions, 0);
         assert!(!xml.contains("WorkingDirectory"), "{xml}");
         assert_eq!(
-            without_what_names_an_account("<Task><Actions/></Task>", &names_them),
+            without_what_names_an_account("<Task><Actions/></Task>", &names_them, &names_them),
             TaskThatNames::NothingOfTheirs
         );
     }

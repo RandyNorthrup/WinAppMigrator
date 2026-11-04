@@ -249,6 +249,11 @@ fn is_data(classification: &FileClassification) -> bool {
 fn what_a_package_says_of(report: &ScanReport, options: &PackageOptions) -> ScanReport {
     let mut said = report.clone();
     said.generated_artifacts = None;
+    // How it was removed where it was, which can be a setup in someone's Downloads. Nothing on another
+    // PC reads this, as an install gives the app's entry an uninstaller of its own.
+    if let Some(app) = said.source_app.as_mut() {
+        app.uninstall_string = None;
+    }
     // A person can leave all of the data out, of a scan that was asked for it. An app of one account's
     // is in that account's folders, and what is said of its own files still has to be.
     if !options.include_user_data {
@@ -526,7 +531,11 @@ fn build_package(
             &manifest,
             &written_about_the_package(&options.output_dir, &reports_dir),
             traces,
-        ));
+            &|done, total| {
+                monitor.report(BuildStep::LookingOverWhatItSays { done, total });
+                monitor.checkpoint()
+            },
+        )?);
     }
 
     let mut self_extracting_archive_path = None;
@@ -2828,7 +2837,10 @@ mod tests {
         Ok(())
     }
 
-    const WHO_IT_WAS: [&str; 18] = [
+    const WHO_IT_WAS: [&str; 21] = [
+        "acct-service-command",
+        "acct-service-args",
+        "acct-session-host",
         "PCNAME-TASK-AUTHOR",
         "acct-task-author",
         "acct-trigger",
@@ -2848,6 +2860,36 @@ mod tests {
         "acct-service",
         "acct-cert-subject",
     ];
+
+    /// Nothing reads how an app was removed on the PC it came from, and it can be a file of someone's.
+    #[test]
+    fn how_an_app_was_removed_where_it_was_is_not_said() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| WinAppMigratorError::io("temp", error))?;
+        let exe = app_in(root.path())?;
+        let stub = plain_stub(root.path())?;
+        let options = installer_options(root.path(), &exe, &stub);
+        let mut report = scan_of(&options)?;
+        report.source_app = Some(crate::models::InstalledApp {
+            display_name: "Acme".to_owned(),
+            publisher: None,
+            version: None,
+            install_location: None,
+            uninstall_string: Some(r#""E:\alice\Downloads\foo-setup.exe" /x"#.to_owned()),
+            main_executable: None,
+            registry_source_path: String::new(),
+            architecture: AppArchitecture::X64,
+            install_scope: crate::models::InstallScope::PerMachine,
+            owner_profile: None,
+        });
+        let said = what_a_package_says_of(&report, &options);
+        assert_eq!(
+            said.source_app
+                .as_ref()
+                .map(|app| app.uninstall_string.clone()),
+            Some(None)
+        );
+        Ok(())
+    }
 
     /// All the ways a scan has been found to say who it was, as a real scan would have them.
     fn plant_who_it_was(report: &mut ScanReport, exe: &Path) {
@@ -2956,8 +2998,27 @@ mod tests {
             dependencies: Vec::new(),
             description: None,
             requires_admin: true,
+            restore_command_suggestion: r"sc create C:\Users\acct-service-command\a".to_owned(),
+        });
+        report.services.push(ServiceEntry {
+            service_name: "ProbeSvcOfTheirs".to_owned(),
+            display_name: None,
+            binary_path: exe.to_path_buf(),
+            arguments: Some(r"--data C:\Users\acct-service-args\work".to_owned()),
+            parameters: Vec::new(),
+            start_type: None,
+            account_name: None,
+            dependencies: Vec::new(),
+            description: None,
+            requires_admin: true,
             restore_command_suggestion: String::new(),
         });
+        report.warnings.push(Warning::new(
+            "registry_key_unreadable",
+            WarningSeverity::Warning,
+            "A key could not be read.",
+            Some(r"HKCU\Software\Acme\Sessions\acct-session-host".to_owned()),
+        ));
         report.certificates.push(CertificateEntry {
             store: "TrustedPeople".to_owned(),
             hive: RegistryHive::CurrentUser,

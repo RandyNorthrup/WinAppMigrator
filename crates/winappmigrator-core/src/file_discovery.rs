@@ -1273,6 +1273,30 @@ pub(crate) fn user_folders_of(
     }
 }
 
+/// Every folder an account's `User Shell Folders` says it keeps things in that is not in its profile,
+/// wherever that is, by what its PC calls it. Anything in one of these is that account's.
+pub(crate) fn folders_an_account_has_moved(
+    user: &UserHive,
+    system: &SystemContext,
+) -> Vec<PathBuf> {
+    let Ok(key) = user.open(USER_SHELL_FOLDERS_KEY, KEY_READ) else {
+        return Vec::new();
+    };
+    let environment = user.open(USER_ENVIRONMENT_KEY, KEY_READ).ok();
+    let lookup = |name: &str| {
+        environment
+            .as_ref()
+            .and_then(|key| key.get_value::<String, _>(name).ok())
+    };
+    let profile = system.logical_path(&user.profile_dir);
+    key.enum_values()
+        .flatten()
+        .filter_map(|(name, _)| key.get_value::<String, _>(name).ok())
+        .filter_map(|recorded| expand_user_folder(&recorded, &profile, &lookup))
+        .filter(|folder| !path_is_within(folder, &profile))
+        .collect()
+}
+
 pub(crate) fn user_folder_of(
     user: &UserHive,
     value_name: &str,
