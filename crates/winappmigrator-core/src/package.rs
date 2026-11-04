@@ -623,12 +623,15 @@ fn written_about_the_package(
     let mut files: Vec<PathBuf> = Vec::new();
     for folder in &folders {
         match fs::read_dir(folder) {
-            Ok(entries) => files.extend(
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|path| path.is_file()),
-            ),
+            Ok(entries) => {
+                for entry in entries {
+                    match entry {
+                        Ok(entry) if entry.file_type().is_ok_and(|kind| kind.is_dir()) => {}
+                        Ok(entry) => files.push(entry.path()),
+                        Err(_) => not_read.push(called(folder)),
+                    }
+                }
+            }
             // Most of these are only made if there is something to put in them.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => not_read.push(called(folder)),

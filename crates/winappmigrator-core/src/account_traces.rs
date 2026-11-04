@@ -99,6 +99,7 @@ const WINDOWS_1252_FROM_0X80: [char; 32] = [
     '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
 ];
 const SID_PREFIX: &str = "S-1-";
+const WHERE_A_PERSON_GOES: [&str; 6] = ["file", "ftp", "ftps", "http", "https", "smb"];
 const TWO_BYTES_A_CHARACTER_WITH_NO_ZEROS_UP_TO: usize = 64 * 1024;
 const FOLDER_UNREADABLE_CODE: &str = "file_discovery_dir_unreadable";
 
@@ -867,8 +868,12 @@ fn what_a_word_says(word: &str) -> Option<&str> {
     option.get(at + 1..).filter(|value| !value.is_empty())
 }
 
-/// Whether something is written as a place or as someone, rather than as a word.
+/// Whether something is written as a place or as someone, rather than as a word. An address on a
+/// network is somewhere a person went. One of an app's own, as `vlc://quit` is, only tells it what to do.
 fn is_written_as_a_place(value: &str) -> bool {
+    if let Some((scheme, _)) = value.split_once("://") {
+        return WHERE_A_PERSON_GOES.contains(&scheme.to_ascii_lowercase().as_str());
+    }
     value.contains(['\\', '/', '%', '@', ':'])
 }
 
@@ -1708,6 +1713,7 @@ mod tests {
             r#""--config=C:\Program Files\Acme\a.ini""#,
             r#""%ProgramFiles%\Acme\a.ini""#,
             r"--config data\a.ini",
+            "--reset-config --reset-plugins-cache vlc://quit",
         ] {
             assert!(on_a_shared_desktop_with(arguments, &traces), "{arguments}");
         }

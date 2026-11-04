@@ -174,6 +174,7 @@ pub struct NearMatchLook {
     /// entry need not say where its app is, so this is what says that of one that does not.
     files_of_others: Vec<String>,
     asked_what_other_apps_have: bool,
+    could_not_read_all_of_what_others_have: bool,
 }
 
 /// An app other than the one being scanned, and what it goes by.
@@ -584,7 +585,15 @@ impl NearMatchLook {
         {
             return Some("it holds what is shared, or is part of Windows");
         }
+        // Where a vendor keeps its products is side by side with others'. Further down, as a folder of
+        // `Linguistics\Providers\Adobe` is, a name like that is only what the folder is about.
+        let is_side_by_side_with_others = path.parent().is_some_and(|parent| {
+            known_bases
+                .iter()
+                .any(|base| comparable_path(base) == comparable_path(parent))
+        });
         if !is_where_microsoft_keeps_its_own
+            && is_side_by_side_with_others
             && names.is_named_only_for_publisher(&file_name_string(path))
         {
             return Some(NAMED_ONLY_FOR_THE_PUBLISHER);
@@ -619,9 +628,15 @@ impl NearMatchLook {
     ) {
         if !self.asked_what_other_apps_have {
             self.asked_what_other_apps_have = true;
-            self.files_of_others =
-                msi_files_of_others(&self.products_of_others, system, is_cancelled);
+            let found = msi_files_of_others(&self.products_of_others, system, is_cancelled);
+            self.files_of_others = found.files;
+            self.could_not_read_all_of_what_others_have = found.could_not_read_all;
         }
+    }
+
+    /// Whether what was just asked could not all be read, which is for a person to know.
+    pub(crate) fn could_not_read_all_of_what_others_have(&self) -> bool {
+        self.could_not_read_all_of_what_others_have
     }
 
     /// Whether another app has on record that it is somewhere inside this folder.
@@ -1218,9 +1233,19 @@ mod tests {
         let system = SystemContext::live();
         let names = ProductNames::new(Some("Acme Widget"), Some("Acme Corp"), &[], &[]);
         let mut look = look_with_others(&[]);
+        let deep_in_something = vendor.join("Providers").join("Acme Corp");
+        std::fs::create_dir_all(&deep_in_something).unwrap_or_else(|error| panic!("{error}"));
+        look.known_bases
+            .set(vec![base.clone()])
+            .unwrap_or_else(|_| panic!("it has not been asked yet"));
         assert_eq!(
             look.root_refusal(&vendor, &names, false, &system),
             Some(NAMED_ONLY_FOR_THE_PUBLISHER)
+        );
+        assert_eq!(
+            look.root_refusal(&deep_in_something, &names, false, &system),
+            None,
+            "that far down, it is only what the folder is about"
         );
         assert_eq!(look.root_refusal(&shared, &names, false, &system), None);
         look.files_of_others = vec![comparable_path(&shared.join("sibling.exe"))];

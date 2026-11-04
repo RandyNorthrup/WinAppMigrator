@@ -377,24 +377,29 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     // A folder taken for the app's because its uninstaller is there, with nothing on record to say so,
     // can hold another app that says nothing of where it is but what Windows Installer has of it.
     let mut uninstallers_folder_left_out = None;
+    let mut app_folder_has_a_file_of_another_app = None;
     if let (Some(app), Some(source)) = (source_app.as_mut(), install_source.as_mut())
         && recorded_location.is_none()
         && let Some(folder) = source.uninstaller_folder.clone()
         && install_location.as_deref() == Some(folder.as_path())
         && near_look.another_app_has_a_file_in(&folder, &system, &is_cancelled)
     {
-        install_location = crate::install_source::location_without_the_uninstallers_folder(
+        match crate::install_source::location_without_the_uninstallers_folder(
             app,
             source,
             &executable_path,
             &folder,
-        )
-        .filter(|location| !is_someone_elses(location));
-        logical_location = install_location
-            .as_deref()
-            .map(|location| system.logical_path(location));
-        app.install_location.clone_from(&install_location);
-        uninstallers_folder_left_out = Some(folder);
+        ) {
+            Some(location) => {
+                install_location = Some(location).filter(|location| !is_someone_elses(location));
+                logical_location = install_location
+                    .as_deref()
+                    .map(|location| system.logical_path(location));
+                app.install_location.clone_from(&install_location);
+                uninstallers_folder_left_out = Some(folder);
+            }
+            None => app_folder_has_a_file_of_another_app = Some(folder),
+        }
     }
     monitor.checkpoint()?;
     let also_the_apps = std::mem::take(&mut picks.also_the_apps);
@@ -497,6 +502,24 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         near_look.ask_what_other_apps_have(&system, &is_cancelled);
     }
     let mut folders_left_out = Vec::new();
+    if near_look.could_not_read_all_of_what_others_have() {
+        folders_left_out.push(Warning::new(
+            "other_apps_files_unknown",
+            WarningSeverity::Warning,
+            "Not all of what Windows Installer has of other apps could be read, so a folder this app \
+             has on record can hold another app's files with nothing here to say so.",
+            None,
+        ));
+    }
+    if let Some(folder) = app_folder_has_a_file_of_another_app {
+        folders_left_out.push(Warning::new(
+            "app_folder_holds_another_app",
+            WarningSeverity::Warning,
+            "Windows Installer says another app has a file in the folder this app's program is in, and \
+             it comes along, as all of that folder is taken.",
+            Some(folder.display().to_string()),
+        ));
+    }
     for folder in install_source
         .iter()
         .flat_map(|source| &source.folders_left_alone)

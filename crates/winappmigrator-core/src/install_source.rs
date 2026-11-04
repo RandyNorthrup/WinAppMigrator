@@ -437,17 +437,30 @@ fn is_app_called(app: &InstalledApp, folder: &str) -> bool {
 }
 
 /// Where an app is, with the folder its uninstaller is in left out, which was taken for where it is
-/// with nothing on record to say so. All that came of taking it goes as well.
+/// with nothing on record to say so. All that came of taking it goes as well. `None` if it is where the
+/// app is whatever else is there, as the program is right in it or it is called what the app is, and
+/// then nothing changes.
 pub(crate) fn location_without_the_uninstallers_folder(
     app: &mut InstalledApp,
     source: &mut InstallSource,
     executable: &Path,
     folder: &Path,
 ) -> Option<PathBuf> {
+    let with_no_location = InstalledApp {
+        install_location: None,
+        ..app.clone()
+    };
+    let roots_as_they_were = source.roots.clone();
     source.roots.retain(|root| root != folder);
+    let location = resolve_install_location(&with_no_location, executable, source)
+        .filter(|location| location != folder);
+    if location.is_none() {
+        source.roots = roots_as_they_were;
+        return None;
+    }
     source.uninstaller_folder = None;
     app.install_location = None;
-    resolve_install_location(app, executable, source)
+    location
 }
 
 /// With the program only known now, as nothing in the app's entry said which it was: the folder the
@@ -1848,6 +1861,15 @@ fn msi_component_paths(
     })
 }
 
+/// What Windows Installer says other apps have.
+#[derive(Debug, Default)]
+pub(crate) struct OtherAppsFiles {
+    /// As [`comparable_path`] writes each, in order.
+    pub files: Vec<String>,
+    /// Some of its records could not be read, so a file not being here says nothing.
+    pub could_not_read_all: bool,
+}
+
 /// Every file the MSI component database records for any of these products, each as
 /// [`comparable_path`] writes it, in order. For what an app's entry does not say of where it is, and
 /// about nothing being scanned, so what cannot be followed is not said to be.
@@ -1855,31 +1877,40 @@ pub(crate) fn msi_files_of_others(
     product_codes: &[String],
     system: &SystemContext,
     is_cancelled: &dyn Fn() -> bool,
-) -> Vec<String> {
+) -> OtherAppsFiles {
+    let mut found = OtherAppsFiles::default();
     let squished_products: BTreeSet<String> = product_codes
         .iter()
         .filter_map(|code| squish_guid(code))
         .collect();
     if squished_products.is_empty() {
-        return Vec::new();
+        return found;
     }
-    let Ok(user_data) = system.open_hklm(USERDATA_PATH, KEY_READ | KEY_WOW64_64KEY) else {
-        return Vec::new();
+    let user_data = match system.open_hklm(USERDATA_PATH, KEY_READ | KEY_WOW64_64KEY) {
+        Ok(user_data) => user_data,
+        // A PC with nothing installed this way has none of this, which is an answer.
+        Err(error) => {
+            found.could_not_read_all = error.kind() != std::io::ErrorKind::NotFound;
+            return found;
+        }
     };
     let mut files = Vec::new();
     for sid in component_sweep_sids(&user_data, &squished_products) {
         let Ok(components) = user_data
             .open_subkey_with_flags(format!(r"{sid}\Components"), KEY_READ | KEY_WOW64_64KEY)
         else {
+            found.could_not_read_all = true;
             continue;
         };
         for component in components.enum_keys().flatten() {
             if is_cancelled() {
-                return Vec::new();
+                found.could_not_read_all = true;
+                return found;
             }
             let Ok(component_key) =
                 components.open_subkey_with_flags(&component, KEY_READ | KEY_WOW64_64KEY)
             else {
+                found.could_not_read_all = true;
                 continue;
             };
             for (product, value) in component_key.enum_values().flatten() {
@@ -1900,7 +1931,8 @@ pub(crate) fn msi_files_of_others(
     }
     files.sort_unstable();
     files.dedup();
-    files
+    found.files = files;
+    found
 }
 
 /// The SIDs whose `Components` subtree to sweep for a product's key paths.
@@ -2681,6 +2713,30 @@ mod tests {
         assert_eq!(location.as_deref(), program.parent());
         assert!(source.roots.is_empty());
         assert_eq!(source.uninstaller_folder, None);
+        Ok(())
+    }
+
+    /// With its program right there, that is where it is, and leaving it out would be saying so and
+    /// taking it anyway.
+    #[test]
+    fn a_folder_with_the_program_right_in_it_stays_where_the_app_is() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let folder = work.path().join("Shared Things");
+        let program = folder.join("widget.exe");
+        std::fs::create_dir_all(&folder)?;
+        std::fs::write(&program, b"MZ")?;
+        let mut app = test_app("Widget Maker", Some("Acme"));
+        app.install_location = Some(folder.clone());
+        let mut source = test_source(InstallMethod::Generic);
+        source.roots = vec![folder.clone()];
+        source.uninstaller_folder = Some(folder.clone());
+        assert_eq!(
+            location_without_the_uninstallers_folder(&mut app, &mut source, &program, &folder),
+            None
+        );
+        assert_eq!(source.roots, std::slice::from_ref(&folder));
+        assert_eq!(source.uninstaller_folder, Some(folder.clone()));
+        assert_eq!(app.install_location, Some(folder));
         Ok(())
     }
 
