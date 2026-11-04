@@ -65,9 +65,11 @@ fn not_a_panic<T>(path: &Path, read: impl FnOnce() -> Result<T>) -> Result<T> {
     })
 }
 
-/// A program's headers, parsed if they can be without trusting what the parser would take on trust:
-/// it makes a slice of section headers wherever the optional header says it ends, and one that is not
-/// on a four-byte boundary is undefined behaviour, whatever it reads as.
+/// A program's headers, parsed if they can be without trusting what the parser would take on trust.
+/// It reads the headers as a structure with 8-byte fields wherever a file says they are, goes by a
+/// place being on a boundary without asking where that place really is in the file, and makes a slice
+/// of the resources with only their own start to go by. Any of those off its boundary is undefined
+/// behaviour, whatever it reads as, and no linker writes one.
 fn parse_program<'a>(path: &Path, bytes: &'a [u8]) -> Result<PeFile<'a>> {
     if !headers_are_where_they_can_be(bytes) {
         return Err(WinAppMigratorError::pe(
@@ -80,22 +82,49 @@ fn parse_program<'a>(path: &Path, bytes: &'a [u8]) -> Result<PeFile<'a>> {
 
 fn headers_are_where_they_can_be(bytes: &[u8]) -> bool {
     const DOS_HEADER_OFFSET_FIELD: usize = 0x3C;
+    const SECTION_COUNT_FIELD: usize = 6;
     const OPTIONAL_HEADER_SIZE_FIELD: usize = 20;
     const OPTIONAL_HEADER_START: usize = 24;
-    const BOUNDARY: usize = 4;
-    let Some(field) = bytes.get(DOS_HEADER_OFFSET_FIELD..DOS_HEADER_OFFSET_FIELD + 4) else {
+    const SECTION_HEADER_BYTES: usize = 40;
+    const SECTION_ADDRESS_FIELD: usize = 12;
+    const SECTION_FILE_OFFSET_FIELD: usize = 20;
+    const FIELD_BOUNDARY: usize = 4;
+    const LARGEST_FIELD_BOUNDARY: usize = 8;
+    let Some(headers) = u32_at(bytes, DOS_HEADER_OFFSET_FIELD).map(|at| at as usize) else {
         return false;
     };
-    let headers = u32::from_le_bytes([field[0], field[1], field[2], field[3]]) as usize;
-    let Some(size) = headers
-        .checked_add(OPTIONAL_HEADER_SIZE_FIELD)
-        .and_then(|at| bytes.get(at..at.checked_add(2)?))
+    let Some(optional_size) =
+        u16_at(bytes, headers.saturating_add(OPTIONAL_HEADER_SIZE_FIELD)).map(usize::from)
     else {
         return false;
     };
-    let optional_size = u16::from_le_bytes([size[0], size[1]]) as usize;
-    headers.is_multiple_of(BOUNDARY)
-        && (headers + OPTIONAL_HEADER_START + optional_size).is_multiple_of(BOUNDARY)
+    let optional = headers.saturating_add(OPTIONAL_HEADER_START);
+    let table = optional.saturating_add(optional_size);
+    if !headers.is_multiple_of(LARGEST_FIELD_BOUNDARY) || !table.is_multiple_of(FIELD_BOUNDARY) {
+        return false;
+    }
+    // Where each section says it is. What is not there to read says nothing, and is the parser's.
+    let sections =
+        u16_at(bytes, headers.saturating_add(SECTION_COUNT_FIELD)).map_or(0, usize::from);
+    let sections_are_where_they_can_be = (0..sections).all(|index| {
+        let header = table.saturating_add(index.saturating_mul(SECTION_HEADER_BYTES));
+        [SECTION_ADDRESS_FIELD, SECTION_FILE_OFFSET_FIELD]
+            .iter()
+            .all(|field| {
+                u32_at(bytes, header.saturating_add(*field))
+                    .is_none_or(|place| (place as usize).is_multiple_of(LARGEST_FIELD_BOUNDARY))
+            })
+    });
+    let directories = match u16_at(bytes, optional) {
+        Some(OPTIONAL_MAGIC_PE32) => optional.saturating_add(PE32_DIRECTORIES_FIELD),
+        Some(OPTIONAL_MAGIC_PE32_PLUS) => optional.saturating_add(PE32_PLUS_DIRECTORIES_FIELD),
+        _ => return sections_are_where_they_can_be,
+    };
+    let resources =
+        directories.saturating_add(RESOURCE_DIRECTORY_INDEX.saturating_mul(DIRECTORY_ENTRY_BYTES));
+    sections_are_where_they_can_be
+        && u32_at(bytes, resources)
+            .is_none_or(|place| (place as usize).is_multiple_of(FIELD_BOUNDARY))
 }
 
 fn scan_pe_bytes(path: &Path, bytes: &[u8]) -> Result<PeScanResult> {
@@ -381,16 +410,44 @@ fn program_needs_of_bytes(path: &Path, bytes: &[u8]) -> Result<ProgramNeeds> {
         } else {
             ManagedImageFacts::default()
         },
-        is_a_single_file_bundle: !is_managed && find_bytes(bytes, &SINGLE_FILE_SIGNATURE).is_some(),
+        is_a_single_file_bundle: !is_managed && is_a_single_file_bundle(path, bytes),
     })
 }
 
-/// What `.NET` writes into a program it has packed into one file, to find what is in it by. It has
-/// no `runtimeconfig.json` on disk and looks like a native program.
+/// What `.NET` writes into the program that starts an app of its, to find what is packed in it by.
+/// Every such program has this, packed or not, after the eight bytes that say where the rest of what
+/// is packed is, which are zero if nothing is. One that is packed has no `runtimeconfig.json` on disk
+/// and looks like a native program.
 const SINGLE_FILE_SIGNATURE: [u8; 32] = [
     0x8b, 0x12, 0x02, 0xb9, 0x6a, 0x61, 0x20, 0x38, 0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0, 0x32,
     0x13, 0xf5, 0xb9, 0xe6, 0xef, 0xae, 0x33, 0x18, 0xee, 0x3b, 0x2d, 0xce, 0x24, 0xb3, 0x6a, 0xae,
 ];
+
+const SINGLE_FILE_OFFSET_BYTES: usize = 8;
+
+/// Whether a program says where what is packed in it is. It is in the program's data, which a large
+/// file's hollow read leaves out, and before what is packed, so only the start of the file is read.
+fn is_a_single_file_bundle(path: &Path, bytes: &[u8]) -> bool {
+    if bytes.len() as u64 <= READ_WHOLE_UP_TO_BYTES {
+        return says_where_what_is_packed_is(bytes);
+    }
+    let Ok(file) = fs::File::open(path) else {
+        return says_where_what_is_packed_is(bytes);
+    };
+    let mut start = Vec::new();
+    file.take(READ_WHOLE_UP_TO_BYTES)
+        .read_to_end(&mut start)
+        .is_ok_and(|_| says_where_what_is_packed_is(&start))
+}
+
+fn says_where_what_is_packed_is(bytes: &[u8]) -> bool {
+    find_bytes(bytes, &SINGLE_FILE_SIGNATURE).is_some_and(|signature| {
+        signature
+            .checked_sub(SINGLE_FILE_OFFSET_BYTES)
+            .and_then(|offset| bytes.get(offset..signature))
+            .is_some_and(|offset| offset.iter().any(|byte| *byte != 0))
+    })
+}
 
 /// A file's version as Windows would show it, for telling which of two copies of a runtime is newer.
 pub(crate) fn file_version_of(path: &Path) -> Option<String> {
@@ -1251,25 +1308,64 @@ mod tests {
         }
     }
 
-    /// Windows' own programs, changed a little at a time where a parser looks: whatever comes of
-    /// reading them, it comes back as an answer. It found a panic and a misaligned read in 84,000
-    /// tries at first. This is few enough to run each time and says those stay found.
+    /// One of a program's places moved on by a byte: what a section says, and what a directory does.
+    fn each_place_moved_by_a_byte(original: &[u8]) -> Vec<Vec<u8>> {
+        let mut moved = Vec::new();
+        let Some(headers) = u32_at(original, 0x3C).map(|at| at as usize) else {
+            return moved;
+        };
+        let sections = u16_at(original, headers + 6).map_or(0, usize::from);
+        let optional_size = u16_at(original, headers + 20).map_or(0, usize::from);
+        let optional = headers + 24;
+        let table = optional + optional_size;
+        let mut move_it = |at: usize| {
+            let mut bytes = original.to_vec();
+            if let Some(place) = bytes.get_mut(at) {
+                *place = place.wrapping_add(1);
+                moved.push(bytes);
+            }
+        };
+        for index in 0..sections {
+            move_it(table + index * 40 + 12);
+            move_it(table + index * 40 + 20);
+        }
+        let directories = match u16_at(original, optional) {
+            Some(OPTIONAL_MAGIC_PE32) => optional + PE32_DIRECTORIES_FIELD,
+            _ => optional + PE32_PLUS_DIRECTORIES_FIELD,
+        };
+        for index in 0..16 {
+            move_it(directories + index * DIRECTORY_ENTRY_BYTES);
+        }
+        move_it(headers + 20);
+        moved
+    }
+
+    /// Windows' own programs and .NET's, changed a little at a time where a parser looks. Read by a
+    /// file that is there, so that it goes all the way through to what a program's version says. A
+    /// resource that takes the parser down is only a program with no version, which is caught where it
+    /// is read, and nothing else may come of any of this. A misread that aborts takes this test with it.
     #[test]
     fn no_program_however_damaged_takes_what_reads_it_down() {
-        const TRIES_OF_EACH: usize = 400;
+        const TRIES_OF_EACH: usize = 200;
         const FIRST_PART: usize = 4096;
-        let path = Path::new("fuzzed.exe");
+        let windows = crate::path_utils::system_root();
         let seeds = [
-            crate::path_utils::system_root().join(r"System32\whoami.exe"),
-            crate::path_utils::system_root().join(r"System32\sc.exe"),
+            windows.join(r"System32\whoami.exe"),
+            windows.join(r"System32\sc.exe"),
+            windows.join(r"Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe"),
+            windows.join(r"Microsoft.NET\Framework\v4.0.30319\MSBuild.exe"),
         ];
         let mut mutations = Mutations(0x5EED_5EED_5EED_5EED);
-        let mut read = 0_usize;
+        let (mut read, mut managed, mut scanned, mut refused, mut gave_a_version) =
+            (0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
+        let mut panics = Vec::new();
         for seed in seeds {
             let Ok(original) = fs::read(&seed) else {
                 continue;
             };
             read += 1;
+            managed += usize::from(header_facts(&original).is_some_and(|facts| facts.is_managed));
+            let mut tries = each_place_moved_by_a_byte(&original);
             for _ in 0..TRIES_OF_EACH {
                 let mut bytes = original.clone();
                 for _ in 0..=mutations.below(8) {
@@ -1282,11 +1378,106 @@ mod tests {
                     let value = mutations.next().to_le_bytes()[0];
                     bytes[at] = value;
                 }
-                let _ = not_a_panic(path, || scan_pe_bytes(path, &bytes));
-                let _ = not_a_panic(path, || program_needs_of_bytes(path, &bytes));
+                tries.push(bytes);
+            }
+            for bytes in &tries {
+                match panic::catch_unwind(AssertUnwindSafe(|| scan_pe_bytes(&seed, bytes))) {
+                    Ok(Ok(scan)) => {
+                        scanned += 1;
+                        gave_a_version += usize::from(scan.metadata.version_info.is_some());
+                    }
+                    Ok(Err(_)) => refused += 1,
+                    Err(panicked) => panics.push(panic_text(&*panicked)),
+                }
+                if let Err(panicked) =
+                    panic::catch_unwind(AssertUnwindSafe(|| program_needs_of_bytes(&seed, bytes)))
+                {
+                    panics.push(panic_text(&*panicked));
+                }
             }
         }
         assert!(read > 0, "there was nothing to try this on");
+        assert!(managed > 0, "nothing of .NET's was tried");
+        assert_eq!(panics, Vec::<String>::new());
+        assert!(scanned > 0, "nothing got all the way through");
+        assert!(gave_a_version > 0, "nothing got as far as its version");
+        assert!(refused > 0, "nothing was refused");
+    }
+
+    /// Each by a byte: a place a parser goes straight to, without asking where it is in the file.
+    #[test]
+    fn a_program_with_a_place_off_its_boundary_is_not_given_to_the_parser() {
+        let seed = crate::path_utils::system_root().join(r"System32\whoami.exe");
+        let Ok(original) = fs::read(seed) else {
+            return;
+        };
+        assert!(headers_are_where_they_can_be(&original));
+        let Some(headers) = u32_at(&original, 0x3C).map(|at| at as usize) else {
+            return;
+        };
+        let optional = headers + 24;
+        let table = optional + u16_at(&original, headers + 20).map_or(0, usize::from);
+        let moved = |at: usize, by: u8| {
+            let mut bytes = original.clone();
+            bytes[at] = bytes[at].wrapping_add(by);
+            bytes
+        };
+        for (what, bytes) in [
+            ("the headers, by 4", moved(0x3C, 4)),
+            ("the optional header's size", moved(headers + 20, 1)),
+            ("where a section is in memory", moved(table + 12, 1)),
+            ("where a section is in the file", moved(table + 20, 1)),
+            ("where a section is in the file, by 4", moved(table + 20, 4)),
+            (
+                "where the resources are",
+                moved(
+                    optional + PE32_PLUS_DIRECTORIES_FIELD + 2 * DIRECTORY_ENTRY_BYTES,
+                    1,
+                ),
+            ),
+        ] {
+            assert!(!headers_are_where_they_can_be(&bytes), "{what}");
+        }
+    }
+
+    fn apphost_with_offset(offset: u64) -> Vec<u8> {
+        let mut bytes = vec![1_u8; 4096];
+        bytes.extend(offset.to_le_bytes());
+        bytes.extend(SINGLE_FILE_SIGNATURE);
+        bytes.extend(vec![1_u8; 4096]);
+        bytes
+    }
+
+    /// Every program that starts a .NET app has this mark. Only one that has been packed says where.
+    #[test]
+    fn a_program_that_starts_a_dotnet_app_is_only_packed_if_it_says_where() {
+        assert!(!says_where_what_is_packed_is(&apphost_with_offset(0)));
+        assert!(says_where_what_is_packed_is(&apphost_with_offset(1 << 20)));
+        assert!(!says_where_what_is_packed_is(&[1_u8; 4096]));
+        assert!(
+            !says_where_what_is_packed_is(&SINGLE_FILE_SIGNATURE),
+            "with nowhere for it to say"
+        );
+    }
+
+    /// Past the size that is read whole, a program's data is not read at all, so this goes to the file.
+    #[test]
+    fn a_large_packed_program_is_seen_for_what_it_is() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let path = work.path().join("packed.exe");
+        let mut packed = apphost_with_offset(1 << 20);
+        let large = usize::try_from(READ_WHOLE_UP_TO_BYTES).unwrap_or(usize::MAX) * 2;
+        packed.resize(large, 0);
+        fs::write(&path, &packed)?;
+        let hollow = vec![0_u8; large];
+        assert!(!says_where_what_is_packed_is(&hollow));
+        assert!(is_a_single_file_bundle(&path, &hollow));
+        let plain = work.path().join("plain.exe");
+        let mut host = apphost_with_offset(0);
+        host.resize(large, 0);
+        fs::write(&plain, &host)?;
+        assert!(!is_a_single_file_bundle(&plain, &hollow));
+        Ok(())
     }
 
     #[test]
