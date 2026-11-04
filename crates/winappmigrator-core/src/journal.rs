@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tracing::warn;
 use winreg::RegValue;
 use winreg::enums::RegType;
 
@@ -676,12 +675,11 @@ impl Journal {
         let unfinished = backup_path(&self.folder, number, UNFINISHED_BACKUP_SUFFIX);
         let copied = backup_path(&self.folder, number, COPIED_BACKUP_SUFFIX);
         crate::restore::write_partial_copy(path, &unfinished, true)?;
-        // Without them a private file comes back readable by whoever can read that folder, which is
-        // worth saying, but no reason to stop what it would then be stopping.
+        // Without them a private file would come back readable by whoever can read that folder, so it
+        // is not taken away from where it is if they cannot be kept.
         let permissions = backup_path(&self.folder, number, PERMISSIONS_SUFFIX);
-        if let Err(error) = save_permissions(path, &permissions) {
-            warn!(path = %path.display(), %error, "could not keep a file's permissions");
-        }
+        save_permissions(path, &permissions)
+            .map_err(|error| WinAppMigratorError::io(path, error))?;
         fs::rename(&unfinished, &copied)
             .map_err(|error| WinAppMigratorError::io(&copied, error))?;
         // That rename has to reach the disk before the delete below does, which is on another
@@ -847,19 +845,22 @@ fn saved_permissions_for(saved: &[u8], name: &str) -> Option<Vec<u8>> {
     )
 }
 
-/// Give a file back the permissions kept with its backup, if there are any, and let go of them. This
-/// takes the right to restore files, which an elevated install has. If it fails the file is still
-/// back, with its folder's permissions, as it would be with none kept.
-pub(crate) fn put_permissions_back(backup: &Path, file: &Path) {
+/// Give a file on its way back the permissions kept with its backup, if there are any. This takes the
+/// right to restore files, which an elevated install has. Done before it has its name, so that it is
+/// never where it is looked for with its folder's permissions. If this fails it does not go back.
+pub(crate) fn put_permissions_back(backup: &Path, file: &Path) -> io::Result<()> {
     let saved = backup.with_extension(PERMISSIONS_SUFFIX);
-    let Ok(bytes) = fs::read(&saved) else {
-        return;
+    let bytes = match fs::read(&saved) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     };
-    let result = put_saved_permissions_on(&saved, &bytes, file);
-    if let Err(error) = result {
-        warn!(path = %file.display(), %error, "could not put a file's permissions back");
-    }
-    let _ = fs::remove_file(&saved);
+    put_saved_permissions_on(&saved, &bytes, file)
+}
+
+/// Let go of what was kept with a backup, now that the file is back.
+pub(crate) fn forget_permissions_of(backup: &Path) {
+    let _ = fs::remove_file(backup.with_extension(PERMISSIONS_SUFFIX));
 }
 
 fn put_saved_permissions_on(saved: &Path, bytes: &[u8], file: &Path) -> io::Result<()> {
@@ -1255,11 +1256,16 @@ mod tests {
 
         let back = work.path().join("private file.txt.before-install");
         fs::write(&back, b"x")?;
-        put_permissions_back(&backup, &back);
+        let put_back = put_permissions_back(&backup, &back);
         assert!(
-            !backup.with_extension(PERMISSIONS_SUFFIX).exists(),
-            "they are let go of"
+            backup.with_extension(PERMISSIONS_SUFFIX).exists(),
+            "they are kept until the file is back"
         );
+        forget_permissions_of(&backup);
+        assert!(!backup.with_extension(PERMISSIONS_SUFFIX).exists());
+        // With none kept, there is nothing to do.
+        assert!(put_permissions_back(&backup, &back).is_ok());
+        assert_eq!(put_back.is_ok(), is_elevated(), "{put_back:?}");
         if is_elevated() {
             let kept = work.path().join("kept");
             save_permissions(&back, &kept)?;

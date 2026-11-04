@@ -43,8 +43,9 @@ use crate::file_discovery::{PinnedPath, hold_path_below_root, pin_path_below_roo
 use crate::hashing::sha256_file;
 use crate::journal::{
     Backup, Change, ItemKind, Journal, JournalLock, ReadJournal, STAGING_PREFIX, ServiceConfig,
-    StoredValue, checked_install_folder, find_backup, has_no_journal, install_folders, is_in_use,
-    lock_journal, lock_state, put_permissions_back, read_journal, real_path,
+    StoredValue, checked_install_folder, find_backup, forget_permissions_of, has_no_journal,
+    install_folders, is_in_use, lock_journal, lock_state, put_permissions_back, read_journal,
+    real_path,
 };
 use crate::models::{EnvironmentScope, FirewallRuleEntry, RegistryHive, UndoReport};
 use crate::path_utils::{
@@ -1393,14 +1394,19 @@ pub(crate) fn put_back_backup(backup: &Backup, path: &Path) -> Result<()> {
                     .unwrap_or_default()
             ));
             remove_regular_file(&partial)?;
-            let copied = write_partial_copy(from, &partial, false).and_then(|()| {
-                fs::rename(&partial, path).map_err(|error| WinAppMigratorError::io(path, error))
-            });
+            let copied = write_partial_copy(from, &partial, false)
+                .and_then(|()| {
+                    put_permissions_back(from, &partial)
+                        .map_err(|error| WinAppMigratorError::io(path, error))
+                })
+                .and_then(|()| {
+                    fs::rename(&partial, path).map_err(|error| WinAppMigratorError::io(path, error))
+                });
             if copied.is_err() {
                 let _ = fs::remove_file(&partial);
                 return copied;
             }
-            put_permissions_back(from, path);
+            forget_permissions_of(from);
             make_replaceable(from)?;
             fs::remove_file(from).map_err(|error| WinAppMigratorError::io(from, error))
         }
