@@ -685,6 +685,28 @@ fn what_an_account_has_follows_the_options() -> TestResult {
         if !manifest.settings_left_out.is_empty() {
             problems.push(format!("{name}: it left settings out with the option on"));
         }
+        // Beside what is planted as an account's file, by a name that says what it is. Nothing asks for
+        // this, and User data being on is no reason for it to go.
+        let takes_a_file_of_the_accounts = id == "7zip";
+        if takes_a_file_of_the_accounts {
+            let is_named_as_a_secret =
+                |text: &str| text.to_ascii_lowercase().contains("credentials.json");
+            if !manifest
+                .secrets_left_out
+                .iter()
+                .any(|item| is_named_as_a_secret(&item.name))
+            {
+                problems.push(format!(
+                    "{name}: credentials.json is not said to have been left out: {:?}",
+                    manifest.secrets_left_out
+                ));
+            }
+            if manifest.file_inventory.iter().any(|file| {
+                file.should_copy && is_named_as_a_secret(&file.original_path.to_string_lossy())
+            }) {
+                problems.push(format!("{name}: credentials.json went in"));
+            }
+        }
         // The search of a package with the option off finds nothing of this, and this says it could.
         if manifest.source_computer_name != std::env::var("COMPUTERNAME").ok() {
             problems.push(format!(

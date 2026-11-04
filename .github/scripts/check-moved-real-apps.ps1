@@ -190,9 +190,35 @@ foreach ($round in $rounds) {
         Check "$($app.id): its folder is gone" (-not (Test-Path -LiteralPath $roots[$app.id])) $roots[$app.id]
     }
     Check 'what someone made of it went with it' (-not (Get-ScheduledTask -TaskPath $script:PersonalTaskPath -TaskName $script:PersonalTaskName -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath (Join-Path ([Environment]::GetFolderPath('Desktop')) $script:PlainShortcut))) ''
-    $differences = @(State-Differences $cleanState (Get-MachineState $manifests $apps))
+    $stateNow = Get-MachineState $manifests $apps
+    $differences = @(State-Differences $cleanState $stateNow)
     foreach ($difference in $differences) { Write-Host "  $difference" }
     Check 'the machine is as it was before any of them' ($differences.Count -eq 0) ($differences -join '; ')
+
+    # So that passing says something: what this leaves out has to be nothing of what a package holds.
+    # One of the packages' own classes, as if an uninstall had left it, with only an AppID at that.
+    $classesKey = 'SOFTWARE\Classes\CLSID'
+    $ofAPackage = '{23170F69-40C1-278A-1000-000100020000}'
+    $unknown = '{5F0A7C11-2B57-4D6E-9C3F-7A1E4D2B9C60}'
+    $withMore = '{5F0A7C11-2B57-4D6E-9C3F-7A1E4D2B9C61}'
+    if ('7zip' -in $apps.id) {
+        foreach ($clsid in $ofAPackage, $unknown, $withMore) {
+            $class = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey("$classesKey\$clsid")
+            $class.SetValue('AppID', '{5F0A7C11-2B57-4D6E-9C3F-7A1E4D2B9C62}')
+            if ($clsid -eq $withMore) { [void]$class.CreateSubKey('InprocServer32') }
+            $class.Dispose()
+        }
+        try {
+            $seen = @(State-Differences $cleanState (Get-MachineState $manifests $apps)) -join "`n"
+        } finally {
+            foreach ($clsid in $ofAPackage, $unknown, $withMore) {
+                [Microsoft.Win32.Registry]::LocalMachine.DeleteSubKeyTree("$classesKey\$clsid", $false)
+            }
+        }
+        Check 'a class a package holds, left behind, is seen though it holds only an AppID' $seen.Contains($ofAPackage) $seen
+        Check 'a class nothing holds that does more than name an AppID is seen' $seen.Contains($withMore) $seen
+        Check 'a class nothing holds, with only an AppID, is not counted' (-not $seen.Contains($unknown)) $seen
+    }
 }
 
 Section 'Every check, each way'

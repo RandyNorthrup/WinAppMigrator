@@ -634,7 +634,41 @@ $script:PersonalTaskName = 'WAM Personal Task'
 $script:PlainShortcut = 'WAM Plain 7-Zip.lnk'
 $script:PersonalShortcut = 'WAM Personal 7-Zip.lnk'
 
+# Classes that hold nothing but an AppID, as Windows and what it runs in the background add and take
+# away by themselves while a job runs. Seen at each look at the machine, as one that has gone cannot be
+# asked what it held.
+$script:ClassesWithOnlyAnAppId = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+function Note-Classes-With-Only-An-AppId([string]$Path) {
+    $classes = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($Path)
+    if (-not $classes) { return }
+    foreach ($name in $classes.GetSubKeyNames()) {
+        try { $class = $classes.OpenSubKey($name) } catch { continue }
+        if (-not $class) { continue }
+        $values = @($class.GetValueNames())
+        if ($class.SubKeyCount -eq 0 -and $values.Count -eq 1 -and $values[0] -eq 'AppID') {
+            [void]$script:ClassesWithOnlyAnAppId.Add("HKEY_LOCAL_MACHINE\$Path\$name")
+        }
+    }
+}
+
+# Whether a class that is new or gone is none of these packages' doing: it is named in none of what they
+# hold, and holds nothing but an AppID. Anything else is what an uninstall left, or took.
+function Is-Windows-Own-Class([string]$Kind, [string]$Item) {
+    if ($Kind -ne 'Classes' -or $Item -notmatch '\\CLSID\\(\{[0-9A-Fa-f-]+\})$') { return $false }
+    $clsid = $Matches[1]
+    if ($script:WhatThePackagesHold -and $script:WhatThePackagesHold.IndexOf($clsid, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $false
+    }
+    return $script:ClassesWithOnlyAnAppId.Contains($Item)
+}
+
 function Get-MachineState([string]$Manifests, $Apps) {
+    $script:WhatThePackagesHold = (@($Apps) | ForEach-Object {
+            Get-Content -Raw -LiteralPath (Join-Path $Manifests "$($_.id).json")
+        }) -join "`n"
+    Note-Classes-With-Only-An-AppId 'SOFTWARE\Classes\CLSID'
+    Note-Classes-With-Only-An-AppId 'SOFTWARE\WOW6432Node\Classes\CLSID'
     $environmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
     $environment = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($environmentKey)
     $mine = [Microsoft.Win32.Registry]::CurrentUser
@@ -697,10 +731,19 @@ function State-Differences($Before, $After) {
             # Windows adds these itself for its own packages, whenever it first starts one.
             if ($kind -eq 'Firewall' -and $item -match '_8wekyb3d8bbwe') {
                 Write-Host "  (Windows' own, and not counted: $item)"
+            } elseif (Is-Windows-Own-Class $kind $item) {
+                Write-Host "  (Windows' own, and not counted: new, with only an AppID: $item$(What-Key-Holds $kind $item))"
             } else {
                 "$kind, new: $item$(What-Key-Holds $kind $item)"
             }
         }
-        foreach ($item in $Before[$kind]) { if (-not $now.Contains($item)) { "$kind, gone: $item" } }
+        foreach ($item in $Before[$kind]) {
+            if ($now.Contains($item)) { continue }
+            if (Is-Windows-Own-Class $kind $item) {
+                Write-Host "  (Windows' own, and not counted: gone, with only an AppID: $item)"
+            } else {
+                "$kind, gone: $item"
+            }
+        }
     }
 }
