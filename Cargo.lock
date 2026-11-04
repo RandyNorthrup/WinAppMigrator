@@ -4199,7 +4199,7 @@ dependencies = [
 
 [[package]]
 name = "winappmigrator-core"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "crc32fast",
  "filetime",
@@ -4224,7 +4224,7 @@ dependencies = [
 
 [[package]]
 name = "winappmigrator-gui"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "eframe",
  "egui_kittest",
@@ -4239,7 +4239,7 @@ dependencies = [
 
 [[package]]
 name = "winappmigrator-installer"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "clap",
  "eframe",
@@ -4256,7 +4256,7 @@ dependencies = [
 
 [[package]]
 name = "winappmigrator-ui"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "eframe",
  "wgpu",

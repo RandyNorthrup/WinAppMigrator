@@ -174,7 +174,7 @@ Those are small, well-behaved apps on clean machines, and this is how far that g
 - **Real windows.** They are opened on runners whose logs show a software renderer and a 1024x768 screen, and clicking
   through them is only done with no real window. A real graphics card, display scaling, and more than one monitor have not been run.
 - **Uninstalling.** CI runs the command an entry in Settings records, and has not clicked **Uninstall** in Settings.
-- **Signing.** Signing a release runs for the first time at `v0.5.0`.
+- **Signing.** `v0.5.0` is the first release that is signed. A certificate of your own on an installer has only been tried with a throwaway one.
 - **What has not been tried at all.** An app with online activation, a driver being loaded, an app the size of an office
   suite, an app's own updater after a move, and a restart afterward.
 
@@ -336,8 +336,8 @@ Open issues are tracked in the [plan](https://github.com/RandyNorthrup/WinAppMig
   [More](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/SECURITY.md#an-installer-can-contain-secrets).
 - **Installers from before `0.5.0` can say more.** Those can hold the name of the PC and account they were built on, and what
   apps remember in the registry, such as recent files and hosts, even with User data off. Treat them as private.
-- **Signing.** Starting with the next release, the app is signed (publisher: Randy Northrup), and each
-  release records build provenance you can check with `gh attestation verify`. Current downloads are
+- **Signing.** From `v0.5.0` on, the app is signed (publisher: Randy Northrup), and each release
+  records build provenance you can check with `gh attestation verify`. Earlier downloads are
   unsigned. Installers you build are not signed unless you sign them, so Windows shows "Unknown
   publisher" for them. [Why, and how to sign one](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/signing.md).
 

@@ -2,7 +2,7 @@
 
 All notable project changes are tracked here.
 
-## Unreleased
+## 0.5.0 — 2026-11-03
 
 This is a large release: almost all of what the app and its installers do has changed.
 
