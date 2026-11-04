@@ -649,7 +649,9 @@ function Note-Classes-With-Only-An-AppId([string]$Path) {
         if ($class.SubKeyCount -eq 0 -and $values.Count -eq 1 -and $values[0] -eq 'AppID') {
             [void]$script:ClassesWithOnlyAnAppId.Add("HKEY_LOCAL_MACHINE\$Path\$name")
         }
+        $class.Dispose()
     }
+    $classes.Dispose()
 }
 
 # Whether a class that is new or gone is none of these packages' doing: it is named in none of what they
