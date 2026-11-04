@@ -1263,12 +1263,10 @@ mod tests {
         if is_elevated() {
             let kept = work.path().join("kept");
             save_permissions(&back, &kept)?;
-            let text = String::from_utf16_lossy(
-                &fs::read(&kept)?
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                    .collect::<Vec<_>>(),
-            );
+            let bytes = fs::read(&kept)?;
+            let (pairs, _) = bytes.as_chunks::<2>();
+            let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+            let text = String::from_utf16_lossy(&units);
             assert!(text.contains(";AU)"), "{text}");
         }
         Ok(())

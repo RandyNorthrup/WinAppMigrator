@@ -90,6 +90,7 @@ fn step_label(step: &BuildStep) -> &'static str {
         BuildStep::RoomChecked(_) => "room",
         BuildStep::Bundling => "bundle",
         BuildStep::Packing { .. } => "pack",
+        BuildStep::LookingOverWhatItSays { .. } => "last look",
         BuildStep::WritingInstaller => "write installer",
     }
 }
