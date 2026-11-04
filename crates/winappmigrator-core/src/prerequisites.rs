@@ -301,14 +301,41 @@ pub fn spec_for_bundle(
     spec(kind, &bundle.architecture)
 }
 
+/// How long to wait before each new try at a download that did not come. Microsoft's short links can
+/// close a connection part way, and a moment later they do not.
+const WAITS_BEFORE_TRYING_AGAIN: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+    Duration::from_secs(9),
+];
+
 /// Download `url` to `dest` over HTTPS (SChannel via native-tls), following a few
-/// redirects, all of which must be HTTPS too. Used at package time only.
+/// redirects, all of which must be HTTPS too, and trying again a few times if it does not all come.
+/// Used at package time only. Whatever came is checked by whoever asked, as it would be anyway.
 pub fn download(url: &str, dest: &Path) -> Result<()> {
     if !is_https(url) {
         return Err(WinAppMigratorError::Network(format!(
             "refusing to download {url}: it is not HTTPS"
         )));
     }
+    trying_again(&WAITS_BEFORE_TRYING_AGAIN, || download_once(url, dest))
+}
+
+/// What is tried until it works, or has been waited for as many times as there are waits.
+fn trying_again(waits: &[Duration], mut attempt: impl FnMut() -> Result<()>) -> Result<()> {
+    let mut outcome = attempt();
+    for wait in waits {
+        if !matches!(outcome, Err(WinAppMigratorError::Network(_))) {
+            break;
+        }
+        tracing::warn!(?wait, "a download did not come, and will be tried again");
+        std::thread::sleep(*wait);
+        outcome = attempt();
+    }
+    outcome
+}
+
+fn download_once(url: &str, dest: &Path) -> Result<()> {
     let connector = native_tls::TlsConnector::new()
         .map_err(|error| WinAppMigratorError::Network(format!("TLS init failed: {error}")))?;
     let agent = ureq::AgentBuilder::new()
@@ -328,6 +355,9 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
     }
+    let says_it_is = response
+        .header("Content-Length")
+        .and_then(|length| length.parse::<usize>().ok());
     let mut bytes = Vec::new();
     response
         .into_reader()
@@ -337,6 +367,12 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
     if bytes.is_empty() {
         return Err(WinAppMigratorError::Network(format!(
             "download {url} returned no data"
+        )));
+    }
+    if let Some(length) = says_it_is.filter(|length| *length != bytes.len()) {
+        return Err(WinAppMigratorError::Network(format!(
+            "download {url} was cut short: {} of {length} bytes came",
+            bytes.len()
         )));
     }
     std::fs::write(dest, &bytes).map_err(|error| WinAppMigratorError::io(dest, error))?;
@@ -833,6 +869,43 @@ fn dotnet_framework4x_spec() -> PrerequisiteSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn network_error() -> WinAppMigratorError {
+        WinAppMigratorError::Network("it was cut short".to_owned())
+    }
+
+    #[test]
+    fn a_download_that_did_not_come_is_tried_again_a_few_times() {
+        let waits = [Duration::ZERO, Duration::ZERO];
+        let tries = std::cell::Cell::new(0);
+        let came_the_second_time = trying_again(&waits, || {
+            tries.set(tries.get() + 1);
+            if tries.get() == 2 {
+                Ok(())
+            } else {
+                Err(network_error())
+            }
+        });
+        assert!(came_the_second_time.is_ok());
+        assert_eq!(tries.get(), 2);
+
+        tries.set(0);
+        let never_came = trying_again(&waits, || {
+            tries.set(tries.get() + 1);
+            Err(network_error())
+        });
+        assert!(never_came.is_err());
+        assert_eq!(tries.get(), 3, "as many as there are waits, and the first");
+
+        // Anything else is not going to be better a moment later.
+        tries.set(0);
+        let not_the_network = trying_again(&waits, || {
+            tries.set(tries.get() + 1);
+            Err(WinAppMigratorError::InvalidInput("no".to_owned()))
+        });
+        assert!(not_the_network.is_err());
+        assert_eq!(tries.get(), 1);
+    }
 
     #[test]
     fn a_runtime_older_than_what_is_bundled_gets_what_is_bundled() {
