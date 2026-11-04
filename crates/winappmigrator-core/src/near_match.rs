@@ -173,6 +173,7 @@ pub struct NearMatchLook {
     /// What Windows Installer says other apps have, as [`comparable_path`] writes it, in order. An
     /// entry need not say where its app is, so this is what says that of one that does not.
     files_of_others: Vec<String>,
+    asked_what_other_apps_have: bool,
 }
 
 /// An app other than the one being scanned, and what it goes by.
@@ -605,11 +606,22 @@ impl NearMatchLook {
         system: &SystemContext,
         is_cancelled: &dyn Fn() -> bool,
     ) -> bool {
-        if self.files_of_others.is_empty() {
+        self.ask_what_other_apps_have(system, is_cancelled);
+        self.holds_a_file_of_another_app(folder)
+    }
+
+    /// Ask Windows Installer what other apps have, once, if nothing has yet had reason to. What it
+    /// cannot say, on a PC where its records cannot be read, says nothing against a folder.
+    pub(crate) fn ask_what_other_apps_have(
+        &mut self,
+        system: &SystemContext,
+        is_cancelled: &dyn Fn() -> bool,
+    ) {
+        if !self.asked_what_other_apps_have {
+            self.asked_what_other_apps_have = true;
             self.files_of_others =
                 msi_files_of_others(&self.products_of_others, system, is_cancelled);
         }
-        self.holds_a_file_of_another_app(folder)
     }
 
     /// Whether another app has on record that it is somewhere inside this folder.
@@ -881,7 +893,7 @@ pub(crate) fn look_for_near_matches(
         });
     }
     if !look.offers.is_empty() {
-        look.files_of_others = msi_files_of_others(&look.products_of_others, system, is_cancelled);
+        look.ask_what_other_apps_have(system, is_cancelled);
         look.take_back_what_holds_a_file_of_another_app(system);
     }
     look.offers

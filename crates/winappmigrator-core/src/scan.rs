@@ -383,10 +383,13 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         && install_location.as_deref() == Some(folder.as_path())
         && near_look.another_app_has_a_file_in(&folder, &system, &is_cancelled)
     {
-        source.roots.retain(|root| *root != folder);
-        source.uninstaller_folder = None;
-        install_location = resolve_install_location(app, &executable_path, source)
-            .filter(|location| !is_someone_elses(location));
+        install_location = crate::install_source::location_without_the_uninstallers_folder(
+            app,
+            source,
+            &executable_path,
+            &folder,
+        )
+        .filter(|location| !is_someone_elses(location));
         logical_location = install_location
             .as_deref()
             .map(|location| system.logical_path(location));
@@ -479,6 +482,20 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     let is_microsofts_own = publisher
         .as_deref()
         .is_some_and(|publisher| publisher.to_ascii_lowercase().starts_with(MICROSOFT));
+    // What Windows Installer says is another app's takes some seconds to ask, and an app's own folders
+    // and what is only its data have no need of it.
+    let is_not_its_own_in_a_program_folder = |root: &PathBuf| {
+        !own_folders
+            .iter()
+            .any(|folder| path_is_within(root, folder))
+            && system
+                .program_files_dirs()
+                .iter()
+                .any(|base| path_is_within(root, base))
+    };
+    if extra_roots.iter().any(is_not_its_own_in_a_program_folder) {
+        near_look.ask_what_other_apps_have(&system, &is_cancelled);
+    }
     let mut folders_left_out = Vec::new();
     for folder in install_source
         .iter()

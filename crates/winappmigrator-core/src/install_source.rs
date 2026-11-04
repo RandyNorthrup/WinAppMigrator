@@ -436,6 +436,20 @@ fn is_app_called(app: &InstalledApp, folder: &str) -> bool {
     normalize_name_for_match(&app.display_name) == normalize_name_for_match(folder)
 }
 
+/// Where an app is, with the folder its uninstaller is in left out, which was taken for where it is
+/// with nothing on record to say so. All that came of taking it goes as well.
+pub(crate) fn location_without_the_uninstallers_folder(
+    app: &mut InstalledApp,
+    source: &mut InstallSource,
+    executable: &Path,
+    folder: &Path,
+) -> Option<PathBuf> {
+    source.roots.retain(|root| root != folder);
+    source.uninstaller_folder = None;
+    app.install_location = None;
+    resolve_install_location(app, executable, source)
+}
+
 /// With the program only known now, as nothing in the app's entry said which it was: the folder the
 /// uninstaller is in is where the app is if that folder holds it.
 pub fn add_the_uninstallers_folder_above_the_program(
@@ -2647,6 +2661,27 @@ mod tests {
             Some(r"C:\Program Files\Widget\widget.exe"),
             r"D:\Downloads",
         ));
+    }
+
+    /// It was made where the app is, so saying where the app is goes by more than the roots.
+    #[test]
+    fn a_folder_left_out_is_not_chosen_again() -> std::io::Result<()> {
+        let work = tempfile::tempdir()?;
+        let folder = work.path().join("Shared Things");
+        let program = folder.join("widget").join("widget.exe");
+        std::fs::create_dir_all(program.parent().unwrap_or(&folder))?;
+        std::fs::write(&program, b"MZ")?;
+        let mut app = test_app("Widget Maker", Some("Acme"));
+        app.install_location = Some(folder.clone());
+        let mut source = test_source(InstallMethod::Generic);
+        source.roots = vec![folder.clone()];
+        source.uninstaller_folder = Some(folder.clone());
+        let location =
+            location_without_the_uninstallers_folder(&mut app, &mut source, &program, &folder);
+        assert_eq!(location.as_deref(), program.parent());
+        assert!(source.roots.is_empty());
+        assert_eq!(source.uninstaller_folder, None);
+        Ok(())
     }
 
     /// One named for itself is still its own, whoever published it.
