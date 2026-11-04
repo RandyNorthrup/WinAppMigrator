@@ -268,7 +268,8 @@ the rest are grouped below: click a group to open it.
   hashes. A preview checks only the installer's overall hash, not each file, and its window lists the first
   300 changes, with services, tasks, and shortcuts first, so on a larger app not every file is listed.
 - **A file replaced on another drive is copied aside.** Only a file on the same drive as `ProgramData` can be moved. One elsewhere
-  takes more time, and its permissions are kept beside it and put back with it.
+  takes more time, and its permissions are kept beside it and put back with it. If they cannot be, the file stays where it is, and the
+  install or the undoing of it says so.
 - **A file named like a device, such as `aux.h`, cannot be installed before Windows 11.** Earlier versions
   open that name as the device instead. An installer holding one stops and says so, before anything is
   installed. That has been run on Windows Server 2022, build 20348, where writing to `aux.h` goes to `\\.\aux`, and

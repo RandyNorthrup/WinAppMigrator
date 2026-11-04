@@ -58,7 +58,8 @@ installer is about to trust, and an honest package reaching too far:
 - **What it says it will do is what it does.** The list a person agrees to and the install go through one
   review, for the location in the box and with the same options, as a value written with a variable can be a file of the
   package at one location and nothing at another. **Install** waits for that list, works it out once more when clicked, and if it
-  has changed shows the new one and installs nothing. A file from a data folder that is not going back to one can arrive
+  has changed shows the new one and installs nothing, and so it does if the review an install goes by, after unpacking, says anything
+  else. A script is shown the list and agrees by running. A file from a data folder that is not going back to one can arrive
   under the install location, but nothing is set up to run it. Who a scheduled task runs as is its principal,
   and asking for the highest rights it can have is marked as high rights. What depends on what is on this PC cannot be known until
   the install gets there, such as a service or a driver of that name already being another app's. Those are on the list as asked
@@ -384,7 +385,8 @@ With the option off, a build looks through all it wrote for those last, and says
 by the names and folders it knows of and, by what they look like, anyone's folder under `Users` and anyone's id, in UTF-8, UTF-16 either
 way round from any byte, and Windows-1252, ignoring case, and in what is written as hex or a list of numbers, with a known id in binary
 too. A name only counts where it is used as one, so an account called `Will` is not found in every sentence. It does not see anything
-encoded another way, such as Base64, or a name by itself in a place nothing says it is one. It does not change what it finds, and it
+encoded another way, such as Base64, a name by itself in a place nothing says it is one, or a large file of two bytes a character
+with no zero in any of it. A file it could not read is said, as it may say anything. It does not change what it finds, and it
 does not look in the app's own files. What stays can still say something: an ODBC source can name a server and a user, and a plainly
 named value in an app's own key that points in its folder could be called anything. With the License option on as well, a license
 value in an account's key goes where it was, so its key's name goes with it, and so does the path of a license file in an account's

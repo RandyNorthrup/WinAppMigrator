@@ -42,6 +42,8 @@ Run from a script, an installer does more than it did, and refuses more:
 - **A service set to start automatically is started** once what was installed has been read back, if it was really set up. One that
   starts only when asked stays stopped. Rollback and uninstall stop what they remove, and an install cut off after stopping a
   service to replace what it runs starts it again the next time an installer runs.
+- **An install holds itself to what was agreed to.** The window's list is for the location in the box, and if what an install would do
+  has changed by the time it is clicked, or by the time it has unpacked, nothing is installed and the new list is shown.
 - **What the rewriting of a value costs is refused up front.** A package holding too much to check is refused whole, where a limit
   could run out part way and leave a value written as it was.
 - **What it prints has grown:** how much room it needs on each drive, what it sets up, each warning and error and what it is
