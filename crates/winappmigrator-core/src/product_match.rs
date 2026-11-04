@@ -21,9 +21,10 @@ const MIN_USER_FOLDER_NAME_LEN: usize = 4;
 /// `ASUS` qualifies for `ASUSTeK Computer Inc.`. Shorter ones must be equal: `Git` is not
 /// `GitHub`.
 const MIN_VENDOR_PREFIX_LEN: usize = 4;
-/// A word this short at the start of a longer one is usually another word: `Intel` of `IntelliJ`,
-/// `Micro` of `Microsoft`.
-const SHORTEST_VENDOR_WORD_TO_GO_BY_THE_START_OF: usize = 6;
+/// A folder can be called the start of a vendor's name, as `ASUS` is of `ASUSTeK` and `Logi` of
+/// `Logitech`, if it is this long. Not the other way round, where a vendor's name starts a longer word:
+/// `Intel` of `IntelliJ`, `Micro` of `Microsoft`.
+const SHORTEST_VENDOR_WORD_TO_GO_BY_THE_START_OF: usize = 4;
 /// A multi-word product name this long is specific enough to match under any parent.
 const MIN_ANY_PARENT_NAME_LEN: usize = 6;
 /// An executable's or folder's one-word name this short is a word anyone could use, as `Code` is, so
@@ -459,11 +460,10 @@ impl ProductNames {
     fn is_vendor_word(&self, word: &str) -> bool {
         self.vendors.iter().any(|vendor| {
             vendor == word
-                || (vendor.len() >= SHORTEST_VENDOR_WORD_TO_GO_BY_THE_START_OF
-                    && word.len() >= SHORTEST_VENDOR_WORD_TO_GO_BY_THE_START_OF
+                || (word.len() >= SHORTEST_VENDOR_WORD_TO_GO_BY_THE_START_OF
                     && !is_publisher_of_everything(word)
                     && !is_publisher_of_everything(vendor)
-                    && (vendor.starts_with(word) || word.starts_with(vendor.as_str())))
+                    && vendor.starts_with(word))
         })
     }
 }
@@ -861,6 +861,19 @@ mod tests {
         let intel = ProductNames::new(Some("Graphics"), Some("Intel Corporation"), &[], &[]);
         assert!(!intel.matches_nested("IntelliJ IDEA", "Graphics", PROGRAM));
         assert!(intel.matches_nested("Intel", "Graphics", PROGRAM));
+    }
+
+    #[test]
+    fn a_folder_called_the_start_of_a_vendors_name_is_that_vendors() {
+        let asus = ProductNames::new(Some("AURA"), Some("ASUSTeK Computer Inc."), &[], &[]);
+        assert!(asus.matches_nested("ASUS", "AURA", PROGRAM));
+        assert!(asus.matches_nested("ASUSTeK", "AURA", PROGRAM));
+        let logitech = ProductNames::new(Some("Options"), Some("Logitech"), &[], &[]);
+        assert!(logitech.matches_nested("Logi", "Options", PROGRAM));
+        assert!(
+            !logitech.matches_nested("Log", "Options", PROGRAM),
+            "too short to go by"
+        );
     }
 
     #[test]
