@@ -167,7 +167,8 @@ there, is written as it is really called, holds what is shared or is Windows', i
 folder or a file Windows Installer says is another app's. That is asked only of a folder in `Program Files`, or if something is on
 offer as a near match, as it goes through every product on the PC. Where its records cannot all be read, the build says so. Being named
 only for the publisher counts only for a folder side by side with others', as `Program Files` holds them. Microsoft's own apps are in `Program Files`
-under the names that say a folder is everyone's, so those names do not count there for them. A folder known only because an
+under the names that say a folder is everyone's, and share files between what is listed as separate apps, so neither of those counts
+there for them. A folder known only because an
 uninstaller is there is also refused if it is in another app's folder. What a record names of a folder that fails still
 goes, file by file, and the folder is said to be left out, by `folder_left_out_of_the_app`.
 

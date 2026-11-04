@@ -604,7 +604,11 @@ impl NearMatchLook {
                 .iter()
                 .any(|folder| path_is_within(folder, path))
         });
-        (holds_another_app || self.holds_a_file_of_another_app(path)).then_some(IS_ANOTHER_APPS)
+        // Microsoft's own share files between what is listed as separate apps, each runtime and kit of
+        // theirs with its neighbours, and a folder of one is that one's for all that.
+        let holds_a_file_of_another =
+            !is_where_microsoft_keeps_its_own && self.holds_a_file_of_another_app(path);
+        (holds_another_app || holds_a_file_of_another).then_some(IS_ANOTHER_APPS)
     }
 
     /// Whether Windows Installer says another app has a file in this folder, asking it if a scan has
@@ -1251,6 +1255,41 @@ mod tests {
         look.files_of_others = vec![comparable_path(&shared.join("sibling.exe"))];
         assert_eq!(
             look.root_refusal(&shared, &names, false, &system),
+            Some(IS_ANOTHER_APPS)
+        );
+    }
+
+    /// As every .NET runtime and Windows SDK here was found to: the ones listed side by side have files
+    /// in each other's folders, and each lost nearly all it had when that was asked of them.
+    #[test]
+    fn microsofts_own_in_program_files_are_not_asked_about_each_others_files() {
+        let system = SystemContext::live();
+        let names = ProductNames::new(Some("Runtime"), Some("Microsoft Corporation"), &[], &[]);
+        let Some(folder) = system
+            .program_files_dirs()
+            .into_iter()
+            .find_map(|base| {
+                std::fs::read_dir(base).ok()?.flatten().find(|entry| {
+                    entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        && entry
+                            .file_name()
+                            .to_string_lossy()
+                            .to_ascii_lowercase()
+                            .starts_with("microsoft ")
+                })
+            })
+            .map(|entry| entry.path())
+        else {
+            return;
+        };
+        let mut look = look_with_others(&[]);
+        look.files_of_others = vec![comparable_path(&folder.join("sibling.exe"))];
+        assert_ne!(
+            look.root_refusal(&folder, &names, true, &system),
+            Some(IS_ANOTHER_APPS)
+        );
+        assert_eq!(
+            look.root_refusal(&folder, &names, false, &system),
             Some(IS_ANOTHER_APPS)
         );
     }

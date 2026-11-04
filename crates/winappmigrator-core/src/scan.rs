@@ -498,7 +498,7 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
                 .iter()
                 .any(|base| path_is_within(root, base))
     };
-    if extra_roots.iter().any(is_not_its_own_in_a_program_folder) {
+    if !is_microsofts_own && extra_roots.iter().any(is_not_its_own_in_a_program_folder) {
         near_look.ask_what_other_apps_have(&system, &is_cancelled);
     }
     let mut folders_left_out = Vec::new();
