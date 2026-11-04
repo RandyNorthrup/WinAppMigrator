@@ -99,6 +99,7 @@ const WINDOWS_1252_FROM_0X80: [char; 32] = [
     '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
 ];
 const SID_PREFIX: &str = "S-1-";
+const TWO_BYTES_A_CHARACTER_WITH_NO_ZEROS_UP_TO: usize = 64 * 1024;
 const FOLDER_UNREADABLE_CODE: &str = "file_discovery_dir_unreadable";
 
 /// Who a scan was of and who is building, for what a package with none of an account's data has no
@@ -491,15 +492,15 @@ fn wide_text(bytes: &[u8], from: fn([u8; 2]) -> u16) -> String {
     String::from_utf16_lossy(&wide)
 }
 
-/// Bytes read each way a value's or a file's can be, one string for each. Text that is one or two
-/// bytes to a character has no zeros in it, so the ways that are two only go if there are any, and
-/// each from both places it could start, as a file need not hold only text.
+/// Bytes read each way a value's or a file's can be, one string for each. Each way of two bytes to a
+/// character goes from both places it could start, as a file need not hold only text. Those only go for
+/// something large if it has a zero in it, which text in those has unless none of it is Latin at all.
 fn text_forms_of(bytes: &[u8]) -> Vec<String> {
     let mut forms = vec![
         String::from_utf8_lossy(bytes).into_owned(),
         windows_1252(bytes),
     ];
-    if bytes.contains(&0) {
+    if bytes.len() <= TWO_BYTES_A_CHARACTER_WITH_NO_ZEROS_UP_TO || bytes.contains(&0) {
         for start in [0, 1] {
             let part = bytes.get(start..).unwrap_or_default();
             forms.push(wide_text(part, u16::from_le_bytes));
@@ -2014,6 +2015,22 @@ mod tests {
             assert!(!warnings.is_empty(), "{form}");
             assert!(warnings[0].message.contains("report.bin"), "{warnings:?}");
         }
+    }
+
+    /// Three characters of a Chinese name are six bytes with no zero among them.
+    #[test]
+    fn a_last_look_finds_a_name_with_no_zero_in_it_as_two_bytes_a_character() {
+        let traces = AccountTraces {
+            account_names: vec!["王小明".to_owned()],
+            ..AccountTraces::default()
+        };
+        let hex: String = "王小明"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert!(!hex.contains("00"));
+        assert_eq!(still_says(&manifest_saying(&hex), &[], &traces).len(), 1);
     }
 
     #[test]

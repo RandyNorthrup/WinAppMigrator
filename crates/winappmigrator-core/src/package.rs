@@ -527,9 +527,23 @@ fn build_package(
     write_integration_artifacts(&options.output_dir, &manifest)?;
     write_restore_plan(&options.output_dir.join(RESTORE_PLAN_FILE), &manifest)?;
     if let Some(traces) = traces.as_ref() {
+        let (written, not_read) = written_about_the_package(&options.output_dir, &reports_dir);
+        if !not_read.is_empty() {
+            warnings.push(Warning::new(
+                crate::account_traces::MENTIONS_CODE,
+                WarningSeverity::Warning,
+                format!(
+                    "This package has {} that could not be looked through for who it came from: {}. \
+                     What it says may say that.",
+                    if not_read.len() == 1 { "a file" } else { "files" },
+                    not_read.join(", ")
+                ),
+                None,
+            ));
+        }
         warnings.extend(what_a_package_still_says(
             &manifest,
-            &written_about_the_package(&options.output_dir, &reports_dir),
+            &written,
             traces,
             &|done, total| {
                 monitor.report(BuildStep::LookingOverWhatItSays { done, total });
@@ -582,7 +596,10 @@ fn build_package(
 }
 
 /// All a build writes of its own about a package, by name, for looking through.
-fn written_about_the_package(root: &Path, reports_dir: &Path) -> Vec<(String, Vec<u8>)> {
+fn written_about_the_package(
+    root: &Path,
+    reports_dir: &Path,
+) -> (Vec<(String, Vec<u8>)>, Vec<String>) {
     let mut written = Vec::new();
     let mut folders: Vec<PathBuf> = [
         REGISTRY_DIR,
@@ -596,26 +613,35 @@ fn written_about_the_package(root: &Path, reports_dir: &Path) -> Vec<(String, Ve
     .map(|folder| root.join(folder))
     .collect();
     folders.push(reports_dir.to_path_buf());
-    let mut files: Vec<PathBuf> = folders
-        .iter()
-        .filter_map(|folder| fs::read_dir(folder).ok())
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .collect();
-    files.push(root.join(RESTORE_PLAN_FILE));
-    for file in files {
-        if let Ok(bytes) = fs::read(&file) {
-            let name = file
-                .strip_prefix(root)
-                .unwrap_or(&file)
-                .display()
-                .to_string();
-            written.push((name, bytes));
+    let mut not_read = Vec::new();
+    let called = |path: &Path| {
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    };
+    let mut files: Vec<PathBuf> = Vec::new();
+    for folder in &folders {
+        match fs::read_dir(folder) {
+            Ok(entries) => files.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_file()),
+            ),
+            // Most of these are only made if there is something to put in them.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => not_read.push(called(folder)),
         }
     }
-    written
+    files.push(root.join(RESTORE_PLAN_FILE));
+    for file in files {
+        match fs::read(&file) {
+            Ok(bytes) => written.push((called(&file), bytes)),
+            Err(_) => not_read.push(called(&file)),
+        }
+    }
+    (written, not_read)
 }
 
 /// As many empty folders as an installer will make, of what was left once a person had chosen, which
