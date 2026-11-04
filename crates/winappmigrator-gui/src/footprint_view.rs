@@ -495,12 +495,20 @@ impl WinAppMigratorApp {
             .iter()
             .filter(|row| footprint.folder_is_in(row, &self.choices))
             .count();
-        let summary = format!(
-            "{} of {}, {}",
-            widgets::format_count(included),
-            plural(rows.len(), "folder", "folders"),
-            widgets::format_bytes(bytes)
-        );
+        // With nothing that can go in, what is useful to say is what could.
+        let summary = if rows.is_empty() {
+            format!(
+                "{} with the User data option",
+                widgets::format_bytes(footprint.data_not_included_bytes)
+            )
+        } else {
+            format!(
+                "{} of {}, {}",
+                widgets::format_count(included),
+                plural(rows.len(), "folder", "folders"),
+                widgets::format_bytes(bytes)
+            )
+        };
         if !self.group_heading(ui, theme, group, title, &summary) {
             return;
         }

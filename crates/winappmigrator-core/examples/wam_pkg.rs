@@ -16,7 +16,7 @@ fn main() {
     let (Some(source), Some(stub), Some(out_dir), Some(app_name)) =
         (args.next(), args.next(), args.next(), args.next())
     else {
-        eprintln!("usage: build_installer <source_exe> <stub_exe> <out_dir> <app_name>");
+        eprintln!("usage: wam_pkg <source_exe> <stub_exe> <out_dir> <app_name>");
         return;
     };
 
