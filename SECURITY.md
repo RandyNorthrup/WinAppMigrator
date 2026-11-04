@@ -59,7 +59,7 @@ installer is about to trust, and an honest package reaching too far:
   review, for the location in the box and with the same options, as a value written with a variable can be a file of the
   package at one location and nothing at another. **Install** waits for that list, works it out once more when clicked, and if it
   has changed shows the new one and installs nothing, and so it does if the review an install goes by, after unpacking, says anything
-  else. A script is shown the list and agrees by running. A file from a data folder that is not going back to one can arrive
+  else. A script is held to the list it printed in the same way. A file from a data folder that is not going back to one can arrive
   under the install location, but nothing is set up to run it. Who a scheduled task runs as is its principal,
   and asking for the highest rights it can have is marked as high rights. What depends on what is on this PC cannot be known until
   the install gets there, such as a service or a driver of that name already being another app's. Those are on the list as asked

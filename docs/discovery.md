@@ -157,15 +157,16 @@ app's entry says the app is, or with no such place said, it holds the app's prog
 folder named only for the publisher is not, as it can hold all they make, and neither is a person's own, such as `Downloads`. That file
 comes by itself if it is somewhere programs are put, `Program Files` or `ProgramData`, and otherwise stays, so a setup run from
 `D:\Downloads` brings nothing. With no location on record, Windows Installer is asked whether another app has a file in that folder
-(`another_app_has_a_file_in`), which takes some seconds, and if so it is left out, and where the app is goes by what is left.
+(`another_app_has_a_file_in`), which takes some seconds, and if so it is left out, and where the app is goes by what is left. If the
+program is right in it, or it is called what the app is, it stays where the app is, and the build says what comes with it.
 
 ### What every record's folder is asked
 
 Each folder something on record names, other than where the app itself is, is asked by `root_refusal` whether it may be read, is
 there, is written as it is really called, holds what is shared or is Windows', is named only for the publisher, or holds another app's
 folder or a file Windows Installer says is another app's. That is asked only of a folder in `Program Files`, or if something is on
-offer as a near match, as it goes through every product on the PC, and where its records cannot be read it says nothing against a
-folder. Microsoft's own apps are in `Program Files`
+offer as a near match, as it goes through every product on the PC. Where its records cannot all be read, the build says so. Being named
+only for the publisher counts only for a folder side by side with others', as `Program Files` holds them. Microsoft's own apps are in `Program Files`
 under the names that say a folder is everyone's, so those names do not count there for them. A folder known only because an
 uninstaller is there is also refused if it is in another app's folder. What a record names of a folder that fails still
 goes, file by file, and the folder is said to be left out, by `folder_left_out_of_the_app`.
