@@ -7,6 +7,12 @@ pub type Result<T> = std::result::Result<T, WinAppMigratorError>;
 
 #[derive(Debug, Error)]
 pub enum WinAppMigratorError {
+    /// What an install would do is not what the person agreed to, so nothing was done.
+    #[error(
+        "what this install would do has changed since it was agreed to, so nothing was installed"
+    )]
+    ListChanged(Box<crate::restore_review::SystemChanges>),
+
     #[error("I/O failed for {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 

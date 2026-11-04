@@ -200,6 +200,7 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     }
     let result = restore_package_monitored(
         &RestoreOptions {
+            agreed_to: None,
             package_root: temp_dir.path().to_path_buf(),
             target_root: target_root.clone(),
             dry_run: cli.dry_run || !cli.apply,

@@ -65,7 +65,7 @@ use crate::restore_policy::{
 use crate::restore_review::{
     ReviewedDriver, ReviewedPackage, ReviewedService, ReviewedShortcut, ReviewedTask,
     STATE_ROOT_REFUSAL, change_kind_of, install_location_problem, overlaps_state_root,
-    refuse_what_cannot_run_here, registry_item, store_file_destination,
+    refuse_what_cannot_run_here, registry_item, store_file_destination, what_a_list_says,
 };
 use crate::rollback::{
     interrupted_installs, put_back_backup, query_shows_running, query_shows_stopped,
@@ -331,6 +331,16 @@ pub fn restore_package_monitored(
         options.restore_user_data,
         options.restore_license,
     )?;
+    // Unpacking can take a long time, and this is the review the install goes by. What depends on what
+    // is on this PC can have changed since the person agreed, or by undoing an earlier install above.
+    if options.apply
+        && let Some(agreed_to) = options.agreed_to.as_ref()
+    {
+        let now = what_a_list_says(&review, fit.warnings.clone());
+        if now != *agreed_to {
+            return Err(WinAppMigratorError::ListChanged(Box::new(now)));
+        }
+    }
     if options.apply && restore_requires_admin(&review) && !is_elevated() {
         return Err(WinAppMigratorError::InvalidInput(
             "restore plan includes admin-only registry, service, scheduled task, shortcut, or protected target changes"
@@ -4182,6 +4192,7 @@ mod tests {
     #[test]
     fn rejects_apply_and_dry_run_together() {
         let options = RestoreOptions {
+            agreed_to: None,
             package_root: PathBuf::from("pkg"),
             target_root: PathBuf::from("target"),
             dry_run: true,
@@ -4292,6 +4303,7 @@ mod tests {
 
     fn driver_options(work: &Path, force: bool) -> RestoreOptions {
         RestoreOptions {
+            agreed_to: None,
             package_root: work.join("package"),
             target_root: work.join("target"),
             dry_run: false,
@@ -4489,6 +4501,7 @@ mod tests {
 
     fn restore_options(root: &Path, package: PathBuf, apply: bool) -> RestoreOptions {
         RestoreOptions {
+            agreed_to: None,
             package_root: package,
             target_root: root.join("target"),
             dry_run: !apply,
@@ -5499,6 +5512,26 @@ mod tests {
         );
         assert_eq!(*asked.borrow(), ["Ours"]);
         assert_eq!(result.started, ["started service Ours"]);
+    }
+
+    /// What a person agreed to is what they were shown, however long it has been since, and an
+    /// install goes by the review it does itself.
+    #[test]
+    fn an_install_that_would_do_something_else_than_was_agreed_to_does_nothing() -> Result<()> {
+        let work = temp_folder()?;
+        let package = package_of(work.path(), &[("acme.exe", b"program")], |_| {})?;
+        let mut options = restore_options(work.path(), package, true);
+        options.agreed_to = Some(crate::restore_review::SystemChanges {
+            refused: vec!["Something that was said to be left out".to_owned()],
+            ..crate::restore_review::SystemChanges::default()
+        });
+        let outcome = restore_package_monitored(&options, &InstallMonitor::default(), None);
+        assert!(
+            matches!(outcome, Err(WinAppMigratorError::ListChanged(_))),
+            "{outcome:?}"
+        );
+        assert!(!options.target_root.exists(), "it changed something");
+        Ok(())
     }
 
     fn manifest_with_a_task_running(command: &str, data_file: &str) -> Result<PackageManifest> {

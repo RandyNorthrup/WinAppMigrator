@@ -176,6 +176,7 @@ fn the_log_never_holds_what_values_hold() -> TestResult {
     )?;
     let target = work.path().join("target");
     let mut options = RestoreOptions {
+        agreed_to: None,
         package_root: package,
         target_root: target.clone(),
         dry_run: true,

@@ -757,12 +757,12 @@ fn run_restore(
         Ok(manifest) => manifest,
         Err(error) => return failed(format!("Could not read the package: {error}")),
     };
-    // Once more now that Install has been clicked, before anything is unpacked. It is the one review
-    // an install goes by, and what is agreed to is what was on screen.
-    if let Some(agreed_to) = agreed_to {
+    // Once more now that Install has been clicked, so that nothing is unpacked for nothing. What is
+    // agreed to is what was on screen, and the install holds itself to that as well when it gets there.
+    if let Some(agreed_to) = agreed_to.as_ref() {
         match system_changes_restoring(&manifest, &target_root, restore_user_data, restore_license)
         {
-            Ok(now) if now == agreed_to => {}
+            Ok(now) if now == *agreed_to => {}
             Ok(now) => return Msg::ListChanged(Box::new(now)),
             Err(error) => return failed(error.to_string()),
         }
@@ -818,6 +818,7 @@ fn run_restore(
         Err(error) => return failed(format!("Could not unpack the package: {error}")),
     }
     let options = RestoreOptions {
+        agreed_to,
         package_root: staging.path().to_path_buf(),
         target_root,
         dry_run: !apply,
@@ -840,6 +841,7 @@ fn run_restore(
             Msg::Done(Box::new(result))
         }
         Err(WinAppMigratorError::Cancelled) => Msg::Cancelled,
+        Err(WinAppMigratorError::ListChanged(now)) => Msg::ListChanged(now),
         Err(error) => failed(error.to_string()),
     }
 }

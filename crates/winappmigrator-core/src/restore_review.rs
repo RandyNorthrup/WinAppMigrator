@@ -1115,9 +1115,17 @@ pub fn system_changes_restoring(
 ) -> Result<SystemChanges> {
     let fit = refuse_what_cannot_run_here(manifest)?;
     let review = ReviewedPackage::new(manifest, target_root, restore_user_data, restore_license)?;
-    let mut changes = describe(&review);
-    changes.notes.extend(fit.warnings);
-    Ok(changes)
+    Ok(what_a_list_says(&review, fit.warnings))
+}
+
+/// What a person is shown of a review, with what may not run on this PC.
+pub(crate) fn what_a_list_says(
+    review: &ReviewedPackage<'_>,
+    may_not_run: Vec<String>,
+) -> SystemChanges {
+    let mut changes = describe(review);
+    changes.notes.extend(may_not_run);
+    changes
 }
 
 /// The Windows this is running on, from what it records about itself, which only an administrator

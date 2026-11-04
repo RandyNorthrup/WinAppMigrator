@@ -1162,6 +1162,10 @@ impl UndoReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestoreOptions {
+    /// What the person was shown when they agreed to this, if one was. An install that would now do
+    /// anything else does nothing.
+    #[serde(skip)]
+    pub agreed_to: Option<crate::restore_review::SystemChanges>,
     pub package_root: PathBuf,
     pub target_root: PathBuf,
     pub dry_run: bool,
