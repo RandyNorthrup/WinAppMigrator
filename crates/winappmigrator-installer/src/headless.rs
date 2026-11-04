@@ -178,13 +178,14 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     package.extract_to(temp_dir.path())?;
 
     // The same list the window asks about, before any of it, so that a script can see what it
-    // agreed to.
-    if let Ok(changes) = system_changes_restoring(
+    // agreed to, which the install then holds itself to.
+    let listed = system_changes_restoring(
         &manifest,
         &target_root,
         cli.restore_user_data,
         restore_license,
-    ) {
+    );
+    if let Ok(changes) = listed.as_ref() {
         println!("Sets up: {}", changes.changes.len());
         for change in &changes.changes {
             println!(
@@ -200,7 +201,7 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     }
     let result = restore_package_monitored(
         &RestoreOptions {
-            agreed_to: None,
+            agreed_to: listed.ok().filter(|_| cli.apply),
             package_root: temp_dir.path().to_path_buf(),
             target_root: target_root.clone(),
             dry_run: cli.dry_run || !cli.apply,
