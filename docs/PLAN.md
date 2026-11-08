@@ -16,7 +16,7 @@ loader and a data file beside it. There are two binaries with a strict split:
 - **`winappmigrator-installer` — the installer stub.** Embedded into the produced
   `.exe`. Runs on the target machine: checks that the app can run there and that there is room,
   extracts its package, reinstalls the app and bundled data, and hash-verifies the result.
-  Restore lives only here.
+  It is the only caller of the restore code, which lives in `winappmigrator-core`.
 
 `winappmigrator-core` holds all shared logic (inventory, install-source
 reverse-engineering, footprint discovery, packaging, restore, verification).
@@ -62,7 +62,7 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   detection, and authoritative file counts.
 - What an account keeps for an app in the registry goes by the User data option, shown on real apps with marks searched for
   through a whole package, and with it off, a package says nothing of who built it but what the app needs to work, and a build
-  looks through what it wrote for anything that does. An app's empty folders are made again.
+  looks through what the package says about the app, though not the app's own files, for anything that does. An app's empty folders are made again.
 - A PC with no Visual C++ runtime, tried for real, and real windows opened on runners that use a software renderer, with what a person is
   told when graphics cannot start. Each window fits the screen it opens on, and goes by one rule for light and dark.
 - Optional per-user/ProgramData data backup and optional license detection/

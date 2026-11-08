@@ -113,7 +113,7 @@ gh attestation verify .\WinAppMigrator-v1.2.3.exe --repo RandyNorthrup/WinAppMig
 ## Other protections for signed, elevated executables
 
 A signed program that runs elevated is a target for loading someone else's code under its
-name, so both executables also:
+name, so between them the two executables also:
 
 - resolve imported DLLs from System32 only (`/DEPENDENTLOADFLAG:0x800`), and DLLs loaded at
   runtime likewise (`SetDefaultDllDirectories`, first thing in `main`);
@@ -122,7 +122,8 @@ name, so both executables also:
   registry rather than from an environment variable the user controls. winget is not a
   Windows tool. `PATH` only holds a shortcut to it in a folder the user can write to, so the
   installer asks Windows where its package is installed and checks that file's signature;
-- take nothing about how a window is drawn from the environment. wgpu would otherwise go by
+- take nothing about how a window is drawn from the environment, but `WGPU_BACKEND`, which can only turn Direct3D 12
+  off. wgpu would otherwise go by
   `WGPU_DX12_AGILITY_SDK_PATH`, and have Direct3D run `D3D12Core.dll` from any folder the user names,
   past the restriction above. `check-real-windows.ps1` plants a stand-in to show that it does not;
 - start every tool with a fixed list of environment variables, with its `Path` and `TEMP` from the Windows folder, and

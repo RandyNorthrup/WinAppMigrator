@@ -258,8 +258,8 @@ where the log is. The card above the options says the install can be undone.
 An install leaves a bare copy of the stub in its admin-only folder, and the app's entry in Settings
 runs it with `--uninstall <id>`. Its window opens at once and reads the record on a worker
 thread, because checking who can change that record runs other programs. It says what will be
-removed and what will stay, has one option, to also remove user data and licenses, which is off,
-shows progress, and then lists what it undid, what it left and why, and what it could not do,
+removed and what will stay, and, when the install put back user data or licenses, has one option
+to also remove those, off unless `--remove-user-data` was given. It shows progress, and then lists what it undid, what it left and why, and what it could not do,
 with where the log is if anything failed. `--quiet` does the same with no window, for
 `QuietUninstallString`. An uninstall that could not finish, including one waiting for a drive that
 is not connected, which is not called a failure, keeps the entry in Settings, so it can

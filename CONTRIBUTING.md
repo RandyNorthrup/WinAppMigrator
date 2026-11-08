@@ -5,7 +5,8 @@ Issues and pull requests are welcome. For anything large, please open an issue f
 ## The rules that shape this project
 
 - **The app builds and the installer restores.** `winappmigrator-gui` builds an installer and never
-  restores anything. Restore lives only in `winappmigrator-installer`. Shared logic goes in
+  restores anything. The restore code lives in `winappmigrator-core`, and only `winappmigrator-installer`
+  calls it. Nothing in the crates' dependencies enforces that, so keep it so. Shared logic goes in
   `winappmigrator-core`, and shared UI in `winappmigrator-ui`.
 - **One screen, one job.** The app is a single screen that produces one self-extracting `.exe`, or, past
   the 4 GiB Windows can start, a small loader and a data file beside it.
@@ -59,7 +60,7 @@ or a license are searched for in the unpacked package and the logs, and hostile 
 the rules refuse, and for what is already there. Each runtime spec's URL is really downloaded and checked as
 Microsoft's.
 
-It then takes that install back out every way that can happen, comparing the machine before and after:
+It then takes that install back out in each of these ways, comparing the machine before and after:
 an uninstall run from the command line Windows has for it, with and without things another program
 changed in between, a failure late in an install, and an installer killed part-way and while undoing
 that. A real account that is not an administrator tries to change what an uninstaller trusts.

@@ -2,8 +2,9 @@
 //!
 //! Logs go to `<state root>\logs`, which on a real PC is `%ProgramData%\WinAppMigrator\logs`:
 //! a fixed folder only administrators can change, a new file for each run, and a limit on how
-//! many are kept and how large each gets. Nothing is opened until something is about to
-//! change, so a preview leaves no trace.
+//! many are kept and how large each gets. The installer and uninstaller open no log until
+//! something is about to change, or the installer's window could not open, so a preview
+//! leaves no trace. The app, which changes nothing on the PC, opens its log as it starts.
 //!
 //! **What goes in a log is paths and key names.** What a registry value, a license file, or an
 //! environment variable holds never does, and neither does a journal's content, so code

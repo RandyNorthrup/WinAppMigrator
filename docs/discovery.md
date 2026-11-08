@@ -608,7 +608,7 @@ This cannot catch everything. See [SECURITY.md](../SECURITY.md#an-installer-can-
   goes only if all it says is where the app is. A service that ran as someone says an account of its PC. A DLL found through an account's
   `Path` is known by its name, and gets a warning in any case, as it may not be on the other PC. What is only read, such as warnings and
   what is left out, says `<an account>` and the like (`say_nothing_of_who_it_was`). `what_a_package_still_says` then looks through all that
-  was written for the account, profile, PC, and SID, and names on the done screen where it found any, changing nothing.
+  was written about the app, though not the app's own files or license files, for the account, profile, PC, and SID, and names on the done screen where it found any, changing nothing.
 - `ScanOptions.include_hashes` — SHA-256 of copyable files during a scan. It dominates scan
   time for large apps. Packaging leaves it off and hashes each file from what it reads into
   the package, so the hash describes what is in the package, including files read in backup

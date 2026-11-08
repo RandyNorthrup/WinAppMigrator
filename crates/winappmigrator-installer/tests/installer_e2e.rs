@@ -1,10 +1,11 @@
 //! End-to-end test of the whole product pipeline against the real binary.
 //!
 //! It reverse-engineers a genuine PE executable, builds a self-extracting
-//! installer using the actual `winappmigrator-installer` stub binary, runs that
-//! installer headlessly against a clean target directory, and asserts the
-//! reinstall plus hash verification pass. The installer exits non-zero on any
-//! hash mismatch, so a successful exit is a strong end-to-end assertion.
+//! installer using the actual `winappmigrator-installer` stub binary, and runs that
+//! installer headlessly against a clean target directory. On GitHub's throwaway
+//! runner it installs and asserts the reinstall plus hash verification pass; anywhere
+//! else it stops at a preview and asserts that changed nothing. The installer exits
+//! non-zero on any hash mismatch, so a successful exit is a strong end-to-end assertion.
 
 use std::error::Error;
 use std::fs;

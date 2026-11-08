@@ -104,10 +104,12 @@ is at the end, by name.
 
 Follow the progress, or cancel. The build goes by what is on the screen and reads each file then, so a file that changed
 is right, and one that has gone is listed. You get one file, named after what it contains, such as
-`Fabrikam_Data_Sync_userdata_license_installer.exe`, by default in `WinAppMigrator` in your profile folder. A package too
+`Fabrikam_Data_Sync_userdata_license_installer.exe`, by default in a folder named for the app, under `WinAppMigrator` in your
+profile folder. A package too
 big for one executable comes as two files, `.exe` and `.wamdata`, and the window says they have to stay together.
 
-With User data off, the build then looks through what it wrote for your account, profile folder, PC name, and SID. The
+With User data off, the build then looks through what the installer says about the app, though not the app's own files or
+license files, for your account, profile folder, PC name, and SID. The
 finished screen says where it found any, so you can decide what to do about that, and the installer is built either way.
 
 <p align="center">
@@ -147,10 +149,10 @@ in the one Windows is in until you choose. An installer goes by the same, where 
 | **Services and drivers** | Yes, unless you untick one | Services keep their arguments, settings, and built-in account, and one set to start by itself is started once the install has checked what it installed. One that will not start is a warning, and the app stays installed. A custom account's password cannot be moved, so that service is set up as LocalService and the installer says so. Drivers the app owns are re-registered, though no test has loaded one. Vendor and inbox drivers are reported instead, because they cannot be redistributed |
 | **Scheduled tasks** | Yes, unless you untick one | A task that ran as a person runs as whoever installs it. With User data off, one told to work on something in someone's folders stays behind |
 | **Shortcuts** | Yes, unless you untick one | One in your own folders goes without User data only if it just opens the app, and then to the Desktop or Start Menu of whoever installs it. An app installed for one account keeps its own |
-| **Environment variables** | Yes, unless you untick one | Those that hold the app's path. A captured `Path` holds only the app's entries, and is merged into the target's, never replaced |
-| **Runtimes** | Always, even if what needed one was left out | Read from all of the app's programs. Visual C++ 2005 and later, and .NET 6 to 10, are embedded, or come through winget if the download failed at build time. .NET Framework 3.5 is a Windows feature that can need internet on the target, and 4.x is part of Windows. A runtime with no installer here, such as Visual C++ 2003, .NET 5, or one with no Arm64 build for an Arm64 app, is named in a warning, and nothing is installed in its place |
-| **User data** | Your choice | What an account keeps for the app in the registry, such as settings, recent files, and saved sessions, and AppData, ProgramData, Public Documents, Documents, and Saved Games. Online-only OneDrive files are skipped |
-| **License data** | Your choice | License files, values, and stores. With this off they are not captured at all, and only their names are noted. Reports whether each is likely tied to the machine. [Never bypasses activation](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/SECURITY.md#licensing-data) |
+| **Environment variables** | Yes, unless you untick that kind | Those that hold the app's path. A captured `Path` holds only the app's entries, and is merged into the target's, never replaced |
+| **Runtimes** | Always, even if what needed one was left out | Read from the main program and up to 64 others, nearest the top of its folder first. Visual C++ 2005 and later, and .NET 6 to 10, are embedded, or come through winget if the download failed at build time. .NET Framework 3.5 is a Windows feature that can need internet on the target, and 4.x is part of Windows. A runtime with no installer here, such as Visual C++ 2003, .NET 5, or one with no Arm64 build for an Arm64 app, is named in a warning, and nothing is installed in its place |
+| **User data** | Your choice | What an account keeps for the app in the registry, such as settings, recent files, and saved sessions, and AppData, ProgramData, Public Documents, Documents, and Saved Games. Online-only OneDrive files are listed, not copied |
+| **License data** | Your choice | License files and stores, and license values in the account's part of the registry. A license value in machine-wide settings or under the publisher's own key, and a store tied to the hardware, such as CodeMeter or Sentinel, are only named, never copied. With this off none of it is captured, and only their names are noted. Reports whether each is likely tied to the machine. [Never bypasses activation](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/SECURITY.md#licensing-data) |
 | **Near matches** | Only if you tick them | Folders with a close name, and parts of the app no list shows, up to 200 of them. [What is never offered](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/discovery.md#near-matches) |
 | **Credentials** | Never | Values and files that look like passwords, tokens, or private keys are left out and named before you build, and cannot be ticked. [This cannot catch everything](#security-and-signing) |
 
@@ -173,7 +175,8 @@ Those are small, well-behaved apps on clean machines, and this is how far that g
   it was taken off. The others are downloaded and checked as Microsoft's, and the winget and Windows feature routes have not been run.
 - **Real windows.** They are opened on runners whose logs show a software renderer and a 1024x768 screen, and clicking
   through them is only done with no real window. A real graphics card, display scaling, and more than one monitor have not been run.
-- **Uninstalling.** CI runs the command an entry in Settings records, and has not clicked **Uninstall** in Settings.
+- **Uninstalling.** CI runs the quiet command an entry in Settings records, `QuietUninstallString`, and only opens the
+  windowed one. It has not clicked **Uninstall** in Settings or in the uninstaller's window.
 - **Signing.** `v0.5.0` is the first release that is signed. A certificate of your own on an installer has only been tried with a throwaway one.
 - **What has not been tried at all.** An app with online activation, a driver being loaded, an app the size of an office
   suite, an app's own updater after a move, and a restart afterward.
@@ -429,7 +432,7 @@ A release build of the app with no installer to carry stops there.
 | [`winappmigrator-core`](https://github.com/RandyNorthrup/WinAppMigrator/tree/main/crates/winappmigrator-core) | Discovery, packaging, restore, and verification |
 | [`winappmigrator-ui`](https://github.com/RandyNorthrup/WinAppMigrator/tree/main/crates/winappmigrator-ui) | Shared design system, widgets, and process hardening |
 | [`winappmigrator-gui`](https://github.com/RandyNorthrup/WinAppMigrator/tree/main/crates/winappmigrator-gui) | The app, built as `winappmigrator.exe`. Never restores anything |
-| [`winappmigrator-installer`](https://github.com/RandyNorthrup/WinAppMigrator/tree/main/crates/winappmigrator-installer) | The stub inside every installer. Restore lives only here |
+| [`winappmigrator-installer`](https://github.com/RandyNorthrup/WinAppMigrator/tree/main/crates/winappmigrator-installer) | The stub inside every installer, and the only caller of the restore code |
 
 Run the checks with the commands in [CONTRIBUTING.md](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/CONTRIBUTING.md). Releases are built by
 [GitHub Actions](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/.github/workflows/release.yml) when a `v*` tag is pushed.

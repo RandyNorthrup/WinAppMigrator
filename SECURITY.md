@@ -358,7 +358,9 @@ installer, and never with what they hold. Since there is nothing of them in a pa
 overwrite what the other PC has, and you may have to enter them again.
 
 With the License option off, the same goes for license files, values, variables, and options, by the same rules
-that find them when it is on. With it on, licenses come along and credentials still do not.
+that find them when it is on. With it on, license files and stores come along, and so do license values in an account's key. A
+license value in machine-wide settings or under the publisher's own key, and a store tied to the hardware, are only named.
+Credentials still do not come along.
 
 **With the User data option off, what an account keeps for an app in its part of the registry stays behind too:** recent
 files and folders, saved sessions, the hosts it has been to. All of it goes but what Windows itself looks in for an app, such as
@@ -381,13 +383,14 @@ anyone wrote about it, and a task or shortcut that has been given a path, an add
 the option on. Plain words stay: they are how an app is told what to do, though one person's word could be `bank-prod`. A shortcut in an
 account's folders goes only if it just opens the app, or for an app installed for that one account, if all it says is about the app.
 
-With the option off, a build looks through all it wrote for those last, and says first on the done screen where it found any. It goes
+With the option off, a build looks through all it wrote about the app for those last, and says on the done screen, before its other
+warnings, where it found any. It goes
 by the names and folders it knows of and, by what they look like, anyone's folder under `Users` and anyone's id, in UTF-8, UTF-16 either
 way round from any byte, and Windows-1252, ignoring case, and in what is written as hex or a list of numbers, with a known id in binary
 too. A name only counts where it is used as one, so an account called `Will` is not found in every sentence. It does not see anything
 encoded another way, such as Base64, a name by itself in a place nothing says it is one, or a large file of two bytes a character
 with no zero in any of it. A file it could not read is said, as it may say anything. It does not change what it finds, and it
-does not look in the app's own files. What stays can still say something: an ODBC source can name a server and a user, and a plainly
+does not look in the app's own files, or in license files. What stays can still say something: an ODBC source can name a server and a user, and a plainly
 named value in an app's own key that points in its folder could be called anything. With the License option on as well, a license
 value in an account's key goes where it was, so its key's name goes with it, and so does the path of a license file in an account's
 folders.
