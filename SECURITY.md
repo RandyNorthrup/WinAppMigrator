@@ -259,9 +259,10 @@ is, above, and the link adds this:
 - **What it says about itself is not trusted.** A PC's name and Windows, from discovery or from the client, are shown and
   nothing more. What the build reads from it is a drive's to this app, so everything above about a drive applies.
 - **The client is signed**, by the release workflow, as the app is, and the UAC prompt names Randy Northrup as its
-  publisher. On Windows 7 without its last updates, Windows cannot check a signature of this kind and says the publisher is
-  unknown, which leaves checking its file the only way to know it is the one the app saved. Either way, save it from the
-  app, on a drive or folder only you can write to.
+  publisher. A Windows 7 without the root it chains to, Microsoft Identity Verification Root Certificate Authority 2020,
+  cannot check it and says the publisher is unknown, which leaves checking its file the only way to know it is the one the
+  app saved. The Windows 7 SP1 VMs, with no internet and none of its later updates, lacked that root; with it added, the
+  64-bit one found the signature valid. Either way, save it from the app, on a drive or folder only you can write to.
 - **A DLL beside the client is not loaded into it.** It imports only DLLs Windows always loads from System32, and runs
   from a copy of itself in `%ProgramFiles%\WinAppMigrator Client`, which only an administrator can change, since Windows
   looks beside a program first for some DLLs it loads later. Its tools get an environment of Windows' own. See

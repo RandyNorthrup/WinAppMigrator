@@ -218,7 +218,7 @@ Those are small, well-behaved apps on clean machines, and this is how far that g
   through them is only done with no real window. A real graphics card, display scaling, and more than one monitor have not been run.
 - **Uninstalling.** CI runs the quiet command an entry in Settings records, `QuietUninstallString`, and only opens the
   windowed one. It has not clicked **Uninstall** in Settings or in the uninstaller's window.
-- **Signing.** `v0.5.0` is the first release that is signed, and `v0.6.0` the first whose client is. A signed client on 32-bit and 64-bit Windows 7 SP1, before its last updates, has not been tried. A certificate of your own on an installer has only been tried with a throwaway one.
+- **Signing.** `v0.5.0` is the first release that is signed, and `v0.6.0` the first whose client is. The signed client was run on 32-bit and 64-bit Windows 7 SP1 VMs with none of its later updates: it worked, and its signature read as untrusted on both, and as valid on the 64-bit one once Microsoft's 2020 root was added; the UAC prompt itself was not seen. A certificate of your own on an installer has only been tried with a throwaway one.
 - **What has not been tried at all.** An app with online activation, a driver being loaded, an app the size of an office
   suite, an app's own updater after a move, and a restart afterward.
 
