@@ -1,6 +1,6 @@
 //! The encrypted link between WinAppMigrator on a new PC (the builder) and its client on an old one.
 //!
-//! The client runs on the PC an app is moving off, which can be Windows 7, 10 or 11. It does no
+//! The client runs on the PC an app is moving off, which can be Windows 7, 8, 10 or 11. It does no
 //! capturing of its own: it takes a snapshot of that PC's Windows drive and answers the builder's
 //! requests to list a folder, describe a file, and read part of one, read-only. The builder captures
 //! the app through those answers as it would from a drive plugged into it.

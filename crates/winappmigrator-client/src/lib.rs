@@ -1,4 +1,4 @@
-//! The client: runs on the PC an app is moving off (Windows 7, 10 or 11) and lets WinAppMigrator on
+//! The client: runs on the PC an app is moving off (Windows 7, 8, 10 or 11) and lets WinAppMigrator on
 //! the new PC read it over the network, through [`winappmigrator_link`]. It captures nothing itself.
 //!
 //! It takes a shadow copy of the Windows drive through WMI, so what is read is one moment of it and

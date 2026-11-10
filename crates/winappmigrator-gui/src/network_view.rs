@@ -32,7 +32,7 @@ Run this on the PC you are moving apps off: Windows 7, 8, 10 or 11.\r\n\
 2. Double-click \"WinAppMigrator Client.exe\" and let it make changes.\r\n\
 3. It shows a 6-digit pairing code. In WinAppMigrator on your new PC, choose\r\n\
    Network PC..., pick this PC, and type the code.\r\n\
-4. When the new PC is done, press Enter in the client's window.\r\n\
+4. When the new PC is done, press Enter in the client's window, or close it.\r\n\
 \r\n\
 It only reads. While it runs it keeps a snapshot of the Windows drive and lets\r\n\
 its own two ports through Windows Firewall from your local network, and it\r\n\

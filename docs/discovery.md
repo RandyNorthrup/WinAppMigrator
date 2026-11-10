@@ -820,8 +820,14 @@ Windows has:
   program sees the real 64-bit `System32`. Nothing it reads is locked, and nothing changes while it is read.
 - **Two Windows Firewall rules** for its own program and ports, TCP 47732 and UDP 47731, from the local subnet only, by `netsh`.
 - **A record** of both, `%ProgramData%\WinAppMigrator Client\running.txt`, held open while it runs. Enter removes both and the
-  record. A run that ended any other way leaves the record, and the next run removes what it names first. One still running
-  is left alone, and a second will not start.
+  record. So does closing the window, which ends the run before it can: each run starts a copy of the client with
+  `--caretaker`, with no console and out of any job the run is in that lets it go, sharing nothing with it but a pipe.
+  When the pipe closes, however the run ended, the caretaker waits for the record to be let go of and removes what it names.
+  A run that ended with its caretaker too, as when Windows shuts down, leaves the record, and the next run removes what it
+  names first. One still running is left alone, and a second will not start.
+
+A paired link that asks nothing for 30 minutes is closed. The client keeps running, with its snapshot and rules, until it is
+stopped.
 
 **Finding it.** The app sends a query to the broadcast address of each IPv4 network it is on (`Get-NetIPAddress`) and to
 `255.255.255.255`, and each client answers with its PC's name, Windows and architecture (`winappmigrator_link::discovery`). That

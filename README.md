@@ -97,7 +97,7 @@ WinAppMigrator itself needs Windows 10 or 11. To move an app off a PC that is st
 The client only lets this PC read the old one, and does no capturing of its own. What the build reads crosses the network,
 and nothing else: an app's files and settings, not the whole drive. The code pairs the two PCs without ever crossing the
 network, and everything after it is encrypted. While it runs, the client lets its own two ports through Windows Firewall
-from your local network only, and when you press Enter it removes them and the snapshot.
+from your local network only, and when you press Enter or close its window, it removes them and the snapshot.
 
 <p align="center">
   <picture>
@@ -466,20 +466,26 @@ there is replaced.
 - **`%ProgramData%\WinAppMigrator`**, which only administrators can get into, holds logs, what an install needs to undo itself,
   and while one runs, what it has unpacked. A scan of a connected drive, or of an account that is not signed in, also keeps copies
   of registry files there while it runs.
+- **WinAppMigrator Client**, on the PC an app is moving off, keeps a snapshot of the Windows drive, two Windows Firewall rules
+  named `WinAppMigrator Client (link)` and `(discovery)`, and a record of both, `%ProgramData%\WinAppMigrator Client\running.txt`,
+  only while it runs. Stopping it or closing its window removes all three. If the PC shuts down while it runs, the next run of
+  the client removes them first. The empty `WinAppMigrator Client` folder stays.
 
 ## Building from source
 
 You need Windows, [Rust](https://rustup.rs) through rustup, which picks the pinned 1.99.1 by itself, and the Visual
-Studio C++ build tools. The app carries the installer inside itself, so build the installer first:
+Studio C++ build tools. The app carries the installer and WinAppMigrator Client inside itself, so build those first:
 
 ```powershell
 cargo build --release -p winappmigrator-installer
 $env:WINAPPMIGRATOR_INSTALLER_STUB = "$PWD\target\release\winappmigrator-installer.exe"
+scripts\build-client.ps1
 cargo build --release -p winappmigrator-gui
 .\target\release\winappmigrator.exe
 ```
 
-A release build of the app with no installer to carry stops there.
+A release build of the app with either missing stops there. The client is built for Windows 7 by
+[`scripts/build-client.ps1`](scripts/build-client.ps1), which says how.
 
 | Crate | What it is |
 | --- | --- |
@@ -487,6 +493,8 @@ A release build of the app with no installer to carry stops there.
 | [`winappmigrator-ui`](https://github.com/RandyNorthrup/WinAppMigrator/tree/main/crates/winappmigrator-ui) | Shared design system, widgets, and process hardening |
 | [`winappmigrator-gui`](https://github.com/RandyNorthrup/WinAppMigrator/tree/main/crates/winappmigrator-gui) | The app, built as `winappmigrator.exe`. Never restores anything |
 | [`winappmigrator-installer`](https://github.com/RandyNorthrup/WinAppMigrator/tree/main/crates/winappmigrator-installer) | The stub inside every installer, and the only caller of the restore code |
+| [`winappmigrator-link`](https://github.com/RandyNorthrup/WinAppMigrator/tree/main/crates/winappmigrator-link) | The encrypted link between the app and WinAppMigrator Client: pairing, messages, and finding a client |
+| [`winappmigrator-client`](https://github.com/RandyNorthrup/WinAppMigrator/tree/main/crates/winappmigrator-client) | WinAppMigrator Client, run on the PC an app is moving off. Only reads |
 
 Run the checks with the commands in [CONTRIBUTING.md](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/CONTRIBUTING.md). Releases are built by
 [GitHub Actions](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/.github/workflows/release.yml) when a `v*` tag is pushed.

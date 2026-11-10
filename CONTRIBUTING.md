@@ -180,7 +180,7 @@ See [docs/gui.md](docs/gui.md) for the conventions.
 
 Versions and tags have three parts, as in `v0.5.0`. The two four-part tags from before that stay as they are.
 
-1. In `Cargo.toml`, set the workspace `version` and the two path dependencies under `[workspace.dependencies]`, and let
+1. In `Cargo.toml`, set the workspace `version` and the four path dependencies under `[workspace.dependencies]`, and let
    `Cargo.lock` follow with a `cargo build`.
 2. In `CHANGELOG.md`, make `## Unreleased` into `## X.Y.Z — YYYY-MM-DD`.
 3. Run `cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md` from the repository's root. A release generates its own

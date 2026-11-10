@@ -1,16 +1,20 @@
 //! What the client does to the PC it runs on, and undoes: a shadow copy of the Windows drive, and two
 //! Windows Firewall rules for its own ports from the local network. Each is recorded in a state file
 //! the client holds open while it runs, so that a run that ended without undoing them can be cleaned
-//! up after by the next, and a run still going is left alone.
+//! up after by its caretaker, a copy of the client with no window that waits for the run to end
+//! however it does, or by the next run, and a run still going is left alone.
 //!
 //! Everything here goes through tools every Windows from 7 on has: WMI through PowerShell 2.0, and
 //! `netsh`. Nothing else on the PC is changed.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, Write};
 use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY};
@@ -32,6 +36,17 @@ const STATE_FILE: &str = "running.txt";
 const RULE_TCP: &str = "WinAppMigrator Client (link)";
 const RULE_UDP: &str = "WinAppMigrator Client (discovery)";
 const ERROR_SHARING_VIOLATION: i32 = 32;
+
+/// The argument that starts the client as a run's caretaker, rather than as a run.
+pub const CARETAKER: &str = "--caretaker";
+/// No console, so that closing a run's window does not end its caretaker too.
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+/// Out of any job the run is in, so that the job ending does not end the caretaker too. A job that
+/// does not allow it refuses, and the caretaker is started without it.
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+/// How long a caretaker waits for Windows to let go of a record once its run has ended.
+const CARETAKER_TRIES: u32 = 40;
+const CARETAKER_PAUSE: Duration = Duration::from_millis(250);
 
 /// Windows' own folder, from where it records it, which only an administrator can change. An
 /// elevated program does not go by the environment it was started with.
@@ -154,23 +169,32 @@ impl RunState {
         let folder = state_folder();
         fs::create_dir_all(&folder)?;
         let path = folder.join(STATE_FILE);
-        if let Ok(left) = fs::read_to_string(&path) {
-            match OpenOptions::new().write(true).share_mode(0).open(&path) {
-                Ok(_) => undo(&left),
-                Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
-                    return Err(io::Error::other(
-                        "the client is already running on this PC. Use that one, or stop it first.",
-                    ));
-                }
-                Err(_) => {}
-            }
-        }
-        let file = OpenOptions::new()
+        let left_by_another = path.exists();
+        // Held from here, so that the record is read, undone and started again by this run alone.
+        let mut file = OpenOptions::new()
+            .read(true)
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .share_mode(0)
-            .open(&path)?;
+            .open(&path)
+            .map_err(|error| {
+                if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+                    io::Error::other(
+                        "the client is already running on this PC, or is cleaning up after one \
+                         that was closed. Use that one, or wait a moment and start this again.",
+                    )
+                } else {
+                    error
+                }
+            })?;
+        if left_by_another {
+            let mut left = String::new();
+            file.read_to_string(&mut left)?;
+            undo(&left);
+            file.set_len(0)?;
+            file.rewind()?;
+        }
         Ok(Self { file, path })
     }
 
@@ -188,6 +212,56 @@ impl RunState {
         let Self { file, path } = self;
         drop(file);
         let _ = fs::remove_file(path);
+    }
+}
+
+/// Start a copy of this program, with no window, that waits for this run to end and then undoes
+/// whatever its record still lists. Closing the run's window ends it before it can clean up after
+/// itself, and so would anything else that ends it, but not its caretaker. The two share nothing but
+/// a pipe, which closes when the run ends or drops the child, so keep the child until after
+/// [`RunState::end`].
+pub fn start_caretaker() -> io::Result<Child> {
+    let program = std::env::current_exe()?;
+    let start = |flags| {
+        Command::new(&program)
+            .arg(CARETAKER)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(flags)
+            .spawn()
+    };
+    start(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB).or_else(|_| start(DETACHED_PROCESS))
+}
+
+/// Be a run's caretaker: wait for the run to end, then undo what its record still lists. A run that
+/// cleaned up after itself has removed its record, and a run started since holds its own, which is
+/// left alone.
+pub fn take_care() {
+    let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+    let path = state_folder().join(STATE_FILE);
+    for _ in 0..CARETAKER_TRIES {
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                let mut left = String::new();
+                if file.read_to_string(&mut left).is_ok() {
+                    undo(&left);
+                }
+                drop(file);
+                // A run that has started since holds its record, which this then cannot remove.
+                let _ = fs::remove_file(&path);
+                return;
+            }
+            Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
+                thread::sleep(CARETAKER_PAUSE);
+            }
+            Err(_) => return,
+        }
     }
 }
 

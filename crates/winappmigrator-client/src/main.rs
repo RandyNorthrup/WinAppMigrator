@@ -3,13 +3,16 @@
 
 use std::io::{self, BufRead};
 use std::net::{Ipv4Addr, TcpListener, UdpSocket};
+use std::os::windows::process::CommandExt;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use winappmigrator_client::serve::serve;
-use winappmigrator_client::system::{RunState, Snapshot, about_this_pc, new_code, open_firewall};
+use winappmigrator_client::system::{
+    RunState, Snapshot, about_this_pc, new_code, open_firewall, start_caretaker,
+};
 use winappmigrator_link::channel::pair_as_client;
 use winappmigrator_link::discovery::{Announcement, answer};
 use winappmigrator_link::{DISCOVERY_PORT, LINK_PORT, LinkError, MAGIC, PROTOCOL_VERSION};
@@ -20,12 +23,18 @@ const ATTEMPTS_PER_CODE: u32 = 5;
 const IDLE_LIMIT: Duration = Duration::from_secs(30 * 60);
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some(winappmigrator_client::system::CARETAKER) {
+        winappmigrator_client::system::take_care();
+        return ExitCode::SUCCESS;
+    }
     // The window says what it is, rather than whatever started it. `title` changes the console it
     // shares with this, and nothing else.
     let _ = std::process::Command::new(
         winappmigrator_client::system::windows_folder().join(r"System32\cmd.exe"),
     )
-    .args(["/d", "/c", "title", "WinAppMigrator Client"])
+    // Raw, since `title` keeps any quotes it is given as part of the title.
+    .args(["/d", "/c"])
+    .raw_arg("title WinAppMigrator Client")
     .status();
     // Each line fits the 80 columns Windows 7 gives a console.
     println!("WinAppMigrator Client {}", winappmigrator_client::VERSION);
@@ -48,6 +57,14 @@ fn main() -> ExitCode {
 
 fn run() -> io::Result<()> {
     let mut state = RunState::begin()?;
+    // Kept until this returns, which tells the caretaker the run is over. It then waits for the
+    // record to be let go of, on a way out that drops it rather than ending it.
+    let _caretaker = start_caretaker()
+        .inspect_err(|error| {
+            println!("If this window is closed rather than stopped, the snapshot and firewall");
+            println!("rules stay until the client is next run here ({error}).");
+        })
+        .ok();
     print!("Taking a snapshot of the Windows drive... ");
     let snapshot = match Snapshot::take(&mut state) {
         Ok(snapshot) => snapshot,
@@ -119,7 +136,7 @@ fn run() -> io::Result<()> {
     println!();
     println!("On your new PC, in WinAppMigrator, choose Network PC... and type this code.");
     println!("Close the app you are moving first, so its files are as it left them.");
-    println!("Press Enter here to stop.");
+    println!("To stop, press Enter here or close this window.");
     println!();
 
     let root = snapshot.root.clone();
