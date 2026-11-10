@@ -12,6 +12,7 @@ use winappmigrator_core::{
 };
 use winappmigrator_core::{BuildStep, WarningSeverity};
 
+use crate::network_view;
 use crate::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
 };
@@ -155,6 +156,10 @@ impl WinAppMigratorApp {
     fn draw_applications(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         self.source_selector(ui, theme);
         ui.add_space(SPACE_MD);
+        if self.network.is_some() && self.remote.is_none() {
+            self.draw_network_wizard(ui, theme);
+            return;
+        }
 
         let search_id = ui.make_persistent_id("app-search");
         widgets::control_row(ui, |ui| {
@@ -258,15 +263,23 @@ impl WinAppMigratorApp {
             ThisPc,
             Drive,
             Image,
+            Network,
         }
-        let mut chosen = if self.disk_image.is_some() || self.image_receiver.is_some() {
+        let mut chosen = if self.network.is_some() {
+            Source::Network
+        } else if self.disk_image.is_some() || self.image_receiver.is_some() {
             Source::Image
         } else if self.scan_source.is_offline() {
             Source::Drive
         } else {
             Source::ThisPc
         };
-        let enabled = !self.is_building() && self.image_receiver.is_none();
+        let enabled = !self.is_building()
+            && self.image_receiver.is_none()
+            && !self
+                .network
+                .as_ref()
+                .is_some_and(network_view::NetworkWizard::is_connecting);
         widgets::control_row(ui, |ui| {
             widgets::field_label(ui, theme, "Scan source");
             let before = chosen;
@@ -278,6 +291,7 @@ impl WinAppMigratorApp {
                     ("This PC", Source::ThisPc),
                     ("Connected drive…", Source::Drive),
                     ("Disk image…", Source::Image),
+                    ("Network PC…", Source::Network),
                 ],
                 enabled,
             );
@@ -286,6 +300,7 @@ impl WinAppMigratorApp {
                     Source::ThisPc => self.select_live_source(),
                     Source::Drive => self.pick_offline_drive(),
                     Source::Image => self.pick_disk_image(),
+                    Source::Network => self.select_network_source(),
                 }
             }
         });
@@ -300,12 +315,17 @@ impl WinAppMigratorApp {
         } else if let ScanSource::OfflineVolume { volume_root } = self.scan_source.clone() {
             ui.add_space(SPACE_XS);
             widgets::control_row(ui, |ui| {
-                let place = match &self.disk_image {
-                    Some(image) => image.image().file_name().map_or_else(
+                let place = match (&self.disk_image, &self.remote) {
+                    (Some(image), _) => image.image().file_name().map_or_else(
                         || image.image().display().to_string(),
                         |name| name.to_string_lossy().into_owned(),
                     ),
-                    None => volume_root.display().to_string(),
+                    (None, Some(remote)) => format!(
+                        "{} over the network ({})",
+                        remote.about().computer_name,
+                        remote.address().ip()
+                    ),
+                    (None, None) => volume_root.display().to_string(),
                 };
                 let windows = self
                     .source_windows
@@ -326,8 +346,19 @@ impl WinAppMigratorApp {
                             .truncate(),
                     );
                 });
-                if widgets::button(ui, theme, ButtonKind::Ghost, "Change…", enabled).clicked() {
-                    if self.disk_image.is_some() {
+                let change = if self.remote.is_some() {
+                    "Disconnect"
+                } else {
+                    "Change…"
+                };
+                if widgets::button(ui, theme, ButtonKind::Ghost, change, enabled).clicked() {
+                    if self.remote.is_some() {
+                        // Back to the steps, to pair with this PC again or another.
+                        self.leave_network_source();
+                        self.select_network_source();
+                        self.scan_source = ScanSource::Live;
+                        self.source_windows = None;
+                    } else if self.disk_image.is_some() {
                         self.pick_disk_image();
                     } else {
                         self.pick_offline_drive();
@@ -489,14 +520,26 @@ impl WinAppMigratorApp {
                 .inner_margin(Margin::same(SPACE_XL as i8))
                 .show(ui, |ui| {
                     ui.add_space(ui.available_height() / 3.0);
-                    widgets::empty_state(
-                        ui,
-                        theme,
-                        Icon::Apps,
-                        "Pick an application",
-                        "Select an app from the list to choose what to include and build its \
-                         installer.",
-                    );
+                    if self.network.is_some() && self.remote.is_none() {
+                        widgets::empty_state(
+                            ui,
+                            theme,
+                            Icon::Apps,
+                            "Pair with the old PC",
+                            "Once WinAppMigrator Client is running there and you have typed its \
+                             code, its apps are listed here, and you build an installer from one \
+                             as from this PC.",
+                        );
+                    } else {
+                        widgets::empty_state(
+                            ui,
+                            theme,
+                            Icon::Apps,
+                            "Pick an application",
+                            "Select an app from the list to choose what to include and build its \
+                             installer.",
+                        );
+                    }
                 });
             return;
         };

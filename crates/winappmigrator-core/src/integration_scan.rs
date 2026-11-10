@@ -1167,7 +1167,7 @@ impl Scan<'_> {
         let Some(on_disk) = self.system.resolve_source_path(logical) else {
             return;
         };
-        let Ok(metadata) = std::fs::metadata(&on_disk) else {
+        let Ok(metadata) = crate::source_fs::metadata(&on_disk) else {
             return;
         };
         if !metadata.is_file() {

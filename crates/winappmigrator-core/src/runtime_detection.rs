@@ -390,7 +390,7 @@ fn may_read_it(
     if !system.may_read(path) {
         return None;
     }
-    let size = std::fs::metadata(path).ok()?.len();
+    let size = crate::source_fs::metadata(path).ok()?.len();
     let within = files_read < MAX_FILES_READ
         && size <= MAX_PROGRAM_BYTES
         && bytes_read.saturating_add(size) <= MAX_BYTES_READ;
@@ -420,7 +420,7 @@ fn note_runtime_config(
     if !system.may_read(&file.path) {
         return;
     }
-    let Ok(text) = std::fs::read_to_string(&file.path) else {
+    let Ok(text) = crate::source_fs::read_to_string(&file.path) else {
         return;
     };
     let folder = file.path.parent().unwrap_or(Path::new(""));

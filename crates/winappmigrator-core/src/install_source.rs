@@ -115,8 +115,10 @@ fn read_within(path: &Path, limit: u64, system: &SystemContext) -> Option<Vec<u8
     if !system.may_read(path) {
         return None;
     }
-    let size = std::fs::metadata(path).ok()?.len();
-    (size <= limit).then(|| std::fs::read(path).ok()).flatten()
+    let size = crate::source_fs::metadata(path).ok()?.len();
+    (size <= limit)
+        .then(|| crate::source_fs::read(path).ok())
+        .flatten()
 }
 
 /// The result of reverse-engineering how and where an application was installed.
@@ -857,7 +859,7 @@ pub fn resolve_install_location(
     let recorded = app
         .install_location
         .as_ref()
-        .filter(|location| location.is_dir());
+        .filter(|location| crate::source_fs::is_dir(location));
     if let Some(location) = recorded
         && path_is_within(executable, location)
     {
@@ -928,11 +930,11 @@ fn is_executable_folder_name(name: &str) -> bool {
 }
 
 fn is_executable_path(path: &Path) -> bool {
-    looks_like_executable(path) && path.is_file()
+    looks_like_executable(path) && crate::source_fs::is_file(path)
 }
 
 fn collect_dir_executables(dir: &Path, out: &mut Vec<PathBuf>, system: &SystemContext) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = crate::source_fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
@@ -993,7 +995,9 @@ fn pick_primary_executable(
     }
 
     filtered.into_iter().min_by_key(|path| {
-        let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        let size = crate::source_fs::metadata(path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
         (path.components().count(), std::cmp::Reverse(size))
     })
 }
@@ -1051,7 +1055,7 @@ fn classify_method(
 
 fn primary_install_dir(app: &InstalledApp) -> Option<PathBuf> {
     if let Some(location) = app.install_location.as_ref()
-        && location.is_dir()
+        && crate::source_fs::is_dir(location)
     {
         return Some(location.clone());
     }
@@ -1081,7 +1085,7 @@ fn inno_log_for(app: &InstalledApp, system: &SystemContext) -> Option<PathBuf> {
 }
 
 fn find_inno_log(dir: &Path) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
+    let entries = crate::source_fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
         if is_inno_log_name(&name) {
@@ -1328,7 +1332,7 @@ fn existing_files(candidates: Vec<String>, system: &SystemContext) -> Vec<PathBu
         let Some(path) = system.resolve_source_path(&PathBuf::from(&candidate)) else {
             continue;
         };
-        if path.is_file() {
+        if crate::source_fs::is_file(&path) {
             files.push(path);
         }
     }
@@ -1342,7 +1346,7 @@ fn is_inno_log(data: &[u8]) -> bool {
 
 /// Locate an NSIS AdvUninstLog `uninstall.log` in the install directory.
 fn find_nsis_log(dir: &Path) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
+    let entries = crate::source_fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
         if is_nsis_log_name(&name) {
@@ -1473,7 +1477,7 @@ fn is_nsis_install(dir: &Path, uninstall_string: Option<&str>, system: &SystemCo
     {
         candidates.push(executable);
     }
-    if let Ok(entries) = std::fs::read_dir(dir) {
+    if let Ok(entries) = crate::source_fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
             if name.starts_with("uninst") && name.ends_with(".exe") {
@@ -1487,7 +1491,7 @@ fn is_nsis_install(dir: &Path, uninstall_string: Option<&str>, system: &SystemCo
 }
 
 fn file_contains_signature(path: &Path, signature: &[u8]) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
+    let Ok(file) = crate::source_fs::open(path) else {
         return false;
     };
     let mut buffer = Vec::new();
@@ -1565,7 +1569,7 @@ fn dedup_existing_dirs(roots: Vec<PathBuf>, system: &SystemContext) -> Vec<PathB
     let mut output = Vec::new();
     for root in roots {
         // An uninstaller at `C:\uninst.exe` says nothing about the rest of the drive.
-        if !system.may_read(&root) || !root.is_dir() || is_drive_root(&root) {
+        if !system.may_read(&root) || !crate::source_fs::is_dir(&root) || is_drive_root(&root) {
             continue;
         }
         if seen.insert(root.to_string_lossy().to_ascii_lowercase()) {
@@ -1582,7 +1586,7 @@ fn is_squirrel_layout(install_location: Option<&Path>, system: &SystemContext) -
     if system.is_file(&location.join("Update.exe")) {
         return true;
     }
-    let Ok(entries) = std::fs::read_dir(location) else {
+    let Ok(entries) = crate::source_fs::read_dir(location) else {
         return false;
     };
     entries
@@ -1600,7 +1604,7 @@ fn is_squirrel_app_dir(path: &Path) -> bool {
 /// install location, if any. Versions are compared by their dotted numeric
 /// segments so `app-1.0.10` ranks above `app-1.0.9`.
 fn latest_squirrel_app_dir(install_dir: &Path, system: &SystemContext) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(install_dir).ok()?;
+    let entries = crate::source_fs::read_dir(install_dir).ok()?;
     entries
         .flatten()
         .map(|entry| entry.path())
@@ -1648,7 +1652,7 @@ fn msix_package_data_roots(identity_name: &str, system: &SystemContext) -> Vec<P
         if !system.may_read(&packages) {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(packages) else {
+        let Ok(entries) = crate::source_fs::read_dir(packages) else {
             continue;
         };
         roots.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
@@ -2069,7 +2073,7 @@ fn footprint_roots(
     // person stops waiting has nothing to go by, and stopping is all that comes of it.
     roots
         .loose_files
-        .retain(|path| !is_cancelled() && path.is_file());
+        .retain(|path| !is_cancelled() && crate::source_fs::is_file(path));
     roots
 }
 

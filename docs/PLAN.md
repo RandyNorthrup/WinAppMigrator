@@ -17,6 +17,11 @@ loader and a data file beside it. There are two binaries with a strict split:
   `.exe`. Runs on the target machine: checks that the app can run there and that there is room,
   extracts its package, reinstalls the app and bundled data, and hash-verifies the result.
   It is the only caller of the restore code, which lives in `winappmigrator-core`.
+- **`winappmigrator-client` — WinAppMigrator Client.** Carried by the app, which saves it for a person to
+  run on a PC an app is moving off, Windows 7 or later, so that the app can read that PC over the network.
+  It captures nothing: it takes a snapshot of the Windows drive and answers the app's requests to describe,
+  list and read paths in it, read-only, over an encrypted link paired by a code it shows
+  (`winappmigrator-link`). One 32-bit program, built for Windows 7 by `scripts/build-client.ps1`.
 
 `winappmigrator-core` holds all shared logic (inventory, install-source
 reverse-engineering, footprint discovery, packaging, restore, verification).
@@ -50,6 +55,10 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   place, which will not lead off it. The app writes nothing to the drive. The app runs
   elevated, so there is no mid-task UAC prompt.
 - A disk image as the source: a `.vhd` or `.vhdx` the app attaches read-only itself, with no drive letter, and detaches.
+- Another PC over the network as the source: **Network PC…** saves WinAppMigrator Client to a USB drive or a folder, finds
+  it on the network, and pairs by the code it shows (SPAKE2, then ChaCha20-Poly1305). The app captures through it as from a
+  connected drive, reading only what the build needs from a snapshot of that PC's drive. Run for real from Windows 7 SP1
+  VMs, 32-bit and 64-bit, and Windows 11 25H2.
 - A drive or an image from Windows 7, Vista, 8 or 8.1, onto Windows 10 or 11: which Windows it is, said in words; an app from
   32-bit Windows laid out as 64-bit Windows keeps it, in `Program Files (x86)` and the 32-bit registry view; what Windows kept
   aside for an older app (`VirtualStore`) put in the app's own folder and keys with User data, since Windows 11 ignores a
@@ -102,6 +111,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo build --release -p winappmigrator-installer
+scripts/build-client.ps1
 cargo build --workspace --release
 cargo audit
 cargo deny check

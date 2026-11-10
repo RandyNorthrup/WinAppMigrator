@@ -37,7 +37,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99.1"
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-src
 
       - name: Check the tag matches the version
         shell: pwsh
@@ -81,6 +81,12 @@ jobs:
         run: |
           $status = (Get-AuthenticodeSignature target/release/winappmigrator-installer.exe).Status
           if ($status -ne 'NotSigned') { throw "The installer stub must stay unsigned, but its signature is $status." }
+
+      # The client the app saves for the old PC. It is built for Windows 7 and later, which takes
+      # the standard library built for that target; see the script.
+      - name: Build the client for Windows 7 and later
+        shell: pwsh
+        run: scripts/build-client.ps1
 
       - name: Build app with embedded stub (release)
         shell: pwsh

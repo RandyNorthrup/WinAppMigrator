@@ -4,6 +4,18 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+### Network PC: another PC, over your network
+
+- **Move an app off a PC that is still running, Windows 7 or later, without unplugging anything.** Choose **Network PC…**,
+  save **WinAppMigrator Client** to a USB drive or a folder, run it on the old PC, and type the code it shows. That PC's apps
+  are then listed, and an installer is built from one here, as from this PC.
+- **The client only lets this PC read the old one.** It takes a snapshot of its Windows drive, so nothing is locked or
+  changing, and the build reads what it needs from it: an app's files and settings, not the whole drive. It changes nothing
+  else there, and removes the snapshot and its firewall rules when you stop it.
+- **Encrypted, and paired by the code.** The code never crosses the network, a wrong one gets a few tries before the client
+  makes another, and everything after it is encrypted and checked.
+- **One small client for Windows 7, 8, 10 and 11, 32-bit or 64-bit.** The app carries it.
+
 ### Windows 7, and disk images
 
 - **Apps from Windows 7, Vista, 8 and 8.1 move to Windows 10 and 11.** Pick the old PC's drive, or an image of it, and the

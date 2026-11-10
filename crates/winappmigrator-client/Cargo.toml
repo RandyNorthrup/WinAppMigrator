@@ -1,0 +1,30 @@
+[package]
+name = "winappmigrator-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Runs on the PC an app is moving off, so that WinAppMigrator on the new PC can read it over the network."
+build = "build.rs"
+
+[[bin]]
+name = "winappmigrator-client"
+path = "src/main.rs"
+test = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+winappmigrator-link.workspace = true
+winreg.workspace = true
+getrandom = "0.2.16"
+
+[build-dependencies]
+embed-manifest.workspace = true
+
+[lints]
+workspace = true

@@ -289,7 +289,7 @@ fn detect_framework_stores(
         // Any account can make a folder in `ProgramData`, so one by this name can be a link to
         // whatever an administrator can read, and it would be packaged as a license.
         let is_real_folder = system.may_read(&path)
-            && std::fs::symlink_metadata(&path)
+            && crate::source_fs::symlink_metadata(&path)
                 .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
         if is_real_folder && !system.is_in_another_profile(&path) {
             let machine_bound = *machine_bound;

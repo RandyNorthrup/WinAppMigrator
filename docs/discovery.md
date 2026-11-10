@@ -802,6 +802,50 @@ What this does not do, and says when it matters:
 - **A package from a 32-bit Windows is laid out for 64-bit Windows,** so on a 32-bit Windows 10 its keys would be under a
   `WOW6432Node` nothing reads. Windows 11 is 64-bit only.
 
+### Another PC over the network (WinAppMigrator Client)
+
+The app needs Windows 10 or 11. A PC an app is moving off can be older, and can still be running, so **Network PC…** reads it
+through **WinAppMigrator Client** (`crates/winappmigrator-client`), which runs there. The client is a tunnel and nothing more:
+the capture is this app's, done here, and a build from another PC is one from a connected drive in every way but where its
+bytes come from.
+
+**The client** is one 32-bit program for Windows 7, 8, 10 and 11, 32-bit and 64-bit, about 600 KB, that asks for elevation.
+Rust's own Windows targets stop running on Windows 7 at 1.78, so it is built for `i686-win7-windows-msvc`, with the standard
+library built for that target and the C runtime linked in (`scripts/build-client.ps1`). It uses only what every one of those
+Windows has:
+
+- **A snapshot** of the Windows drive, by WMI's `Win32_ShadowCopy.Create`, through PowerShell 2.0 as Windows 7 has it. 64-bit
+  Windows makes none for a 32-bit program ("Initialization failure"), so it asks the 64-bit PowerShell, through `Sysnative`.
+  Everything is read from the snapshot's device, `\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN\`, through which a 32-bit
+  program sees the real 64-bit `System32`. Nothing it reads is locked, and nothing changes while it is read.
+- **Two Windows Firewall rules** for its own program and ports, TCP 47732 and UDP 47731, from the local subnet only, by `netsh`.
+- **A record** of both, `%ProgramData%\WinAppMigrator Client\running.txt`, held open while it runs. Enter removes both and the
+  record. A run that ended any other way leaves the record, and the next run removes what it names first. One still running
+  is left alone, and a second will not start.
+
+**Finding it.** The app sends a query to the broadcast address of each IPv4 network it is on (`Get-NetIPAddress`) and to
+`255.255.255.255`, and each client answers with its PC's name, Windows and architecture (`winappmigrator_link::discovery`). That
+is only where to connect. A PC across a router can be typed in by name or address.
+
+**Pairing.** The client shows six random digits. The app connects and both run SPAKE2 with them (`spake2` 0.4, Ed25519), so the
+code never crosses the network, and what does lets no one test guesses away from the client. Each guess takes a connection, and
+the client makes a new code after five wrong ones. The key it agrees is stretched with HKDF-SHA256 over both sides' messages
+into one key for each direction, and each side proves it holds its key before anything else is said.
+
+**The link.** Every message after that is sealed with ChaCha20-Poly1305 under its direction's key, with a count as its nonce, so
+one changed, replayed, reordered or sent back the other way is refused (`winappmigrator_link::channel`). The app asks to
+describe a path, list a folder, or read up to 1 MiB of a file (`winappmigrator_link::protocol`), one request at a time. The
+client answers only for a path below the snapshot's root in ordinary names (`winappmigrator_link::paths`), checks each folder
+on the way for a link, and never follows one: a link is described as one, and nothing is listed or read through it. Over a
+gigabit link a hive reads at about 150 MB/s, and a whole app is built in seconds.
+
+**In the app.** A paired PC's root is `\\?\WAMLINK-<id>\` (`remote.rs`), which no path of this PC can start with and which
+Windows refuses to open, and the source is a `ScanSource::OfflineVolume` there. What a scan and a build read goes through
+`source_fs`, which answers a path of this PC as `std::fs` does and one below that root through the link. So hives are copied
+here and loaded as a drive's are, and everything above about a drive holds. What cannot be asked over the link is not:
+backup-mode reads of a file only its own account may read, and who owns a file, so data of an app installed for one account
+that is outside that account's profile is left out. Each request waits up to two minutes for its answer.
+
 ## Restoring user data to real locations
 
 Run headlessly, program and user-data files (including the `files\_external\…` data staged

@@ -59,6 +59,7 @@ use crate::path_utils::{
 use crate::privilege::{
     ProtectedFolder, confirm_protected_folder, ensure_protected_folder, is_elevated, owner_of,
 };
+use crate::source_fs;
 
 /// Profile directory names under `Users\` that are not real user profiles.
 pub const NON_USER_PROFILE_NAMES: &[&str] = &["All Users", "Default", "Default User", "Public"];
@@ -245,7 +246,7 @@ impl VolumeMap {
             if checked.contains(&key) {
                 continue;
             }
-            match fs::symlink_metadata(&current) {
+            match source_fs::symlink_metadata(&current) {
                 Ok(metadata) if metadata.file_type().is_symlink() => return false,
                 Ok(_) => {
                     checked.insert(key);
@@ -681,7 +682,7 @@ fn copy_hive(
         let mut log_name = name.to_os_string();
         log_name.push(suffix);
         let log = hive_file.with_file_name(&log_name);
-        if fs::symlink_metadata(&log).is_ok_and(|metadata| metadata.is_file())
+        if source_fs::symlink_metadata(&log).is_ok_and(|metadata| metadata.is_file())
             && let Err(error) = copy_a_hive_file(&log, &into.join(&log_name), bytes_left, cancel)
         {
             warn!(%error, log = %log.display(), "could not copy a hive's log");
@@ -699,14 +700,14 @@ fn copy_a_hive_file(
     bytes_left: &mut u64,
     cancel: Option<&AtomicBool>,
 ) -> Result<()> {
-    let size = fs::symlink_metadata(source).map_or(0, |metadata| metadata.len());
+    let size = source_fs::symlink_metadata(source).map_or(0, |metadata| metadata.len());
     let most_of_it = MAX_HIVE_BYTES.min(*bytes_left);
     if size > most_of_it {
         return Err(too_large_for_a_hive(source, size));
     }
     *bytes_left -= size;
     // By reading it, since `fs::copy` also brings the streams stored under its name, of any size.
-    match File::open(source) {
+    match source_fs::open(source) {
         Ok(from) => {
             let mut to = File::create(destination)
                 .map_err(|error| WinAppMigratorError::io(destination, error))?;
@@ -1125,7 +1126,7 @@ impl SystemContext {
             let classes_file = profile.dir.join(USR_CLASS_DAT);
             let classes = if with_classes
                 && self.may_read(&classes_file)
-                && fs::symlink_metadata(&classes_file).is_ok()
+                && source_fs::symlink_metadata(&classes_file).is_ok()
             {
                 match mounts.load(&format!("{CLASSES_LABEL}{index}"), &classes_file) {
                     Ok(classes) => Some(classes),
@@ -1333,10 +1334,10 @@ impl SystemContext {
                 };
                 let name = file_name_string(&logical);
                 let no_hive = matches!(
-                    fs::symlink_metadata(dir.join(NTUSER_DAT)),
+                    source_fs::symlink_metadata(dir.join(NTUSER_DAT)),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound
                 );
-                if !dir.is_dir()
+                if !source_fs::is_dir(&dir)
                     || no_hive
                     || is_non_user_profile(&dir)
                     || !seen.insert(comparison_key(&resolved_location(&dir)))
@@ -1646,12 +1647,12 @@ impl SystemContext {
     /// Whether this is a folder, with no link on a drive followed to find that out. Looking at a
     /// link to a share is enough to connect to it.
     pub fn is_dir(&self, path: &Path) -> bool {
-        self.may_read(path) && path.is_dir()
+        self.may_read(path) && source_fs::is_dir(path)
     }
 
     /// Whether this is a file, with no link on a drive followed to find that out.
     pub fn is_file(&self, path: &Path) -> bool {
-        self.may_read(path) && path.is_file()
+        self.may_read(path) && source_fs::is_file(path)
     }
 
     /// What the PC itself calls a path that can be read here. It is the same path on this PC.
@@ -1795,14 +1796,14 @@ fn loaded_user(profile: &ListedProfile) -> Option<UserHive> {
 /// `Users` that are folders on it: looking through a link to find out could connect to a share.
 pub fn looks_like_a_windows_drive(root: &Path) -> bool {
     ["Windows", "Users"].iter().all(|folder| {
-        fs::symlink_metadata(root.join(folder))
+        source_fs::symlink_metadata(root.join(folder))
             .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
     })
 }
 
 fn mount_machine_hives(volume_root: &Path, mounts: &mut HiveMounts) -> Result<OfflineHives> {
     let windows = volume_root.join(WINDOWS_FOLDER);
-    let is_real_folder = fs::symlink_metadata(&windows)
+    let is_real_folder = source_fs::symlink_metadata(&windows)
         .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
     // Detect a Windows volume by its listable \Windows directory; the hive files
     // under \Windows\System32\config are ACL-protected and may not even stat
@@ -2062,7 +2063,7 @@ fn enumerate_user_hives(map: &VolumeMap) -> Vec<(String, PathBuf, PathBuf)> {
     if !map.may_read(&users_root) {
         return hives;
     }
-    let Ok(entries) = fs::read_dir(&users_root) else {
+    let Ok(entries) = source_fs::read_dir(&users_root) else {
         return hives;
     };
     for entry in entries.flatten() {
@@ -2072,14 +2073,14 @@ fn enumerate_user_hives(map: &VolumeMap) -> Vec<(String, PathBuf, PathBuf)> {
         if !map.may_read(&profile_dir) {
             continue;
         }
-        let is_real_folder = fs::symlink_metadata(&profile_dir)
+        let is_real_folder = source_fs::symlink_metadata(&profile_dir)
             .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
         if !is_real_folder || is_non_user_profile(&profile_dir) {
             continue;
         }
         let ntuser = profile_dir.join(NTUSER_DAT);
         if map.may_read(&ntuser)
-            && fs::symlink_metadata(&ntuser).is_ok_and(|metadata| metadata.is_file())
+            && source_fs::symlink_metadata(&ntuser).is_ok_and(|metadata| metadata.is_file())
         {
             let name = profile_dir
                 .file_name()
@@ -2098,7 +2099,7 @@ fn collect_profile_dirs(
     profiles: &mut Vec<PathBuf>,
     is_folder: &dyn Fn(&Path) -> bool,
 ) {
-    let Ok(entries) = fs::read_dir(users_root) else {
+    let Ok(entries) = source_fs::read_dir(users_root) else {
         return;
     };
     for entry in entries.flatten() {

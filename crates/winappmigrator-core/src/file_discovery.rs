@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -1130,7 +1129,7 @@ pub(crate) fn is_of_one_account(kind: &FootprintKind) -> bool {
 }
 
 pub(crate) fn is_a_link(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    crate::source_fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
 }
 
 /// Whether what a scan found may be read for it: on a drive, it has to be on the drive with no
@@ -1232,9 +1231,9 @@ fn collect_roots(
         let is_for_this_scan = system.may_read(&root.path)
             && !(anyone_can_create_in(&root.kind) && is_a_link(&root.path))
             && !(is_of_one_account(&root.kind)
-                && root.path.exists()
+                && crate::source_fs::exists(&root.path)
                 && !system.is_the_accounts_own(&root.path))
-            && (!root.path.exists()
+            && (!crate::source_fs::exists(&root.path)
                 || may_take_from(&root.path, context.install_location.as_deref(), system));
         if !is_for_this_scan {
             warnings.push(left_out_warning(&root.path));
@@ -1524,7 +1523,7 @@ pub(crate) fn collect_matching_dirs(
         drive.is_some_and(|drive| !drive.may_read(path))
             || (anyone_can_create_in(&kind) && is_a_link(path))
     };
-    let entries = match fs::read_dir(base) {
+    let entries = match crate::source_fs::read_dir(base) {
         Ok(entries) => entries,
         Err(error) => {
             // `NotFound` just means the app keeps nothing under this base — normal
@@ -1550,7 +1549,7 @@ pub(crate) fn collect_matching_dirs(
         let path = entry.path();
         let not_to_follow = is_not_to_follow(&path);
         let link = !not_to_follow && is_a_link(&path);
-        if (!not_to_follow && !path.is_dir()) || is_volatile_dir(&path, true) {
+        if (!not_to_follow && !crate::source_fs::is_dir(&path)) || is_volatile_dir(&path, true) {
             continue;
         }
         let folder_name = file_name_string(&path);
@@ -1564,7 +1563,7 @@ pub(crate) fn collect_matching_dirs(
         if not_to_follow {
             continue;
         }
-        let children = match fs::read_dir(&path) {
+        let children = match crate::source_fs::read_dir(&path) {
             Ok(children) => children,
             Err(error) => {
                 let is_legacy_name = link && error.kind() == std::io::ErrorKind::PermissionDenied;
@@ -1585,7 +1584,7 @@ pub(crate) fn collect_matching_dirs(
         for child in children.flatten() {
             let child_path = child.path();
             let not_to_follow = is_not_to_follow(&child_path);
-            if (not_to_follow || child_path.is_dir())
+            if (not_to_follow || crate::source_fs::is_dir(&child_path))
                 && !is_volatile_dir(&child_path, true)
                 && names.matches_nested(&folder_name, &file_name_string(&child_path), scope)
             {
@@ -1838,7 +1837,7 @@ fn add_file(
     include_program_data: bool,
     reason: &str,
     user_folder: Option<&(UserDataAnchor, PathBuf)>,
-    listed: Option<&fs::Metadata>,
+    listed: Option<&crate::source_fs::Metadata>,
     system: &SystemContext,
     warnings: &mut Vec<Warning>,
 ) {
@@ -1849,7 +1848,10 @@ fn add_file(
 
     // What a folder's listing said, if this came from one. Asking again for every file of a large
     // app takes as long as the rest of the walk.
-    let metadata = match listed.map_or_else(|| fs::metadata(path), |listed| Ok(listed.clone())) {
+    let metadata = match listed.map_or_else(
+        || crate::source_fs::metadata(path),
+        |listed| Ok(listed.clone()),
+    ) {
         Ok(metadata) => metadata,
         Err(error) => {
             warnings.push(Warning::new(
@@ -2100,7 +2102,7 @@ pub(crate) fn is_walkable_app_dir(
     known_base_dirs: &[PathBuf],
     windows_dir: &Path,
 ) -> bool {
-    path.is_dir()
+    crate::source_fs::is_dir(path)
         && !is_drive_root(path)
         && !path_is_within(path, windows_dir)
         && !holds_a_known_base_dir(path, known_base_dirs)

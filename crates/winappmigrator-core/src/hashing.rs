@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::{BufReader, Read};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -16,7 +15,8 @@ const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 const MOST_READ_BACK_THREADS: usize = 8;
 
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let file = File::open(path).map_err(|source| WinAppMigratorError::io(path, source))?;
+    let file =
+        crate::source_fs::open(path).map_err(|source| WinAppMigratorError::io(path, source))?;
     let mut reader = BufReader::with_capacity(HASH_BUFFER_BYTES, file);
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
@@ -42,7 +42,8 @@ pub(crate) struct ReadBack {
 }
 
 fn read_back_file(path: &Path, is_cancelled: &(dyn Fn() -> bool + Sync)) -> Result<ReadBack> {
-    let mut file = File::open(path).map_err(|source| WinAppMigratorError::io(path, source))?;
+    let mut file =
+        crate::source_fs::open(path).map_err(|source| WinAppMigratorError::io(path, source))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     let mut size = 0_u64;

@@ -71,15 +71,44 @@ installing services both need it. The same app comes in a zip with this file and
 
 ### 1. Pick an app
 
-Choose **This PC**, **Connected drive…** (a disk from another PC, plugged in), or **Disk image…** (a `.vhd` or `.vhdx`
-of another PC, which the app attaches read-only itself), then search or sort the list. A drive or an image can have Windows
-7, 8 or 10 as well as 11: see [Limitations](#limitations). Selecting an app looks at it in the
+Choose **This PC**, **Connected drive…** (a disk from another PC, plugged in), **Disk image…** (a `.vhd` or `.vhdx`
+of another PC, which the app attaches read-only itself), or **Network PC…** (another PC on your network, read through
+WinAppMigrator Client: see [below](#from-another-pc-over-the-network)), then search or sort the list. Another PC can have
+Windows 7, 8 or 10 as well as 11: see [Limitations](#limitations). Selecting an app looks at it in the
 background, and picking another stops that. Optionally include the app's license data and user data. An installer
 holds one account's data, so if more than one account has data for the app, you choose whose.
 
 With **User data** off, what the app remembers for you in the registry stays behind as well as its data folders:
 preferences along with recent files and saved sessions. So it should start on the other PC much as it would for someone new,
 except for what it keeps among its own program files and machine-wide settings, which go as they are.
+
+#### From another PC over the network
+
+WinAppMigrator itself needs Windows 10 or 11. To move an app off a PC that is still running, even one on Windows 7, choose
+**Network PC…**, and the app walks you through it:
+
+1. **Put the client on the old PC.** Save **WinAppMigrator Client** to a USB drive, or to any folder the old PC can reach,
+   such as a shared folder. It is one small program, the same for Windows 7, 8, 10 and 11, 32-bit or 64-bit.
+2. **Run it there.** Close the app you are moving, double-click the client, and let it make changes. It takes a snapshot of
+   the Windows drive, so nothing it reads is locked or changing, and shows a six-digit code.
+3. **Pick the old PC and type the code.** It is found on your network by itself, or you type its name or address. Its apps
+   are then listed as this PC's are, and you build an installer from one in the same way, here.
+
+The client only lets this PC read the old one, and does no capturing of its own. What the build reads crosses the network,
+and nothing else: an app's files and settings, not the whole drive. The code pairs the two PCs without ever crossing the
+network, and everything after it is encrypted. While it runs, the client lets its own two ports through Windows Firewall
+from your local network only, and when you press Enter it removes them and the snapshot.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/network-pair-dark.png">
+    <img alt="Network PC: the client saved to a USB drive, the old PC found on the network with its Windows, and the pairing code typed in" src="docs/images/network-pair-light.png" width="860">
+  </picture>
+</p>
+
+<p align="center">
+  <img alt="WinAppMigrator Client on Windows 7, showing the PC, its Windows, the pairing code, and the new PC reading what it needs" src="docs/images/client-windows7.png" width="640">
+</p>
 
 ### 2. See what goes in
 
@@ -178,6 +207,11 @@ Those are small, well-behaved apps on clean machines, and this is how far that g
   `.vhdx`, read with **Disk image…**'s own code, and built into installers that checked out. LegacyNotes, RetroBlocks and
   Notepad++ were installed on Windows 11 25H2, run as a person would, and uninstalled, and each started with what it had on
   Windows 7. 7-Zip and VLC were built but not installed, as that PC has newer ones.
+- **Network PC.** Off CI, by hand: the client on the same Windows 7 VMs, 32-bit and 64-bit, and on Windows 11 25H2. All
+  five apps were built over the network from the 64-bit VM, each in a few seconds, with the same files and settings as from
+  its disk image, and LegacyNotes, RetroBlocks and Notepad++ from those installers were installed and run on Windows 11 as
+  above. Windows 8 and 10 as the old PC have not been run, and neither has a real network between two PCs: the VMs were on a
+  network of their own inside the PC building.
 - **Runtimes.** Of those it can install, only the x64 Visual C++ 2015 and later has been installed for real, on a runner
   it was taken off. The others are downloaded and checked as Microsoft's, and the winget and Windows feature routes have not been run.
 - **Real windows.** They are opened on runners whose logs show a software renderer and a 1024x768 screen, and clicking
@@ -316,6 +350,11 @@ the rest are grouped below: click a group to open it.
   trust, and read what it lists.
 - **The app does not write to a connected drive,** which reads a copy of its registry files. Windows itself
   can still update last-access times and its own records on any disk it mounts.
+- **Network PC reads what the client lets it,** which is the old PC's Windows drive as a snapshot, read-only. A file only
+  an account's own permissions let it read is left out, and so is whether an account owns a folder outside its profile,
+  which leaves data of an app installed for one account outside its profile behind. The old PC needs the internet for
+  nothing, and the new one finds it only on the same local network: across a router, type its address. A firewall other
+  than Windows' own has to be told to let the client's ports, TCP 47732 and UDP 47731, through. The client is not signed.
 - **A disk image is attached read-only** and with no drive letter, and detached when you pick another source or close
   the app. Only `.vhd` and `.vhdx`, which Windows can attach: an image from VMware or VirtualBox has to be saved as one
   first, and one Windows already has attached is refused, since something else may be writing to it.
@@ -456,7 +495,7 @@ Run the checks with the commands in [CONTRIBUTING.md](https://github.com/RandyNo
 
 | Document | What it covers |
 | --- | --- |
-| [Discovery](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/discovery.md) | How an app's footprint is found, and from a connected drive |
+| [Discovery](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/discovery.md) | How an app's footprint is found, from a connected drive, an image, or another PC over the network |
 | [Interface](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/gui.md) | How the screens are built, and the design conventions |
 | [Signing](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/signing.md) | What is signed, what must never be, and how |
 | [Plan](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/PLAN.md) | Scope, and open issues in priority order |

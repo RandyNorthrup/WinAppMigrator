@@ -26,6 +26,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo build --release -p winappmigrator-installer
+scripts/build-client.ps1
 cargo build --workspace --release
 cargo audit
 cargo deny check

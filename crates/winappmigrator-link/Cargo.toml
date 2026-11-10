@@ -1,0 +1,25 @@
+[package]
+name = "winappmigrator-link"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "The encrypted link between WinAppMigrator on a new PC and its client on an old one."
+
+[lib]
+doctest = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# The released line that SPAKE2 0.4 is built on. 0.5 is a pre-release.
+spake2 = "0.4.0"
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
+hkdf = "0.12.4"
+sha2-0-10 = { package = "sha2", version = "0.10.9" }
+
+[lints]
+workspace = true

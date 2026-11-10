@@ -26,6 +26,7 @@ tracing-subscriber.workspace = true
 ureq.workspace = true
 walkdir.workspace = true
 winreg.workspace = true
+winappmigrator-link.workspace = true
 zip.workspace = true
 
 [lints]

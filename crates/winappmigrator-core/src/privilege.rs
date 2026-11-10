@@ -550,6 +550,10 @@ fn refuse_anything_already_inside(folder: &Path) -> io::Result<()> {
 /// Whose a file or folder is, as a SID: whoever made it, unless someone with the rights to changed
 /// that. `None` if that cannot be told.
 pub fn owner_of(path: &Path) -> Option<String> {
+    // Another PC's client says nothing of who owns what, and Windows here has nothing to ask.
+    if crate::source_fs::is_on_another_pc(path) {
+        return None;
+    }
     let text = path.to_string_lossy();
     let output = powershell_command(format!("{POWERSHELL_IMPORT_SECURITY}{READ_OWNER_SCRIPT}"))
         .env(ACL_PATH_VARIABLE, without_verbatim_prefix(&text))

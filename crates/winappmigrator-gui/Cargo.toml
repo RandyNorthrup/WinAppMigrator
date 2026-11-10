@@ -25,9 +25,11 @@ rfd.workspace = true
 tracing.workspace = true
 winappmigrator-core.workspace = true
 winappmigrator-ui.workspace = true
+winappmigrator-link.workspace = true
 
 [dev-dependencies]
 egui_kittest.workspace = true
+winappmigrator-client.workspace = true
 tempfile.workspace = true
 
 [build-dependencies]

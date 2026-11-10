@@ -1050,7 +1050,7 @@ fn read_key_file(file: &FileEntry, system: &SystemContext) -> Option<Vec<u8>> {
     {
         return None;
     }
-    std::fs::read(&file.path).ok()
+    crate::source_fs::read(&file.path).ok()
 }
 
 #[cfg(test)]

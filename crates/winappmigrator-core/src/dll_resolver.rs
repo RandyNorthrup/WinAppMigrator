@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::env;
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -161,8 +162,8 @@ pub fn find_app_local_dlls(
             executable_path.display()
         ))
     })?;
-    let entries =
-        fs::read_dir(app_dir).map_err(|source| WinAppMigratorError::io(app_dir, source))?;
+    let entries = crate::source_fs::read_dir(app_dir)
+        .map_err(|source| WinAppMigratorError::io(app_dir, source))?;
     let mut files = Vec::new();
 
     for entry in entries {

@@ -12,7 +12,6 @@
 //! would offer now. See [`NearMatchLook::pick`].
 
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::app_inventory::{UninstallRecord, read_uninstall_records};
@@ -1094,7 +1093,7 @@ fn near_named_folders(
     if !system.may_read(base) {
         return;
     }
-    let Ok(entries) = fs::read_dir(base) else {
+    let Ok(entries) = crate::source_fs::read_dir(base) else {
         return;
     };
     for entry in entries.flatten() {
@@ -1102,7 +1101,7 @@ fn near_named_folders(
             return;
         }
         let path = entry.path();
-        if !system.may_read(&path) || is_a_link(&path) || !path.is_dir() {
+        if !system.may_read(&path) || is_a_link(&path) || !crate::source_fs::is_dir(&path) {
             continue;
         }
         let name = file_name_string(&path);
@@ -1125,14 +1124,14 @@ fn near_named_folders(
         if is_shared_by_name(&system.logical_path(&path)) || is_volatile_dir(&path, true) {
             continue;
         }
-        let Ok(children) = fs::read_dir(&path) else {
+        let Ok(children) = crate::source_fs::read_dir(&path) else {
             continue;
         };
         for child in children.flatten() {
             let child_path = child.path();
             if !system.may_read(&child_path)
                 || is_a_link(&child_path)
-                || !child_path.is_dir()
+                || !crate::source_fs::is_dir(&child_path)
                 || scan
                     .install_location
                     .is_some_and(|location| path_is_within(&child_path, location))

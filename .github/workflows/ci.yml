@@ -24,7 +24,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99.1"
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-src
 
       - name: Cache build output
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -65,6 +65,11 @@ jobs:
       - name: Release build of the stub
         shell: pwsh
         run: cargo build --locked --release -p winappmigrator-installer
+
+      # The client the app carries, built as a release builds it: for Windows 7 and later.
+      - name: Release build of the client
+        shell: pwsh
+        run: scripts/build-client.ps1
 
       - name: Release build
         shell: pwsh

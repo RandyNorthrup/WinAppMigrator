@@ -239,14 +239,14 @@ fn is_app_owned_driver(context: &ServiceScanContext, image_path: &Path, file: &P
         .iter()
         .chain(&context.also_the_apps)
         .any(|root| path_is_strictly_inside(image_path, root));
-    under_install && file.is_file()
+    under_install && crate::source_fs::is_file(file)
 }
 
 /// Best-effort Authenticode signer subject for a driver image. Spawns PowerShell
 /// only for drivers that matched the app (typically zero or one), so cost is
 /// bounded.
 fn driver_signer(image_path: &Path) -> Option<String> {
-    if !image_path.is_file() {
+    if !crate::source_fs::is_file(image_path) {
         return None;
     }
     let script = format!(

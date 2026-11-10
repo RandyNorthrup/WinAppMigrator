@@ -2,6 +2,7 @@
 //! elevation the `winappmigrator` executable's manifest demands.
 
 mod footprint_view;
+mod network_view;
 mod views;
 mod worker;
 
@@ -9,6 +10,8 @@ mod worker;
 mod ui_tests;
 #[cfg(test)]
 mod ui_tests_footprint;
+#[cfg(test)]
+mod ui_tests_network;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -276,6 +279,10 @@ pub struct WinAppMigratorApp {
     pub(crate) image_receiver: Option<Receiver<ImageMessage>>,
     /// Which Windows a drive or an image has, once its apps are listed.
     pub(crate) source_windows: Option<SourceIdentity>,
+    /// While Network PC is the source: the steps to pair with a client.
+    pub(crate) network: Option<network_view::NetworkWizard>,
+    /// The PC paired with through its client, whose drive is the source.
+    pub(crate) remote: Option<Arc<winappmigrator_core::remote::RemotePc>>,
     /// What was found about the accounts on that source, when its apps were listed.
     profile_survey: Option<Arc<ProfileSurvey>>,
     /// Whose data can go in an installer of the selected app, once that has been looked at.
@@ -382,6 +389,8 @@ impl WinAppMigratorApp {
             disk_image: None,
             image_receiver: None,
             source_windows: None,
+            network: None,
+            remote: None,
             profile_survey: None,
             profile_picker: None,
             picker_receiver: None,
@@ -792,6 +801,7 @@ impl WinAppMigratorApp {
     fn select_live_source(&mut self) {
         self.source_error = None;
         self.image_receiver = None;
+        self.leave_network_source();
         if self.scan_source.is_offline() {
             self.release_disk_image();
             self.scan_source = ScanSource::Live;
@@ -800,7 +810,7 @@ impl WinAppMigratorApp {
     }
 
     /// Detach the image that was the source, away from the window: it runs another program.
-    fn release_disk_image(&mut self) {
+    pub(crate) fn release_disk_image(&mut self) {
         if let Some(image) = self.disk_image.take() {
             thread::spawn(move || drop(image));
         }
@@ -865,6 +875,7 @@ impl WinAppMigratorApp {
         }
         self.source_error = None;
         self.image_receiver = None;
+        self.leave_network_source();
         self.release_disk_image();
         self.scan_source = ScanSource::offline(root);
         self.start_inventory_load();
@@ -975,6 +986,7 @@ impl WinAppMigratorApp {
 
     pub(crate) fn poll_workers(&mut self) {
         self.poll_scan();
+        self.poll_network();
         while let Ok(message) = self.also_messages.try_recv() {
             // An answer about what the choices were before is about nothing now.
             if message.version == self.choices_version {
@@ -1018,6 +1030,7 @@ impl WinAppMigratorApp {
         if let Some(receiver) = self.image_receiver.take() {
             match receiver.try_recv() {
                 Ok(ImageMessage::Attached(image, volume)) => {
+                    self.leave_network_source();
                     self.release_disk_image();
                     self.disk_image = Some(*image);
                     self.scan_source = ScanSource::offline(volume);

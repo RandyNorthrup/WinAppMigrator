@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+#[cfg(test)]
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};
@@ -171,7 +172,7 @@ fn merge_delay_imports(imports: &mut Vec<ImportedDll>, delay: Vec<ImportedDll>) 
 /// Most of a large program is code, which nothing here reads, and reading it would be the second or
 /// third time that file was read for a build.
 fn read_program(path: &Path) -> Result<Vec<u8>> {
-    let size = fs::metadata(path)
+    let size = crate::source_fs::metadata(path)
         .map_err(|source| WinAppMigratorError::io(path, source))?
         .len();
     if size > MAX_PROGRAM_BYTES {
@@ -185,7 +186,7 @@ fn read_program(path: &Path) -> Result<Vec<u8>> {
     {
         return Ok(bytes);
     }
-    fs::read(path).map_err(|source| WinAppMigratorError::io(path, source))
+    crate::source_fs::read(path).map_err(|source| WinAppMigratorError::io(path, source))
 }
 
 /// A program of this size or less is read whole, as it costs next to nothing.
@@ -283,7 +284,7 @@ fn program_layout(start: &[u8]) -> Option<ProgramLayout> {
 /// its resources, and its signature. A managed program's metadata can be anywhere, so that is read
 /// whole, as is anything that does not read as expected. `None` means to read it whole.
 fn read_what_is_looked_at(path: &Path, size: u64) -> Option<Vec<u8>> {
-    let mut file = fs::File::open(path).ok()?;
+    let mut file = crate::source_fs::open(path).ok()?;
     let start = read_start_of(path).ok()?;
     let layout = program_layout(&start)?;
     if header_facts(&start)?.is_managed {
@@ -431,7 +432,7 @@ fn is_a_single_file_bundle(path: &Path, bytes: &[u8]) -> bool {
     if bytes.len() as u64 <= READ_WHOLE_UP_TO_BYTES {
         return says_where_what_is_packed_is(bytes);
     }
-    let Ok(file) = fs::File::open(path) else {
+    let Ok(file) = crate::source_fs::open(path) else {
         return says_where_what_is_packed_is(bytes);
     };
     let mut start = Vec::new();
@@ -536,7 +537,8 @@ pub(crate) fn header_facts(bytes: &[u8]) -> Option<HeaderFacts> {
 
 /// The first part of a file, enough for its headers.
 fn read_start_of(path: &Path) -> Result<Vec<u8>> {
-    let mut file = fs::File::open(path).map_err(|source| WinAppMigratorError::io(path, source))?;
+    let mut file =
+        crate::source_fs::open(path).map_err(|source| WinAppMigratorError::io(path, source))?;
     let mut bytes = Vec::with_capacity(HEADER_BYTES);
     (&mut file)
         .take(HEADER_BYTES as u64)
@@ -576,11 +578,12 @@ pub(crate) fn read_program_need(
 }
 
 fn file_metadata(path: &Path, pe: &PeFile<'_>, bytes: &[u8]) -> Result<ExecutableMetadata> {
-    let metadata = fs::metadata(path).map_err(|source| WinAppMigratorError::io(path, source))?;
+    let metadata =
+        crate::source_fs::metadata(path).map_err(|source| WinAppMigratorError::io(path, source))?;
     let modified_utc = metadata.modified().ok().and_then(format_system_time_utc);
     // Only that it is there. Following a link to find out could connect to a share.
     let external_manifest = external_manifest_path(path)
-        .filter(|manifest_path| fs::symlink_metadata(manifest_path).is_ok());
+        .filter(|manifest_path| crate::source_fs::symlink_metadata(manifest_path).is_ok());
 
     let embedded_manifest_xml = read_embedded_manifest(pe);
     let requested_execution_level = embedded_manifest_xml

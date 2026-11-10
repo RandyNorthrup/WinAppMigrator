@@ -205,9 +205,9 @@ fn read_shortcuts_on_a_drive(
 
 /// A shortcut's file, if it is small enough to be one.
 pub(crate) fn read_shortcut_file(path: &Path) -> Option<Vec<u8>> {
-    let size = std::fs::metadata(path).ok()?.len();
+    let size = crate::source_fs::metadata(path).ok()?.len();
     (size <= MAX_SHORTCUT_BYTES)
-        .then(|| std::fs::read(path).ok())
+        .then(|| crate::source_fs::read(path).ok())
         .flatten()
 }
 

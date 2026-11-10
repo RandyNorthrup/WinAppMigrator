@@ -177,6 +177,13 @@ apps are read from:
   with no drive letter on a worker thread (`disk_image::AttachedImage`), says so while it
   does, and from then on it is a connected drive whose place is a folder of the app's. It is
   detached when another source is picked, on a worker thread, and when the app closes.
+- **Network PC…** — another PC on the network, read through WinAppMigrator Client
+  (`network_view.rs`). Until a PC is paired, three steps take the place of the app list: save
+  the client to a USB drive the app lists (`Win32_LogicalDisk`, drive type 2) or to a folder; pick
+  the PC, which the app asks the network for every five seconds on a worker thread, or type its
+  name or address; and type the code it shows. Pairing runs on a worker thread. Once paired, the
+  PC's root is the source, its apps are listed, and **Disconnect** ends the link and goes back to
+  the steps. The detail panel says to pair first until then.
 
 Under the selector, a drive or an image shows its place and which Windows it has
 (`SourceIdentity::windows_name`), shortened rather than pushing **Change…** out of sight. A
@@ -326,6 +333,11 @@ and disrupts the desktop). Instead:
   | `footprint-left-out-folder-` | `app-choose-` |
   | `done-` | `app-done-` |
   | `installer-ready-` | `installer-` |
+  | `network-found-` | `network-pair-` |
+
+  These are in `docs/images` for the docs and the wiki, and not on the README's first screen:
+  `windows-7-drive-` as `source-windows7-`, `network-steps-` and `network-paired-` as they are.
+  `client-windows7.png` is the client itself, on a Windows 7 VM, taken from the VM's screen.
 
   They tell one story, of an app built with both options off, so the sample data has to agree with itself and with what a real
   scan of that would say.

@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
-use std::os::windows::fs::{FileExt, OpenOptionsExt};
+use std::os::windows::fs::OpenOptionsExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -612,7 +612,7 @@ fn work_until_stopped(shared: &Shared<'_>, monitor: &BuildMonitor) {
 
 /// A source file, open, and a copy of it to remove when this goes, if that is what it took.
 struct OpenedSource {
-    file: File,
+    file: crate::source_fs::File,
     spooled: Option<PathBuf>,
 }
 
@@ -626,7 +626,11 @@ impl Drop for OpenedSource {
 
 /// Open what is to be read. On a drive, nothing that is a link is opened at all: whatever has that
 /// name is what is looked at, however it came to have it since it was last asked about.
-fn open_file(path: &Path, connected_drive: bool) -> io::Result<File> {
+fn open_file(path: &Path, connected_drive: bool) -> io::Result<crate::source_fs::File> {
+    // Another PC's client opens nothing that is not a file, and never a link.
+    if crate::source_fs::is_on_another_pc(path) {
+        return crate::source_fs::open(path);
+    }
     let mut options = OpenOptions::new();
     options.read(true);
     if connected_drive {
@@ -639,7 +643,7 @@ fn open_file(path: &Path, connected_drive: bool) -> io::Result<File> {
             path.display()
         )));
     }
-    Ok(file)
+    Ok(crate::source_fs::File::Local(file))
 }
 
 fn open_source(shared: &Shared<'_>, path: &Path) -> Result<OpenedSource> {
@@ -661,7 +665,9 @@ fn open_source(shared: &Shared<'_>, path: &Path) -> Result<OpenedSource> {
             let copy = folder.join(name);
             let copied =
                 copy_file_backup_mode_unless(path, &copy, shared.is_cancelled).and_then(|()| {
-                    File::open(&copy).map_err(|error| WinAppMigratorError::io(&copy, error))
+                    File::open(&copy)
+                        .map(crate::source_fs::File::Local)
+                        .map_err(|error| WinAppMigratorError::io(&copy, error))
                 });
             match copied {
                 Ok(file) => Ok(OpenedSource {
@@ -679,7 +685,7 @@ fn open_source(shared: &Shared<'_>, path: &Path) -> Result<OpenedSource> {
 }
 
 /// As much as a read can give of what `buffer` holds, and less only at the end of the file.
-fn read_fully(file: &mut File, buffer: &mut [u8]) -> io::Result<usize> {
+fn read_fully(file: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
     let mut filled = 0;
     while filled < buffer.len() {
         match file.read(&mut buffer[filled..]) {
@@ -695,7 +701,7 @@ fn read_fully(file: &mut File, buffer: &mut [u8]) -> io::Result<usize> {
 /// All of a file, if it fits in a chunk, or one byte past that to say that it does not. Room is made
 /// for what it was seen to be, so that a small file does not hold a chunk's worth of memory while it
 /// waits its turn, and what it has become is what counts.
-fn read_up_to_a_chunk(file: &mut File, size_hint: u64) -> io::Result<Vec<u8>> {
+fn read_up_to_a_chunk(file: &mut impl Read, size_hint: u64) -> io::Result<Vec<u8>> {
     let most = CHUNK_BYTES + 1;
     let first = usize::try_from(size_hint.saturating_add(1)).map_or(most, |size| size.min(most));
     let mut buffer = vec![0_u8; first];
@@ -779,7 +785,7 @@ fn sample_kept(compressor: &mut Compress, sample: &[u8]) -> Option<f64> {
 /// A sample of a file too big to hold, from its start, middle, and end, since a package format can
 /// start with an index and then be all compressed data. Whatever is read here goes nowhere else, and
 /// it leaves the file's place in it wherever it likes.
-fn sample_of_file(file: &File) -> Option<f64> {
+fn sample_of_file(file: &crate::source_fs::File) -> Option<f64> {
     let size = file.metadata().ok()?.len();
     let mut compressor = Compress::new(Compression::new(COMPRESSION_LEVEL), false);
     let mut sample = Vec::with_capacity(SAMPLE_BYTES * LARGE_FILE_SAMPLES as usize);
@@ -1398,7 +1404,8 @@ mod tests {
         let mut bytes = text(SAMPLE_BYTES);
         bytes.extend_from_slice(&noise(CHUNK_BYTES * 2, 13));
         fs::write(&path, &bytes)?;
-        let kept = sample_of_file(&File::open(&path)?).ok_or("no sample")?;
+        let kept = sample_of_file(&crate::source_fs::File::Local(File::open(&path)?))
+            .ok_or("no sample")?;
         assert!(kept > 0.5, "{kept}");
         Ok(())
     }

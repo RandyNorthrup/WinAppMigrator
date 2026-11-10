@@ -239,6 +239,27 @@ controlled. So:
 - **Loading a hive runs Windows' own parser on it.** A drive made to attack that parser needs no bug here, and this
   project cannot do anything about one. Read a drive from someone you do not trust on a machine you can lose.
 
+## Another PC over the network
+
+**Network PC…** reads a PC through WinAppMigrator Client, which runs there elevated. What it reads is treated as a drive's
+is, above, and the link adds this:
+
+- **Only a PC with the code reads anything.** The six digits are used in SPAKE2, which does not send them and gives someone
+  listening nothing to guess them from. Someone else on the network gets one guess per connection, and the client makes a
+  new code after five wrong ones, which it shows. The code is random each run, unless a script gives one with `--code`.
+- **What crosses the network is encrypted and checked.** ChaCha20-Poly1305, one key each way from HKDF over the pairing,
+  and a count as each nonce: a message changed, replayed, reordered or reflected is refused, and the link ends.
+- **The client only reads, and only below the snapshot's root.** Every path is checked for names Windows would read as
+  something else and for `..`, and each folder on the way for a link, which is never followed. It writes nothing on the PC
+  but its own record, a snapshot, and two firewall rules, all removed when it stops or by its next run.
+- **The client is reachable from the local network while it runs.** Its rules allow its two ports from the local subnet,
+  for whoever is there, and only the code stands between them and the PC's files. Run it on a network you know, and stop it
+  when the build is done. Discovery is in the open: anyone there can see the PC's name and Windows.
+- **What it says about itself is not trusted.** A PC's name and Windows, from discovery or from the client, are shown and
+  nothing more. What the build reads from it is a drive's to this app, so everything above about a drive applies.
+- **The client is not signed.** Windows says so when it asks to let it make changes, and checking its file is the only way
+  to know it is the one the app saved. Save it from the app, on a drive or folder only you can write to.
+
 ## Another account's data
 
 An installer holds one account's data. A scan loads only the hive of that account, and leaves out what is in

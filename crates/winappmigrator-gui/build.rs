@@ -31,6 +31,7 @@ fn main() {
     embed_file_details();
     restrict_import_dll_search();
     stage_installer_stub();
+    stage_client();
 }
 
 /// Resolve the DLLs this executable imports from System32 only, so one dropped beside
@@ -118,6 +119,45 @@ fn stage_installer_stub() {
     }
 
     println!("cargo:rustc-env=WAM_INSTALLER_STUB={}", staged.display());
+}
+
+/// Stage WinAppMigrator Client, built for Windows 7 and later, which the app saves for a person to
+/// run on the PC they are moving an app off. `scripts/build-client.ps1` builds it, as
+/// `target/win7/i686-win7-windows-msvc/release/winappmigrator-client.exe`, since it is built for a
+/// target and in a way the rest of the workspace is not. A release without it fails, as one
+/// without the stub does.
+fn stage_client() {
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap_or_default());
+    let staged = out_dir.join("client.bin");
+    let explicit = std::env::var_os("WINAPPMIGRATOR_CLIENT").map(PathBuf::from);
+    let built = out_dir.ancestors().nth(4).map(|target| {
+        target
+            .join("win7")
+            .join("i686-win7-windows-msvc")
+            .join("release")
+            .join("winappmigrator-client.exe")
+    });
+    let source = [explicit, built]
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_file());
+    println!("cargo:rerun-if-env-changed=WINAPPMIGRATOR_CLIENT");
+    if let Some(path) = source.as_ref() {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    let problem = match source.as_ref() {
+        Some(path) => stage(path, &staged).err(),
+        None => Some("it has not been built: run scripts/build-client.ps1".to_owned()),
+    };
+    if let Some(problem) = problem {
+        if std::env::var("PROFILE").is_ok_and(|profile| profile == "release") {
+            println!("cargo:error=a release of the app has to carry its client: {problem}");
+            std::process::exit(1);
+        }
+        println!("cargo:warning=no client is embedded in this build: {problem}");
+        let _ = std::fs::write(&staged, []);
+    }
+    println!("cargo:rustc-env=WAM_CLIENT={}", staged.display());
 }
 
 fn stage(stub: &Path, staged: &Path) -> Result<(), String> {

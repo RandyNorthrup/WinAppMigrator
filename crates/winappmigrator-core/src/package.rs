@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -226,7 +226,7 @@ fn refuse_a_scan_whose_program_is_gone(report: &ScanReport) -> Result<()> {
         .find(|file| file.original_path.as_path() == main)
         .map_or(main, |file| file.path.as_path());
     let reader = SourceReader::new(report);
-    if reader.check(readable).is_ok() && fs::metadata(readable).is_ok() {
+    if reader.check(readable).is_ok() && crate::source_fs::metadata(readable).is_ok() {
         return Ok(());
     }
     Err(WinAppMigratorError::InvalidInput(format!(
@@ -453,8 +453,8 @@ fn build_package(
             Err(error) => {
                 // Nothing goes into a package without a hash to check it by. A scan can be some
                 // time ago, so it says when a file is simply not there any more.
-                let is_gone =
-                    reader.check(&file.path).is_ok() && fs::symlink_metadata(&file.path).is_err();
+                let is_gone = reader.check(&file.path).is_ok()
+                    && crate::source_fs::symlink_metadata(&file.path).is_err();
                 warnings.push(if is_gone {
                     Warning::new(
                         FILE_GONE_CODE,
@@ -825,7 +825,7 @@ pub(crate) fn driver_image_bytes(report: &ScanReport, driver: &DriverEntry) -> u
     SourceReader::new(report)
         .locate(&driver.image_path)
         .ok()
-        .and_then(|image| fs::metadata(image).ok())
+        .and_then(|image| crate::source_fs::metadata(image).ok())
         .map_or(0, |metadata| metadata.len())
 }
 
@@ -885,7 +885,7 @@ fn build_inputs(
         .iter()
         .filter(|driver| driver.app_owned)
         .filter_map(|driver| reader.locate(&driver.image_path).ok())
-        .filter_map(|image| fs::metadata(image).ok())
+        .filter_map(|image| crate::source_fs::metadata(image).ok())
         .map(|metadata| metadata.len())
         .fold(0, adding);
     Ok(BuildInputs {
@@ -940,7 +940,7 @@ fn files_to_pack(
             reader.check(&file.path).ok()?;
             // One that has gone says so when it is copied, and holds nothing now. Anything else that
             // stops it being looked at says nothing of what is in it.
-            match fs::symlink_metadata(&file.path) {
+            match crate::source_fs::symlink_metadata(&file.path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
                 _ => read_small_file(&file.path),
             }
@@ -1281,7 +1281,7 @@ fn package_drivers(
         let image = reader
             .locate(&driver.image_path)
             .ok()
-            .filter(|image| image.is_file());
+            .filter(|image| crate::source_fs::is_file(image));
         if let Some(image) = image.as_deref().filter(|_| driver.app_owned) {
             let relative = driver_package_path(&driver);
             match package_destination_path(output_dir, &relative).and_then(|destination| {
@@ -1370,7 +1370,7 @@ fn package_one_license_artifact(
     let Ok(source) = reader.locate(&logical) else {
         return false;
     };
-    if source.is_file() {
+    if crate::source_fs::is_file(&source) {
         // A license goes by its option, and what looks like a credential goes nowhere, by now as well.
         if crate::secret_rules::is_secret_file(&source, || read_small_file(&source)) {
             warnings.push(Warning::new(
@@ -1394,7 +1394,7 @@ fn package_one_license_artifact(
         artifact.package_relative_path = Some(relative);
         return true;
     }
-    if !source.is_dir() {
+    if !crate::source_fs::is_dir(&source) {
         return false;
     }
     artifact.store_files = copy_license_store(&source, &destination, reader, warnings);
@@ -1417,7 +1417,9 @@ fn copy_license_store(
     let mut copied = Vec::new();
     // Nothing is followed, not even at the top: it was a folder when it was scanned, and any account
     // can make what is there now.
-    if fs::symlink_metadata(source).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+    if crate::source_fs::symlink_metadata(source)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
         return copied;
     }
     for entry in walk_asking(source, DEEPEST_WALK, |path, _| reader.check(path).is_ok()) {
@@ -1478,10 +1480,10 @@ fn copy_license_store(
 
 /// What is in a file no bigger than a key file is, to tell whether it holds a private key.
 fn read_small_file(path: &Path) -> Option<Vec<u8>> {
-    fs::metadata(path)
+    crate::source_fs::metadata(path)
         .ok()
         .filter(|metadata| metadata.len() <= crate::secret_rules::MAX_KEY_FILE_BYTES)
-        .and_then(|_| fs::read(path).ok())
+        .and_then(|_| crate::source_fs::read(path).ok())
 }
 
 fn create_package_dirs(root: &Path) -> Result<()> {
@@ -1530,6 +1532,17 @@ fn copy_hashing_into_package(source: &Path, destination: &Path) -> Result<(Strin
         }
         Err(error) => return Err(WinAppMigratorError::io(destination, error)),
     };
+    // Another PC's file says when it was changed, and nothing of its permissions here.
+    if crate::source_fs::is_on_another_pc(source) {
+        if let Some(modified) = crate::source_fs::metadata(source)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+        {
+            let modified = FileTime::from_system_time(modified);
+            let _ = set_file_times(destination, modified, modified);
+        }
+        return Ok(fingerprint);
+    }
     let Ok(metadata) = fs::metadata(source) else {
         // Source metadata may be unreadable even when a backup-mode copy
         // succeeded; the bytes are what matter, so keep the copied file as-is.
@@ -1543,7 +1556,7 @@ fn copy_hashing_into_package(source: &Path, destination: &Path) -> Result<(Strin
 }
 
 fn copy_and_hash(source: &Path, destination: &Path) -> std::io::Result<(String, u64)> {
-    let mut input = File::open(source)?;
+    let mut input = crate::source_fs::open(source)?;
     let mut output = OpenOptions::new()
         .write(true)
         .create(true)
@@ -1883,6 +1896,7 @@ mod tests {
     };
     use crate::progress::{ScanMonitor, ScanStep};
     use crate::restore_review::ReviewedPackage;
+    use std::fs::File;
 
     #[test]
     fn creates_package_from_isolated_pe_copy() -> Result<()> {

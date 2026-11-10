@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -520,7 +521,7 @@ fn find_executable_in_dir(
     display_name: &str,
     system: &SystemContext,
 ) -> Option<PathBuf> {
-    let entries = fs::read_dir(dir).ok()?;
+    let entries = crate::source_fs::read_dir(dir).ok()?;
     let normalized_display = normalize_name_for_match(display_name);
     let mut executable_paths = Vec::new();
     let mut overlapping = None;

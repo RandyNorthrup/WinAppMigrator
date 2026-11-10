@@ -728,10 +728,10 @@ pub const DEEPEST_WALK: usize = 64;
 #[derive(Debug)]
 pub struct WalkedEntry {
     pub path: PathBuf,
-    pub file_type: std::fs::FileType,
+    pub file_type: crate::source_fs::FileType,
     /// What the listing said of it, which takes nothing more to find out. A size here can lag behind
     /// a file that is open for writing, so it is not to be taken as what would be read.
-    pub metadata: Option<std::fs::Metadata>,
+    pub metadata: Option<crate::source_fs::Metadata>,
     /// A folder the walk went no further into, as it was as deep as it was asked to go. What is in it
     /// was not looked at, so it is not to be taken for empty.
     pub too_deep: bool,
@@ -755,7 +755,7 @@ impl std::fmt::Display for WalkFailure {
 /// sees it, and on a drive only opening one can connect to a share: what a listing calls the folder
 /// `x.` opens as the link `x` beside it. Links are not followed below the root.
 pub struct AskingWalk<F> {
-    open: Vec<std::fs::ReadDir>,
+    open: Vec<crate::source_fs::ReadDir>,
     max_depth: usize,
     may_look: F,
     failed: Option<WalkFailure>,
@@ -780,7 +780,7 @@ pub fn walk_asking<F: FnMut(&Path, bool) -> bool>(
 
 impl<F> AskingWalk<F> {
     fn enter(&mut self, folder: &Path) {
-        match std::fs::read_dir(folder) {
+        match crate::source_fs::read_dir(folder) {
             Ok(entries) => self.open.push(entries),
             Err(error) => {
                 self.failed = Some(WalkFailure {
@@ -885,6 +885,10 @@ pub fn is_network_path(text: &str) -> bool {
 /// the link is. Windows says such a place is not found when asked its name, so it takes looking
 /// at whether something is there.
 pub fn location_can_be_told(path: &Path) -> bool {
+    // Another PC's path is where it says: no link there is followed to find out more.
+    if crate::source_fs::is_on_another_pc(path) {
+        return true;
+    }
     let mut current = path;
     loop {
         match std::fs::canonicalize(current) {
@@ -903,6 +907,9 @@ pub fn location_can_be_told(path: &Path) -> bool {
 /// Where a location really is, as far as it exists yet: links followed and short names spelled
 /// out for what is there, and the rest as it was given. For what must not be fooled by either.
 pub fn resolved_location(path: &Path) -> PathBuf {
+    if crate::source_fs::is_on_another_pc(path) {
+        return path.to_path_buf();
+    }
     let mut missing = Vec::new();
     let mut current = path;
     loop {

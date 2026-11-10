@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
@@ -1057,7 +1056,7 @@ fn selected_executable_path(
 }
 
 fn validate_scan_input(executable_path: &Path) -> Result<()> {
-    let metadata = fs::metadata(executable_path)
+    let metadata = crate::source_fs::metadata(executable_path)
         .map_err(|source| WinAppMigratorError::io(executable_path, source))?;
     if !metadata.is_file() {
         return Err(WinAppMigratorError::InvalidInput(format!(
