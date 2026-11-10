@@ -7,7 +7,9 @@ use eframe::egui::Role as A11yRole;
 use eframe::egui::{self, Key, Margin, Modifiers, RichText, Sense, Stroke, WidgetInfo};
 
 use winappmigrator_core::account_traces::MENTIONS_CODE;
-use winappmigrator_core::{AppArchitecture, InstallScope, InstalledApp, ScanSource, Warning};
+use winappmigrator_core::{
+    AppArchitecture, InstallScope, InstalledApp, ScanSource, SourceIdentity, Warning,
+};
 use winappmigrator_core::{BuildStep, WarningSeverity};
 
 use crate::theme::{
@@ -34,6 +36,9 @@ const COLUMN_GUTTER: f32 = 12.0;
 const VERSION_COLUMN: f32 = 84.0;
 const SCOPE_COLUMN: f32 = 88.0;
 const ARCH_COLUMN: f32 = 58.0;
+/// What the "Change…" button beside a drive or an image takes, and the least its name is given.
+const CHANGE_BUTTON_ROOM: f32 = 96.0;
+const MIN_SOURCE_TEXT_WIDTH: f32 = 120.0;
 const NAME_SHARE: f32 = 0.6;
 const LICENSE_OPTION_TEXT: &str = "May be tied to this PC and need reactivation on the new one.";
 const USER_DATA_OPTION_TEXT: &str =
@@ -252,13 +257,16 @@ impl WinAppMigratorApp {
         enum Source {
             ThisPc,
             Drive,
+            Image,
         }
-        let mut chosen = if self.scan_source.is_offline() {
+        let mut chosen = if self.disk_image.is_some() || self.image_receiver.is_some() {
+            Source::Image
+        } else if self.scan_source.is_offline() {
             Source::Drive
         } else {
             Source::ThisPc
         };
-        let enabled = !self.is_building();
+        let enabled = !self.is_building() && self.image_receiver.is_none();
         widgets::control_row(ui, |ui| {
             widgets::field_label(ui, theme, "Scan source");
             let before = chosen;
@@ -269,6 +277,7 @@ impl WinAppMigratorApp {
                 &[
                     ("This PC", Source::ThisPc),
                     ("Connected drive…", Source::Drive),
+                    ("Disk image…", Source::Image),
                 ],
                 enabled,
             );
@@ -276,22 +285,66 @@ impl WinAppMigratorApp {
                 match chosen {
                     Source::ThisPc => self.select_live_source(),
                     Source::Drive => self.pick_offline_drive(),
-                }
-            }
-            if let ScanSource::OfflineVolume { volume_root } = &self.scan_source {
-                let drive = volume_root.display().to_string();
-                ui.add_space(SPACE_XS);
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
-                widgets::paint_icon(ui.painter(), Icon::Drive, rect, theme.text_muted);
-                ui.label(RichText::new(drive).size(13.0).color(theme.text_muted));
-                if widgets::button(ui, theme, ButtonKind::Ghost, "Change…", enabled).clicked() {
-                    self.pick_offline_drive();
+                    Source::Image => self.pick_disk_image(),
                 }
             }
         });
+        // On a line of its own: a path and the name of a Windows can be long.
+        if self.image_receiver.is_some() {
+            ui.add_space(SPACE_XS);
+            ui.label(
+                RichText::new("Attaching the image, read-only…")
+                    .size(13.0)
+                    .color(theme.text_muted),
+            );
+        } else if let ScanSource::OfflineVolume { volume_root } = self.scan_source.clone() {
+            ui.add_space(SPACE_XS);
+            widgets::control_row(ui, |ui| {
+                let place = match &self.disk_image {
+                    Some(image) => image.image().file_name().map_or_else(
+                        || image.image().display().to_string(),
+                        |name| name.to_string_lossy().into_owned(),
+                    ),
+                    None => volume_root.display().to_string(),
+                };
+                let windows = self
+                    .source_windows
+                    .as_ref()
+                    .and_then(|identity| identity.windows_name());
+                let text = match windows {
+                    Some(windows) => format!("{place} · {windows}"),
+                    None => place,
+                };
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+                widgets::paint_icon(ui.painter(), Icon::Drive, rect, theme.text_muted);
+                // Shortened to leave the button room, rather than pushing it out of sight.
+                let room = (ui.available_width() - CHANGE_BUTTON_ROOM).max(MIN_SOURCE_TEXT_WIDTH);
+                ui.scope(|ui| {
+                    ui.set_max_width(room);
+                    ui.add(
+                        egui::Label::new(RichText::new(text).size(13.0).color(theme.text_muted))
+                            .truncate(),
+                    );
+                });
+                if widgets::button(ui, theme, ButtonKind::Ghost, "Change…", enabled).clicked() {
+                    if self.disk_image.is_some() {
+                        self.pick_disk_image();
+                    } else {
+                        self.pick_offline_drive();
+                    }
+                }
+            });
+        }
         if let Some(error) = self.source_error.clone() {
             ui.add_space(SPACE_SM);
             widgets::notice(ui, theme, Role::Danger, &error);
+        } else if let Some(identity) = self
+            .source_windows
+            .as_ref()
+            .filter(|identity| identity.is_before_windows_10())
+        {
+            ui.add_space(SPACE_SM);
+            widgets::notice(ui, theme, Role::Accent, &older_windows_note(identity));
         }
     }
 
@@ -811,6 +864,25 @@ impl WinAppMigratorApp {
 }
 
 // ----- Free helpers ----------------------------------------------------------
+
+/// What happens to an app from a Windows older than 10, said once a drive or an image has one.
+pub(crate) fn older_windows_note(identity: &SourceIdentity) -> String {
+    let windows = identity
+        .windows_name()
+        .unwrap_or_else(|| "an older Windows".to_owned());
+    let mut note = format!(
+        "This has {windows}. Installers built from it are made for Windows 10 and 11. With User \
+         data, settings that Windows quietly kept aside for an older app come along, and \
+         runtimes Windows 11 does not have, such as DirectX 9, are installed with the app."
+    );
+    if identity.is_32_bit() {
+        note.push_str(
+            " Its apps are 32-bit, so they go to Program Files (x86), where 64-bit Windows keeps \
+             them.",
+        );
+    }
+    note
+}
 
 fn draw_app_title(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp, short: bool) {
     ui.add(

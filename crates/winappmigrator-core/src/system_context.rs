@@ -315,6 +315,74 @@ pub struct SourceIdentity {
     pub windows_build: Option<u32>,
     /// `PROCESSOR_ARCHITECTURE`, as that PC recorded it.
     pub architecture_name: Option<String>,
+    /// What that Windows called itself, such as `Windows 7 Professional`.
+    pub product_name: Option<String>,
+    /// Its service pack, such as `Service Pack 1`, from before Windows 10 had none.
+    pub service_pack: Option<String>,
+}
+
+/// The first build of Windows 10. Every build before it is Windows 8.1 or older, whose apps were
+/// made for a Windows laid out the same way, with gaps that matter when they move: see
+/// `docs/discovery.md`.
+pub const FIRST_WINDOWS_10_BUILD: u32 = 10240;
+/// The first build of Windows 11, which still calls itself Windows 10 in its registry.
+const FIRST_WINDOWS_11_BUILD: u32 = 22000;
+
+impl SourceIdentity {
+    /// A Windows from before 10, such as Windows 7.
+    pub fn is_before_windows_10(&self) -> bool {
+        self.windows_build
+            .is_some_and(|build| build < FIRST_WINDOWS_10_BUILD)
+    }
+
+    /// A 32-bit Windows, which keeps 32-bit apps where 64-bit Windows keeps 64-bit ones.
+    pub fn is_32_bit(&self) -> bool {
+        self.architecture_name
+            .as_deref()
+            .is_some_and(|name| name.trim().eq_ignore_ascii_case("x86"))
+    }
+
+    /// Which Windows this is, in words, such as `Windows 7 Professional Service Pack 1, 32-bit`.
+    pub fn windows_name(&self) -> Option<String> {
+        let build = self.windows_build?;
+        let name = match self.product_name.as_deref() {
+            Some(product) if build >= FIRST_WINDOWS_11_BUILD => {
+                product.replacen("Windows 10", "Windows 11", 1)
+            }
+            Some(product) => product.to_owned(),
+            None => windows_family(build).to_owned(),
+        };
+        let mut words = match self.service_pack.as_deref() {
+            Some(pack) => format!("{name} {pack}"),
+            None => name,
+        };
+        match self.architecture_name.as_deref().map(str::trim) {
+            Some(architecture) if architecture.eq_ignore_ascii_case("x86") => {
+                words.push_str(", 32-bit");
+            }
+            Some(architecture)
+                if architecture.eq_ignore_ascii_case("amd64")
+                    || architecture.eq_ignore_ascii_case("arm64") =>
+            {
+                words.push_str(", 64-bit");
+            }
+            _ => {}
+        }
+        Some(words)
+    }
+}
+
+/// Which Windows a build number is, for a drive whose registry did not name it.
+fn windows_family(build: u32) -> &'static str {
+    match build {
+        0..6000 => "Windows XP or older",
+        6000..7600 => "Windows Vista",
+        7600..9200 => "Windows 7",
+        9200..9600 => "Windows 8",
+        9600..FIRST_WINDOWS_10_BUILD => "Windows 8.1",
+        FIRST_WINDOWS_10_BUILD..FIRST_WINDOWS_11_BUILD => "Windows 10",
+        _ => "Windows 11",
+    }
 }
 
 /// A profile a PC records.
@@ -1153,6 +1221,10 @@ impl SystemContext {
     }
 
     fn note_refused(&self, recorded: &Path) {
+        // An empty value, as an MSI of Windows 7's time leaves `InstallLocation`, names nothing.
+        if recorded.as_os_str().is_empty() {
+            return;
+        }
         if let Ok(mut refused) = self.refused.lock() {
             refused.insert(recorded.display().to_string());
         }
@@ -1630,12 +1702,29 @@ impl SystemContext {
     pub fn source_identity(&self) -> SourceIdentity {
         match &self.offline {
             Some(hives) => hives.identity.clone(),
-            None => SourceIdentity {
-                computer_name: std::env::var("COMPUTERNAME").ok(),
-                windows_version: live_windows_version(),
-                windows_build: Some(windows_build()).filter(|build| *build != 0),
-                architecture_name: windows_architecture_name(),
-            },
+            None => {
+                let version_key = RegKey::predef(HKEY_LOCAL_MACHINE)
+                    .open_subkey_with_flags(
+                        format!(r"SOFTWARE\{CURRENT_VERSION_KEY_IN_HIVE}"),
+                        KEY_READ,
+                    )
+                    .ok();
+                let text = |name: &str| {
+                    version_key
+                        .as_ref()
+                        .and_then(|key| key.get_value::<String, _>(name).ok())
+                        .map(|value| bounded_text(value.trim()))
+                        .filter(|value| !value.is_empty())
+                };
+                SourceIdentity {
+                    computer_name: std::env::var("COMPUTERNAME").ok(),
+                    windows_version: live_windows_version(),
+                    windows_build: Some(windows_build()).filter(|build| *build != 0),
+                    architecture_name: windows_architecture_name(),
+                    product_name: text("ProductName"),
+                    service_pack: text("CSDVersion"),
+                }
+            }
         }
     }
 }
@@ -1843,29 +1932,49 @@ fn read_identity(
     let build: Option<String> = version_key
         .as_ref()
         .and_then(|key| key.get_value("CurrentBuildNumber").ok());
+    let text = |name: &str| {
+        version_key
+            .as_ref()
+            .and_then(|key| key.get_value::<String, _>(name).ok())
+            .map(|value| bounded_text(value.trim()))
+            .filter(|value| !value.is_empty())
+    };
     let version = version_key
         .as_ref()
         .zip(build.as_deref())
         .map(|(key, build)| {
             let number = |name: &str| key.get_value::<u32, _>(name).ok();
-            windows_version_text(
-                number("CurrentMajorVersionNumber").unwrap_or(10),
-                number("CurrentMinorVersionNumber").unwrap_or(0),
-                build,
-                number("UBR").unwrap_or(0),
-            )
+            // Windows 10 added these numbers, and from then on `CurrentVersion` says 6.3 to whatever
+            // reads it. Before, that is all there is, and no update revision either.
+            let (major, minor) = number("CurrentMajorVersionNumber")
+                .zip(number("CurrentMinorVersionNumber"))
+                .or_else(|| text("CurrentVersion").as_deref().and_then(major_and_minor))
+                .unwrap_or((10, 0));
+            windows_version_text(major, minor, build, number("UBR"))
         });
     SourceIdentity {
         computer_name: computer_name.map(|name| bounded_text(&name)),
         windows_version: version.map(|version| bounded_text(&version)),
         windows_build: build.and_then(|build| build.trim().parse().ok()),
         architecture_name: architecture_name.map(|name| bounded_text(&name)),
+        product_name: text("ProductName"),
+        service_pack: text("CSDVersion"),
     }
 }
 
-/// In the form `ver` prints, which is what a build from this PC records.
-fn windows_version_text(major: u32, minor: u32, build: &str, revision: u32) -> String {
-    format!("Microsoft Windows [Version {major}.{minor}.{build}.{revision}]")
+/// `6.1` as the two numbers it is.
+fn major_and_minor(text: &str) -> Option<(u32, u32)> {
+    let (major, minor) = text.trim().split_once('.')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// In the form `ver` prints, which is what a build from this PC records. Windows before 10 printed
+/// no update revision.
+fn windows_version_text(major: u32, minor: u32, build: &str, revision: Option<u32>) -> String {
+    match revision {
+        Some(revision) => format!("Microsoft Windows [Version {major}.{minor}.{build}.{revision}]"),
+        None => format!("Microsoft Windows [Version {major}.{minor}.{build}]"),
+    }
 }
 
 /// What goes in front of a person from a value on a drive: a line, of a sensible length.
@@ -2606,9 +2715,59 @@ mod tests {
     #[test]
     fn a_drives_windows_version_reads_as_a_builds_does() {
         assert_eq!(
-            windows_version_text(10, 0, "26200", 7171),
+            windows_version_text(10, 0, "26200", Some(7171)),
             "Microsoft Windows [Version 10.0.26200.7171]"
         );
+        assert_eq!(
+            windows_version_text(6, 1, "7601", None),
+            "Microsoft Windows [Version 6.1.7601]"
+        );
+        assert_eq!(major_and_minor("6.1"), Some((6, 1)));
+        assert_eq!(major_and_minor(" 6.3 "), Some((6, 3)));
+        for odd in ["", "6", "six.one", "6.", ".1"] {
+            assert_eq!(major_and_minor(odd), None, "{odd}");
+        }
+    }
+
+    #[test]
+    fn a_drive_says_which_windows_it_has_in_words() {
+        let identity =
+            |build, product: Option<&str>, pack: Option<&str>, architecture| SourceIdentity {
+                computer_name: None,
+                windows_version: None,
+                windows_build: Some(build),
+                architecture_name: Some(String::from(architecture)),
+                product_name: product.map(str::to_owned),
+                service_pack: pack.map(str::to_owned),
+            };
+        let seven = identity(
+            7601,
+            Some("Windows 7 Professional"),
+            Some("Service Pack 1"),
+            "x86",
+        );
+        assert!(seven.is_before_windows_10());
+        assert!(seven.is_32_bit());
+        assert_eq!(
+            seven.windows_name().as_deref(),
+            Some("Windows 7 Professional Service Pack 1, 32-bit")
+        );
+        // Windows 11 still calls itself Windows 10 there.
+        let eleven = identity(26200, Some("Windows 10 Pro"), None, "AMD64");
+        assert!(!eleven.is_before_windows_10());
+        assert!(!eleven.is_32_bit());
+        assert_eq!(
+            eleven.windows_name().as_deref(),
+            Some("Windows 11 Pro, 64-bit")
+        );
+        let unnamed = identity(7600, None, None, "AMD64");
+        assert_eq!(unnamed.windows_name().as_deref(), Some("Windows 7, 64-bit"));
+        let vista = identity(6002, None, None, "x86");
+        assert_eq!(
+            vista.windows_name().as_deref(),
+            Some("Windows Vista, 32-bit")
+        );
+        assert_eq!(SourceIdentity::default().windows_name(), None);
     }
 
     #[test]

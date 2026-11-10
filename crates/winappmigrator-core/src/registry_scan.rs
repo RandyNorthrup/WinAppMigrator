@@ -654,6 +654,105 @@ fn scan_recorded_keys(
     }
 }
 
+/// What an account's copy of the app's keys in `HKLM\Software` holds, in place of what they hold.
+/// Windows lets a 32-bit app with no manifest believe it wrote there, keeps what it wrote in the
+/// account's own classes, and gives that back when the app reads. Apps made for Windows XP did this on
+/// Windows 7 without knowing, so it is what the app read on that PC as that account.
+///
+/// It cannot go back where it was. Windows only gives a program what is in a key there that Windows
+/// itself made, and ignores one an installer makes, which the app then writes over: tried on Windows
+/// 11. So it goes in the app's own key, where the app reads it with Windows doing this for it or not,
+/// as the account's own copies of the app's files go in its folder. Of a key every app shares, only
+/// the app's own values. It is an account's, so only for a scan with that account's data.
+pub(crate) fn put_what_windows_kept_aside_in_place(
+    account: &RegRoot,
+    entries: &mut Vec<RegistryEntry>,
+    warnings: &mut Vec<Warning>,
+) {
+    let mut aside = Vec::new();
+    capture_what_windows_kept_aside(account, entries, &mut aside, warnings);
+    for entry in aside {
+        let Some(rest) = strip_key_prefix(&entry.key_path, VIRTUAL_STORE_SOFTWARE) else {
+            continue;
+        };
+        let key_path = format!(r"{SOFTWARE}\{rest}");
+        entries.retain(|other| {
+            !(other.hive == RegistryHive::LocalMachine
+                && other.key_path.eq_ignore_ascii_case(&key_path)
+                && other.value_name == entry.value_name)
+        });
+        entries.push(RegistryEntry {
+            hive: RegistryHive::LocalMachine,
+            key_path,
+            requires_admin: true,
+            ..entry
+        });
+    }
+}
+
+/// The values under an account's `VirtualStore` that stand for the app's keys in `entries`.
+fn capture_what_windows_kept_aside(
+    account: &RegRoot,
+    machine: &[RegistryEntry],
+    entries: &mut Vec<RegistryEntry>,
+    warnings: &mut Vec<Warning>,
+) {
+    let mut whole_keys: Vec<String> = Vec::new();
+    let mut single_values: Vec<(String, String)> = Vec::new();
+    for entry in machine
+        .iter()
+        .filter(|entry| entry.hive == RegistryHive::LocalMachine)
+    {
+        let Some(rest) = strip_key_prefix(&entry.key_path, SOFTWARE) else {
+            continue;
+        };
+        if rest.is_empty() || strip_key_prefix(rest, CLASSES).is_some() {
+            continue;
+        }
+        let aside = format!(r"{VIRTUAL_STORE_SOFTWARE}\{rest}");
+        if is_shared_registry_key(&entry.key_path) {
+            if let Some(name) = entry.value_name.as_deref() {
+                let name = if name == "(Default)" { "" } else { name };
+                single_values.push((aside, name.to_owned()));
+            }
+        } else {
+            whole_keys.push(aside);
+        }
+    }
+    whole_keys.sort_by_key(|key| key.to_ascii_lowercase());
+    let mut roots: Vec<String> = Vec::new();
+    for key in whole_keys {
+        if !roots
+            .iter()
+            .any(|root| strip_key_prefix(&key, root).is_some())
+        {
+            roots.push(key);
+        }
+    }
+    for key_path in roots {
+        if account.open(&key_path, KEY_READ).is_ok() {
+            capture_registry_subtree(account, &key_path, MatchConfidence::High, entries, warnings);
+        }
+    }
+    single_values.sort();
+    single_values.dedup();
+    for (key_path, name) in single_values {
+        if let Ok(key) = account.open(&key_path, KEY_READ)
+            && let Ok(value) = key.get_raw_value(&name)
+            && value.bytes.len() <= MAX_REGISTRY_VALUE_BYTES
+        {
+            entries.push(entry_from_raw_value(
+                account.hive(),
+                key_path,
+                name,
+                value,
+                MatchConfidence::High,
+                false,
+            ));
+        }
+    }
+}
+
 /// What a record can say about an app installed for one account. Without rights it could not have
 /// written anywhere else in the registry, and the record is a file in that account's own folder,
 /// which could name a machine's secrets, for an administrator to package. `HKEY_CLASSES_ROOT` is
@@ -716,6 +815,156 @@ fn is_shared_registry_key(key_path: &str) -> bool {
             top.starts_with('.') || first_below == "shell" || first_below == "shellex"
         });
     of_many_apps || SHARED_REGISTRY_KEYS.contains(&plain.as_str())
+}
+
+/// Keys below `HKLM\Software` that 64-bit Windows keeps one of for 32-bit and 64-bit programs
+/// alike, from Microsoft's "Registry Keys Affected by WOW64" for Windows 7 and later, lowercase.
+/// `AppCompatFlags` is not on that list, but Windows reads an app's compatibility settings from the
+/// 64-bit view whatever the app is, which is where the Properties dialog writes them.
+const KEYS_BOTH_VIEWS_SHARE: &[&str] = &[
+    r"clients",
+    r"microsoft\com3",
+    r"microsoft\cryptography\calais\current",
+    r"microsoft\cryptography\calais\readers",
+    r"microsoft\cryptography\services",
+    r"microsoft\ctf\systemshared",
+    r"microsoft\ctf\tip",
+    r"microsoft\dfs",
+    r"microsoft\driver signing",
+    r"microsoft\enterprisecertificates",
+    r"microsoft\eventsystem",
+    r"microsoft\msmq",
+    r"microsoft\non-driver signing",
+    r"microsoft\notepad\defaultfonts",
+    r"microsoft\ole",
+    r"microsoft\ras",
+    r"microsoft\rpc",
+    r"microsoft\shared tools\msinfo",
+    r"microsoft\systemcertificates",
+    r"microsoft\termservlicensing",
+    r"microsoft\transactionserver",
+    r"microsoft\windows\currentversion\app paths",
+    r"microsoft\windows\currentversion\control panel\cursors\schemes",
+    r"microsoft\windows\currentversion\explorer\autoplayhandlers",
+    r"microsoft\windows\currentversion\explorer\driveicons",
+    r"microsoft\windows\currentversion\explorer\kindmap",
+    r"microsoft\windows\currentversion\group policy",
+    r"microsoft\windows\currentversion\policies",
+    r"microsoft\windows\currentversion\previewhandlers",
+    r"microsoft\windows\currentversion\setup",
+    r"microsoft\windows\currentversion\telephony\locations",
+    r"microsoft\windows nt\currentversion\appcompatflags",
+    r"microsoft\windows nt\currentversion\console",
+    r"microsoft\windows nt\currentversion\fontdpi",
+    r"microsoft\windows nt\currentversion\fontlink",
+    r"microsoft\windows nt\currentversion\fontmapper",
+    r"microsoft\windows nt\currentversion\fonts",
+    r"microsoft\windows nt\currentversion\fontsubstitutes",
+    r"microsoft\windows nt\currentversion\gre_initialize",
+    r"microsoft\windows nt\currentversion\image file execution options",
+    r"microsoft\windows nt\currentversion\language pack",
+    r"microsoft\windows nt\currentversion\networkcards",
+    r"microsoft\windows nt\currentversion\perflib",
+    r"microsoft\windows nt\currentversion\ports",
+    r"microsoft\windows nt\currentversion\print",
+    r"microsoft\windows nt\currentversion\profilelist",
+    r"microsoft\windows nt\currentversion\time zones",
+    r"policies",
+    r"registeredapplications",
+];
+/// What `Software\Classes` has for each view, in `HKLM` and in an account's own classes. The rest
+/// of it, file types, ProgIDs, type libraries and AppIDs among them, both views share.
+const CLASSES_EACH_VIEW_HAS: &[&str] = &[
+    "clsid",
+    "directshow",
+    "interface",
+    "media type",
+    "mediafoundation",
+];
+/// Where an account's classes keep what Windows let a 32-bit app without a manifest believe it wrote
+/// to `HKLM\Software`.
+const VIRTUAL_STORE_SOFTWARE: &str = r"Software\Classes\VirtualStore\MACHINE\SOFTWARE";
+
+/// Where 64-bit Windows keeps a key that a 32-bit Windows had. A 32-bit app reads `HKLM\Software`
+/// and an account's classes through the 32-bit view there, so what it wrote on 32-bit Windows is
+/// only where it looks again under `WOW6432Node`, except for the keys both views share.
+pub(crate) fn where_64_bit_windows_keeps(hive: &RegistryHive, key_path: &str) -> String {
+    // As it was written: `HKLM\SOFTWARE` reads the same as `Software`, and a test of what was
+    // written compares the text.
+    let head = |prefix: &str| &key_path[..prefix.len()];
+    let (prefix, rest) = match hive {
+        RegistryHive::LocalMachine => match strip_key_prefix(key_path, HKLM_CLASSES) {
+            Some(rest) => (head(HKLM_CLASSES), rest),
+            None => match strip_key_prefix(key_path, SOFTWARE) {
+                Some(rest) => return in_the_32_bit_software_view(head(SOFTWARE), rest),
+                None => return key_path.to_owned(),
+            },
+        },
+        RegistryHive::CurrentUser => match strip_key_prefix(key_path, HKLM_CLASSES) {
+            Some(rest) => (head(HKLM_CLASSES), rest),
+            None => return key_path.to_owned(),
+        },
+    };
+    let top = rest.split('\\').next().unwrap_or_default();
+    if CLASSES_EACH_VIEW_HAS
+        .iter()
+        .any(|class| class.eq_ignore_ascii_case(top))
+    {
+        format!(r"{prefix}\{WOW6432_NODE}\{rest}")
+    } else {
+        key_path.to_owned()
+    }
+}
+
+/// `Software\<rest>` in the 32-bit view, where `rest` is not one of the keys both views share.
+fn in_the_32_bit_software_view(software: &str, rest: &str) -> String {
+    let lower = rest.to_ascii_lowercase();
+    let top = lower.split('\\').next().unwrap_or_default();
+    let shared = lower.is_empty()
+        || top == "classes"
+        || top == "wow6432node"
+        || KEYS_BOTH_VIEWS_SHARE.iter().any(|key| {
+            lower == *key
+                || lower
+                    .strip_prefix(key)
+                    .is_some_and(|below| below.starts_with('\\'))
+        });
+    if shared {
+        if rest.is_empty() {
+            software.to_owned()
+        } else {
+            format!(r"{software}\{rest}")
+        }
+    } else {
+        format!(r"{software}\{WOW6432_NODE}\{rest}")
+    }
+}
+
+/// What follows `prefix\` in a key path, ignoring case; `Some("")` for the key itself.
+fn strip_key_prefix<'a>(key_path: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = key_path.get(..prefix.len())?;
+    if !head.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    match &key_path[prefix.len()..] {
+        "" => Some(""),
+        below => below.strip_prefix('\\'),
+    }
+}
+
+/// Lay what a scan of a 32-bit Windows found out as 64-bit Windows, which every installer is
+/// unpacked on that runs an app from one: see [`where_64_bit_windows_keeps`].
+pub(crate) fn lay_out_for_64_bit_windows(
+    entries: &mut [RegistryEntry],
+    com_registrations: &mut [ComRegistrationEntry],
+) {
+    for entry in entries {
+        entry.key_path = where_64_bit_windows_keeps(&entry.hive, &entry.key_path);
+    }
+    for registration in com_registrations {
+        registration.key_path =
+            where_64_bit_windows_keeps(&registration.hive, &registration.key_path);
+    }
 }
 
 /// Without a verb another app added to a type, which comes along when all of a type is the app's,
@@ -1943,6 +2192,84 @@ mod tests {
             r"Software\WOW6432Node\Foo",
         ] {
             assert!(!is_shared_registry_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_32_bit_windows_keys_go_where_64_bit_windows_shows_them_to_a_32_bit_app() {
+        let machine = |key: &str| where_64_bit_windows_keeps(&RegistryHive::LocalMachine, key);
+        let account = |key: &str| where_64_bit_windows_keeps(&RegistryHive::CurrentUser, key);
+        for (before, after) in [
+            (r"SOFTWARE\Acme\App", r"SOFTWARE\WOW6432Node\Acme\App"),
+            (r"Software\Acme", r"Software\WOW6432Node\Acme"),
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Acme",
+                r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Acme",
+            ),
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+                r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+            ),
+            (
+                r"SOFTWARE\Classes\CLSID\{1}\InprocServer32",
+                r"SOFTWARE\Classes\WOW6432Node\CLSID\{1}\InprocServer32",
+            ),
+            (
+                r"Software\Classes\Interface\{2}",
+                r"Software\Classes\WOW6432Node\Interface\{2}",
+            ),
+            // Shared, so where they were.
+            (r"SOFTWARE\Classes\.acme", r"SOFTWARE\Classes\.acme"),
+            (
+                r"SOFTWARE\Classes\Acme.Doc\shell",
+                r"SOFTWARE\Classes\Acme.Doc\shell",
+            ),
+            (
+                r"SOFTWARE\Classes\TypeLib\{3}",
+                r"SOFTWARE\Classes\TypeLib\{3}",
+            ),
+            (r"SOFTWARE\Classes\AppID\{4}", r"SOFTWARE\Classes\AppID\{4}"),
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\acme.exe",
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\acme.exe",
+            ),
+            (
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+            ),
+            (
+                r"SOFTWARE\RegisteredApplications",
+                r"SOFTWARE\RegisteredApplications",
+            ),
+            (
+                r"SOFTWARE\Clients\Media\Acme",
+                r"SOFTWARE\Clients\Media\Acme",
+            ),
+            (r"SOFTWARE\Policies\Acme", r"SOFTWARE\Policies\Acme"),
+            (r"SOFTWARE\WOW6432Node\Acme", r"SOFTWARE\WOW6432Node\Acme"),
+            (r"SOFTWARE", r"SOFTWARE"),
+            // Only what is all of a name: `Policies` is shared, `PoliciesOfAcme` is not.
+            (
+                r"SOFTWARE\PoliciesOfAcme",
+                r"SOFTWARE\WOW6432Node\PoliciesOfAcme",
+            ),
+            (
+                r"SYSTEM\CurrentControlSet\Services\Acme",
+                r"SYSTEM\CurrentControlSet\Services\Acme",
+            ),
+        ] {
+            assert_eq!(machine(before), after, "{before}");
+        }
+        for (before, after) in [
+            // An account's own `Software` is the same key to both.
+            (r"Software\Acme\App", r"Software\Acme\App"),
+            (
+                r"Software\Classes\CLSID\{1}",
+                r"Software\Classes\WOW6432Node\CLSID\{1}",
+            ),
+            (r"Software\Classes\.acme", r"Software\Classes\.acme"),
+        ] {
+            assert_eq!(account(before), after, "{before}");
         }
     }
 }

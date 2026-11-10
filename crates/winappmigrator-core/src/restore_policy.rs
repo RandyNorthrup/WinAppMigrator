@@ -402,6 +402,9 @@ const NET_DEBUGGER_VALUES: &[&str] = &["dbgmanageddebugger", "dbgjitdebuglaunchs
 const NET_INSTALL_ROOT_VALUE: &str = "installroot";
 const CLASSES_KEY: &str = r"software\classes";
 const CLASSES_PREFIX: &str = r"software\classes\";
+/// Where an account's classes keep what Windows let a 32-bit program believe it wrote to a key of
+/// the PC's, followed by that key.
+const VIRTUAL_STORE_MACHINE_PREFIX: &str = r"software\classes\virtualstore\machine\";
 /// File types and protocols every program shares. An app can add a command to them, which
 /// is how "Git Bash Here" works, so long as the command runs the app's own file. Changing
 /// which command is the default changes what happens for everyone.
@@ -865,6 +868,19 @@ pub fn registry_refusal(
         return Some("it is a registry link".to_owned());
     }
     let key = normalized_key(&entry.key_path);
+    // What Windows shows a 32-bit program with no manifest in place of a key of the PC's, for the
+    // account it runs as. It goes by the same rules as that key.
+    if entry.hive == RegistryHive::CurrentUser
+        && let Some(stands_for) = key.strip_prefix(VIRTUAL_STORE_MACHINE_PREFIX)
+    {
+        let machine = RegistryEntry {
+            hive: RegistryHive::LocalMachine,
+            key_path: stands_for.to_owned(),
+            ..entry.clone()
+        };
+        return registry_refusal(&machine, map, restored_services, expand)
+            .map(|refusal| format!("it stands for a key of the PC's, and {refusal}"));
+    }
     let first = key.split('\\').next().unwrap_or_default();
     match entry.hive {
         RegistryHive::LocalMachine if first == "system" => {
@@ -2521,7 +2537,7 @@ pub(crate) fn is_com_server_entry(entry: &RegistryEntry) -> bool {
 }
 
 /// Whether a file runs, or decides what runs in a program beside it.
-fn is_runnable_file(path: &Path) -> bool {
+pub(crate) fn is_runnable_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
@@ -3914,6 +3930,46 @@ mod tests {
     fn refusal(entry: &RegistryEntry) -> Option<String> {
         let services: HashSet<String> = ["acmesync".to_owned()].into_iter().collect();
         registry_refusal(entry, &app_map(), &services, &|text| text.to_owned())
+    }
+
+    #[test]
+    fn an_accounts_virtual_store_goes_by_the_rules_of_the_key_it_stands_for() {
+        use RegistryHive::CurrentUser;
+        let store = r"Software\Classes\VirtualStore\MACHINE\SOFTWARE";
+        // What a 32-bit app keeps of its own key is the account's own setting.
+        assert_eq!(
+            refusal(&entry(
+                CurrentUser,
+                &format!(r"{store}\WOW6432Node\Acme"),
+                Some("Runs"),
+                "2"
+            )),
+            None
+        );
+        // Nothing in it can do what the key it stands for may not.
+        let autorun = refusal(&entry(
+            CurrentUser,
+            &format!(r"{store}\Microsoft\Windows\CurrentVersion\Run"),
+            Some("Evil"),
+            r"C:\Users\Public\evil.exe",
+        ));
+        assert!(
+            autorun
+                .as_deref()
+                .is_some_and(|why| why.starts_with("it stands for a key of the PC's")),
+            "{autorun:?}"
+        );
+        assert!(
+            refusal(&entry(
+                CurrentUser,
+                &format!(
+                    r"{store}\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\sethc.exe"
+                ),
+                Some("Debugger"),
+                "cmd.exe"
+            ))
+            .is_some()
+        );
     }
 
     #[test]

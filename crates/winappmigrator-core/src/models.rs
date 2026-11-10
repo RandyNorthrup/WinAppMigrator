@@ -1030,6 +1030,10 @@ pub enum RuntimePrerequisiteKind {
     /// Classic .NET Framework 4.x (CLR v4.0.30319). Ships with Windows 10/11, so
     /// it is listed for transparency but needs no install on modern targets.
     DotNetFramework4x,
+    /// The DirectX End-User Runtime of June 2010: D3DX, XInput 1.1 to 1.3, XAudio 2.0 to 2.7 and the
+    /// rest of what the DirectX SDK let a program use. Windows 7 PCs mostly had it from a game's
+    /// setup, and no Windows has ever come with it.
+    LegacyDirectX,
     JavaRuntime,
     PythonRuntime,
     ElectronNodeRuntime,

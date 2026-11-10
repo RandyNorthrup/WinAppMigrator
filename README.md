@@ -71,7 +71,9 @@ installing services both need it. The same app comes in a zip with this file and
 
 ### 1. Pick an app
 
-Choose **This PC** or **Connected drive…**, then search or sort the list. Selecting an app looks at it in the
+Choose **This PC**, **Connected drive…** (a disk from another PC, plugged in), or **Disk image…** (a `.vhd` or `.vhdx`
+of another PC, which the app attaches read-only itself), then search or sort the list. A drive or an image can have Windows
+7, 8 or 10 as well as 11: see [Limitations](#limitations). Selecting an app looks at it in the
 background, and picking another stops that. Optionally include the app's license data and user data. An installer
 holds one account's data, so if more than one account has data for the app, you choose whose.
 
@@ -171,6 +173,11 @@ Those are small, well-behaved apps on clean machines, and this is how far that g
   neither desktop Windows 10 nor desktop Windows 11 on x64 has been run on CI.
 - **A pulled drive.** That path runs on a VHD built on the runner and made to look like another PC's. A real disk from
   another PC has not been run on CI.
+- **Windows 7.** Off CI, by hand: Windows 7 SP1 VMs, 32-bit and 64-bit, with 7-Zip 9.20, Notepad++, VLC 2.2.8 and two
+  small apps of the XP era, one keeping its settings beside itself and one using DirectX 9. Each disk was exported as a
+  `.vhdx`, read with **Disk image…**'s own code, and built into installers that checked out. LegacyNotes, RetroBlocks and
+  Notepad++ were installed on Windows 11 25H2, run as a person would, and uninstalled, and each started with what it had on
+  Windows 7. 7-Zip and VLC were built but not installed, as that PC has newer ones.
 - **Runtimes.** Of those it can install, only the x64 Visual C++ 2015 and later has been installed for real, on a runner
   it was taken off. The others are downloaded and checked as Microsoft's, and the winget and Windows feature routes have not been run.
 - **Real windows.** They are opened on runners whose logs show a software renderer and a 1024x768 screen, and clicking
@@ -309,6 +316,14 @@ the rest are grouped below: click a group to open it.
   trust, and read what it lists.
 - **The app does not write to a connected drive,** which reads a copy of its registry files. Windows itself
   can still update last-access times and its own records on any disk it mounts.
+- **A disk image is attached read-only** and with no drive letter, and detached when you pick another source or close
+  the app. Only `.vhd` and `.vhdx`, which Windows can attach: an image from VMware or VirtualBox has to be saved as one
+  first, and one Windows already has attached is refused, since something else may be writing to it.
+- **From Windows 7 (or Vista, 8 or 8.1),** what Windows kept aside for an older app comes along with User data and goes
+  in the app's own folder and keys, an app from 32-bit Windows goes to `Program Files (x86)`, and the DirectX 9 runtime is
+  installed with an app that needs it, which takes the internet where it is installed. A DLL that came from Windows 7's
+  own folders and that Windows 11 lacks is named and not brought. A 16-bit program, a driver signed only for Windows 7,
+  and anything that used the Sidebar, Media Center or Internet Explorer itself will not work on Windows 11.
 
 </details>
 

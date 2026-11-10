@@ -114,7 +114,7 @@ pub fn read_uninstall_records(system: &SystemContext) -> Vec<UninstallRecord> {
     for (subkey, architecture, flags) in [
         (
             HKLM_UNINSTALL,
-            AppArchitecture::X64,
+            native_architecture(system),
             KEY_READ | KEY_WOW64_64KEY,
         ),
         (
@@ -208,6 +208,16 @@ fn collect_uninstall_records(
     }
 }
 
+/// What an app in the Uninstall key's own view is built for. On a 32-bit Windows, such as many a
+/// Windows 7 PC, that view is the only one, and every app in it is 32-bit.
+fn native_architecture(system: &SystemContext) -> AppArchitecture {
+    if system.is_offline() && system.source_identity().is_32_bit() {
+        AppArchitecture::X86
+    } else {
+        AppArchitecture::X64
+    }
+}
+
 /// List apps installed on the system `system` points at (live OS or a connected
 /// offline volume). Paths in each entry are re-rooted onto the source system.
 pub fn list_installed_apps_from(system: &SystemContext) -> Result<Vec<InstalledApp>> {
@@ -215,7 +225,7 @@ pub fn list_installed_apps_from(system: &SystemContext) -> Result<Vec<InstalledA
     let hklm_locations = [
         HklmUninstallLocation {
             subkey: HKLM_UNINSTALL,
-            architecture: AppArchitecture::X64,
+            architecture: native_architecture(system),
             flags: KEY_READ | KEY_WOW64_64KEY,
         },
         HklmUninstallLocation {

@@ -217,6 +217,11 @@ controlled. So:
   how many accounts are listed, and how much of the registry is captured. How much of an app's own files can be read
   into a package is checked against the room there is, by what the listing says of each, and a file can only hold as
   much as was read.
+- **A disk image is attached read-only, with no drive letter,** so nothing writes to it and nothing else on the PC is
+  offered it. Its volumes are mounted on folders inside an administrators-only folder under
+  `%ProgramData%\WinAppMigrator\images`, read as a drive is, and detached afterward. One Windows already has attached is
+  refused, since whatever attached it may be writing to it. A run that dies leaves an image attached until the app next
+  starts or Windows restarts, and the sweep only detaches one whose volume is still mounted in that run's folder.
 - **The drive is not written to.** Loading a registry hive can replay its logs into it, so hives are copied to an
   administrators-only folder under `%ProgramData%\WinAppMigrator\hives`, and the copies are loaded. They can hold
   secrets, and are removed afterward. A run that dies leaves them, and hives loaded, so the app sweeps those when

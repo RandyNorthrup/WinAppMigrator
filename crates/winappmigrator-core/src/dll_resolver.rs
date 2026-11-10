@@ -97,6 +97,9 @@ pub fn resolve_imports(
 ) -> (Vec<DependencyEntry>, Vec<Warning>) {
     let mut warnings = Vec::new();
     let search_dirs = build_search_directories(context, system, &mut warnings);
+    // What another PC's Windows folder has is not what Windows has now, when that was a Windows
+    // from before 10.
+    let from_older_windows = system.is_offline() && system.source_identity().is_before_windows_10();
     let mut dependencies = Vec::new();
     let mut pending: VecDeque<ImportedDll> = imports.iter().cloned().collect();
     let mut seen_names = BTreeSet::new();
@@ -114,6 +117,9 @@ pub fn resolve_imports(
             system,
             &mut warnings,
         );
+        if from_older_windows {
+            say_if_newer_windows_lacks(&dependency, &mut warnings);
+        }
 
         if context.recursive
             && dependency.should_copy
@@ -212,6 +218,44 @@ pub struct VisualCppDll {
     pub runtime: VisualCppRuntime,
     /// A debug build, such as `msvcp140d.dll`, which no redistributable has.
     pub debug: bool,
+}
+
+/// The newest of each family the DirectX End-User Runtime of June 2010 brought. Those after it came
+/// with Windows 8 and later themselves, such as `d3dcompiler_47.dll`, `xinput1_4.dll` and
+/// `xaudio2_8.dll`.
+const LEGACY_DIRECTX_FAMILIES: &[(&str, u32)] = &[
+    ("d3dx9_", 43),
+    ("d3dx10_", 43),
+    ("d3dx11_", 43),
+    ("d3dcompiler_", 43),
+    ("d3dcsx_", 43),
+    ("xinput1_", 3),
+    ("xaudio2_", 7),
+    ("x3daudio1_", 7),
+    ("xapofx1_", 5),
+    ("xactengine2_", 10),
+    ("xactengine3_", 7),
+];
+
+/// Whether a DLL is one of the DirectX SDK's that only the DirectX End-User Runtime installs, such as
+/// `d3dx9_43.dll`. `d3dx10.dll` with no number is the first of them.
+pub fn is_legacy_directx_dll(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let Some(stem) = lower.strip_suffix(".dll") else {
+        return false;
+    };
+    if stem == "d3dx10" {
+        return true;
+    }
+    LEGACY_DIRECTX_FAMILIES.iter().any(|(family, newest)| {
+        stem.strip_prefix(family)
+            .and_then(|number| {
+                (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+                    .then(|| number.parse::<u32>().ok())
+                    .flatten()
+            })
+            .is_some_and(|number| number <= *newest)
+    })
 }
 
 /// What a DLL's name says about which Visual C++ runtime it belongs to, if any.
@@ -338,6 +382,57 @@ fn resolve_one_import(
             missing: true,
         },
     )
+}
+
+/// A DLL a program found in an older Windows' own folders that Windows on this PC does not have, and
+/// that no installer this knows of puts there. Something put it there for the app, or for another,
+/// and the app will not start without it on a PC like this one. This PC runs Windows 10 or 11, which
+/// is all this app runs on.
+fn say_if_newer_windows_lacks(dependency: &DependencyEntry, warnings: &mut Vec<Warning>) {
+    let from_windows_folders = matches!(
+        dependency.source_category,
+        DependencySourceCategory::System32
+            | DependencySourceCategory::SysWow64
+            | DependencySourceCategory::Windows
+    );
+    if !from_windows_folders
+        || is_legacy_directx_dll(&dependency.name)
+        || visual_cpp_dll(&dependency.name).is_some()
+        || this_windows_has(&dependency.name, &dependency.architecture)
+    {
+        return;
+    }
+    warnings.push(Warning::new(
+        DEPENDENCY_NOT_IN_NEWER_WINDOWS,
+        WarningSeverity::Warning,
+        format!(
+            "{} was in the Windows folder of the PC this app was on, and Windows 10 and 11 do not \
+             come with it. Something installed it there, so it is not part of the app's own files \
+             and does not come along. The app may not start until whatever provides it is \
+             installed.",
+            dependency.name
+        ),
+        dependency
+            .resolved_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+    ));
+}
+
+/// Said of a DLL an older Windows had that Windows 10 and 11 do not.
+pub const DEPENDENCY_NOT_IN_NEWER_WINDOWS: &str = "dependency_not_in_newer_windows";
+
+/// Whether this PC's Windows has a DLL of that name where a program of that build looks for it.
+fn this_windows_has(name: &str, architecture: &AppArchitecture) -> bool {
+    if name.contains(['\\', '/', ':']) {
+        return false;
+    }
+    let windows = crate::path_utils::system_root();
+    let folder = match architecture {
+        AppArchitecture::X86 => SYSWOW64_DIR,
+        _ => SYSTEM32_DIR,
+    };
+    windows.join(folder).join(name).is_file() || windows.join(name).is_file()
 }
 
 fn dependency_entry(import: &ImportedDll, resolved: ResolvedImport) -> DependencyEntry {
@@ -536,6 +631,41 @@ fn read_architecture_with_warning(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_directx_sdks_own_dlls_need_its_runtime() {
+        for name in [
+            "d3dx9_43.dll",
+            "D3DX9_24.DLL",
+            "d3dx10.dll",
+            "d3dx10_43.dll",
+            "d3dx11_42.dll",
+            "d3dcompiler_43.dll",
+            "xinput1_3.dll",
+            "XInput1_1.dll",
+            "xaudio2_7.dll",
+            "x3daudio1_7.dll",
+            "xapofx1_5.dll",
+            "xactengine3_7.dll",
+        ] {
+            assert!(is_legacy_directx_dll(name), "{name}");
+        }
+        // What Windows 8 and later come with, and what only looks like one.
+        for name in [
+            "d3dcompiler_47.dll",
+            "xinput1_4.dll",
+            "xinput9_1_0.dll",
+            "xaudio2_8.dll",
+            "xaudio2_9.dll",
+            "d3d9.dll",
+            "d3dx9_.dll",
+            "d3dx9_43a.dll",
+            "d3dx9_43",
+            r"..\d3dx9_43.dll",
+        ] {
+            assert!(!is_legacy_directx_dll(name), "{name}");
+        }
+    }
 
     #[test]
     fn a_dll_is_the_runtime_its_name_says_and_windows_own_are_none() {

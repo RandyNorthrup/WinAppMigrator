@@ -222,6 +222,17 @@ pub(crate) fn discover_files_unless(
         });
     }
 
+    if context.include_user_data && !is_cancelled() {
+        put_what_windows_kept_aside_in_place(
+            context,
+            system,
+            is_cancelled,
+            &mut files,
+            &mut locations,
+            &mut warnings,
+        );
+    }
+
     files.sort_by_cached_key(|file| file.original_path.to_string_lossy().to_ascii_lowercase());
     locations.sort_by_key(|location| std::cmp::Reverse(location.total_bytes));
     empty_folders.sort_by_cached_key(|folder| comparable_path(&folder.original_path));
@@ -233,6 +244,135 @@ pub(crate) fn discover_files_unless(
         locations,
         warnings,
     }
+}
+
+/// Where Windows keeps, in an account's own folder, what it let a 32-bit app without a manifest
+/// believe it wrote to a folder only administrators may change. Windows Vista brought it in, and apps
+/// made for XP kept their settings there on Windows 7 without knowing.
+const VIRTUAL_STORE_FOLDER: &str = r"AppData\Local\VirtualStore";
+const VIRTUAL_STORE_REASON: &str = "This account's own copy of the app's file, which Windows kept \
+     aside for it (VirtualStore), in place of the app's";
+const VIRTUAL_STORE_PROGRAM_LEFT_OUT: &str = "virtual_store_program_left_out";
+
+/// The account's own copies of an app's files, which Windows kept in its `VirtualStore`, in place of
+/// the app's. That is what the app read on that PC, as the account it ran as, and it is only there
+/// for an app installed under `Program Files`, `ProgramData` or the Windows folder. Put in the app's
+/// folder, the app reads them wherever it is installed, and whether Windows does that for it there
+/// or not.
+///
+/// Windows never puts a program there, since it does not do this for any. So one there was put by
+/// something else, which any program the account ran can, and it stays out.
+fn put_what_windows_kept_aside_in_place(
+    context: &FileDiscoveryContext,
+    system: &SystemContext,
+    is_cancelled: &dyn Fn() -> bool,
+    files: &mut Vec<FileEntry>,
+    locations: &mut Vec<FootprintLocation>,
+    warnings: &mut Vec<Warning>,
+) {
+    let Some(account) = system.user_hives().into_iter().next() else {
+        return;
+    };
+    let virtual_store = account.profile_dir.join(VIRTUAL_STORE_FOLDER);
+    if !system.may_read(&virtual_store) || !system.is_in_the_accounts_profile(&virtual_store) {
+        return;
+    }
+    let mut protected: Vec<PathBuf> = system.program_files_dirs();
+    protected.extend(system.program_data());
+    protected.push(system.windows_dir());
+    let install_root = context.install_location.as_deref();
+    let app_folders: Vec<&Path> = install_root
+        .into_iter()
+        .chain(context.extra_roots.iter().map(PathBuf::as_path))
+        .filter(|folder| {
+            protected
+                .iter()
+                .any(|base| path_is_strictly_inside(folder, base))
+        })
+        .collect();
+    let mut seen_folders = BTreeSet::new();
+    for folder in app_folders {
+        if !seen_folders.insert(comparable_path(folder)) {
+            continue;
+        }
+        let aside = virtual_store.join(below_the_drive(&system.logical_path(folder)));
+        if !system.is_dir(&aside) {
+            continue;
+        }
+        let root = DiscoveryRoot {
+            path: aside.clone(),
+            kind: FootprintKind::LocalAppData,
+            scope: InstallScope::PerUser,
+            user_folder: None,
+        };
+        let mut found = Vec::new();
+        discover_tree(
+            &root,
+            None,
+            context.include_hashes,
+            true,
+            context.include_program_data,
+            system,
+            is_cancelled,
+            &mut found,
+            &mut Vec::new(),
+            &mut BTreeSet::new(),
+            warnings,
+        );
+        let mut placed = 0;
+        let mut total_bytes = 0;
+        let mut copyable_bytes = 0;
+        for mut file in found {
+            let Some(relative) = strip_prefix_ignore_case(&file.path, &aside) else {
+                continue;
+            };
+            let stands_for = folder.join(relative);
+            if crate::restore_policy::is_runnable_file(&file.path) {
+                warnings.push(Warning::new(
+                    VIRTUAL_STORE_PROGRAM_LEFT_OUT,
+                    WarningSeverity::Warning,
+                    "A program was in the folder where Windows keeps what an app wrote for one \
+                     account. Windows never puts one there, so something else did, and it was left \
+                     out.",
+                    Some(file.path.display().to_string()),
+                ));
+                continue;
+            }
+            let replaced = comparable_path(&stands_for);
+            files.retain(|other| comparable_path(&other.original_path) != replaced);
+            file.package_relative_path = file
+                .should_copy
+                .then(|| package_relative_path(&stands_for, install_root));
+            file.original_path = stands_for;
+            file.classification = FileClassification::UserData;
+            file.reason = VIRTUAL_STORE_REASON.to_owned();
+            let size = file.size_bytes.unwrap_or_default();
+            total_bytes += size;
+            if file.should_copy {
+                copyable_bytes += size;
+            }
+            placed += 1;
+            files.push(file);
+        }
+        if placed > 0 {
+            locations.push(FootprintLocation {
+                path: aside,
+                kind: FootprintKind::LocalAppData,
+                scope: InstallScope::PerUser,
+                file_count: placed,
+                total_bytes,
+                copyable_bytes,
+                included: copyable_bytes > 0,
+            });
+        }
+    }
+}
+
+/// `Program Files\App` of `C:\Program Files\App`, which is where `VirtualStore` keeps it.
+fn below_the_drive(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|component| matches!(component, Component::Normal(_)))
+        .collect()
 }
 
 pub fn package_relative_path(original_path: &Path, install_root: Option<&Path>) -> PathBuf {
@@ -2049,6 +2189,19 @@ fn sanitize_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_keeps_a_folders_files_aside_below_where_it_is_on_its_drive() {
+        assert_eq!(
+            below_the_drive(Path::new(r"C:\Program Files (x86)\Acme\App")),
+            PathBuf::from(r"Program Files (x86)\Acme\App")
+        );
+        assert_eq!(
+            below_the_drive(Path::new(r"C:\ProgramData\Acme")),
+            PathBuf::from(r"ProgramData\Acme")
+        );
+        assert_eq!(below_the_drive(Path::new(r"C:\")), PathBuf::new());
+    }
 
     #[test]
     fn strips_unsafe_relative_components() {

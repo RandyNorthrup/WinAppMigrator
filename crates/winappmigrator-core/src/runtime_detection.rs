@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::dll_resolver::{VisualCppRuntime, visual_cpp_dll};
+use crate::dll_resolver::{VisualCppRuntime, is_legacy_directx_dll, visual_cpp_dll};
 use crate::models::{AppArchitecture, DotNetFlavor, FileClassification, FileEntry};
 use crate::path_utils::{is_auxiliary_executable, path_has_extension, strip_prefix_ignore_case};
 use crate::pe_scan::{ProgramNeeds, read_pe_architecture, read_program_needs};
@@ -81,6 +81,9 @@ pub(crate) struct AppRuntimes {
     pub programs_left_out: usize,
     /// .NET programs packed into one file, which say nothing of which .NET they need.
     pub single_file_programs: BTreeSet<String>,
+    /// What says a program needs the DirectX End-User Runtime, if one does: a DLL of it that the
+    /// program imports and that does not ship beside it.
+    pub legacy_directx: Option<String>,
 }
 
 /// [`AppArchitecture`], in an order.
@@ -352,6 +355,11 @@ pub(crate) fn inspect_app_runtimes(
                     }
                     Some(_) => {}
                     None if ships_with_it => pending.push_back(beside),
+                    None if is_legacy_directx_dll(&import.name) => {
+                        runtimes.legacy_directx.get_or_insert_with(|| {
+                            format!("{program_name} imports {}", import.name)
+                        });
+                    }
                     None => {}
                 }
             }

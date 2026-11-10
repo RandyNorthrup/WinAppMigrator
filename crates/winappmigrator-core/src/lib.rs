@@ -3,6 +3,7 @@ pub mod account_traces;
 pub mod app_inventory;
 pub mod archive;
 pub mod authenticode;
+pub mod disk_image;
 pub mod dll_resolver;
 pub mod env_scan;
 pub mod errors;
@@ -81,6 +82,7 @@ pub use space::{
     volume_stats_at,
 };
 pub use system_context::{
-    ProfileChoice, ScanSource, SystemContext, looks_like_a_windows_drive, sweep_leaked_hive_mounts,
+    ProfileChoice, ScanSource, SourceIdentity, SystemContext, looks_like_a_windows_drive,
+    sweep_leaked_hive_mounts,
 };
 pub use verify::{verify_installer, verify_package, verify_unpacked_package};

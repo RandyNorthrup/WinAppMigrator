@@ -33,6 +33,13 @@ const LNK_INFO_UNICODE_BASE_OFFSET: usize = 0x1C;
 const LNK_INFO_UNICODE_SUFFIX_OFFSET: usize = 0x20;
 const LNK_INFO_UNICODE_HEADER_SIZE: u32 = 0x24;
 const LNK_INFO_HAS_LOCAL_PATH: u32 = 0x1;
+const LNK_HAS_EXP_STRING: u32 = 0x200;
+/// `EnvironmentVariableDataBlock`: its size and signature, then the target in ANSI in 260 bytes, then
+/// in UTF-16 in 520.
+const ENVIRONMENT_BLOCK_SIGNATURE: u32 = 0xA000_0001;
+const ENVIRONMENT_BLOCK_SIZE: usize = 0x314;
+const ENVIRONMENT_ANSI_OFFSET: usize = 8;
+const ENVIRONMENT_UNICODE_OFFSET: usize = 8 + 260;
 /// Far more than any shortcut. On a drive from elsewhere, one could be made big enough to run this
 /// out of memory.
 const MAX_SHORTCUT_BYTES: u64 = 1024 * 1024;
@@ -149,7 +156,20 @@ fn read_shortcuts_on_a_drive(
             if !entry.file_type.is_file() || !path_has_extension(path, SHORTCUT_EXTENSION) {
                 continue;
             }
-            let Some(link) = read_shortcut_file(path).and_then(|data| read_lnk(&data)) else {
+            let data = read_shortcut_file(path);
+            let read = data.as_deref().and_then(read_lnk).or_else(|| {
+                // What a variable in it means on the PC the drive is from, and nothing on this one.
+                data.as_deref()
+                    .and_then(read_lnk_written_with_variables)
+                    .map(|link| LnkFile {
+                        target: PathBuf::from(
+                            system.expand_source_variables(&link.target.to_string_lossy()),
+                        ),
+                        ..link
+                    })
+                    .filter(|link| !link.target.to_string_lossy().contains('%'))
+            });
+            let Some(link) = read else {
                 unreadable.push(path.display().to_string());
                 continue;
             };
@@ -378,9 +398,60 @@ struct LnkStrings {
     icon_location: Option<String>,
 }
 
+/// A shortcut whose target is only written with a variable, such as `%windir%\system32\calc.exe`, in
+/// its `EnvironmentVariableDataBlock`, with no `LinkInfo`. Windows 7's own shortcuts are made this way,
+/// and so are some an installer of its time made. The target comes back as it is written, for the
+/// caller to read as the PC the shortcut is from would.
+pub(crate) fn read_lnk_written_with_variables(data: &[u8]) -> Option<LnkFile> {
+    if read_u32(data, 0)? != LNK_HEADER_SIZE {
+        return None;
+    }
+    let flags = read_u32(data, LNK_FLAGS_OFFSET)?;
+    if flags & LNK_HAS_EXP_STRING == 0 || flags & LNK_HAS_LINK_INFO != 0 {
+        return None;
+    }
+    let mut offset = LNK_HEADER_SIZE as usize;
+    if flags & LNK_HAS_TARGET_ID_LIST != 0 {
+        let list_size = usize::from(read_u16(data, offset)?);
+        offset = offset.checked_add(LNK_ID_LIST_SIZE_FIELD + list_size)?;
+    }
+    let (strings, mut extra) = read_lnk_strings_and_rest(data.get(offset..)?, flags);
+    // Each block has its size first, and a size under four ends them.
+    let target = loop {
+        let size = read_u32(extra, 0)? as usize;
+        if size < 4 || size > extra.len() {
+            return None;
+        }
+        if read_u32(extra, 4)? == ENVIRONMENT_BLOCK_SIGNATURE && size >= ENVIRONMENT_BLOCK_SIZE {
+            let block = &extra[..size];
+            let unicode = block
+                .get(ENVIRONMENT_UNICODE_OFFSET..ENVIRONMENT_BLOCK_SIZE)
+                .and_then(|text| utf16_string(text, 0))
+                .filter(|text| !text.trim().is_empty());
+            break unicode.or_else(|| ansi_string(block, ENVIRONMENT_ANSI_OFFSET as u32))?;
+        }
+        extra = &extra[size..];
+    };
+    let target = target.trim();
+    (!target.is_empty()).then(|| LnkFile {
+        target: PathBuf::from(target),
+        arguments: strings.arguments,
+        working_directory: strings.working_directory.map(PathBuf::from),
+        icon_location: strings.icon_location.map(|path| {
+            let index = read_u32(data, LNK_ICON_INDEX_OFFSET).unwrap_or_default() as i32;
+            PathBuf::from(format!("{path},{index}"))
+        }),
+    })
+}
+
 /// The strings after `LinkInfo`, each with its length first, those a shortcut has in a fixed order.
 /// Whatever does not fit in the file is simply not there.
-fn read_lnk_strings(mut data: &[u8], flags: u32) -> LnkStrings {
+fn read_lnk_strings(data: &[u8], flags: u32) -> LnkStrings {
+    read_lnk_strings_and_rest(data, flags).0
+}
+
+/// [`read_lnk_strings`], and what comes after them, which is where the extra blocks are.
+fn read_lnk_strings_and_rest(mut data: &[u8], flags: u32) -> (LnkStrings, &[u8]) {
     let mut strings = LnkStrings::default();
     let unicode = flags & LNK_IS_UNICODE != 0;
     let mut next = |wanted: bool| -> Option<String> {
@@ -405,7 +476,7 @@ fn read_lnk_strings(mut data: &[u8], flags: u32) -> LnkStrings {
     strings.working_directory = next(flags & LNK_HAS_WORKING_DIR != 0);
     strings.arguments = next(flags & LNK_HAS_ARGUMENTS != 0);
     strings.icon_location = next(flags & LNK_HAS_ICON_LOCATION != 0);
-    strings
+    (strings, data)
 }
 
 fn local_path_in_link_info(info: &[u8]) -> Option<PathBuf> {
@@ -532,6 +603,69 @@ mod tests {
             lnk_target_path(&lnk_bytes(r"C:\Program Files\", "App\\app.exe", false, &[])),
             Some(PathBuf::from(r"C:\Program Files\App\app.exe")),
             "the path can be split into a base and a suffix"
+        );
+    }
+
+    /// A shortcut as Windows 7 makes its own: an item list, arguments, and the target only in an
+    /// `EnvironmentVariableDataBlock`, after another block.
+    fn written_with_variables(target: &str, unicode_target: bool) -> Vec<u8> {
+        let mut data = vec![0_u8; LNK_HEADER_SIZE as usize];
+        data[0..4].copy_from_slice(&LNK_HEADER_SIZE.to_le_bytes());
+        let flags =
+            LNK_HAS_TARGET_ID_LIST | LNK_HAS_ARGUMENTS | LNK_IS_UNICODE | LNK_HAS_EXP_STRING;
+        data[LNK_FLAGS_OFFSET..LNK_FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
+        data.extend_from_slice(&3_u16.to_le_bytes());
+        data.extend_from_slice(&[9, 9, 9]);
+        let arguments: Vec<u16> = "/x".encode_utf16().collect();
+        data.extend_from_slice(&(arguments.len() as u16).to_le_bytes());
+        for unit in arguments {
+            data.extend_from_slice(&unit.to_le_bytes());
+        }
+        // Some other block first, which is stepped over by its size.
+        data.extend_from_slice(&12_u32.to_le_bytes());
+        data.extend_from_slice(&0xA000_0009_u32.to_le_bytes());
+        data.extend_from_slice(&[0; 4]);
+        let mut block = vec![0_u8; ENVIRONMENT_BLOCK_SIZE];
+        block[0..4].copy_from_slice(&(ENVIRONMENT_BLOCK_SIZE as u32).to_le_bytes());
+        block[4..8].copy_from_slice(&ENVIRONMENT_BLOCK_SIGNATURE.to_le_bytes());
+        block[ENVIRONMENT_ANSI_OFFSET..ENVIRONMENT_ANSI_OFFSET + target.len()]
+            .copy_from_slice(target.as_bytes());
+        if unicode_target {
+            for (index, unit) in target.encode_utf16().enumerate() {
+                let at = ENVIRONMENT_UNICODE_OFFSET + index * 2;
+                block[at..at + 2].copy_from_slice(&unit.to_le_bytes());
+            }
+        }
+        data.extend_from_slice(&block);
+        data.extend_from_slice(&0_u32.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn a_shortcut_written_with_variables_is_read_as_written() {
+        for unicode in [true, false] {
+            let data = written_with_variables(r"%windir%\system32\calc.exe", unicode);
+            assert_eq!(read_lnk(&data), None, "it has no LinkInfo");
+            let link = read_lnk_written_with_variables(&data);
+            assert_eq!(
+                link.as_ref().map(|link| link.target.clone()),
+                Some(PathBuf::from(r"%windir%\system32\calc.exe")),
+                "{unicode}"
+            );
+            assert_eq!(link.and_then(|link| link.arguments).as_deref(), Some("/x"));
+        }
+        // One with a LinkInfo is read by that, and one with no block, or cut short, by nothing.
+        assert_eq!(
+            read_lnk_written_with_variables(&lnk_bytes(r"C:\App\app.exe", "", true, &[])),
+            None
+        );
+        let whole = written_with_variables(r"%ProgramFiles%\App\app.exe", true);
+        for cut in 0..whole.len() {
+            let _ = read_lnk_written_with_variables(&whole[..cut]);
+        }
+        assert_eq!(
+            read_lnk_written_with_variables(&whole[..whole.len() - 300]),
+            None
         );
     }
 

@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use winappmigrator_core::disk_image::{AttachedImage, DISK_IMAGE_EXTENSIONS, sweep_leaked_images};
 use winappmigrator_core::logging;
 use winappmigrator_core::path_utils::{is_on_a_local_disk, signed_in_user, system_root};
 use winappmigrator_core::privilege::ProtectedFolder;
@@ -27,11 +28,11 @@ use winappmigrator_core::{
     AlsoLeftOut, AppSelection, BuildInputs, BuildMonitor, BuildStep, ChoiceId, Footprint,
     FootprintChoices, InstalledApp, InstallerStub, IntegrationRow, PackageOptions, PackageResult,
     ProfileChoice, ProfilePicker, ProfileSurvey, RoomCheck, ScanFlags, ScanMonitor, ScanOptions,
-    ScanReport, ScanSource, ScanStep, SystemContext, VerificationReport, VolumeStats, WhatGoes,
-    WinAppMigratorError, create_package_from_scan, hidden_command, list_installed_apps_from,
-    looks_like_a_windows_drive, panic_text, room_before_a_build, scan_app, scan_options_for,
-    survey_of, survey_profiles, sweep_leaked_hive_mounts, verify_installer, volume_stats_at,
-    what_goes_with,
+    ScanReport, ScanSource, ScanStep, SourceIdentity, SystemContext, VerificationReport,
+    VolumeStats, WhatGoes, WinAppMigratorError, create_package_from_scan, hidden_command,
+    list_installed_apps_from, looks_like_a_windows_drive, panic_text, room_before_a_build,
+    scan_app, scan_options_for, survey_of, survey_profiles, sweep_leaked_hive_mounts,
+    verify_installer, volume_stats_at, what_goes_with,
 };
 use winappmigrator_ui::theme::{self, Theme, ThemeMode};
 use winappmigrator_ui::widgets;
@@ -57,6 +58,7 @@ pub fn run() -> eframe::Result {
     // moment to find out, and the app is about to want to know.
     thread::spawn(|| {
         sweep_leaked_hive_mounts();
+        sweep_leaked_images();
         signed_in_user();
     });
     let native_options = winappmigrator_ui::window_options(WINDOW_SIZES.viewport("winappmigrator"));
@@ -268,6 +270,12 @@ pub struct WinAppMigratorApp {
     scan_source: ScanSource,
     /// A problem selecting the offline drive (not a Windows volume, etc.).
     source_error: Option<String>,
+    /// The disk image that source is on, attached for as long as it is the source.
+    pub(crate) disk_image: Option<AttachedImage>,
+    /// The image a person picked, while it is being attached.
+    pub(crate) image_receiver: Option<Receiver<ImageMessage>>,
+    /// Which Windows a drive or an image has, once its apps are listed.
+    pub(crate) source_windows: Option<SourceIdentity>,
     /// What was found about the accounts on that source, when its apps were listed.
     profile_survey: Option<Arc<ProfileSurvey>>,
     /// Whose data can go in an installer of the selected app, once that has been looked at.
@@ -371,6 +379,9 @@ impl WinAppMigratorApp {
             backup_license: false,
             scan_source: ScanSource::Live,
             source_error: None,
+            disk_image: None,
+            image_receiver: None,
+            source_windows: None,
             profile_survey: None,
             profile_picker: None,
             picker_receiver: None,
@@ -420,6 +431,7 @@ impl WinAppMigratorApp {
         self.profile_picker = None;
         self.picker_receiver = None;
         self.chosen_profile = None;
+        self.source_windows = None;
         let (sender, receiver) = mpsc::channel();
         self.inventory_receiver = Some(receiver);
         // Build the source context (mounting offline hives if needed) on the
@@ -437,10 +449,13 @@ impl WinAppMigratorApp {
                 } else {
                     survey_profiles(&source).ok()
                 };
-                Ok((apps, survey))
+                let windows = source.is_offline().then(|| system.source_identity());
+                Ok((apps, survey, windows))
             });
             let message = match listed {
-                Ok((apps, survey)) => InventoryMessage::Loaded(apps, survey.map(Arc::new)),
+                Ok((apps, survey, windows)) => {
+                    InventoryMessage::Loaded(apps, survey.map(Arc::new), windows)
+                }
                 Err(error) => InventoryMessage::Failed(error.to_string()),
             };
             let _send_result = sender.send(message);
@@ -776,10 +791,55 @@ impl WinAppMigratorApp {
     /// Scan the live machine.
     fn select_live_source(&mut self) {
         self.source_error = None;
+        self.image_receiver = None;
         if self.scan_source.is_offline() {
+            self.release_disk_image();
             self.scan_source = ScanSource::Live;
             self.start_inventory_load();
         }
+    }
+
+    /// Detach the image that was the source, away from the window: it runs another program.
+    fn release_disk_image(&mut self) {
+        if let Some(image) = self.disk_image.take() {
+            thread::spawn(move || drop(image));
+        }
+    }
+
+    /// Pick a disk image of another PC (`.vhd` or `.vhdx`) as the scan source. It is attached
+    /// read-only, away from the window, and its apps are listed once it is.
+    pub(crate) fn pick_disk_image(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Select a disk image of the other PC (.vhd or .vhdx)")
+            .add_filter("Disk images", DISK_IMAGE_EXTENSIONS)
+            .pick_file();
+        // The dialog leaves this process in whatever folder was chosen, and a scan searches that.
+        let _ = std::env::set_current_dir(system_root());
+        let Some(image) = picked else {
+            return;
+        };
+        self.source_error = None;
+        self.inventory_state = InventoryState::Loading;
+        self.inventory_receiver = None;
+        self.apps.clear();
+        self.selected_app_index = None;
+        let (sender, receiver) = mpsc::channel();
+        self.image_receiver = Some(receiver);
+        let ctx = self.ctx.clone();
+        thread::spawn(move || {
+            let message = match AttachedImage::attach(&image) {
+                Ok(attached) => match attached.windows_volumes().into_iter().next() {
+                    Some(volume) => ImageMessage::Attached(Box::new(attached), volume),
+                    None => ImageMessage::Failed(format!(
+                        "{} has no volume with Windows on it.",
+                        image.display()
+                    )),
+                },
+                Err(error) => ImageMessage::Failed(error.to_string()),
+            };
+            let _send_result = sender.send(message);
+            ctx.request_repaint();
+        });
     }
 
     /// Pick a connected drive (a disk from another PC) as the scan source.
@@ -804,6 +864,8 @@ impl WinAppMigratorApp {
             return;
         }
         self.source_error = None;
+        self.image_receiver = None;
+        self.release_disk_image();
         self.scan_source = ScanSource::offline(root);
         self.start_inventory_load();
     }
@@ -953,9 +1015,33 @@ impl WinAppMigratorApp {
             }
         }
 
+        if let Some(receiver) = self.image_receiver.take() {
+            match receiver.try_recv() {
+                Ok(ImageMessage::Attached(image, volume)) => {
+                    self.release_disk_image();
+                    self.disk_image = Some(*image);
+                    self.scan_source = ScanSource::offline(volume);
+                    self.start_inventory_load();
+                }
+                Ok(ImageMessage::Failed(error)) => {
+                    self.source_error = Some(error);
+                    self.start_inventory_load();
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.image_receiver = Some(receiver);
+                    self.ctx.request_repaint_after(BUSY_REPAINT_INTERVAL);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.source_error = Some("The disk image could not be attached.".to_owned());
+                    self.start_inventory_load();
+                }
+            }
+        }
+
         if let Some(receiver) = self.inventory_receiver.take() {
             match receiver.try_recv() {
-                Ok(InventoryMessage::Loaded(apps, survey)) => {
+                Ok(InventoryMessage::Loaded(apps, survey, windows)) => {
+                    self.source_windows = windows;
                     theme::add_fallback_fonts(
                         &self.ctx,
                         &fonts_dir(),
@@ -1442,7 +1528,17 @@ pub(crate) struct MigrationOutcome {
 }
 
 enum InventoryMessage {
-    Loaded(Vec<InstalledApp>, Option<Arc<ProfileSurvey>>),
+    Loaded(
+        Vec<InstalledApp>,
+        Option<Arc<ProfileSurvey>>,
+        Option<SourceIdentity>,
+    ),
+    Failed(String),
+}
+
+/// A disk image attached, with the volume on it that has Windows, or why it could not be.
+pub(crate) enum ImageMessage {
+    Attached(Box<AttachedImage>, PathBuf),
     Failed(String),
 }
 

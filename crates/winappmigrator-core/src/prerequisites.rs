@@ -111,6 +111,7 @@ pub fn spec(
         }
         RuntimePrerequisiteKind::DotNetFramework35 => Some(dotnet_framework35_spec()),
         RuntimePrerequisiteKind::DotNetFramework4x => Some(dotnet_framework4x_spec()),
+        RuntimePrerequisiteKind::LegacyDirectX => legacy_directx_spec(architecture),
         _ => None,
     }
 }
@@ -132,6 +133,7 @@ pub fn compiled_specs() -> Vec<(String, PrerequisiteSpec)> {
         RuntimePrerequisiteKind::VisualCpp2013,
         RuntimePrerequisiteKind::DotNetFramework35,
         RuntimePrerequisiteKind::DotNetFramework4x,
+        RuntimePrerequisiteKind::LegacyDirectX,
     ];
     for major in DOTNET_MAJOR_VERSIONS {
         for flavor in [
@@ -864,6 +866,31 @@ fn dotnet_framework4x_spec() -> PrerequisiteSpec {
             min_value: 528_040,
         }),
     }
+}
+
+/// The DirectX End-User Runtime's web installer, which Microsoft still keeps. It fetches the parts of
+/// the June 2010 runtime a PC does not have, both builds of each on 64-bit Windows, so the PC it runs
+/// on needs to reach Microsoft. Nothing in the registry says which parts a PC has, so it runs each
+/// time, and finds nothing to do when they are there. It was never made for Arm64.
+fn legacy_directx_spec(architecture: &AppArchitecture) -> Option<PrerequisiteSpec> {
+    let build = match architecture {
+        AppArchitecture::X86 => "x86",
+        AppArchitecture::X64 | AppArchitecture::Unknown => "x64",
+        AppArchitecture::Arm64 => return None,
+    };
+    Some(PrerequisiteSpec {
+        bundleable: true,
+        // One installer for both, named for the build it is here for, as every bundled file is.
+        file_name: format!("dxwebsetup.{build}.exe"),
+        download_url: "https://download.microsoft.com/download/1/7/1/1718CCC4-6315-4D8E-9543-8E28A4E18C4C/dxwebsetup.exe".to_owned(),
+        silent_install_args: vec!["/Q".to_owned()],
+        success_exit_codes: vec![0],
+        reboot_exit_codes: Vec::new(),
+        winget_id: Some("Microsoft.DirectX".to_owned()),
+        windows_feature: None,
+        requires_admin: true,
+        probe: None,
+    })
 }
 
 #[cfg(test)]

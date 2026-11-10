@@ -2,7 +2,7 @@
 //! of each state, for checking the design without touching a live window.
 
 use std::cmp::Ordering;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use egui_kittest::Harness;
@@ -11,7 +11,8 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use winappmigrator_core::space::DriveRoom;
 use winappmigrator_core::{
     AppArchitecture, BuildStep, InstallScope, InstalledApp, PackageResult, ProfileChoice,
-    ProfilePicker, ProfileRow, RoomCheck, VerificationReport, Warning, WarningSeverity,
+    ProfilePicker, ProfileRow, RoomCheck, SourceIdentity, VerificationReport, Warning,
+    WarningSeverity,
 };
 
 use winappmigrator_ui::window::Opening;
@@ -245,6 +246,60 @@ fn selected_app_offers_the_build() {
         );
         preview(&mut harness, &format!("selected-{name}"));
     }
+}
+
+#[test]
+fn a_drive_with_windows_7_says_which_and_what_becomes_of_its_apps() {
+    for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        let mut harness = harness_with(mode, |app| {
+            app.set_source_for_tests(Path::new(r"E:\"));
+            app.source_windows = Some(SourceIdentity {
+                computer_name: None,
+                windows_version: None,
+                windows_build: Some(7601),
+                architecture_name: Some("x86".to_owned()),
+                product_name: Some("Windows 7 Professional".to_owned()),
+                service_pack: Some("Service Pack 1".to_owned()),
+            });
+        });
+        preview(&mut harness, &format!("windows-7-drive-{name}"));
+        assert!(
+            harness
+                .query_by_label(r"E:\ · Windows 7 Professional Service Pack 1, 32-bit")
+                .is_some()
+        );
+        assert!(
+            harness
+                .query_by_label_contains("so they go to Program Files (x86)")
+                .is_some()
+        );
+        assert!(harness.query_by_label_contains("Disk image").is_some());
+    }
+}
+
+#[test]
+fn a_drive_with_windows_11_needs_no_note() {
+    let harness = harness_with(ThemeMode::Light, |app| {
+        app.set_source_for_tests(Path::new(r"E:\"));
+        app.source_windows = Some(SourceIdentity {
+            computer_name: None,
+            windows_version: None,
+            windows_build: Some(26100),
+            architecture_name: Some("AMD64".to_owned()),
+            product_name: Some("Windows 10 Pro".to_owned()),
+            service_pack: None,
+        });
+    });
+    assert!(
+        harness
+            .query_by_label(r"E:\ · Windows 11 Pro, 64-bit")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("made for Windows 10 and 11")
+            .is_none()
+    );
 }
 
 fn profile_row(name: &str, is_default: bool) -> ProfileRow {

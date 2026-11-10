@@ -44,8 +44,8 @@ use crate::path_utils::{
 use crate::pe_scan::{read_program_need, scan_pe};
 use crate::progress::{ScanMonitor, ScanStep};
 use crate::registry_scan::{
-    RegistryScanContext, context_product_names, recorded_keys_of_one_account,
-    scan_registry_artifacts,
+    RegRoot, RegistryScanContext, context_product_names, lay_out_for_64_bit_windows,
+    put_what_windows_kept_aside_in_place, recorded_keys_of_one_account, scan_registry_artifacts,
 };
 use crate::reporting::artifact_paths;
 use crate::restore_policy::architecture_from_name;
@@ -78,6 +78,8 @@ const MAX_CONFIDENCE_SCORE: i32 = 100;
 /// its drivers always are, and they come first.
 const MOST_PROGRAMS_RECORDED: usize = 2000;
 const MICROSOFT: &str = "microsoft";
+/// Said of an app from a 32-bit Windows, whose registry keys move to the 32-bit view.
+pub const FROM_32_BIT_WINDOWS: &str = "from_32_bit_windows";
 
 #[derive(Debug, Clone)]
 struct ConfidenceInputs<'a> {
@@ -677,6 +679,16 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         },
         &system,
     );
+    // What the account whose data this is kept of the app's machine keys, which is that account's.
+    if options.include_user_data
+        && let Some(account) = system.user_hives().into_iter().next()
+    {
+        put_what_windows_kept_aside_in_place(
+            &RegRoot::User(&account),
+            &mut registry_artifacts.entries,
+            &mut registry_artifacts.warnings,
+        );
+    }
     monitor.checkpoint()?;
     monitor.report(ScanStep::Finishing);
     // A font in the Windows folder the app's install record names is copied like any of its files.
@@ -839,6 +851,21 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     });
 
     let identity = system.source_identity();
+    // Every Windows an installer can run on that runs this app is 64-bit, as Windows 11 only is.
+    if identity.is_32_bit() {
+        lay_out_for_64_bit_windows(
+            &mut registry_artifacts.entries,
+            &mut registry_artifacts.com_registrations,
+        );
+        lay_out_for_64_bit_windows(&mut license_registry_entries, &mut []);
+        warnings.push(Warning::new(
+            FROM_32_BIT_WINDOWS,
+            WarningSeverity::Info,
+            "This app was on 32-bit Windows. Its registry keys are laid out as 64-bit Windows keeps \
+             a 32-bit app's, and the installer offers Program Files (x86) for it.",
+            identity.windows_name(),
+        ));
+    }
     let source_platform = Some(SourcePlatform {
         windows_build: identity.windows_build,
         architecture: identity
@@ -986,7 +1013,9 @@ fn use_what_the_source_pc_calls_things(report: &mut ScanReport, system: &SystemC
         need.path = logical(&need.path);
     }
     for file in &mut report.file_inventory {
-        file.original_path = logical(&file.path);
+        // Where it is read from, except for an account's own copy of one of the app's files, which
+        // is what it stands for.
+        file.original_path = logical(&file.original_path);
         if file.package_relative_path.is_some() {
             file.package_relative_path = Some(package_relative_path(
                 &file.original_path,
@@ -1353,6 +1382,19 @@ fn runtime_prerequisites_from_signals(
             kind: RuntimePrerequisiteKind::PythonRuntime,
             evidence: "Python runtime artifacts present (python*.dll)".to_owned(),
             install_manually: false,
+            present_on_source: None,
+            bundle: None,
+            presence_probe: None,
+            architecture: None,
+        });
+    }
+
+    if let Some(evidence) = &runtimes.legacy_directx {
+        prerequisites.push(RuntimePrerequisite {
+            name: "DirectX End-User Runtime (June 2010)".to_owned(),
+            kind: RuntimePrerequisiteKind::LegacyDirectX,
+            evidence: evidence.clone(),
+            install_manually: true,
             present_on_source: None,
             bundle: None,
             presence_probe: None,

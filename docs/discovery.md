@@ -731,6 +731,77 @@ Scanning a drive needs **elevation**, for `reg load` and for reading files throu
 never changes ownership or permissions (no `takeown`/`icacls`); files whose ACL denies a plain read are copied at
 package time via `robocopy /B`. **For a failing drive, image it first and scan the image.**
 
+### A disk image
+
+**Disk image…** takes a `.vhd` or `.vhdx` and reads it as a connected drive (`disk_image.rs`). That is what
+Sysinternals Disk2vhd makes of a PC that is still running, what Windows 7's own "Create a system image" makes, and what
+Hyper-V keeps. Windows attaches it and its own NTFS and registry code reads it, so nothing on it is read any other way,
+and everything above holds as it does for a drive.
+
+- **Read-only, with no drive letter.** `Mount-DiskImage -Access ReadOnly -NoDriveLetter`, so nothing writes to the image,
+  and nothing else on the PC is offered it. Each volume with a file system is mounted on a folder of its own in an
+  administrators-only folder, `%ProgramData%\WinAppMigrator\images\i-<run>`, and the first with `Windows` and `Users` on it
+  is the source.
+- **An image Windows already has attached is refused,** since whatever attached it may be writing to it. Pick its drive as
+  a connected drive instead, or detach it.
+- **It is detached** when another source is chosen or the app closes. A run holds a lease in its folder, as one that loads
+  hives does, and `sweep_leaked_images` detaches what a run that died left, but only an image with a volume still mounted in
+  that run's folder. An attached image does not outlive a restart of Windows anyway.
+- **Not read:** VMware's `.vmdk` and VirtualBox's `.vdi`, which Windows cannot attach (VirtualBox can save a disk as
+  `.vhd`), a Hyper-V checkpoint's `.avhdx` (export the VM's disk), and a volume encrypted with BitLocker until it is unlocked.
+
+### A drive from Windows 7 (or Vista, 8 or 8.1)
+
+Windows 7 keeps apps where Windows 10 and 11 do, under `Program Files`, `ProgramData` and `Users`, so what is found is found
+the same way. What differs is in what that Windows did for apps, what it had that Windows 11 does not, and, on 32-bit
+Windows, where 64-bit Windows keeps a 32-bit app. Each of these was run for real from Windows 7 SP1 VMs, 32-bit and 64-bit,
+onto Windows 11 25H2: see `C:\Users\Randy\TestLab\README.md` for the lab.
+
+- **Which Windows it is.** Windows 10 added `CurrentMajorVersionNumber`; before it, `CurrentVersion` says `6.1`, and there is no
+  update revision. The drive's `ProductName` and `CSDVersion` name it, as `Windows 7 Professional Service Pack 1, 32-bit`
+  (`SourceIdentity::windows_name`), and the app says so beside the drive, with what follows when it is older than 10.
+- **A 32-bit Windows.** Its one registry view and its one `Program Files` are where a 32-bit app is on 64-bit Windows under
+  `WOW6432Node` and `Program Files (x86)`, and Windows 11 is 64-bit only. So a scan of one lays its keys out as 64-bit Windows
+  keeps a 32-bit app's (`registry_scan::where_64_bit_windows_keeps`): `HKLM\Software\X` goes to `Software\WOW6432Node\X`, and
+  `Classes\CLSID`, `Interface`, `DirectShow`, `Media Type` and `MediaFoundation` to `Classes\WOW6432Node\…`, in `HKLM` and in an
+  account's classes. The keys Microsoft lists as shared by both views stay where they are, as do file types, ProgIDs, type
+  libraries, AppIDs, an account's own `Software`, and `AppCompatFlags`, which Windows reads from the 64-bit view whatever the
+  app is. The installer offers `Program Files (x86)` for such an app (`restore::default_install_location`), and paths in what
+  it restores are rewritten to match, as for any other location. The app list calls its apps 32-bit.
+- **What Windows kept aside for an app (`VirtualStore`).** A 32-bit app with no manifest, run without elevation, can believe
+  it wrote to its own folder in `Program Files` and to `HKLM\Software`. Windows keeps what it wrote in the account's
+  `AppData\Local\VirtualStore\<path>` and `Software\Classes\VirtualStore\MACHINE\SOFTWARE\<key>`, and gives it back when the
+  app reads. Apps made for Windows XP did this on Windows 7 without knowing, so that is where their settings are. With the
+  User data option on, the account's copies go in place of the app's own: files into the app's folder
+  (`file_discovery::put_what_windows_kept_aside_in_place`), values into the app's own key
+  (`registry_scan::put_what_windows_kept_aside_in_place`). Back in `VirtualStore` would not do: Windows 11 only gives an app what
+  is in a `VirtualStore` key Windows itself made, and ignores one an installer made, which the app then writes over. That was
+  tried. Where they are now, the app reads them whether Windows does this for it there or not, wherever it is installed. A
+  program found in `VirtualStore` stays out (`virtual_store_program_left_out`), since Windows never puts one there.
+- **DirectX 9 and the rest of the DirectX SDK's runtime.** `d3dx9_*.dll`, `d3dx10*`, `d3dx11_*`, `d3dcompiler_` up to 43,
+  `xinput1_1` to `1_3`, `xaudio2_0` to `2_7`, `x3daudio`, `xapofx` and `xactengine` came from the DirectX End-User Runtime of
+  June 2010, which a game's setup put on most Windows 7 PCs, and no Windows has ever come with. A program that imports one and
+  does not ship it beside itself gets that runtime as a prerequisite, `LegacyDirectX`: Microsoft's web installer
+  (`dxwebsetup.exe /Q`), signed by Microsoft and checked, which fetches what the PC lacks, so the PC it installs on needs to
+  reach Microsoft. Nothing says which parts a PC has, so it runs each time, and it stays when the app is uninstalled.
+- **Other DLLs from the old Windows folders.** A program can find a DLL in Windows 7's `System32` or `SysWOW64` that Windows
+  10 and 11 do not have, put there by some other setup. Each is named (`dependency_not_in_newer_windows`), by whether this PC's
+  own Windows has one of that name where a program of that build looks, which is the best there is to go by. It does not come
+  along: it is not the app's, and what put it there is what has to be installed.
+- **Shortcuts written with a variable.** Windows 7's own shortcuts, and some an installer of its time made, hold their target
+  only as `%windir%\…` in an `EnvironmentVariableDataBlock`. They are read as that PC would read them
+  (`shortcut_scan::read_lnk_written_with_variables`). Those with only a shell item list still name no file.
+- **An empty `InstallLocation`,** as an MSI of the time left it, names nothing and is not listed as a path not followed.
+
+What this does not do, and says when it matters:
+
+- **A 16-bit program** cannot run on any 64-bit Windows. One is not a PE program, so it is not looked at for what it needs.
+- **A driver** made for Windows 7 may be signed in a way Windows 11 with Secure Boot or Memory integrity refuses. A 32-bit
+  driver is refused before anything is installed, as for any source.
+- **An app that used Windows 7's Sidebar, Media Center, or Internet Explorer itself** has nothing to run on in Windows 11.
+- **A package from a 32-bit Windows is laid out for 64-bit Windows,** so on a 32-bit Windows 10 its keys would be under a
+  `WOW6432Node` nothing reads. Windows 11 is 64-bit only.
+
 ## Restoring user data to real locations
 
 Run headlessly, program and user-data files (including the `files\_external\…` data staged

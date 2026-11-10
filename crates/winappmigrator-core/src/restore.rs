@@ -28,10 +28,10 @@ use crate::journal::{
     find_backup, install_on_record_at, lock_state,
 };
 use crate::models::{
-    DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry, FileClassification,
-    FileEntry, FirewallRuleEntry, LicenseArtifact, PackageManifest, RegistryEntry, RegistryHive,
-    RegistryValueKind, RestoreOptions, RestoreResult, RuntimePrerequisite, ServiceEntry,
-    VerificationOptions, Warning, WarningSeverity,
+    AppArchitecture, DriverEntry, DriverKind, EnvironmentScope, EnvironmentVariableEntry,
+    FileClassification, FileEntry, FirewallRuleEntry, LicenseArtifact, PackageManifest,
+    RegistryEntry, RegistryHive, RegistryValueKind, RestoreOptions, RestoreResult,
+    RuntimePrerequisite, ServiceEntry, VerificationOptions, Warning, WarningSeverity,
 };
 use crate::package::{PreparedPackage, read_embedded_manifest, read_manifest};
 use crate::path_rewrite::RestoreMap;
@@ -855,9 +855,11 @@ fn app_display_name(manifest: &PackageManifest) -> String {
 }
 
 /// Where a package suggests installing, which is where its app was. Whether that can be used
-/// here is for [`install_location_problem`] to say.
+/// here is for [`install_location_problem`] to say. An app from a 32-bit Windows was in its
+/// `Program Files`, and 64-bit Windows keeps a 32-bit app in `Program Files (x86)`, which is
+/// where that app's own `%ProgramFiles%` leads there.
 pub fn default_install_location(manifest: &PackageManifest) -> Option<PathBuf> {
-    manifest
+    let recorded = manifest
         .application_metadata
         .as_ref()
         .and_then(|app| app.install_location.clone())
@@ -866,7 +868,40 @@ pub fn default_install_location(manifest: &PackageManifest) -> Option<PathBuf> {
                 .main_executable_path
                 .parent()
                 .map(Path::to_path_buf)
-        })
+        })?;
+    let from_32_bit_windows = manifest
+        .source_platform
+        .as_ref()
+        .is_some_and(|platform| platform.architecture == AppArchitecture::X86);
+    Some(if from_32_bit_windows {
+        where_64_bit_windows_keeps_a_32_bit_app(&recorded)
+    } else {
+        recorded
+    })
+}
+
+const PROGRAM_FILES: &str = "Program Files";
+const PROGRAM_FILES_X86: &str = "Program Files (x86)";
+
+/// `C:\Program Files\App` as `C:\Program Files (x86)\App`. Anything else is where it was.
+fn where_64_bit_windows_keeps_a_32_bit_app(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    let (
+        Some(prefix @ Component::Prefix(_)),
+        Some(Component::RootDir),
+        Some(Component::Normal(top)),
+    ) = (components.next(), components.next(), components.next())
+    else {
+        return path.to_path_buf();
+    };
+    if !top.eq_ignore_ascii_case(PROGRAM_FILES) {
+        return path.to_path_buf();
+    }
+    let mut moved = PathBuf::from(prefix.as_os_str());
+    moved.push(Component::RootDir);
+    moved.push(PROGRAM_FILES_X86);
+    moved.extend(components);
+    moved
 }
 
 /// Write what happened to the log. Paths and key names only: what a registry value, license,
@@ -4182,12 +4217,43 @@ pub(crate) fn run_powershell_script(script: &str) -> std::result::Result<(), War
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::os::windows::fs::OpenOptionsExt;
     use std::sync::{Arc, Mutex};
 
     use crate::journal::{install_folders, read_journal};
     use crate::restore_policy::driver_destination;
     use crate::rollback::{UndoMode, open_install, undo_journal};
+
+    #[test]
+    fn an_app_from_a_32_bit_windows_is_offered_program_files_x86() {
+        for (before, after) in [
+            (
+                r"C:\Program Files\Acme\App",
+                r"C:\Program Files (x86)\Acme\App",
+            ),
+            (r"D:\program files\Acme", r"D:\Program Files (x86)\Acme"),
+            (
+                r"C:\Program Files (x86)\Acme",
+                r"C:\Program Files (x86)\Acme",
+            ),
+            (
+                r"C:\Games\Program Files\Acme",
+                r"C:\Games\Program Files\Acme",
+            ),
+            (r"C:\Acme", r"C:\Acme"),
+            (
+                r"\\server\Program Files\Acme",
+                r"\\server\Program Files\Acme",
+            ),
+        ] {
+            assert_eq!(
+                where_64_bit_windows_keeps_a_32_bit_app(Path::new(before)),
+                PathBuf::from(after),
+                "{before}"
+            );
+        }
+    }
 
     #[test]
     fn rejects_apply_and_dry_run_together() {

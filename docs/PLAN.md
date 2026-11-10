@@ -49,6 +49,13 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   its registry says with what that PC called things, and map a path to the volume in one
   place, which will not lead off it. The app writes nothing to the drive. The app runs
   elevated, so there is no mid-task UAC prompt.
+- A disk image as the source: a `.vhd` or `.vhdx` the app attaches read-only itself, with no drive letter, and detaches.
+- A drive or an image from Windows 7, Vista, 8 or 8.1, onto Windows 10 or 11: which Windows it is, said in words; an app from
+  32-bit Windows laid out as 64-bit Windows keeps it, in `Program Files (x86)` and the 32-bit registry view; what Windows kept
+  aside for an older app (`VirtualStore`) put in the app's own folder and keys with User data, since Windows 11 ignores a
+  `VirtualStore` key an installer makes; the DirectX End-User Runtime as a prerequisite; DLLs from the old Windows folders that
+  Windows 11 lacks named; and shortcuts written with a variable read. Run for real from Windows 7 SP1 VMs, 32-bit and 64-bit,
+  onto Windows 11 25H2.
 - One account's data in an installer: whoever is signed in, or the account chosen when
   more than one has data, going to whoever is signed in where it runs. Documents and Saved
   Games go to their real folders.

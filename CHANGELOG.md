@@ -2,6 +2,26 @@
 
 All notable project changes are tracked here.
 
+## Unreleased
+
+### Windows 7, and disk images
+
+- **Apps from Windows 7, Vista, 8 and 8.1 move to Windows 10 and 11.** Pick the old PC's drive, or an image of it, and the
+  app says which Windows it has. What was different there is taken care of:
+  - **Settings an older app kept in Windows' `VirtualStore`** come along with User data. Windows kept them in your profile
+    when the app thought it wrote to its own folder or machine keys, so that is where the settings of most apps made for
+    Windows XP are. They now go in the app's own folder and keys, where it finds them on Windows 11.
+  - **An app from 32-bit Windows** goes to `Program Files (x86)`, and its registry keys to where 64-bit Windows keeps a
+    32-bit app's. Before, it would have been installed where it could not find its own settings.
+  - **The DirectX 9 runtime** is installed with an app that needs it (`d3dx9_43.dll` and the rest), as no Windows comes
+    with it. Installing it takes the internet.
+  - **A DLL the app found in Windows 7's own folders that Windows 11 does not have** is named, rather than assumed to be there.
+  - The drive's Windows version was read as 10.0 for anything older, and is now read right.
+- **Disk image…** reads a `.vhd` or `.vhdx` of another PC, such as one Sysinternals Disk2vhd makes of a PC that still runs, or
+  Windows 7's own system image backup. The app attaches it read-only with no drive letter, and detaches it.
+- A shortcut that names its target only with a variable, as Windows 7's own do, is read. An MSI's empty install location is no
+  longer listed as a path that could not be followed.
+
 ## 0.5.0 — 2026-11-03
 
 This is a large release: almost all of what the app and its installers do has changed.

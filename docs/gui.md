@@ -164,7 +164,7 @@ States: nothing selected, `Running` with what step it is on and a Stop button, `
 `Stopped` with Look again. Create installer is disabled in all but `Ready`, and while what goes with a choice is being worked
 out, or there is not the room.
 
-## Scan source: this PC or a connected drive
+## Scan source: this PC, a connected drive, or a disk image
 
 A **scan-source selector** at the top of the app list chooses where installed
 apps are read from:
@@ -173,6 +173,14 @@ apps are read from:
 - **Connected drive…** — a disk from another (often failing) PC, mounted here
   (e.g. `E:\`). Picking a folder validates it is a Windows volume (`\Windows` and
   `\Users` exist) before use.
+- **Disk image…** — a `.vhd` or `.vhdx` of another PC. The app attaches it read-only
+  with no drive letter on a worker thread (`disk_image::AttachedImage`), says so while it
+  does, and from then on it is a connected drive whose place is a folder of the app's. It is
+  detached when another source is picked, on a worker thread, and when the app closes.
+
+Under the selector, a drive or an image shows its place and which Windows it has
+(`SourceIdentity::windows_name`), shortened rather than pushing **Change…** out of sight. A
+Windows older than 10 gets a note of what becomes of its apps (`views::older_windows_note`).
 
 Scanning a connected drive **requires administrator rights** (to mount copies of the
 drive's registry hives and read protected files). The app already runs elevated:
