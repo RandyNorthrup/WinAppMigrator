@@ -15,8 +15,7 @@
   <a href="https://github.com/RandyNorthrup/WinAppMigrator/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/RandyNorthrup/WinAppMigrator/total?style=flat-square&color=2d63e0"></a>
   <a href="https://github.com/RandyNorthrup/WinAppMigrator/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/RandyNorthrup/WinAppMigrator?style=flat-square&color=2d63e0"></a>
   <a href="https://github.com/RandyNorthrup/WinAppMigrator/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/RandyNorthrup/WinAppMigrator/ci.yml?branch=main&style=flat-square&label=CI"></a>
-  <img alt="Windows 10 and 11, x64" src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-0078D4?style=flat-square">
-  <img alt="Moves apps from Windows 7 and later" src="https://img.shields.io/badge/moves%20apps%20from-Windows%207%2B-0078D4?style=flat-square">
+  <img alt="Windows 7, 10 and 11: the app runs on 10 and 11, and moves apps from 7 and later" src="https://img.shields.io/badge/Windows-7%20%7C%2010%20%7C%2011-0078D4?style=flat-square">
   <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-b7410e?style=flat-square">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/RandyNorthrup/WinAppMigrator?style=flat-square"></a>
 </p>
