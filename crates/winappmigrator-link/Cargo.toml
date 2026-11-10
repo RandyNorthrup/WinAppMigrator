@@ -15,8 +15,12 @@ doctest = false
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# The released line that SPAKE2 0.4 is built on. 0.5 is a pre-release.
-spake2 = "0.4.0"
+# The released line that SPAKE2 0.4 is built on. 0.5 is a pre-release. Without its own randomness,
+# which would come through `getrandom` 0.2 and import `bcrypt.dll`: see `Drawn` in `channel.rs`.
+spake2 = { version = "0.4.0", default-features = false }
+rand_core = "0.6.4"
+getrandom = "0.3.4"
+zeroize = "1.9.1"
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
 hkdf = "0.12.4"
 sha2-0-10 = { package = "sha2", version = "0.10.9" }

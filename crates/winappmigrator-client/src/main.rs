@@ -27,15 +27,27 @@ fn main() -> ExitCode {
         winappmigrator_client::system::take_care();
         return ExitCode::SUCCESS;
     }
+    // Run from a folder only an administrator can change, before anything here can have Windows
+    // load a DLL by name: see `safe_folder`.
+    if !winappmigrator_client::system::runs_from_safe_folder() {
+        return match winappmigrator_client::system::run_from_safe_folder() {
+            Ok(status) if status.success() => ExitCode::SUCCESS,
+            Ok(_) => ExitCode::FAILURE,
+            Err(error) => {
+                println!("WinAppMigrator Client could not start from a folder only administrators");
+                println!("can change: {error}");
+                println!("Press Enter to close this window.");
+                let _ = io::stdin().lock().read_line(&mut String::new());
+                ExitCode::FAILURE
+            }
+        };
+    }
     // The window says what it is, rather than whatever started it. `title` changes the console it
-    // shares with this, and nothing else.
-    let _ = std::process::Command::new(
-        winappmigrator_client::system::windows_folder().join(r"System32\cmd.exe"),
-    )
-    // Raw, since `title` keeps any quotes it is given as part of the title.
-    .args(["/d", "/c"])
-    .raw_arg("title WinAppMigrator Client")
-    .status();
+    // shares with this, and nothing else. Raw, since `title` keeps any quotes it is given.
+    let _ = winappmigrator_client::system::windows_tool("cmd.exe")
+        .args(["/d", "/c"])
+        .raw_arg("title WinAppMigrator Client")
+        .status();
     // Each line fits the 80 columns Windows 7 gives a console.
     println!("WinAppMigrator Client {}", winappmigrator_client::VERSION);
     println!();

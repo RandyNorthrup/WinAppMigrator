@@ -2,7 +2,7 @@
 
 All notable project changes are tracked here.
 
-## Unreleased
+## 0.6.0 — 2026-11-09
 
 ### Network PC: another PC, over your network
 
@@ -15,6 +15,9 @@ All notable project changes are tracked here.
 - **Encrypted, and paired by the code.** The code never crosses the network, a wrong one gets a few tries before the client
   makes another, and everything after it is encrypted and checked.
 - **One small client for Windows 7, 8, 10 and 11, 32-bit or 64-bit.** The app carries it.
+- **Signed, as the app is.** The UAC prompt on the old PC names Randy Northrup as its publisher. A DLL put beside the client
+  is not loaded into it: it runs from a copy of itself in a folder only an administrator can change, and gives the Windows
+  tools it starts an environment of Windows' own.
 
 ### Windows 7, and disk images
 

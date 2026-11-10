@@ -21,7 +21,7 @@ doctest = false
 [dependencies]
 winappmigrator-link.workspace = true
 winreg.workspace = true
-getrandom = "0.2.16"
+getrandom = "0.3.4"
 
 [build-dependencies]
 embed-manifest.workspace = true

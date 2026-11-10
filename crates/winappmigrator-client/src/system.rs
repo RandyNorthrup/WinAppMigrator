@@ -12,7 +12,7 @@ use std::io::{self, Read, Seek, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -44,6 +44,10 @@ const DETACHED_PROCESS: u32 = 0x0000_0008;
 /// Out of any job the run is in, so that the job ending does not end the caretaker too. A job that
 /// does not allow it refuses, and the caretaker is started without it.
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+/// No window for a tool started with no console.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Where Windows records where `Program Files` is.
+const WINDOWS_FOLDERS_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion";
 /// How long a caretaker waits for Windows to let go of a record once its run has ended.
 const CARETAKER_TRIES: u32 = 40;
 const CARETAKER_PAUSE: Duration = Duration::from_millis(250);
@@ -57,8 +61,67 @@ pub fn windows_folder() -> PathBuf {
         .map_or_else(|_| PathBuf::from(r"C:\Windows"), PathBuf::from)
 }
 
-fn tool(name: &str) -> PathBuf {
-    windows_folder().join("System32").join(name)
+/// A tool in `System32`, started as [`give_windows_environment`] says.
+pub fn windows_tool(name: &str) -> Command {
+    let mut command = Command::new(windows_folder().join("System32").join(name));
+    give_windows_environment(&mut command);
+    command
+}
+
+/// Start a Windows tool with an environment of Windows' own rather than the person's. An elevated
+/// program is given the environment of whoever started it, which they can change without being an
+/// administrator. PowerShell is a .NET program, so `COR_PROFILER` would load a DLL into it,
+/// `COMPLUS_InstallRoot` a runtime from any folder, and `PSModulePath` other commands in place of
+/// Windows' own. As the app does (`set_tool_environment` in the core), with what these tools use.
+fn give_windows_environment(command: &mut Command) {
+    let windows = windows_folder();
+    let system32 = windows.join("System32");
+    let powershell_home = system32.join(r"WindowsPowerShell\v1.0");
+    let temp = windows.join("Temp");
+    let program_data = program_data();
+    command
+        .env_clear()
+        .env("SystemRoot", &windows)
+        .env("windir", &windows)
+        .env("SystemDrive", system_drive())
+        .env("ComSpec", system32.join("cmd.exe"))
+        .env("ProgramData", &program_data)
+        .env("ALLUSERSPROFILE", &program_data)
+        .env("TEMP", &temp)
+        .env("TMP", &temp)
+        .env("OS", "Windows_NT")
+        .env("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+        .env("PSModulePath", powershell_home.join("Modules"));
+    // As a 64-bit tool on 64-bit Windows would be told, which is what PowerShell is here.
+    if let Some(architecture) = machine_value(ENVIRONMENT_KEY, "PROCESSOR_ARCHITECTURE") {
+        command.env("PROCESSOR_ARCHITECTURE", architecture);
+    }
+    if let Ok(path) =
+        std::env::join_paths([system32.clone(), system32.join("Wbem"), powershell_home])
+    {
+        command.env("Path", path);
+    }
+}
+
+/// A value of the machine's registry, which only an administrator can change.
+fn machine_value(key: &str, name: &str) -> Option<String> {
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(key, KEY_READ)
+        .and_then(|key| key.get_value::<String, _>(name))
+        .ok()
+}
+
+/// The drive Windows is on, as `C:`.
+fn system_drive() -> String {
+    windows_folder().to_string_lossy().chars().take(2).collect()
+}
+
+/// `ProgramData`, from where Windows records it.
+fn program_data() -> PathBuf {
+    machine_value(PROFILE_LIST_KEY, "ProgramData").map_or_else(
+        || PathBuf::from(r"C:\ProgramData"),
+        |value| PathBuf::from(value.replace("%SystemDrive%", &system_drive())),
+    )
 }
 
 /// Windows' own PowerShell, as the 64-bit program on 64-bit Windows. The client is a 32-bit program,
@@ -76,7 +139,9 @@ fn powershell_program() -> PathBuf {
 }
 
 fn powershell(script: &str) -> io::Result<Output> {
-    Command::new(powershell_program())
+    let mut command = Command::new(powershell_program());
+    give_windows_environment(&mut command);
+    command
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -94,13 +159,7 @@ fn text_of(output: &Output) -> String {
 
 /// What this PC says of itself, read from its registry.
 pub fn about_this_pc(snapshot_taken: &str) -> About {
-    let machine = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let value = |key: &str, name: &str| {
-        machine
-            .open_subkey_with_flags(key, KEY_READ)
-            .and_then(|key| key.get_value::<String, _>(name))
-            .unwrap_or_default()
-    };
+    let value = |key: &str, name: &str| machine_value(key, name).unwrap_or_default();
     let mut product = value(CURRENT_VERSION_KEY, "ProductName");
     // Windows 11 still calls itself Windows 10 there; its builds start at 22000.
     let build: u32 = value(CURRENT_VERSION_KEY, "CurrentBuildNumber")
@@ -131,7 +190,7 @@ pub fn new_code() -> io::Result<String> {
     const LIMIT: u32 = 4_294_000_000;
     loop {
         let mut bytes = [0_u8; 4];
-        getrandom::getrandom(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
+        getrandom::fill(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
         let number = u32::from_le_bytes(bytes);
         if number < LIMIT {
             let digits = format!("{:0width$}", number % 1_000_000, width = CODE_DIGITS);
@@ -142,19 +201,7 @@ pub fn new_code() -> io::Result<String> {
 
 /// The folder the state file is in, under `ProgramData`.
 fn state_folder() -> PathBuf {
-    let program_data = RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey_with_flags(PROFILE_LIST_KEY, KEY_READ)
-        .and_then(|key| key.get_value::<String, _>("ProgramData"))
-        .map(|value| {
-            let drive = windows_folder()
-                .to_string_lossy()
-                .chars()
-                .take(2)
-                .collect::<String>();
-            value.replace("%SystemDrive%", &drive)
-        })
-        .unwrap_or_else(|_| r"C:\ProgramData".to_owned());
-    PathBuf::from(program_data).join(STATE_FOLDER)
+    program_data().join(STATE_FOLDER)
 }
 
 /// What a run has done to the PC, held open for as long as it runs.
@@ -236,7 +283,7 @@ pub fn start_caretaker() -> io::Result<Child> {
 
 /// Be a run's caretaker: wait for the run to end, then undo what its record still lists. A run that
 /// cleaned up after itself has removed its record, and a run started since holds its own, which is
-/// left alone.
+/// left alone. Then remove the copy of the client the run and this ran from.
 pub fn take_care() {
     let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
     let path = state_folder().join(STATE_FILE);
@@ -255,14 +302,96 @@ pub fn take_care() {
                 drop(file);
                 // A run that has started since holds its record, which this then cannot remove.
                 let _ = fs::remove_file(&path);
-                return;
+                break;
             }
             Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
                 thread::sleep(CARETAKER_PAUSE);
             }
-            Err(_) => return,
+            Err(_) => break,
         }
     }
+    remove_this_copy_once_ended();
+}
+
+/// The folder a run copies the client to and runs it from: `WinAppMigrator Client` in Program Files,
+/// which only an administrator can change, and which a new folder there takes after.
+///
+/// The client is run from wherever a person put it, often a USB drive or a shared folder. Windows
+/// loads some DLLs only when they are first needed, by name, and looks for them in the program's own
+/// folder first, whatever the program asks: on 32-bit Windows 7, `RtlGenRandom` loads
+/// `cryptbase.dll` that way, and a copy of it planted beside the client was loaded into it, elevated.
+/// Run from here, the only folder looked in first is one nobody but an administrator can put a DLL in.
+fn safe_folder() -> PathBuf {
+    machine_value(WINDOWS_FOLDERS_KEY, "ProgramFilesDir")
+        .map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from)
+        .join(STATE_FOLDER)
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let plain = |path: &Path| path.to_string_lossy().trim_end_matches('\\').to_lowercase();
+    plain(left) == plain(right)
+}
+
+/// Whether this is a copy in [`safe_folder`].
+pub fn runs_from_safe_folder() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|program| program.parent().map(Path::to_path_buf))
+        .is_some_and(|folder| same_path(&folder, &safe_folder()))
+}
+
+/// Copy this program into [`safe_folder`], under a name of its own, run the copy in this window with
+/// the same arguments, and wait for it. Then remove the copy, once its caretaker has let go of it.
+/// Nothing before the copy starts loads a DLL by name: tried with Windows' own DLLs planted beside it,
+/// on Windows 7 32-bit and 64-bit.
+pub fn run_from_safe_folder() -> io::Result<ExitStatus> {
+    let folder = safe_folder();
+    fs::create_dir_all(&folder)?;
+    // What an earlier run could not remove. One still in use is left.
+    if let Ok(entries) = fs::read_dir(&folder) {
+        for entry in entries.flatten() {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    let copy = folder.join(format!("WinAppMigrator Client {}.exe", std::process::id()));
+    fs::copy(std::env::current_exe()?, &copy)?;
+    let status = Command::new(&copy)
+        .args(std::env::args_os().skip(1))
+        .status();
+    for _ in 0..CARETAKER_TRIES {
+        match fs::remove_file(&copy) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                thread::sleep(CARETAKER_PAUSE);
+            }
+            _ => break,
+        }
+    }
+    let _ = fs::remove_dir(&folder);
+    status
+}
+
+/// Remove the copy this runs from, and its folder if nothing else is in it, a moment after this has
+/// ended, which is the soonest Windows lets it go. The run that copied it does the same if it is still
+/// there to, and the next run removes any that is left.
+fn remove_this_copy_once_ended() {
+    let Ok(program) = std::env::current_exe() else {
+        return;
+    };
+    if !runs_from_safe_folder() {
+        return;
+    }
+    // `ping` is what waits: `cmd` has no pause that needs no console.
+    let _ = windows_tool("cmd.exe")
+        .raw_arg(format!(
+            "/d /c ping -n 3 127.0.0.1 >nul & del /f /q \"{}\" & rd \"{}\"",
+            program.display(),
+            safe_folder().display()
+        ))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .spawn();
 }
 
 /// Undo each thing a record says a run did.
@@ -287,7 +416,7 @@ pub struct Snapshot {
 impl Snapshot {
     /// Take one of the drive Windows is on, and record it before anything else can fail.
     pub fn take(state: &mut RunState) -> io::Result<Self> {
-        let drive: String = windows_folder().to_string_lossy().chars().take(2).collect();
+        let drive = system_drive();
         // PowerShell 2.0, as Windows 7 has it: no `::new`, no `-LiteralPath` on `Get-Acl`.
         let script = format!(
             "$r = ([wmiclass]'root\\cimv2:Win32_ShadowCopy').Create('{drive}\\', 'ClientAccessible'); \
@@ -348,7 +477,7 @@ pub fn open_firewall(program: &Path) -> io::Result<()> {
         (RULE_TCP, "TCP", LINK_PORT),
         (RULE_UDP, "UDP", DISCOVERY_PORT),
     ] {
-        let output = Command::new(tool("netsh.exe"))
+        let output = windows_tool("netsh.exe")
             .args(["advfirewall", "firewall", "add", "rule"])
             .arg(format!("name={name}"))
             .args(["dir=in", "action=allow"])
@@ -369,7 +498,7 @@ pub fn open_firewall(program: &Path) -> io::Result<()> {
 
 pub fn close_firewall() {
     for name in [RULE_TCP, RULE_UDP] {
-        let _ = Command::new(tool("netsh.exe"))
+        let _ = windows_tool("netsh.exe")
             .args(["advfirewall", "firewall", "delete", "rule"])
             .arg(format!("name={name}"))
             .output();

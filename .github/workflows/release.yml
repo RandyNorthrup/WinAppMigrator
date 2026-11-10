@@ -17,8 +17,80 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The client the app saves for the old PC, built for Windows 7 and later, which takes the standard
+  # library built for that target; see the script. The app carries it, so it is signed before the app
+  # is built, in a job of its own.
+  client:
+    name: Build the client for Windows 7 and later
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99.1"
+          components: rust-src
+
+      - name: Build the client
+        shell: pwsh
+        run: scripts/build-client.ps1
+
+      - name: Hand on the client
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wam-client-unsigned
+          path: target\win7\i686-win7-windows-msvc\release\winappmigrator-client.exe
+          retention-days: 1
+          if-no-files-found: error
+
+  # Signed apart from every build, so that nothing from the repository or crates.io runs once this
+  # can sign: only pinned actions, and the client, which is not run. See docs/signing.md for why the
+  # client may be signed and the stub may not.
+  sign-client:
+    name: Sign the client
+    needs: client
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      id-token: write # signs in to Azure for code signing
+    steps:
+      - name: Take the client
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wam-client-unsigned
+          path: ${{ runner.temp }}\wam-client
+
+      - name: Sign in to Azure for code signing
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Sign the client
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: https://wus.codesigning.azure.net/
+          signing-account-name: scnetsolutions
+          certificate-profile-name: SAKUtility
+          files: ${{ runner.temp }}\wam-client\winappmigrator-client.exe
+          description: WinAppMigrator Client
+          description-url: https://github.com/RandyNorthrup/WinAppMigrator
+          exclude-environment-credential: true
+
+      - name: Hand on the signed client
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wam-client-signed
+          path: ${{ runner.temp }}\wam-client\winappmigrator-client.exe
+          retention-days: 1
+          if-no-files-found: error
+
   release:
     name: Build, sign, and publish Windows x64 release
+    needs: sign-client
     runs-on: windows-latest
     # Azure trusts GitHub's sign-in token only from this environment, which only v*
     # tags can use.
@@ -82,22 +154,37 @@ jobs:
           $status = (Get-AuthenticodeSignature target/release/winappmigrator-installer.exe).Status
           if ($status -ne 'NotSigned') { throw "The installer stub must stay unsigned, but its signature is $status." }
 
-      # The client the app saves for the old PC. It is built for Windows 7 and later, which takes
-      # the standard library built for that target; see the script.
-      - name: Build the client for Windows 7 and later
-        shell: pwsh
-        run: scripts/build-client.ps1
+      - name: Take the signed client
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wam-client-signed
+          path: ${{ runner.temp }}\wam-client
 
-      - name: Build app with embedded stub (release)
+      # Checked here too, as what this job takes from another.
+      - name: Check the client's signature
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature "$env:RUNNER_TEMP\wam-client\winappmigrator-client.exe"
+          if ($signature.Status -ne 'Valid') { throw "The client's signature is $($signature.Status): $($signature.StatusMessage)" }
+          if ($signature.SignerCertificate.Subject -notmatch 'CN=Randy Northrup') { throw "Signed by someone else: $($signature.SignerCertificate.Subject)" }
+          if (-not $signature.TimeStamperCertificate) { throw 'The signature has no timestamp.' }
+          Write-Host "Signed by $($signature.SignerCertificate.Subject), timestamped by $($signature.TimeStamperCertificate.Subject)"
+
+      - name: Build app with embedded stub and client (release)
         shell: pwsh
         env:
           WINAPPMIGRATOR_INSTALLER_STUB: ${{ github.workspace }}\target\release\winappmigrator-installer.exe
+          WINAPPMIGRATOR_CLIENT: ${{ runner.temp }}\wam-client\winappmigrator-client.exe
         run: cargo build --locked --release -p winappmigrator-gui
 
       # An app without the stub inside it would build no installers. CI runs the same check.
       - name: Check the app embeds the stub
         shell: pwsh
         run: .github/scripts/check-stub-embedded.ps1 -App target/release/winappmigrator.exe -Stub target/release/winappmigrator-installer.exe
+
+      - name: Check the app embeds the signed client
+        shell: pwsh
+        run: .github/scripts/check-stub-embedded.ps1 -App target/release/winappmigrator.exe -Stub "$env:RUNNER_TEMP\wam-client\winappmigrator-client.exe" -Name client
 
       # Code signing with Azure Artifact Signing, under the maintainer's verified
       # identity (CN=Randy Northrup). No password is stored anywhere: Azure accepts
@@ -162,7 +249,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         shell: pwsh
         run: |
-          $notes = "WinAppMigrator $env:TAG - portable Windows x64 build. A single elevated app (winappmigrator.exe) that carries the self-extracting installer stub inside it. See CHANGELOG.md for details.`n`n**Code signing:** winappmigrator.exe is signed with Azure Artifact Signing (publisher: Randy Northrup). Installers you build with it are not signed unless you sign them yourself; see docs/signing.md.`n`nCheck the exe or the zip with ``gh attestation verify <file> --repo RandyNorthrup/WinAppMigrator``."
+          $notes = "WinAppMigrator $env:TAG - portable Windows x64 build. A single elevated app (winappmigrator.exe) that carries the self-extracting installer stub inside it. See CHANGELOG.md for details.`n`n**Code signing:** winappmigrator.exe, and WinAppMigrator Client inside it, are signed with Azure Artifact Signing (publisher: Randy Northrup). Installers you build with it are not signed unless you sign them yourself; see docs/signing.md.`n`nCheck the exe or the zip with ``gh attestation verify <file> --repo RandyNorthrup/WinAppMigrator``."
           gh release create $env:TAG `
             "dist/WinAppMigrator-$env:TAG-windows-x64.zip" `
             "dist/WinAppMigrator-$env:TAG.exe" `

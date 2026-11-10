@@ -251,14 +251,21 @@ is, above, and the link adds this:
   and a count as each nonce: a message changed, replayed, reordered or reflected is refused, and the link ends.
 - **The client only reads, and only below the snapshot's root.** Every path is checked for names Windows would read as
   something else and for `..`, and each folder on the way for a link, which is never followed. It writes nothing on the PC
-  but its own record, a snapshot, and two firewall rules, all removed when it stops or by its next run.
+  but its own record, a snapshot, two firewall rules, and while it runs a copy of itself in Program Files, all removed when it
+  stops or by its next run.
 - **The client is reachable from the local network while it runs.** Its rules allow its two ports from the local subnet,
   for whoever is there, and only the code stands between them and the PC's files. Run it on a network you know, and stop it
   when the build is done. Discovery is in the open: anyone there can see the PC's name and Windows.
 - **What it says about itself is not trusted.** A PC's name and Windows, from discovery or from the client, are shown and
   nothing more. What the build reads from it is a drive's to this app, so everything above about a drive applies.
-- **The client is not signed.** Windows says so when it asks to let it make changes, and checking its file is the only way
-  to know it is the one the app saved. Save it from the app, on a drive or folder only you can write to.
+- **The client is signed**, by the release workflow, as the app is, and the UAC prompt names Randy Northrup as its
+  publisher. On Windows 7 without its last updates, Windows cannot check a signature of this kind and says the publisher is
+  unknown, which leaves checking its file the only way to know it is the one the app saved. Either way, save it from the
+  app, on a drive or folder only you can write to.
+- **A DLL beside the client is not loaded into it.** It imports only DLLs Windows always loads from System32, and runs
+  from a copy of itself in `%ProgramFiles%\WinAppMigrator Client`, which only an administrator can change, since Windows
+  looks beside a program first for some DLLs it loads later. Its tools get an environment of Windows' own. See
+  [why the client may be signed](docs/signing.md#why-the-client-may-be-signed).
 
 ## Another account's data
 

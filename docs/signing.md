@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | `winappmigrator.exe`, the app | Yes, by the release workflow | It is what people download. The UAC prompt shows the publisher, Randy Northrup. |
 | `winappmigrator-installer.exe`, the stub | **Never** | See below. It is embedded in the app and never published alone. |
+| `WinAppMigrator Client.exe`, the client | Yes, by the release workflow, before the app is built around it | It is run elevated on the old PC, where the UAC prompt then shows the publisher. See [why it may be](#why-the-client-may-be-signed). |
 | An installer you build | Only if you sign it yourself | You are its publisher, not this project. |
 | The loader of an installer in two files | Only if you sign it yourself | It is the `.exe` of that installer. Its footer holds the hash of its data file, so the signature covers that too. |
 | The data file of an installer in two files | No | It is not a program, and has nothing to carry a signature. |
@@ -23,13 +24,38 @@ The certificate profile is shared with other projects, so revoking it would hit 
 
 Three independent layers stop this:
 
-1. **The release workflow** fails if the stub carries a signature, and signs only the app. It also fails unless the app
+1. **The release workflow** fails if the stub carries a signature, and signs only the app and the client. It also fails unless the app
    holds that stub byte for byte, and building an app for release fails with no stub to embed.
 2. **Building refuses a signed stub** (`refuse_signed_stub` in `archive.rs`).
 3. **The stub only trusts a package a signature would cover.** It reads the package, or the
    footer that vouches for a data file, from directly before the certificate table, never from
    inside it, and refuses any data after it. So even a stub signed by mistake could not be abused
    this way.
+
+## Why the client may be signed
+
+What made a signed stub dangerous is that it runs what its own file carries. The client reads nothing
+from its own file: whatever is hidden in its certificate table is never looked at, so it still only
+does what the client does. Its signature says the program is this project's, as the app's does.
+
+What a signature does change is that someone could hand out the signed client beside a DLL of their
+own, for Windows to load into it under this project's name. So, besides what every signed executable
+here does (below):
+
+- **It imports only DLLs Windows always loads from System32**: `kernel32`, `advapi32`, `ws2_32` and
+  `ntdll`. `build-client.ps1` builds it, and its randomness for pairing comes through `RtlGenRandom` in
+  `advapi32` rather than `bcrypt.dll`, which is not one of them, as Windows 7 ignores
+  `/DEPENDENTLOADFLAG`.
+- **It runs from a folder only an administrator can change.** Windows loads some DLLs only when first
+  needed, by name, looking beside the program first whatever it asks: on 32-bit Windows 7,
+  `RtlGenRandom` loads `cryptbase.dll` that way, and a copy planted beside the client was loaded into it.
+  So the client first copies itself into `%ProgramFiles%\WinAppMigrator Client` and runs from there,
+  having done nothing that loads a DLL. Tried on Windows 7, 32-bit and 64-bit, with Windows' own DLLs
+  planted beside it: none were loaded, before the copy or after, through pairing and a whole build.
+- **Every Windows tool it starts gets an environment of Windows' own**, not the person's, as below.
+
+The release workflow signs it in a job of its own, which runs nothing from the repository or crates.io,
+then checks its signature and that the app carries it byte for byte.
 
 ## Signing an installer you built
 
@@ -113,7 +139,7 @@ gh attestation verify .\WinAppMigrator-v1.2.3.exe --repo RandyNorthrup/WinAppMig
 ## Other protections for signed, elevated executables
 
 A signed program that runs elevated is a target for loading someone else's code under its
-name, so between them the two executables also:
+name, so between them the app and the stub also, and the client as [above](#why-the-client-may-be-signed):
 
 - resolve imported DLLs from System32 only (`/DEPENDENTLOADFLAG:0x800`), and DLLs loaded at
   runtime likewise (`SetDefaultDllDirectories`, first thing in `main`);

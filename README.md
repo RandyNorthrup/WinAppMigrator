@@ -218,7 +218,7 @@ Those are small, well-behaved apps on clean machines, and this is how far that g
   through them is only done with no real window. A real graphics card, display scaling, and more than one monitor have not been run.
 - **Uninstalling.** CI runs the quiet command an entry in Settings records, `QuietUninstallString`, and only opens the
   windowed one. It has not clicked **Uninstall** in Settings or in the uninstaller's window.
-- **Signing.** `v0.5.0` is the first release that is signed. A certificate of your own on an installer has only been tried with a throwaway one.
+- **Signing.** `v0.5.0` is the first release that is signed, and `v0.6.0` the first whose client is. A signed client on 32-bit and 64-bit Windows 7 SP1, before its last updates, has not been tried. A certificate of your own on an installer has only been tried with a throwaway one.
 - **What has not been tried at all.** An app with online activation, a driver being loaded, an app the size of an office
   suite, an app's own updater after a move, and a restart afterward.
 
@@ -354,7 +354,7 @@ the rest are grouped below: click a group to open it.
   an account's own permissions let it read is left out, and so is whether an account owns a folder outside its profile,
   which leaves data of an app installed for one account outside its profile behind. The old PC needs the internet for
   nothing, and the new one finds it only on the same local network: across a router, type its address. A firewall other
-  than Windows' own has to be told to let the client's ports, TCP 47732 and UDP 47731, through. The client is not signed.
+  than Windows' own has to be told to let the client's ports, TCP 47732 and UDP 47731, through.
 - **A disk image is attached read-only** and with no drive letter, and detached when you pick another source or close
   the app. Only `.vhd` and `.vhdx`, which Windows can attach: an image from VMware or VirtualBox has to be saved as one
   first, and one Windows already has attached is refused, since something else may be writing to it.
@@ -393,7 +393,7 @@ Open issues are tracked in the [plan](https://github.com/RandyNorthrup/WinAppMig
   [More](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/SECURITY.md#an-installer-can-contain-secrets).
 - **Installers from before `0.5.0` can say more.** Those can hold the name of the PC and account they were built on, and what
   apps remember in the registry, such as recent files and hosts, even with User data off. Treat them as private.
-- **Signing.** From `v0.5.0` on, the app is signed (publisher: Randy Northrup), and each release
+- **Signing.** From `v0.5.0` on, the app is signed (publisher: Randy Northrup), and from `v0.6.0` WinAppMigrator Client too; each release
   records build provenance you can check with `gh attestation verify`. Earlier downloads are
   unsigned. Installers you build are not signed unless you sign them, so Windows shows "Unknown
   publisher" for them. [Why, and how to sign one](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/signing.md).
@@ -468,8 +468,9 @@ there is replaced.
   of registry files there while it runs.
 - **WinAppMigrator Client**, on the PC an app is moving off, keeps a snapshot of the Windows drive, two Windows Firewall rules
   named `WinAppMigrator Client (link)` and `(discovery)`, and a record of both, `%ProgramData%\WinAppMigrator Client\running.txt`,
-  only while it runs. Stopping it or closing its window removes all three. If the PC shuts down while it runs, the next run of
-  the client removes them first. The empty `WinAppMigrator Client` folder stays.
+  only while it runs. It runs from a copy of itself in `%ProgramFiles%\WinAppMigrator Client`, which only an administrator can
+  change. Stopping it or closing its window removes all of them. If the PC shuts down while it runs, the next run of the client
+  removes them first. The empty `WinAppMigrator Client` folder in ProgramData stays.
 
 ## Building from source
 

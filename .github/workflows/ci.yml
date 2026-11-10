@@ -80,6 +80,10 @@ jobs:
         shell: pwsh
         run: .github/scripts/check-stub-embedded.ps1 -App target/release/winappmigrator.exe -Stub target/release/winappmigrator-installer.exe
 
+      - name: Check the app embeds the client
+        shell: pwsh
+        run: .github/scripts/check-stub-embedded.ps1 -App target/release/winappmigrator.exe -Stub target/win7/i686-win7-windows-msvc/release/winappmigrator-client.exe -Name client
+
       # What the job that opens it plants for it not to run. It only says that it ran.
       - name: Build a stand-in for planted code
         shell: pwsh

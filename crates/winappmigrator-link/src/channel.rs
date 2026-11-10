@@ -33,6 +33,69 @@ const MAX_PLAIN: usize = 64;
 pub const MAX_MESSAGE: usize = 1024 * 1024 + 64 * 1024;
 const TAG_BYTES: usize = 16;
 
+/// What SPAKE2 draws to start: one Ed25519 scalar, from 64 random bytes.
+const SPAKE2_DRAWS: usize = 64;
+
+/// SPAKE2's randomness, taken from Windows before it starts, so that Windows giving none is an
+/// error here rather than a panic inside SPAKE2, and wiped when it has been used. It comes through
+/// `getrandom` 0.3, which on Windows 7 asks `RtlGenRandom` in `advapi32.dll`, one of the DLLs Windows
+/// only ever loads from System32. SPAKE2's own would come through `getrandom` 0.2, which imports
+/// `bcrypt.dll` by name. That one is not, and Windows 7 ignores `/DEPENDENTLOADFLAG`, so a
+/// `bcrypt.dll` put beside the client on a USB drive would be loaded into it, elevated.
+struct Drawn {
+    bytes: [u8; SPAKE2_DRAWS],
+    used: usize,
+}
+
+impl Drawn {
+    fn from_windows() -> Result<Self> {
+        let mut bytes = [0_u8; SPAKE2_DRAWS];
+        getrandom::fill(&mut bytes).map_err(|error| {
+            LinkError::Io(io::Error::other(format!(
+                "Windows gave no randomness to pair with: {error}"
+            )))
+        })?;
+        Ok(Self { bytes, used: 0 })
+    }
+}
+
+impl rand_core::RngCore for Drawn {
+    fn next_u32(&mut self) -> u32 {
+        rand_core::impls::next_u32_via_fill(self)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        rand_core::impls::next_u64_via_fill(self)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        let from_drawn = dest.len().min(SPAKE2_DRAWS - self.used);
+        let (drawn, rest) = dest.split_at_mut(from_drawn);
+        drawn.copy_from_slice(&self.bytes[self.used..self.used + from_drawn]);
+        self.used += from_drawn;
+        // Only if SPAKE2 ever draws more than it does: then as `rand_core`'s own `OsRng` would,
+        // since there is nothing safe to go on with.
+        if !rest.is_empty()
+            && let Err(error) = getrandom::fill(rest)
+        {
+            panic!("Windows gave no randomness to pair with: {error}");
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl rand_core::CryptoRng for Drawn {}
+
+impl Drop for Drawn {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.bytes);
+    }
+}
+
 /// Which end of the link this is.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Side {
@@ -51,10 +114,11 @@ pub struct SecureChannel<S> {
 
 /// Pair as the builder, with the code the person read off the old PC.
 pub fn pair_as_builder<S: Read + Write>(mut stream: S, code: &str) -> Result<SecureChannel<S>> {
-    let (state, outbound) = Spake2::<Ed25519Group>::start_a(
+    let (state, outbound) = Spake2::<Ed25519Group>::start_a_with_rng(
         &Password::new(code_bytes(code).as_bytes()),
         &Identity::new(BUILDER_IDENTITY),
         &Identity::new(CLIENT_IDENTITY),
+        Drawn::from_windows()?,
     );
     write_plain(&mut stream, HELLO)?;
     write_plain(&mut stream, &outbound)?;
@@ -84,10 +148,11 @@ pub fn pair_as_client<S: Read + Write>(mut stream: S, code: &str) -> Result<Secu
         ));
     }
     let inbound = read_plain(&mut stream)?;
-    let (state, outbound) = Spake2::<Ed25519Group>::start_b(
+    let (state, outbound) = Spake2::<Ed25519Group>::start_b_with_rng(
         &Password::new(code_bytes(code).as_bytes()),
         &Identity::new(BUILDER_IDENTITY),
         &Identity::new(CLIENT_IDENTITY),
+        Drawn::from_windows()?,
     );
     write_plain(&mut stream, &outbound)?;
     let key = state

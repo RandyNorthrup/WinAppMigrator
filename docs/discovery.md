@@ -826,6 +826,13 @@ Windows has:
   A run that ended with its caretaker too, as when Windows shuts down, leaves the record, and the next run removes what it
   names first. One still running is left alone, and a second will not start.
 
+Before any of that, the client copies itself into `%ProgramFiles%\WinAppMigrator Client`, which only an administrator can
+change, runs the copy in the same window, and removes it when that ends, as its caretaker does after a closed window
+(`run_from_safe_folder` in `system.rs`). Windows loads some DLLs only when first needed, by name, beside the program first: on
+32-bit Windows 7, `RtlGenRandom` loads `cryptbase.dll` so, and a copy planted beside the client was loaded into it. Every
+Windows tool it starts gets an environment of Windows' own, not the person's. See
+[signing.md](signing.md#why-the-client-may-be-signed).
+
 A paired link that asks nothing for 30 minutes is closed. The client keeps running, with its snapshot and rules, until it is
 stopped.
 

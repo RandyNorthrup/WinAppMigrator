@@ -151,5 +151,5 @@ avoid and code cannot: see [Known gaps](../SECURITY.md#known-gaps).
 
 ## Code signing
 
-Releases sign the app. The installer stub stays unsigned on purpose, and installers
+Releases sign the app and WinAppMigrator Client. The installer stub stays unsigned on purpose, and installers
 are signed only by whoever builds them. See [signing.md](signing.md).
