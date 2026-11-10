@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – Move installed Windows programs to a new PC</title>
+  <meta name="description" content="Free, open-source tool that turns an installed Windows app into one installer for another PC, even from a dead PC's drive, a disk image, or an old Windows 7 PC.">
+  <link rel="canonical" href="${base_url}/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – Move installed Windows programs to a new PC">
+  <meta property="og:description" content="Turn an installed Windows app into one installer you can run on another PC, even when the original installer is long gone.">
+  <meta property="og:url" content="${base_url}/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "Turns an installed Windows desktop app into one self-extracting installer for another PC: from this PC, a drive pulled out of a dead machine, a disk image, or an old Windows 7 or later PC over your network.",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">Skip to the page</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="Site">
+        <a href="Home">Docs</a>
+        <a href="https://github.com/${repository}/releases/latest">Download</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>Move installed Windows programs to a new PC</h1>
+      <p class="lede">WinAppMigrator turns an app installed on one Windows PC into one installer you can run on another.
+        Even when the app is on an old Windows 7 PC across your network, on a drive pulled out of a dying machine, or on an
+        image of one, and the original installer is long gone.</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">Download ${version}</a>
+        <a class="button" href="Getting-Started">Get started</a>
+      </p>
+      <p class="facts">Free and open source, MIT license · Windows 10 and 11, x64 · Signed by Randy Northrup</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="WinAppMigrator with an app selected, showing how big its installer can be, whether that fits, and what goes in it">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">When it helps</h2>
+      <div class="cards">
+        <article>
+          <h3>Moving to a new PC</h3>
+          <p>An app comes along without hunting for its setup file, its license file, or its settings.</p>
+          <a href="Getting-Started">Getting started</a>
+        </article>
+        <article>
+          <h3>The old PC will not start</h3>
+          <p>Take its drive out, connect it to a working PC, and build an installer from an app on it. If the drive may be
+            failing, make an image of it first and build from the image, since reading a failing drive can finish it off.</p>
+          <a href="Moving-from-a-Connected-Drive">From a drive or a disk image</a>
+        </article>
+        <article>
+          <h3>Leaving Windows 7, Vista, 8 or 8.1</h3>
+          <p>An app from one goes onto Windows 10 or 11, with what was different there taken care of: 32-bit Windows,
+            <code>VirtualStore</code>, and the DirectX 9 runtime.</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">Apps from older Windows</a>
+        </article>
+        <article>
+          <h3>The old PC still runs, on your network</h3>
+          <p>Run the small, signed WinAppMigrator Client on it, type the code it shows, and pick an app. Only what the build
+            needs crosses the network, encrypted. Nothing has to be taken out of the PC.</p>
+          <a href="Moving-over-the-Network">From a PC over the network</a>
+        </article>
+        <article>
+          <h3>The setup file is gone, or the company is</h3>
+          <p>It works backward from what is installed: the app's files, its registry entries, its services, and the
+            Microsoft runtimes it needs.</p>
+          <a href="How-It-Works">How it works</a>
+        </article>
+        <article>
+          <h3>The same app on several PCs</h3>
+          <p>An installer it builds can preview, install and uninstall from a command prompt, so a script can install the
+            same app on each PC.</p>
+          <a href="Command-Line">Command line</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">How it works</h2>
+      <ol class="steps">
+        <li>
+          <h3>Pick an app</h3>
+          <p>From this PC, a drive from another PC plugged into this one, a <code>.vhd</code> or <code>.vhdx</code> image
+            the app attaches read-only, or another PC on your network.</p>
+        </li>
+        <li>
+          <h3>See what goes in</h3>
+          <p>The screen says how big the installer can be, whether it fits, and what it holds. Untick what you do not want,
+            and tick what looks related that exact names missed.</p>
+        </li>
+        <li>
+          <h3>Build the installer</h3>
+          <p>You get one <code>.exe</code>, named after what it holds. An app too big for one comes as an <code>.exe</code>
+            and a data file that stay together.</p>
+        </li>
+        <li>
+          <h3>Run it on the other PC</h3>
+          <p>It checks its package's hashes before writing anything, installs, then reads back what it installed and checks
+            that. If anything goes wrong, or you cancel, it puts back what it did, except a runtime it installed. It leaves
+            an uninstaller in Settings.</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="The installer, showing the install location, whether it is signed, and what it sets up beyond files">
+      </picture>
+      <p class="more"><a href="How-It-Works">The whole journey, step by step</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">What goes in an installer</h2>
+      <ul class="checks">
+        <li><strong>Program files</strong>, found through MSI and Inno Setup records, NSIS logs, App Paths, and folders named
+          exactly for the product.</li>
+        <li><strong>Registry entries</strong>: the app's machine-wide keys, its COM classes, file types, link protocols, menu
+          commands and shell extensions.</li>
+        <li><strong>Services and drivers, scheduled tasks, shortcuts</strong>, firewall rules, fonts, and the environment
+          variables that hold the app's path.</li>
+        <li><strong>Runtimes</strong>: the Visual C++ and modern .NET runtimes it needs, downloaded when you build and put
+          inside, so they install without internet, unless one could not be downloaded then.</li>
+        <li><strong>User data and license data, if you choose.</strong> It never gets around activation, and a license tied
+          to the old machine may need reactivating.</li>
+        <li><strong>Never credentials.</strong> Values and files that look like passwords, tokens or private keys are left
+          out and named before you build.</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">Everything that goes in, and what does not</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">Before you rely on it</h2>
+      <p>Every push to the project moves five real open-source apps, 7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter and
+        Git LFS, from one test machine to fresh ones, and asks Windows itself to use what was restored. Those are small, well-behaved
+        apps on clean machines. Desktop Windows 10 and 11 on x64 have not been run in those tests, and an app with online
+        activation, a driver being loaded, and a restart afterward have not been tried at all.</p>
+      <p>So try an installer before you rely on it, and make an image of a failing drive before you read it. It is only
+        for software you are allowed to move.</p>
+      <p class="more"><a href="Limitations">Limitations</a> · <a href="Requirements-and-Testing">Requirements and testing</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">Get it</h2>
+      <ol class="plain">
+        <li>Download <code>WinAppMigrator-v${version}.exe</code> from the
+          <a href="https://github.com/${repository}/releases/latest">latest release</a>. There is nothing to install.</li>
+        <li>Run it. Windows asks for administrator approval, because reading another drive and installing services both
+          need it. Its signature names Randy Northrup.</li>
+        <li>Pick an app, and the screen shows you what would go in its installer before you click anything.</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">Download ${version}</a>
+        <a class="button" href="Getting-Started">How to check the download</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version}, released ${release_date}. Free and open source, under the
+        <a href="https://github.com/${repository}/blob/main/LICENSE">MIT license</a>.</p>
+      <p><a href="Home">Documentation</a> · <a href="https://github.com/${repository}">Source</a> ·
+        <a href="https://github.com/${repository}/issues">Report a problem</a> ·
+        <a href="https://github.com/${repository}/security/policy">Security</a></p>
+    </div>
+  </footer>
+</body>
+</html>

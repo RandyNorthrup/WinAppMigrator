@@ -1,0 +1,159 @@
+name: Website
+
+# Builds https://randynorthrup.github.io/WinAppMigrator from the wiki and site/, and publishes it with GitHub Pages.
+# Search engines do not read a GitHub wiki until its repository has 500 stars, so this is where they find the docs.
+# It runs when the site's own files change, when the wiki is edited, after a release is published, once a day, and by
+# hand.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "site/**"
+      - "docs/images/**"
+      - "crates/winappmigrator-ui/assets/**"
+      - ".github/scripts/build-site.py"
+      - ".github/workflows/pages.yml"
+  gollum:
+  # A release's own run is on its tag, which may not deploy to github-pages. This one runs on main once it has finished,
+  # so the landing page shows the new version. It checks out main, never what the release ran on.
+  workflow_run:
+    workflows:
+      - Release
+    types:
+      - completed
+  # A wiki edit pushed with git may not raise the gollum event, so the site is also rebuilt once a day. Only pages that
+  # changed are sent to search engines, so a day with no change tells them nothing.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  SITE_URL: https://randynorthrup.github.io/WinAppMigrator
+  # IndexNow tells Bing, and the search engines that share its index, which pages changed. The key is public by design:
+  # site/<key>.txt holds it, to show that whoever sends it owns the site.
+  INDEXNOW_KEY: 4da2307d903eb83c021e02170dbdc170
+
+jobs:
+  build:
+    name: Build the website
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.build.outputs.changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The date each page last changed, for the sitemap, comes from git.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Clone the wiki
+        run: git clone --quiet "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.wiki.git" "${RUNNER_TEMP}/wiki"
+
+      - name: Check the IndexNow key file
+        run: test "$(cat "site/${INDEXNOW_KEY}.txt")" = "${INDEXNOW_KEY}"
+
+      - name: Fetch the live sitemap
+        id: sitemap
+        # What changed since it is what search engines are told about. Before the first deploy there is none, and every
+        # page is new. If it cannot be read, nothing is sent, rather than every page again.
+        run: |
+          status="$(curl --silent --show-error --location --max-time 30 --write-out '%{http_code}' \
+            --output "${RUNNER_TEMP}/old-sitemap.xml" "${SITE_URL}/sitemap.xml")" || status="failed"
+          case "${status}" in
+            200)
+              echo "notify=true" >> "${GITHUB_OUTPUT}"
+              ;;
+            404)
+              rm -f "${RUNNER_TEMP}/old-sitemap.xml"
+              echo "notify=true" >> "${GITHUB_OUTPUT}"
+              echo "::notice::No live sitemap yet, so every page counts as new."
+              ;;
+            *)
+              echo "notify=false" >> "${GITHUB_OUTPUT}"
+              echo "::warning::The live sitemap could not be read (${status}), so search engines are not told what changed this time."
+              ;;
+          esac
+
+      - name: Build
+        id: build
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NOTIFY: ${{ steps.sitemap.outputs.notify }}
+        run: |
+          changes=()
+          if [ "${NOTIFY}" = "true" ]; then
+            changes=(--old-sitemap "${RUNNER_TEMP}/old-sitemap.xml" --changed-out "${RUNNER_TEMP}/changed.txt")
+          fi
+          python3 -I .github/scripts/build-site.py \
+            --wiki "${RUNNER_TEMP}/wiki" \
+            --out _site \
+            --base-url "${SITE_URL}" \
+            "${changes[@]}"
+          {
+            echo "changed<<CHANGED_URLS"
+            if [ -f "${RUNNER_TEMP}/changed.txt" ]; then cat "${RUNNER_TEMP}/changed.txt"; fi
+            echo "CHANGED_URLS"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+  deploy:
+    name: Publish the website
+    needs: build
+    # Only main is published. The github-pages environment says the same; this keeps it so if that setting changes.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+      - name: Tell search engines what changed
+        if: needs.build.outputs.changed != ''
+        env:
+          CHANGED: ${{ needs.build.outputs.changed }}
+        # A search engine that is down must not fail a published site, so a refusal is a warning.
+        run: |
+          python3 -I - <<'PY'
+          import json, os, urllib.error, urllib.parse, urllib.request
+
+          site = os.environ["SITE_URL"]
+          key = os.environ["INDEXNOW_KEY"]
+          urls = [url for url in os.environ["CHANGED"].split() if url]
+          body = {
+              "host": urllib.parse.urlsplit(site).hostname,
+              "key": key,
+              "keyLocation": f"{site}/{key}.txt",
+              "urlList": urls,
+          }
+          request = urllib.request.Request(
+              "https://api.indexnow.org/indexnow",
+              data=json.dumps(body).encode("utf-8"),
+              headers={"Content-Type": "application/json; charset=utf-8"},
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  print(f"IndexNow took {len(urls)} URLs: HTTP {response.status}")
+          except (urllib.error.URLError, TimeoutError) as error:
+              print(f"::warning::IndexNow did not take the changed pages: {error}")
+          PY

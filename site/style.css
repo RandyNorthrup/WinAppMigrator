@@ -1,0 +1,638 @@
+/* WinAppMigrator website. Light and dark follow the reader's system, as the app and its screenshots do. */
+
+:root {
+  --bg: #ffffff;
+  --bg-soft: #f5f7fb;
+  --bg-code: #f0f2f6;
+  --text: #1c2230;
+  --muted: #5a6478;
+  --line: #d9dee8;
+  --accent: #2d63e0;
+  --accent-text: #ffffff;
+  --accent-soft: #e8effd;
+  --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 8px 24px rgb(16 24 40 / 8%);
+  --syntax-comment: #6e7781;
+  --syntax-keyword: #cf222e;
+  --syntax-string: #0a3069;
+  --syntax-entity: #8250df;
+  --syntax-constant: #0550ae;
+  --syntax-variable: #953800;
+  --radius: 10px;
+  --gutter: 16px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #11151d;
+    --bg-soft: #171c26;
+    --bg-code: #1d2330;
+    --text: #e4e8f0;
+    --muted: #9aa4b8;
+    --line: #2b3342;
+    --accent: #6d97ff;
+    --accent-text: #0d1220;
+    --accent-soft: #1b2640;
+    --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 24px rgb(0 0 0 / 35%);
+    --syntax-comment: #8b949e;
+    --syntax-keyword: #ff7b72;
+    --syntax-string: #a5d6ff;
+    --syntax-entity: #d2a8ff;
+    --syntax-constant: #79c0ff;
+    --syntax-variable: #ffa657;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 var(--font);
+}
+
+a {
+  color: var(--accent);
+  text-underline-offset: 2px;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+}
+
+.skip:focus {
+  left: var(--gutter);
+  top: 8px;
+  z-index: 10;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+}
+
+/* The bar across the top */
+
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.top-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 24px;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 12px var(--gutter);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  font-weight: 650;
+  font-size: 1.1rem;
+  text-decoration: none;
+}
+
+.top-links {
+  display: flex;
+  gap: 20px;
+}
+
+.top-links a {
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.top-links a:hover,
+.top-links a:focus-visible {
+  color: var(--accent);
+}
+
+/* Documentation pages: the list of pages, then the page */
+
+.docs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0 40px;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+.sidebar {
+  margin: 16px 0 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+
+.sidebar summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  font-weight: 600;
+}
+
+.sidebar nav {
+  padding: 0 14px 12px;
+  font-size: 0.95rem;
+}
+
+.sidebar nav p {
+  margin: 14px 0 4px;
+}
+
+.sidebar nav ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sidebar nav li {
+  margin: 2px 0;
+}
+
+.sidebar nav a {
+  display: block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.sidebar nav a:hover,
+.sidebar nav a:focus-visible {
+  background: var(--accent-soft);
+}
+
+.sidebar nav a[aria-current="page"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+@media (min-width: 960px) {
+  .docs {
+    grid-template-columns: 250px minmax(0, 1fr);
+  }
+
+  .sidebar {
+    position: sticky;
+    top: 16px;
+    align-self: start;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    margin-top: 32px;
+  }
+}
+
+/* A page of the documentation, as GitHub renders it */
+
+.markdown {
+  min-width: 0;
+  max-width: 860px;
+  padding: 8px 0 48px;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 1.6em 0 0.5em;
+  line-height: 1.25;
+}
+
+.markdown h1 {
+  font-size: 2rem;
+}
+
+.markdown h2 {
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--line);
+  font-size: 1.5rem;
+}
+
+.markdown h3 {
+  font-size: 1.2rem;
+}
+
+.markdown-heading {
+  position: relative;
+}
+
+.markdown-heading .anchor {
+  position: absolute;
+  top: 50%;
+  left: -1.2em;
+  width: 1.2em;
+  transform: translateY(-50%);
+  color: var(--muted);
+  text-decoration: none;
+  opacity: 0;
+}
+
+.markdown-heading:hover .anchor,
+.markdown-heading .anchor:focus-visible {
+  opacity: 1;
+}
+
+.octicon-link::before {
+  content: "#";
+}
+
+.markdown p,
+.markdown ul,
+.markdown ol,
+.markdown table,
+.markdown pre,
+.markdown blockquote,
+.markdown details {
+  margin: 0 0 1em;
+}
+
+.markdown li + li {
+  margin-top: 0.25em;
+}
+
+.markdown code {
+  padding: 0.15em 0.35em;
+  border-radius: 5px;
+  background: var(--bg-code);
+}
+
+.markdown pre {
+  overflow-x: auto;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  background: var(--bg-code);
+  line-height: 1.45;
+}
+
+.markdown pre code {
+  padding: 0;
+  background: none;
+  font-size: inherit;
+}
+
+.markdown .highlight pre {
+  margin: 0;
+}
+
+.markdown .highlight {
+  margin: 0 0 1em;
+}
+
+.markdown table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  border-collapse: collapse;
+}
+
+.markdown th,
+.markdown td {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  vertical-align: top;
+  text-align: left;
+}
+
+.markdown th {
+  background: var(--bg-soft);
+}
+
+.markdown tr:nth-child(2n) td {
+  background: var(--bg-soft);
+}
+
+.markdown blockquote {
+  padding: 0 1em;
+  border-left: 4px solid var(--line);
+  color: var(--muted);
+}
+
+.markdown details > summary {
+  cursor: pointer;
+}
+
+.markdown img {
+  border-radius: 6px;
+}
+
+.markdown pre.mermaid {
+  background: none;
+  text-align: center;
+  white-space: pre-wrap;
+}
+
+.markdown hr {
+  height: 1px;
+  border: 0;
+  background: var(--line);
+}
+
+.markdown kbd {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--bg-soft);
+}
+
+.updated {
+  margin-top: 40px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* Code colors, by the class names GitHub's renderer gives them */
+
+.pl-c {
+  color: var(--syntax-comment);
+}
+
+.pl-k,
+.pl-smi + .pl-k {
+  color: var(--syntax-keyword);
+}
+
+.pl-s,
+.pl-pds,
+.pl-sr {
+  color: var(--syntax-string);
+}
+
+.pl-en,
+.pl-e {
+  color: var(--syntax-entity);
+}
+
+.pl-c1,
+.pl-ent,
+.pl-mi1 {
+  color: var(--syntax-constant);
+}
+
+.pl-v,
+.pl-smi {
+  color: var(--syntax-variable);
+}
+
+/* The landing page */
+
+.landing main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 var(--gutter) 48px;
+}
+
+.hero {
+  padding: 56px 0 24px;
+  text-align: center;
+}
+
+.hero h1 {
+  max-width: 820px;
+  margin: 0 auto 16px;
+  font-size: clamp(2rem, 5vw, 3.1rem);
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+}
+
+.lede {
+  max-width: 760px;
+  margin: 0 auto 24px;
+  color: var(--muted);
+  font-size: 1.15rem;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin: 0 0 12px;
+}
+
+.button {
+  display: inline-block;
+  padding: 11px 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.button:hover,
+.button:focus-visible {
+  border-color: var(--accent);
+}
+
+.button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.button.primary:hover,
+.button.primary:focus-visible {
+  filter: brightness(1.08);
+}
+
+.facts {
+  margin: 0 0 32px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.shot {
+  display: block;
+  margin: 0 auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.shot.narrow {
+  max-width: min(100%, 560px);
+  margin-top: 8px;
+}
+
+.landing section {
+  padding: 40px 0 8px;
+}
+
+.landing section h2 {
+  margin: 0 0 20px;
+  font-size: 1.75rem;
+  text-align: center;
+}
+
+.landing section > p {
+  max-width: 760px;
+  margin: 0 auto 14px;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.cards article {
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+
+.cards h3 {
+  margin: 0 0 8px;
+  font-size: 1.1rem;
+}
+
+.cards p {
+  flex: 1;
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+
+.cards a {
+  font-weight: 600;
+}
+
+.steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 16px;
+  margin: 0 0 24px;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.steps li {
+  padding: 20px;
+  border-top: 3px solid var(--accent);
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: var(--bg-soft);
+  counter-increment: step;
+}
+
+.steps h3 {
+  margin: 0 0 8px;
+  font-size: 1.1rem;
+}
+
+.steps h3::before {
+  content: counter(step) ". ";
+  color: var(--accent);
+}
+
+.steps p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.checks {
+  max-width: 760px;
+  margin: 0 auto 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.checks li {
+  position: relative;
+  margin: 0 0 12px;
+  padding-left: 28px;
+}
+
+.checks li::before {
+  content: "✓";
+  position: absolute;
+  left: 4px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.plain {
+  max-width: 760px;
+  margin: 0 auto 24px;
+}
+
+.plain li {
+  margin: 0 0 8px;
+}
+
+.more {
+  text-align: center;
+  font-weight: 600;
+}
+
+.landing code {
+  padding: 0.1em 0.3em;
+  border-radius: 5px;
+  background: var(--bg-code);
+}
+
+/* The bottom of every page */
+
+.bottom {
+  border-top: 1px solid var(--line);
+  background: var(--bg-soft);
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.bottom-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px var(--gutter);
+}
+
+.bottom p {
+  margin: 0 0 8px;
+}
+
+@media (max-width: 600px) {
+  .hero {
+    padding-top: 32px;
+  }
+
+  .markdown-heading .anchor {
+    display: none;
+  }
+}

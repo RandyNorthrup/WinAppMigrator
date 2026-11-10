@@ -22,6 +22,7 @@
 
 <p align="center">
   <a href="https://github.com/RandyNorthrup/WinAppMigrator/releases/latest"><strong>Download</strong></a> ·
+  <a href="https://randynorthrup.github.io/WinAppMigrator/">Website and guide</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#what-gets-captured">What gets captured</a> ·
   <a href="#limitations">Limitations</a> ·
@@ -507,6 +508,10 @@ Run the checks with the commands in [CONTRIBUTING.md](https://github.com/RandyNo
 [GitHub Actions](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/.github/workflows/release.yml) when a `v*` tag is pushed.
 
 ## Documentation
+
+The [website](https://randynorthrup.github.io/WinAppMigrator/) has a guide in plain words, from getting started to
+troubleshooting, built from the [wiki](https://github.com/RandyNorthrup/WinAppMigrator/wiki). The documents here are the
+authority, and win if the two ever disagree.
 
 | Document | What it covers |
 | --- | --- |

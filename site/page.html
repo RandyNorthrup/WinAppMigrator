@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' https://raw.githubusercontent.com data:; style-src 'self' 'unsafe-inline'; script-src 'self' https://cdn.jsdelivr.net; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>${title}</title>
+  <meta name="description" content="${description}">
+  <link rel="canonical" href="${canonical}">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="${title}">
+  <meta property="og:description" content="${description}">
+  <meta property="og:url" content="${canonical}">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  ${scripts}
+</head>
+<body>
+  <a class="skip" href="#content">Skip to the page</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="Site">
+        <a href="Home">Docs</a>
+        <a href="https://github.com/${repository}/releases/latest">Download</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+      </nav>
+    </div>
+  </header>
+  <div class="docs">
+    <details class="sidebar" id="sidebar">
+      <summary>All pages</summary>
+      <nav aria-label="Documentation">
+${sidebar}
+      </nav>
+    </details>
+    <main id="content" class="markdown">
+${content}
+      <p class="updated">Last changed ${updated}. Describes WinAppMigrator as of its latest release, ${version}.</p>
+    </main>
+  </div>
+  <footer class="bottom">
+    <div class="bottom-inner">
+${footer}
+      <p>This site is built from the project's <a href="https://github.com/${repository}/wiki">wiki</a>. WinAppMigrator is free and open source, under the <a href="https://github.com/${repository}/blob/main/LICENSE">MIT license</a>.</p>
+    </div>
+  </footer>
+</body>
+</html>

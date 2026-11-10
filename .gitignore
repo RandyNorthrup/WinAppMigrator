@@ -13,3 +13,7 @@ temp/
 
 # Scan report output directories (dev artifacts)
 /scan-output*/
+
+# Website build output (.github/scripts/build-site.py)
+/_site/
+__pycache__/

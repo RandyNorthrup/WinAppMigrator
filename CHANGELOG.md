@@ -2,6 +2,16 @@
 
 All notable project changes are tracked here.
 
+## Unreleased
+
+### A website
+
+- **The guide is on a website search engines can read:** https://randynorthrup.github.io/WinAppMigrator. GitHub keeps a
+  wiki out of search results until its repository has 500 stars, so `.github/workflows/pages.yml` publishes the wiki's
+  pages there, rendered by GitHub's own Markdown renderer, with a landing page from `site/`. It is rebuilt when the site's
+  files change, when the wiki is edited, after a release, and once a day, and the build fails on any link or `#anchor` between pages
+  that leads nowhere. Bing and the search engines that share its index are told which pages changed, through IndexNow.
+
 ## 0.6.0 — 2026-11-09
 
 ### Network PC: another PC, over your network
