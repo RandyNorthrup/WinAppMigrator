@@ -6,7 +6,8 @@
 
 <p align="center">
   <strong>Turn an installed Windows app into one installer you can run on another PC.</strong><br>
-  Even when the app came from a drive pulled out of a dying machine, and the original installer is long gone.
+  Even when the app is on an old Windows 7 PC across your network, on a drive pulled out of a dying machine, or on an
+  image of one, and the original installer is long gone.
 </p>
 
 <p align="center">
@@ -15,6 +16,7 @@
   <a href="https://github.com/RandyNorthrup/WinAppMigrator/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/RandyNorthrup/WinAppMigrator?style=flat-square&color=2d63e0"></a>
   <a href="https://github.com/RandyNorthrup/WinAppMigrator/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/RandyNorthrup/WinAppMigrator/ci.yml?branch=main&style=flat-square&label=CI"></a>
   <img alt="Windows 10 and 11, x64" src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-0078D4?style=flat-square">
+  <img alt="Moves apps from Windows 7 and later" src="https://img.shields.io/badge/moves%20apps%20from-Windows%207%2B-0078D4?style=flat-square">
   <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-b7410e?style=flat-square">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/RandyNorthrup/WinAppMigrator?style=flat-square"></a>
 </p>
@@ -43,7 +45,12 @@ services, and runtimes, and packs them into a single `.exe`, or two files if it 
 
 - **One file, as long as Windows allows.** The app is one portable `.exe`, and so is an installer, unless its
   package would pass the 4 GiB Windows can start. Then it is a small `.exe` and a data file, which stay together.
-- **Works from a pulled drive.** Connect the disk from a failed PC and pick an app from it.
+- **Works from a pulled drive, or an image of one.** Connect the disk from a failed PC, or pick a `.vhd` or `.vhdx` of
+  it, and pick an app from it.
+- **Works over your network.** Run the small, signed WinAppMigrator Client on a PC that still starts, type the code it
+  shows, and pick an app from that PC. Only what the build needs crosses the network, encrypted.
+- **Moves apps off Windows 7.** An app from Windows 7, Vista, 8 or 8.1 goes onto Windows 10 or 11, with what was different
+  there taken care of: 32-bit Windows, `VirtualStore`, the DirectX 9 runtime.
 - **Brings the runtimes along.** The Visual C++ and modern .NET runtimes an app needs are downloaded when you build
   and embedded, so they install without internet, unless one could not be downloaded then.
 - **Checks its work.** The installer checks its package's hashes before writing anything, then reads back
