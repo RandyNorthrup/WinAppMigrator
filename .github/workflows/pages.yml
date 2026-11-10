@@ -22,8 +22,8 @@ on:
       - Release
     types:
       - completed
-  # A wiki edit pushed with git may not raise the gollum event, so the site is also rebuilt once a day. Only pages that
-  # changed are sent to search engines, so a day with no change tells them nothing.
+  # A wiki edit, made on the web or pushed with git, raises gollum. The daily run catches up on one that was missed or
+  # failed. Only pages that changed are sent to search engines, so a day with no change tells them nothing.
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
