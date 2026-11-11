@@ -182,7 +182,9 @@ Versions and tags have three parts, as in `v0.5.0`. The two four-part tags from 
 
 1. In `Cargo.toml`, set the workspace `version` and the four path dependencies under `[workspace.dependencies]`, and let
    `Cargo.lock` follow with a `cargo build`.
-2. In `CHANGELOG.md`, make `## Unreleased` into `## X.Y.Z — YYYY-MM-DD`.
+2. In `CHANGELOG.md`, make `## Unreleased` into `## X.Y.Z — YYYY-MM-DD`, and write a short paragraph under it, before its
+   first `###`, saying for people rather than developers what is new. The release page shows that, after what the app is
+   from `.github/release-notes.md`, and a release stops early without it (`.github/scripts/release-notes.ps1`).
 3. Run `cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md` from the repository's root. A release generates its own
    for the zip, and this keeps the one in the repository the same.
 4. Run the checks above, push `main`, and wait for CI to pass on that commit.

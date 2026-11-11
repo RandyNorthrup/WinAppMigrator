@@ -4,6 +4,12 @@ All notable project changes are tracked here.
 
 ## 0.6.1 — 2026-11-11
 
+Moving an app off another PC over the network is safer. WinAppMigrator Client, on the old PC, now stops anyone on the
+network from guessing its pairing code, and leaves no way for another account on that PC to misuse it. The app no longer
+takes what another PC, a drive, or a disk image says about its own files on trust, so a broken or hostile one cannot fill
+this PC's memory or disk, and it refuses a disk image that would reach out to another disk elsewhere. Titles, labels, and
+buttons are in title case, and the guide now has a website.
+
 ### A website
 
 - **The guide is on a website search engines can read:** https://randynorthrup.github.io/WinAppMigrator. GitHub keeps a

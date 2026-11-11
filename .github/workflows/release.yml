@@ -126,6 +126,14 @@ jobs:
             Where-Object name -eq 'winappmigrator-gui').version
           if ($env:TAG -ne "v$version") { throw "The tag is $env:TAG, but Cargo.toml says the version is $version." }
 
+      # Here, so that a version with no summary in CHANGELOG.md stops before anything is built or signed. The publish job
+      # writes them again for the release.
+      - name: Check the release notes can be written
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: .github/scripts/release-notes.ps1 -Version ($env:TAG.Substring(1)) -Out "$env:RUNNER_TEMP\release-notes.md"
+
       - name: Lint
         shell: pwsh
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -337,11 +345,13 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         shell: pwsh
+        # What the app is, from .github/release-notes.md, and what is new, from the summary under the version's heading
+        # in CHANGELOG.md.
         run: |
-          $notes = "WinAppMigrator $env:TAG - portable Windows x64 build. A single elevated app (winappmigrator.exe) that carries the self-extracting installer stub inside it. See CHANGELOG.md for details.`n`n**Code signing:** winappmigrator.exe, and WinAppMigrator Client inside it, are signed with Azure Artifact Signing (publisher: Randy Northrup). Installers you build with it are not signed unless you sign them yourself; see docs/signing.md.`n`nCheck the exe or the zip with ``gh attestation verify <file> --repo RandyNorthrup/WinAppMigrator``."
+          .github/scripts/release-notes.ps1 -Version ($env:TAG.Substring(1)) -Out dist/release-notes.md
           gh release create $env:TAG `
             "dist/WinAppMigrator-$env:TAG-windows-x64.zip" `
             "dist/WinAppMigrator-$env:TAG.exe" `
             "dist/SHA256SUMS.txt" `
             --title "WinAppMigrator $env:TAG" `
-            --notes $notes
+            --notes-file dist/release-notes.md
