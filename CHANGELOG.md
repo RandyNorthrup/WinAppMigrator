@@ -2,7 +2,7 @@
 
 All notable project changes are tracked here.
 
-## Unreleased
+## 0.6.1 — 2026-11-11
 
 ### A website
 

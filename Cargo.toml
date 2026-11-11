@@ -10,7 +10,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.96.0"
 license = "MIT"
@@ -42,10 +42,10 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 walkdir = "2.5.0"
 winreg = "0.56.0"
 zip = { version = "9.2.1", default-features = false, features = ["deflate"] }
-winappmigrator-core = { version = "0.6.0", path = "crates/winappmigrator-core" }
-winappmigrator-ui = { version = "0.6.0", path = "crates/winappmigrator-ui" }
-winappmigrator-link = { version = "0.6.0", path = "crates/winappmigrator-link" }
-winappmigrator-client = { version = "0.6.0", path = "crates/winappmigrator-client" }
+winappmigrator-core = { version = "0.6.1", path = "crates/winappmigrator-core" }
+winappmigrator-ui = { version = "0.6.1", path = "crates/winappmigrator-ui" }
+winappmigrator-link = { version = "0.6.1", path = "crates/winappmigrator-link" }
+winappmigrator-client = { version = "0.6.1", path = "crates/winappmigrator-client" }
 embed-manifest = "1.5.1"
 winresource = { version = "0.1.34", default-features = false }
 egui_kittest = { version = "0.37.0", features = ["snapshot", "wgpu"] }
