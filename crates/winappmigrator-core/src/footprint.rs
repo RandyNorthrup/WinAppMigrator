@@ -203,7 +203,7 @@ pub struct Footprint {
     pub notes: Vec<String>,
     /// What a scan had to say, with what it left out taken off, since that is listed.
     pub warnings: Vec<Warning>,
-    /// What a person's data comes to, that only goes in with the User data option.
+    /// What a person's data comes to, that only goes in with the User Data option.
     pub data_not_included_files: usize,
     pub data_not_included_bytes: u64,
     pub near_matches: Vec<NearMatch>,
@@ -1987,7 +1987,7 @@ mod tests {
         let mut report = report();
         report.settings_left_out = vec![LeftOutItem {
             name: r"HKCU\Software\Acme".to_owned(),
-            why: "2 values, which only go with the User data option".to_owned(),
+            why: "2 values, which only go with the User Data option".to_owned(),
         }];
         let footprint = Footprint::of(&report, FLAGS)?;
         let group = footprint

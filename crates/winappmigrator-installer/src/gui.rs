@@ -1006,20 +1006,20 @@ impl InstallerApp {
 
         widgets::card_titled(ui, theme, &title, subtitle.as_deref(), |ui| {
             if !source_computer.is_empty() {
-                widgets::kv_row(ui, theme, "Captured from", &source_computer);
+                widgets::kv_row(ui, theme, "Captured From", &source_computer);
             }
             signature_row(ui, theme, &self.signature);
             ui.add_space(SPACE_SM);
             widgets::path_field(
                 ui,
                 theme,
-                "Install location",
+                "Install Location",
                 &mut self.target_root,
                 r"C:\Program Files\App",
                 enabled,
                 || {
                     rfd::FileDialog::new()
-                        .set_title("Choose the install location")
+                        .set_title("Choose the Install Location")
                         .pick_folder()
                 },
             );
@@ -1042,7 +1042,7 @@ impl InstallerApp {
             }
             if let Some(room) = self.room_for_target() {
                 ui.add_space(SPACE_XS);
-                widgets::kv_row(ui, theme, "Room needed", &room.summary());
+                widgets::kv_row(ui, theme, "Room Needed", &room.summary());
                 for shortfall in room.shortfalls() {
                     ui.add_space(SPACE_XS);
                     widgets::notice(
@@ -1067,7 +1067,7 @@ impl InstallerApp {
         widgets::card_titled(
             ui,
             theme,
-            "What this sets up beyond files",
+            "What This Sets Up Beyond Files",
             Some(BEYOND_FILES_TEXT),
             |ui| {
                 if let Some(problem) = self.list_problem.as_ref() {
@@ -1095,7 +1095,7 @@ impl InstallerApp {
                         ui,
                         theme,
                         &mut self.restore_user_data,
-                        "User data",
+                        "User Data",
                         "On: settings, Documents, and Saved Games go to the usual folders of \
                          whoever is signed in. Off: all of it goes under the install folder, and \
                          nothing is set up to run from it.",
@@ -1199,7 +1199,7 @@ impl InstallerApp {
                     theme,
                     ButtonKind::Secondary,
                     Icon::Folder,
-                    "Open install folder",
+                    "Open Install Folder",
                     true,
                 )
                 .clicked()
@@ -1218,7 +1218,7 @@ impl InstallerApp {
             if widgets::button(ui, theme, ButtonKind::Primary, "Install", can_agree).clicked() {
                 self.start(true, &ctx);
             }
-            if widgets::button(ui, theme, ButtonKind::Secondary, "Preview changes", valid).clicked()
+            if widgets::button(ui, theme, ButtonKind::Secondary, "Preview Changes", valid).clicked()
             {
                 self.start(false, &ctx);
             }
@@ -1401,9 +1401,9 @@ fn rollback_ui(ui: &mut egui::Ui, theme: &Theme, report: &UndoReport) {
 
 fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Option<&Path>) {
     let heading = if outcome.applied {
-        "Install result"
+        "Install Result"
     } else {
-        "Preview: nothing has been changed yet"
+        "Preview: Nothing Has Been Changed Yet"
     };
     widgets::card_titled(ui, theme, heading, None, |ui| {
         if outcome.installed_cleanly() {
@@ -1449,15 +1449,15 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
             &[
                 match outcome.rollback.as_ref() {
                     Some(report) => metric(
-                        "Changes put back",
+                        "Changes Put Back",
                         widgets::format_count(report.undone.len()),
                         Role::Accent,
                     ),
                     None => metric(
                         if outcome.applied {
-                            "Changes made"
+                            "Changes Made"
                         } else {
-                            "Changes planned"
+                            "Changes Planned"
                         },
                         widgets::format_count(outcome.changes.len()),
                         Role::Accent,
@@ -1490,9 +1490,9 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
                     ui,
                     theme,
                     if valid {
-                        "Package hashes valid"
+                        "Package Hashes Valid"
                     } else {
-                        "Package hashes INVALID"
+                        "Package Hashes INVALID"
                     },
                     if valid { Role::Success } else { Role::Danger },
                 );
@@ -1502,9 +1502,9 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
                     ui,
                     theme,
                     if valid {
-                        "Installed files valid"
+                        "Installed Files Valid"
                     } else {
-                        "Installed files INVALID"
+                        "Installed Files INVALID"
                     },
                     if valid { Role::Success } else { Role::Danger },
                 );
@@ -1563,21 +1563,21 @@ fn prereq_row(prereq: &RuntimePrerequisite) -> PrereqRow {
         let spec = spec_for_bundle(&prereq.kind, bundle);
         let spec = spec.as_ref();
         if let Some(feature) = spec.and_then(|spec| spec.windows_feature.as_deref()) {
-            (format!("Windows feature: {feature}"), Role::Accent)
+            (format!("Windows Feature: {feature}"), Role::Accent)
         } else if spec.is_some_and(|spec| spec.bundleable) && bundle.package_relative_path.is_some()
         {
             ("Included".to_owned(), Role::Accent)
         } else if let Some(id) = spec.and_then(|spec| spec.winget_id.as_deref()) {
             (format!("Installed with winget: {id}"), Role::Accent)
         } else {
-            ("Install manually".to_owned(), Role::Warning)
+            ("Install Manually".to_owned(), Role::Warning)
         }
     } else if matches!(prereq.kind, RuntimePrerequisiteKind::DotNetFramework4x) {
         ("Built into Windows".to_owned(), Role::Success)
     } else if !prereq.install_manually {
-        ("Ships with the app".to_owned(), Role::Success)
+        ("Ships with the App".to_owned(), Role::Success)
     } else {
-        ("Install manually".to_owned(), Role::Warning)
+        ("Install Manually".to_owned(), Role::Warning)
     };
     PrereqRow {
         name: prereq.name.clone(),
@@ -1809,12 +1809,12 @@ mod tests {
     fn it_only_says_what_pc_an_app_came_from_if_the_package_does() {
         let harness = harness_for(sample_installer(ThemeMode::Dark));
         assert!(harness.query_by_label_contains("OLD-LAPTOP").is_some());
-        assert!(harness.query_by_label_contains("Captured from").is_some());
+        assert!(harness.query_by_label_contains("Captured From").is_some());
 
         let mut app = sample_installer(ThemeMode::Dark);
         app.source_computer = String::new();
         let harness = harness_for(app);
-        assert!(harness.query_by_label_contains("Captured from").is_none());
+        assert!(harness.query_by_label_contains("Captured From").is_none());
     }
 
     #[test]
@@ -1891,7 +1891,7 @@ mod tests {
         harness.run();
         assert!(harness.query_by_label("With data and license").is_some());
 
-        harness.get_by_label("User data").click();
+        harness.get_by_label("User Data").click();
         harness.run();
         assert!(harness.query_by_label("With a license alone").is_some());
         assert!(harness.query_by_label("With data and license").is_none());
@@ -2092,7 +2092,7 @@ mod tests {
 
         let mut harness = harness_for(app);
         harness.run();
-        harness.get_by_label("Preview changes").click();
+        harness.get_by_label("Preview Changes").click();
         run_until_done(&mut harness);
         let state = harness.state();
         assert_eq!(state.error, None);
@@ -2205,8 +2205,8 @@ mod tests {
         for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
             let harness = harness_for(sample_installer(mode));
             assert!(harness.query_by_label("Install").is_some());
-            assert!(harness.query_by_label("Preview changes").is_some());
-            assert!(harness.query_by_label("User data").is_some());
+            assert!(harness.query_by_label("Preview Changes").is_some());
+            assert!(harness.query_by_label("User Data").is_some());
 
             // The README's picture, of the installer it shows being built: nothing of an account's
             // is in it, so there is no PC to name and no data to ask about.
@@ -2217,8 +2217,8 @@ mod tests {
             built_as_shown.restore_user_data = false;
             built_as_shown.restore_license = false;
             let mut harness = harness_for(built_as_shown);
-            assert!(harness.query_by_label_contains("Captured from").is_none());
-            assert!(harness.query_by_label("User data").is_none());
+            assert!(harness.query_by_label_contains("Captured From").is_none());
+            assert!(harness.query_by_label("User Data").is_none());
             preview(&mut harness, &format!("ready-{name}"));
         }
     }
@@ -2234,10 +2234,10 @@ mod tests {
         });
         let harness = harness_for(app);
         for label in [
-            "What this sets up beyond files",
+            "What This Sets Up Beyond Files",
             "Fabrikam Sync Service",
             "Service",
-            "Starts automatically",
+            "Starts Automatically",
             "Shortcut",
             "PATH",
             "Driver",
@@ -2552,7 +2552,7 @@ mod tests {
                 .query_by_label_contains("The runtime stays")
                 .is_some()
         );
-        assert!(harness.query_by_label("Changes put back").is_some());
+        assert!(harness.query_by_label("Changes Put Back").is_some());
         assert!(
             harness.query_by_label("Install").is_some(),
             "it can be tried again"
@@ -2683,7 +2683,7 @@ mod tests {
         let mut harness = harness_for(app);
         assert!(
             harness
-                .query_by_label_contains("nothing has been changed")
+                .query_by_label_contains("Nothing Has Been Changed")
                 .is_some()
         );
         assert!(harness.query_by_label("Install").is_some());

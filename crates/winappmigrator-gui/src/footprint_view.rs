@@ -156,10 +156,10 @@ impl WinAppMigratorApp {
         // Beside its heading, for looking again at what has been looked at.
         let can_look_again = matches!(look, Look::Ready) && !self.is_building();
         widgets::control_row(ui, |ui| {
-            widgets::field_label(ui, theme, "What goes in the installer");
+            widgets::field_label(ui, theme, "What Goes in the Installer");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if can_look_again
-                    && widgets::button(ui, theme, ButtonKind::Ghost, "Look again", true).clicked()
+                    && widgets::button(ui, theme, ButtonKind::Ghost, "Look Again", true).clicked()
                 {
                     self.scan_again();
                 }
@@ -202,7 +202,7 @@ impl WinAppMigratorApp {
                     &format!("This app could not be looked at. {message}"),
                 );
                 ui.add_space(SPACE_SM);
-                if widgets::button(ui, theme, ButtonKind::Secondary, "Try again", true).clicked() {
+                if widgets::button(ui, theme, ButtonKind::Secondary, "Try Again", true).clicked() {
                     self.scan_again();
                 }
             }
@@ -214,7 +214,7 @@ impl WinAppMigratorApp {
                     "Stopped. An installer can be built once this app has been looked at.",
                 );
                 ui.add_space(SPACE_SM);
-                if widgets::button(ui, theme, ButtonKind::Secondary, "Look again", true).clicked() {
+                if widgets::button(ui, theme, ButtonKind::Secondary, "Look Again", true).clicked() {
                     self.scan_again();
                 }
             }
@@ -259,7 +259,7 @@ impl WinAppMigratorApp {
                         widgets::format_count(inputs.payload_files),
                         Role::Accent,
                     ),
-                    metric("Up to", widgets::format_bytes(needed), Role::Accent),
+                    metric("Up To", widgets::format_bytes(needed), Role::Accent),
                     metric(
                         free_label,
                         free_text,
@@ -414,7 +414,7 @@ impl WinAppMigratorApp {
                 theme,
                 &format!(
                     "This was looked at {} ago. Files are read when you build, so a change is \
-                     picked up, and anything gone by then is listed. Look again for anything new.",
+                     picked up, and anything gone by then is listed. Look Again for anything new.",
                     widgets::format_elapsed(age.as_secs())
                 ),
             );
@@ -441,14 +441,14 @@ impl WinAppMigratorApp {
             ui,
             theme,
             ListGroup::Startup,
-            "Starts automatically",
+            "Starts Automatically",
             &footprint.startup,
         );
         self.draw_item_group(
             ui,
             theme,
             ListGroup::Tasks,
-            "Scheduled tasks",
+            "Scheduled Tasks",
             &footprint.tasks,
         );
         self.draw_item_group(
@@ -479,8 +479,8 @@ impl WinAppMigratorApp {
             .filter(|row| row.group == which)
             .collect();
         let (group, title) = match which {
-            FolderGroup::Program => (ListGroup::Program, "Program files"),
-            FolderGroup::Data => (ListGroup::Data, "Data folders"),
+            FolderGroup::Program => (ListGroup::Program, "Program Files"),
+            FolderGroup::Data => (ListGroup::Data, "Data Folders"),
         };
         if rows.is_empty()
             && (which == FolderGroup::Program || footprint.data_not_included_files == 0)
@@ -498,7 +498,7 @@ impl WinAppMigratorApp {
         // With nothing that can go in, what is useful to say is what could.
         let summary = if rows.is_empty() {
             format!(
-                "{} with the User data option",
+                "{} with the User Data option",
                 widgets::format_bytes(footprint.data_not_included_bytes)
             )
         } else {
@@ -517,7 +517,7 @@ impl WinAppMigratorApp {
                 ui,
                 theme,
                 &format!(
-                    "{} in {} of this app's data will only go in with the User data option.",
+                    "{} in {} of this app's data will only go in with the User Data option.",
                     widgets::format_bytes(footprint.data_not_included_bytes),
                     plural(footprint.data_not_included_files, "file", "files"),
                 ),
@@ -615,7 +615,7 @@ impl WinAppMigratorApp {
             ui,
             theme,
             ListGroup::Integrations,
-            "What ties it into Windows",
+            "What Ties It into Windows",
             &summary,
         ) {
             return;
@@ -687,7 +687,7 @@ impl WinAppMigratorApp {
             ui,
             theme,
             ListGroup::Prerequisites,
-            "What it needs to run",
+            "What It Needs to Run",
             &summary,
         ) {
             return;
@@ -708,7 +708,7 @@ impl WinAppMigratorApp {
         let ticked = rows
             .iter()
             .filter(|near| {
-                // One waiting for the User data option is not in, whatever its box says.
+                // One waiting for the User Data option is not in, whatever its box says.
                 self.near_picks.contains_key(&near.id)
                     && (!near.follows_user_data || self.backup_user_data)
             })
@@ -722,7 +722,7 @@ impl WinAppMigratorApp {
             ui,
             theme,
             ListGroup::NearMatches,
-            "Might also be part of it",
+            "Might Also Be Part of It",
             &summary,
         ) {
             return;
@@ -755,7 +755,7 @@ impl WinAppMigratorApp {
         let detail = if usable {
             near.why.clone()
         } else {
-            format!("Comes with the User data option. {}", near.why)
+            format!("Comes with the User Data option. {}", near.why)
         };
         let size = if near.measured_all {
             widgets::format_bytes(near.total_bytes)
@@ -764,7 +764,7 @@ impl WinAppMigratorApp {
         };
         let kind = match near.kind {
             NearMatchKind::Folder => "Folder",
-            NearMatchKind::HiddenEntry => "Hidden part of an app",
+            NearMatchKind::HiddenEntry => "Hidden Part of an App",
         };
         let place = near
             .path
@@ -811,7 +811,7 @@ impl WinAppMigratorApp {
         }
         if named + refused > 0 {
             let summary = plural(named + refused, "thing", "things");
-            if self.group_heading(ui, theme, ListGroup::LeftOut, "Left out, and why", &summary) {
+            if self.group_heading(ui, theme, ListGroup::LeftOut, "Left Out, and Why", &summary) {
                 for group in &footprint.left_out {
                     widgets::hint(ui, theme, &format!("{}:", group.title));
                     ui.add_space(SPACE_XS);
@@ -837,7 +837,7 @@ impl WinAppMigratorApp {
             }
         }
         if warnings > 0 {
-            crate::views::warning_list(ui, theme, "Worth knowing", &footprint.warnings, false);
+            crate::views::warning_list(ui, theme, "Worth Knowing", &footprint.warnings, false);
         }
         ui.add_space(SPACE_LG);
     }

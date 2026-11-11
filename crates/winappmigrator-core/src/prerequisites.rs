@@ -280,12 +280,12 @@ pub fn handling_before_a_build(
         return ("Built into Windows".to_owned(), false);
     }
     if !prerequisite.install_manually {
-        return ("Ships with the app".to_owned(), false);
+        return ("Ships with the App".to_owned(), false);
     }
     let found = spec(&prerequisite.kind, architecture);
     let found = found.as_ref();
     if let Some(feature) = found.and_then(|spec| spec.windows_feature.as_deref()) {
-        return (format!("Windows feature: {feature}"), false);
+        return (format!("Windows Feature: {feature}"), false);
     }
     if found.is_some_and(|spec| spec.bundleable) {
         return ("Included".to_owned(), false);
@@ -293,7 +293,7 @@ pub fn handling_before_a_build(
     if let Some(id) = found.and_then(|spec| spec.winget_id.as_deref()) {
         return (format!("Installed with winget: {id}"), false);
     }
-    ("Install manually".to_owned(), true)
+    ("Install Manually".to_owned(), true)
 }
 
 pub fn spec_for_bundle(

@@ -989,8 +989,8 @@ pub fn search_field(
         let clear = ui
             .interact(clear_rect, id.with("clear"), Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text("Clear search");
-        clear.widget_info(|| WidgetInfo::labeled(A11yRole::Button, true, "Clear search"));
+            .on_hover_text("Clear Search");
+        clear.widget_info(|| WidgetInfo::labeled(A11yRole::Button, true, "Clear Search"));
         if clear.hovered() {
             ui.painter()
                 .rect_filled(clear_rect, RADIUS_SM - 2, theme.card_hover);

@@ -144,7 +144,7 @@ fn run() -> io::Result<()> {
     };
     println!("  This PC:       {}", about.computer_name);
     println!("  Windows:       {}, {bits}", about.windows_name);
-    println!("  Pairing code:  {}", lock(&code));
+    println!("  Pairing Code:  {}", lock(&code));
     println!();
     println!("On your new PC, in WinAppMigrator, choose Network PC... and type this code.");
     println!("Close the app you are moving first, so its files are as it left them.");

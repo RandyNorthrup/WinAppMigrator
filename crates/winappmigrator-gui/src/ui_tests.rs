@@ -228,8 +228,8 @@ fn select_first_looked_at(app: &mut WinAppMigratorApp) {
 fn nothing_selected_invites_a_pick() {
     for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
         let mut harness = harness_with(mode, |_| {});
-        assert!(harness.query_by_label("Pick an application").is_some());
-        assert!(harness.query_by_label("Create installer").is_none());
+        assert!(harness.query_by_label("Pick an Application").is_some());
+        assert!(harness.query_by_label("Create Installer").is_none());
         preview(&mut harness, &format!("empty-{name}"));
     }
 }
@@ -238,10 +238,10 @@ fn nothing_selected_invites_a_pick() {
 fn selected_app_offers_the_build() {
     for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
         let mut harness = harness_with(mode, select_first_looked_at);
-        assert!(harness.query_by_label("Create installer").is_some());
+        assert!(harness.query_by_label("Create Installer").is_some());
         assert!(
             harness
-                .query_by_label_contains("License and activation data")
+                .query_by_label_contains("License and Activation Data")
                 .is_some()
         );
         preview(&mut harness, &format!("selected-{name}"));
@@ -273,7 +273,7 @@ fn a_drive_with_windows_7_says_which_and_what_becomes_of_its_apps() {
                 .query_by_label_contains("so they go to Program Files (x86)")
                 .is_some()
         );
-        assert!(harness.query_by_label_contains("Disk image").is_some());
+        assert!(harness.query_by_label_contains("Disk Image").is_some());
     }
 }
 
@@ -332,7 +332,7 @@ fn with_one_account_there_is_nothing_to_choose() {
         app.backup_user_data = true;
     });
     harness.run_steps(1);
-    assert!(harness.query_by_label("Whose data").is_none());
+    assert!(harness.query_by_label("Whose Data").is_none());
     assert_eq!(
         harness.state().profile_choice(),
         ProfileChoice::Profile("id of alice".to_owned())
@@ -351,7 +351,7 @@ fn accounts_with_data_can_be_chosen_between_and_a_build_goes_by_the_choice() {
         app.backup_user_data = true;
     });
     harness.run_steps(1);
-    assert!(harness.query_by_label("Whose data").is_some());
+    assert!(harness.query_by_label("Whose Data").is_some());
     assert_eq!(
         harness.state().profile_choice(),
         ProfileChoice::Profile("id of alice".to_owned())
@@ -378,7 +378,7 @@ fn the_choice_is_about_user_data_and_only_shows_with_it() {
         app.backup_user_data = false;
     });
     harness.run_steps(1);
-    assert!(harness.query_by_label("Whose data").is_none());
+    assert!(harness.query_by_label("Whose Data").is_none());
 }
 
 #[test]
@@ -432,7 +432,7 @@ fn a_running_build_locks_the_selection() {
         }));
         app.build_room = Some(sample_room());
     });
-    assert!(harness.query_by_label("Create installer").is_none());
+    assert!(harness.query_by_label("Create Installer").is_none());
     assert!(harness.query_by_label("Cancel").is_some());
     assert!(
         harness
@@ -462,7 +462,7 @@ fn a_build_needs_a_full_output_path() {
             .query_by_label_contains("Enter a full folder path")
             .is_some()
     );
-    let button = harness.get_by_label("Create installer");
+    let button = harness.get_by_label("Create Installer");
     assert!(button.accesskit_node().is_disabled());
 }
 
@@ -511,7 +511,7 @@ fn a_person_who_picks_an_app_and_clicks_create_gets_an_installer()
         harness.run_steps(1);
     }
     harness.run_steps(2);
-    harness.get_by_label("Create installer").click();
+    harness.get_by_label("Create Installer").click();
     harness.run_steps(1);
     assert!(
         harness.state().is_building(),
@@ -574,7 +574,7 @@ fn search_narrows_the_list() {
 
     harness.state_mut().app_search = "no such app".to_owned();
     harness.run_steps(2);
-    assert!(harness.query_by_label("No matching applications").is_some());
+    assert!(harness.query_by_label("No Matching Applications").is_some());
     preview(&mut harness, "no-results-dark");
 }
 
@@ -739,7 +739,7 @@ fn failed_and_cancelled_builds_explain_themselves() {
             .query_by_label_contains("access is denied")
             .is_some()
     );
-    assert!(harness.query_by_label("Copy error").is_some());
+    assert!(harness.query_by_label("Copy Error").is_some());
     assert!(
         harness.query_by_label("Log").is_none(),
         "there is no log to point at"

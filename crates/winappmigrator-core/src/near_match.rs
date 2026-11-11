@@ -1010,7 +1010,7 @@ fn is_written_as_it_is_called(path: &Path) -> bool {
     comparable_path(&resolved_location(path)) == comparable_path(path)
 }
 
-/// Whether what is here comes with the User data option. It is the same test a scan makes of each
+/// Whether what is here comes with the User Data option. It is the same test a scan makes of each
 /// file, going by the kind of place it is.
 fn is_a_data_folder(folder: &Path, system: &SystemContext) -> bool {
     let logical = system.logical_path(folder);

@@ -171,7 +171,7 @@ pub struct ScanReport {
     /// says where other accounts' folders are, and goes no further than this run.
     #[serde(skip)]
     pub other_accounts: OtherAccountsFolders,
-    /// The name of the PC the app was on, as that PC recorded it, if the User data option asked for
+    /// The name of the PC the app was on, as that PC recorded it, if the User Data option asked for
     /// any of what is on it.
     #[serde(default)]
     pub source_computer_name: Option<String>,
@@ -184,7 +184,7 @@ pub struct ScanReport {
     /// What each of the app's programs and drivers needs from Windows.
     #[serde(default)]
     pub program_needs: Vec<ProgramNeed>,
-    /// The account whose per-user data was read, if the User data option asked for any.
+    /// The account whose per-user data was read, if the User Data option asked for any.
     #[serde(default)]
     pub user_data_profile: Option<String>,
     pub source_app: Option<InstalledApp>,
@@ -229,7 +229,7 @@ pub struct ScanReport {
     /// What was not captured because the License option is off. Names only.
     #[serde(default)]
     pub licenses_left_out: Vec<LeftOutItem>,
-    /// How much of what an account keeps for the app was not captured, because the User data option
+    /// How much of what an account keeps for the app was not captured, because the User Data option
     /// is off, by the key of the app it was in. Nothing of what it was.
     #[serde(default)]
     pub settings_left_out: Vec<LeftOutItem>,
@@ -268,7 +268,7 @@ pub struct NearMatch {
     pub path: Option<PathBuf>,
     /// Why it is offered, in a sentence a person can check.
     pub why: String,
-    /// It is in a data folder, so it comes with the User data option or not at all.
+    /// It is in a data folder, so it comes with the User Data option or not at all.
     pub follows_user_data: bool,
     /// As far as was looked. Nothing here is more than a guide, since it is counted before any choice.
     pub file_count: usize,

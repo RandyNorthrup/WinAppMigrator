@@ -589,7 +589,7 @@ fn write_restore_instructions(output: &mut String, _report: &ScanReport) {
     push_line(output, "## Restore Instructions");
     push_line(
         output,
-        "- Run the produced installer on the target PC. Use its Preview changes button first, or run it with `--target-root <DIR>` and no `--apply`.",
+        "- Run the produced installer on the target PC. Use its Preview Changes button first, or run it with `--target-root <DIR>` and no `--apply`.",
     );
     push_line(output, "");
 }

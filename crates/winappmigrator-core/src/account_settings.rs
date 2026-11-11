@@ -1,4 +1,4 @@
-//! What an account keeps for an app in its part of the registry, which goes by the User data option.
+//! What an account keeps for an app in its part of the registry, which goes by the User Data option.
 //!
 //! An app's key under `HKEY_CURRENT_USER` is where it remembers things: 7-Zip the folders and archives
 //! it last opened, PuTTY the hosts it has been to and who as. None of that is called what it is, so the
@@ -147,7 +147,7 @@ fn key_of_the_app(key_path: &str) -> String {
     key
 }
 
-/// With the User data option off: take what an account keeps for an app out of what was captured,
+/// With the User Data option off: take what an account keeps for an app out of what was captured,
 /// leaving what a value says of where the app is, and say how much went from where.
 pub(crate) fn take_account_settings(
     entries: &mut Vec<RegistryEntry>,
@@ -188,7 +188,7 @@ pub(crate) fn take_account_settings(
     }
 }
 
-/// With the User data option off: what capturing the registry had to say of a key goes no further
+/// With the User Data option off: what capturing the registry had to say of a key goes no further
 /// down than the app's, as what was left out does.
 pub(crate) fn say_no_more_than_the_apps_key(warnings: &mut [Warning]) {
     for warning in warnings {
@@ -331,11 +331,11 @@ mod tests {
             [
                 (
                     r"HKCU\Software\7-Zip",
-                    "2 values, which only go with the User data option"
+                    "2 values, which only go with the User Data option"
                 ),
                 (
                     r"HKCU\Software\SimonTatham",
-                    "3 values, which only go with the User data option"
+                    "3 values, which only go with the User Data option"
                 ),
             ]
         );

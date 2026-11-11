@@ -870,7 +870,7 @@ fn check_with_every_option_on(
     helper_id: &str,
     data_id: &str,
 ) -> TestResult {
-    section("With the License and User data options on");
+    section("With the License and User Data options on");
     fs::create_dir_all(work)?;
     let options = PackageOptions {
         include_user_data: true,
@@ -999,7 +999,7 @@ fn check_what_is_offered(
         .iter()
         .find(|near| near.path.as_deref() == Some(Path::new(DATA_NEAR_ROOT)));
     checks.that(
-        "one in a data folder is offered, and comes with the User data option",
+        "one in a data folder is offered, and comes with the User Data option",
         settings.is_some_and(|near| near.follows_user_data),
         format!("{names:?}"),
     );

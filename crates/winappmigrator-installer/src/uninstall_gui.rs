@@ -278,19 +278,19 @@ impl UninstallApp {
     fn draw_plan(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         let enabled = matches!(self.stage, Stage::Ready);
         let summary = &self.summary;
-        widgets::card_titled(ui, theme, "What will be removed", None, |ui| {
+        widgets::card_titled(ui, theme, "What Will Be Removed", None, |ui| {
             widgets::kv_row(
                 ui,
                 theme,
-                "Install location",
+                "Install Location",
                 &summary.target_root.display().to_string(),
             );
             for (label, count) in [
                 ("Files", summary.files),
-                ("Registry values", summary.registry_values),
+                ("Registry Values", summary.registry_values),
                 ("Services", summary.services),
                 ("Drivers", summary.drivers),
-                ("Scheduled tasks", summary.tasks),
+                ("Scheduled Tasks", summary.tasks),
                 ("Environment", summary.environment),
             ] {
                 if count > 0 {
@@ -313,7 +313,7 @@ impl UninstallApp {
                     ui,
                     theme,
                     &mut self.remove_user_data,
-                    "Also remove user data and license data",
+                    "Also Remove User Data and License Data",
                     &description,
                     enabled,
                 );
@@ -464,7 +464,7 @@ fn draw_outcome(
                 Role::Accent,
             ),
             widgets::metric(
-                "Left in place",
+                "Left in Place",
                 widgets::format_count(report.kept.len()),
                 if report.kept.is_empty() {
                     Role::Neutral
@@ -473,7 +473,7 @@ fn draw_outcome(
                 },
             ),
             widgets::metric(
-                "Could not be undone",
+                "Could Not Be Undone",
                 widgets::format_count(report.failed.len()),
                 if report.failed.is_empty() {
                     Role::Success
@@ -486,7 +486,7 @@ fn draw_outcome(
     let left: Vec<&String> = report.kept.iter().chain(&report.left_behind).collect();
     if !left.is_empty() {
         widgets::section_gap(ui);
-        widgets::card_titled(ui, theme, "Left in place", None, |ui| {
+        widgets::card_titled(ui, theme, "Left in Place", None, |ui| {
             for line in left.iter().take(MAX_LISTED_ITEMS) {
                 widgets::hint(ui, theme, line);
             }
@@ -604,10 +604,10 @@ mod tests {
             let mut harness = harness_for(sample(mode));
             for label in [
                 "Uninstall Fabrikam Data Sync",
-                "What will be removed",
+                "What Will Be Removed",
                 "Uninstall",
                 "Cancel",
-                "Also remove user data and license data",
+                "Also Remove User Data and License Data",
             ] {
                 assert!(harness.query_by_label(label).is_some(), "{label}");
             }
@@ -636,7 +636,7 @@ mod tests {
         let harness = harness_for(sample(ThemeMode::Dark));
         assert!(
             !harness
-                .get_by_label("Also remove user data and license data")
+                .get_by_label("Also Remove User Data and License Data")
                 .accesskit_node()
                 .is_selected()
                 .unwrap_or(false),
@@ -649,7 +649,7 @@ mod tests {
         let harness = harness_for(app);
         assert!(
             harness
-                .query_by_label("Also remove user data and license data")
+                .query_by_label("Also Remove User Data and License Data")
                 .is_none()
         );
     }
@@ -765,7 +765,7 @@ mod tests {
             "the window's title"
         );
         assert!(harness.query_by_label("Close").is_some());
-        assert!(harness.query_by_label("What will be removed").is_none());
+        assert!(harness.query_by_label("What Will Be Removed").is_none());
     }
 
     #[test]

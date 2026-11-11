@@ -186,7 +186,7 @@ pub(crate) fn sample_report(app: &InstalledApp) -> ScanReport {
         FileClassification::AppOwned,
     ));
     let data = r"C:\ProgramData\Fabrikam Data Sync";
-    // Looked at with the User data option off, as a person first sees it: this is known of, and stays.
+    // Looked at with the User Data option off, as a person first sees it: this is known of, and stays.
     let mut not_copied = files_in(data, 90, 300 * 1024, FileClassification::MachineAppData);
     not_copied.extend(files_in(
         r"C:\Users\You\AppData\Roaming\Fabrikam Data Sync",
@@ -322,7 +322,7 @@ pub(crate) fn sample_report(app: &InstalledApp) -> ScanReport {
         }],
         settings_left_out: vec![LeftOutItem {
             name: r"HKCU\Software\Fabrikam".to_owned(),
-            why: "12 values, which only go with the User data option".to_owned(),
+            why: "12 values, which only go with the User Data option".to_owned(),
         }],
         empty_folders: Vec::new(),
         firewall_rules: vec![FirewallRuleEntry {
@@ -376,7 +376,7 @@ const FLAGS: ScanFlags = ScanFlags {
     include_license_data: false,
 };
 
-/// What the sample's machine-wide data is like with the User data option on, when it goes in.
+/// What the sample's machine-wide data is like with the User Data option on, when it goes in.
 fn with_its_data_going(report: &mut ScanReport) {
     for entry in &mut report.file_inventory {
         if entry.classification == FileClassification::MachineAppData {
@@ -552,18 +552,18 @@ fn size_and_room_are_there_before_anything_is_clicked_and_first() {
         let mut harness = harness_with(mode, ready_app);
         harness.run_steps(2);
         assert!(harness.query_by_label("Files").is_some());
-        assert!(harness.query_by_label("Up to").is_some());
+        assert!(harness.query_by_label("Up To").is_some());
         assert!(harness.query_by_label("Free on C:").is_some());
         assert!(harness.query_by_label("356.0 GB").is_some());
         assert!(
             !harness
-                .get_by_label("Create installer")
+                .get_by_label("Create Installer")
                 .accesskit_node()
                 .is_disabled(),
             "it fits, and it has been looked at"
         );
-        let size_at = harness.get_by_label("Up to").rect().top();
-        let list_at = harness.get_by_label_contains("Program files").rect().top();
+        let size_at = harness.get_by_label("Up To").rect().top();
+        let list_at = harness.get_by_label_contains("Program Files,").rect().top();
         assert!(
             size_at < list_at,
             "how big it is comes before what is in it"
@@ -577,15 +577,15 @@ fn it_reads_the_same_at_the_smallest_window() {
     for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
         let mut harness = harness_sized(mode, egui::vec2(1000.0, 640.0), ready_app);
         harness.run_steps(2);
-        assert!(harness.query_by_label("Create installer").is_some());
-        assert!(harness.query_by_label("Up to").is_some());
-        let button = harness.get_by_label("Create installer").rect();
+        assert!(harness.query_by_label("Create Installer").is_some());
+        assert!(harness.query_by_label("Up To").is_some());
+        let button = harness.get_by_label("Create Installer").rect();
         assert!(
             button.bottom() <= 640.0,
             "the button stays in view: {button:?}"
         );
         // Not just the top of the panel: what goes in is what the panel is about.
-        let panel_top = harness.get_by_label("Output folder").rect().top();
+        let panel_top = harness.get_by_label("Output Folder").rect().top();
         let row = harness.get_by_label_contains("plugins").rect();
         assert!(
             row.bottom() <= panel_top,
@@ -618,16 +618,16 @@ fn on_a_small_screen_what_matters_can_be_reached() {
         harness.run_steps(2);
         let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height));
         for label in [
-            "Create installer",
+            "Create Installer",
             "Browse",
             "Fabrikam Data Sync, Fabrikam Inc., version 1.7.3",
         ] {
             let at = harness.get_by_label(label).rect();
             assert!(window.contains_rect(at), "{name}: {label} is at {at:?}");
         }
-        assert!(harness.query_by_label("Up to").is_some(), "{name}");
+        assert!(harness.query_by_label("Up To").is_some(), "{name}");
         // It scrolls, and whatever it scrolls to is not behind what is pinned below it.
-        let panel_top = harness.get_by_label("Output folder").rect().top();
+        let panel_top = harness.get_by_label("Output Folder").rect().top();
         assert!(
             panel_top > 120.0,
             "{name}: only {panel_top} above the panel"
@@ -653,8 +653,8 @@ fn a_small_window_does_not_cut_what_a_row_says_of_how_it_was_installed() {
             egui::vec2(400.0, 36.0),
         ));
         let font = crate::theme::regular(13.0);
-        assert!(width_of("Per-machine", font.clone()) <= cells[3].width());
-        assert!(width_of("Per-user", font.clone()) <= cells[3].width());
+        assert!(width_of("Per-Machine", font.clone()) <= cells[3].width());
+        assert!(width_of("Per-User", font.clone()) <= cells[3].width());
         assert!(width_of("ARM64", font.clone()) <= cells[4].width());
         assert!(width_of("10.0.10007", font) <= cells[2].width());
         assert!(cells[0].width() > cells[1].width());
@@ -671,19 +671,22 @@ fn every_group_reads_in_plain_words_and_in_the_installers_own() {
     });
     harness.run_steps(2);
     for heading in [
-        "Program files",
-        "Data folders",
+        "Program Files",
+        "Data Folders",
         "Services",
-        "Starts automatically",
-        "Scheduled tasks",
+        "Starts Automatically",
+        "Scheduled Tasks",
         "Shortcuts",
-        "What ties it into Windows",
-        "What it needs to run",
-        "Might also be part of it",
-        "Left out, and why",
+        "What Ties It into Windows",
+        "What It Needs to Run",
+        "Might Also Be Part of It",
+        "Left Out, and Why",
     ] {
+        // A heading's name goes on with what is in it, which sets it apart from a path.
         assert!(
-            harness.query_by_label_contains(heading).is_some(),
+            harness
+                .query_by_label_contains(&format!("{heading}, "))
+                .is_some(),
             "{heading}"
         );
     }
@@ -699,24 +702,24 @@ fn every_group_reads_in_plain_words_and_in_the_installers_own() {
     );
     preview(&mut harness, "footprint-services-dark");
     click_row(&mut harness, "Services,");
-    click_row(&mut harness, "Scheduled tasks,");
+    click_row(&mut harness, "Scheduled Tasks,");
     assert!(
         harness
-            .query_by_label_contains(r"\Fabrikam\Nightly sync, Scheduled task. Runs as SYSTEM")
+            .query_by_label_contains(r"\Fabrikam\Nightly sync, Scheduled Task. Runs as SYSTEM")
             .is_some()
     );
-    click_row(&mut harness, "Scheduled tasks,");
-    click_row(&mut harness, "What ties it into Windows,");
-    assert!(harness.query_by_label_contains("File type,").is_some());
+    click_row(&mut harness, "Scheduled Tasks,");
+    click_row(&mut harness, "What Ties It into Windows,");
+    assert!(harness.query_by_label_contains("File Type,").is_some());
     assert!(
         harness
             .query_by_label_contains(".fab, Files of this type open with the app")
             .is_some()
     );
-    assert!(harness.query_by_label_contains("Firewall rule,").is_some());
+    assert!(harness.query_by_label_contains("Firewall Rule,").is_some());
     preview(&mut harness, "footprint-integrations-dark");
-    click_row(&mut harness, "What ties it into Windows,");
-    click_row(&mut harness, "What it needs to run,");
+    click_row(&mut harness, "What Ties It into Windows,");
+    click_row(&mut harness, "What It Needs to Run,");
     assert!(
         harness
             .query_by_label_contains("Microsoft Visual C++ 2015+ Redistributable (x64), Included")
@@ -759,7 +762,7 @@ fn what_stays_out_is_named_and_cannot_be_ticked() {
     assert_eq!(
         settings.accesskit_node().role(),
         egui::accesskit::Role::Label,
-        "and the way to bring it is the User data option, not a box here"
+        "and the way to bring it is the User Data option, not a box here"
     );
     scroll_to_row(&mut harness, "license.lic");
     preview(&mut harness, "footprint-left-out-dark");
@@ -833,7 +836,7 @@ fn leaving_a_folder_out(mode: ThemeMode, name: &str) {
     preview(&mut harness, &format!("footprint-left-out-folder-{name}"));
     assert!(
         !harness
-            .get_by_label("Create installer")
+            .get_by_label("Create Installer")
             .accesskit_node()
             .is_disabled(),
         "and it can be built like that"
@@ -889,7 +892,7 @@ fn what_ties_it_into_windows_is_said_as_what_was_left_out_leaves_it() {
         "and it says it went: {:?}",
         harness.state().also.items
     );
-    scroll_to_row(&mut harness, "Firewall rule");
+    scroll_to_row(&mut harness, "Firewall Rule");
     assert!(
         harness
             .query_by_label_contains("Nothing left of it, because of what you left out")
@@ -1011,7 +1014,7 @@ fn a_row_can_be_worked_from_the_keyboard_and_says_what_it_is() {
             .choices
             .is_left_out(&folder_id(&format!(r"{INSTALL}\samples")))
     );
-    let heading = harness.get_by_label_contains("Program files,");
+    let heading = harness.get_by_label_contains("Program Files,");
     assert_eq!(
         heading.accesskit_node().role(),
         egui::accesskit::Role::Button
@@ -1052,7 +1055,7 @@ fn near_matches_start_unticked_say_why_and_ticking_one_looks_again_for_it() {
     assert!(!harness.state().can_build());
     assert!(
         harness
-            .query_by_label_contains("Create installer")
+            .query_by_label_contains("Create Installer")
             .is_some_and(|button| button.accesskit_node().is_disabled())
     );
     assert!(
@@ -1073,7 +1076,7 @@ fn near_matches_start_unticked_say_why_and_ticking_one_looks_again_for_it() {
 fn a_near_match_in_a_data_folder_comes_with_the_user_data_option() {
     let mut harness = harness_with(ThemeMode::Dark, ready_app);
     harness.run_steps(2);
-    let row = harness.get_by_label_contains("Comes with the User data option");
+    let row = harness.get_by_label_contains("Comes with the User Data option");
     assert!(row.accesskit_node().is_disabled());
     assert!(
         row.accesskit_node()
@@ -1113,7 +1116,7 @@ fn scanning_says_so_and_the_build_waits_for_it() {
         assert!(harness.query_by_label("Stop").is_some());
         assert!(
             harness
-                .get_by_label("Create installer")
+                .get_by_label("Create Installer")
                 .accesskit_node()
                 .is_disabled()
         );
@@ -1121,7 +1124,7 @@ fn scanning_says_so_and_the_build_waits_for_it() {
         let _ = scan.release.send(());
         wait_until(&mut harness, "the scan finished", is_ready);
         assert!(harness.query_by_label("Stop").is_none());
-        assert!(harness.query_by_label("Up to").is_some());
+        assert!(harness.query_by_label("Up To").is_some());
     }
 }
 
@@ -1187,8 +1190,8 @@ fn a_choice_that_changes_what_a_scan_reads_looks_again_and_keeps_the_rest() {
     });
 
     for (label, expect) in [
-        ("License and activation data,", (false, true)),
-        ("User data,", (true, true)),
+        ("License and Activation Data,", (false, true)),
+        ("User Data,", (true, true)),
     ] {
         let scan = gated_scan(harness.state_mut());
         click_row(&mut harness, label);
@@ -1264,10 +1267,10 @@ fn a_failed_scan_says_why_and_can_be_tried_again() {
                 .query_by_label_contains("could not find an executable")
                 .is_some()
         );
-        assert!(harness.query_by_label("Try again").is_some());
+        assert!(harness.query_by_label("Try Again").is_some());
         assert!(
             harness
-                .get_by_label("Create installer")
+                .get_by_label("Create Installer")
                 .accesskit_node()
                 .is_disabled()
         );
@@ -1287,7 +1290,7 @@ fn stopping_a_scan_stays_stopped_until_asked() {
         assert!(harness.query_by_label_contains("Stopped.").is_some());
         assert!(
             harness
-                .get_by_label("Create installer")
+                .get_by_label("Create Installer")
                 .accesskit_node()
                 .is_disabled()
         );
@@ -1298,7 +1301,7 @@ fn stopping_a_scan_stays_stopped_until_asked() {
                 .recv_timeout(Duration::from_millis(200))
                 .is_err()
         );
-        harness.get_by_label("Look again").click();
+        harness.get_by_label("Look Again").click();
         harness.run_steps(3);
         started(&scan);
         let _ = scan.release.send(());
@@ -1325,7 +1328,7 @@ fn looking_again_takes_a_new_scan_and_a_stale_one_says_how_old_it_is() {
     preview(&mut harness, "footprint-old-dark");
 
     let scan = gated_scan(harness.state_mut());
-    harness.get_by_label("Look again").click();
+    harness.get_by_label("Look Again").click();
     harness.run_steps(3);
     started(&scan);
     assert!(harness.state().ready_scan().is_none());
@@ -1348,7 +1351,7 @@ fn without_the_room_it_says_where_and_how_much_and_will_not_start() {
     assert!(harness.query_by_label_contains("another drive").is_some());
     assert!(
         harness
-            .get_by_label("Create installer")
+            .get_by_label("Create Installer")
             .accesskit_node()
             .is_disabled()
     );
@@ -1383,7 +1386,7 @@ fn a_running_build_locks_every_choice() {
     assert!(row.accesskit_node().is_disabled());
     assert!(
         harness
-            .query_by_label_contains("License and activation data")
+            .query_by_label_contains("License and Activation Data")
             .is_some_and(|option| option.accesskit_node().is_disabled())
     );
 }
@@ -1438,7 +1441,7 @@ fn a_long_list_keeps_a_row_with_the_focus_in_view() {
         }
     });
     harness.run_steps(2);
-    let panel_top = harness.get_by_label("Output folder").rect().top();
+    let panel_top = harness.get_by_label("Output Folder").rect().top();
     harness.get_by_label_contains("many 0,").focus();
     harness.run_steps(SCROLL_ANIMATION_FRAMES);
     let row = harness.get_by_label_contains("many 0,").rect();

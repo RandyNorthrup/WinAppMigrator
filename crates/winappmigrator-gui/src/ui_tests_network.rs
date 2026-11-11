@@ -48,12 +48,12 @@ fn the_steps_show_until_a_pc_is_paired() {
         let mut harness = harness_with(mode, |app| app.network = Some(wizard()));
         assert!(
             harness
-                .query_by_label_contains("1. Put the client on the old PC")
+                .query_by_label_contains("1. Put the Client on the Old PC")
                 .is_some()
         );
         assert!(
             harness
-                .query_by_label_contains("Save to USB drive E:")
+                .query_by_label_contains("Save to USB Drive E:")
                 .is_some()
         );
         assert!(

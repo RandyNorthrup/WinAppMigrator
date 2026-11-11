@@ -273,7 +273,7 @@ impl WinAppMigratorApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                widgets::card_titled(ui, theme, "1. Put the client on the old PC", None, |ui| {
+                widgets::card_titled(ui, theme, "1. Put the Client on the Old PC", None, |ui| {
                     widgets::hint(
                         ui,
                         theme,
@@ -284,10 +284,10 @@ impl WinAppMigratorApp {
                     widgets::control_row(ui, |ui| {
                         for drive in &wizard.usb_drives {
                             let label = if drive.label.is_empty() {
-                                format!("Save to USB drive {}", drive.root.display())
+                                format!("Save to USB Drive {}", drive.root.display())
                             } else {
                                 format!(
-                                    "Save to USB drive {} ({})",
+                                    "Save to USB Drive {} ({})",
                                     drive.root.display(),
                                     drive.label
                                 )
@@ -298,12 +298,12 @@ impl WinAppMigratorApp {
                                 save_to = Some(drive.root.clone());
                             }
                         }
-                        if widgets::button(ui, theme, ButtonKind::Secondary, "Save to a folder…", true)
+                        if widgets::button(ui, theme, ButtonKind::Secondary, "Save to a Folder…", true)
                             .clicked()
                         {
                             pick_folder = true;
                         }
-                        if widgets::button(ui, theme, ButtonKind::Ghost, "Look for USB drives again", true)
+                        if widgets::button(ui, theme, ButtonKind::Ghost, "Look for USB Drives Again", true)
                             .clicked()
                         {
                             refresh_drives = true;
@@ -340,7 +340,7 @@ impl WinAppMigratorApp {
                     }
                 });
                 ui.add_space(SPACE_MD);
-                widgets::card_titled(ui, theme, "2. Pick the old PC", None, |ui| {
+                widgets::card_titled(ui, theme, "2. Pick the Old PC", None, |ui| {
                     if wizard.found.is_empty() {
                         busy_line(ui, theme, "Looking on your network for PCs running the client…");
                     }
@@ -360,7 +360,7 @@ impl WinAppMigratorApp {
                     }
                     ui.add_space(SPACE_SM);
                     widgets::control_row(ui, |ui| {
-                        widgets::field_label(ui, theme, "Or type its name or address");
+                        widgets::field_label(ui, theme, "Or Type Its Name or Address");
                         let typed = widgets::text_field(ui, &mut wizard.typed, "OLD-PC or 192.168.1.20", 220.0);
                         if typed.changed() && !wizard.typed.trim().is_empty() {
                             wizard.chosen = None;
@@ -368,13 +368,13 @@ impl WinAppMigratorApp {
                     });
                 });
                 ui.add_space(SPACE_MD);
-                widgets::card_titled(ui, theme, "3. Type the code it shows", None, |ui| {
+                widgets::card_titled(ui, theme, "3. Type the Code It Shows", None, |ui| {
                     let ready = (wizard.chosen.is_some() || !wizard.typed.trim().is_empty())
                         && wizard.code.chars().filter(char::is_ascii_digit).count()
                             == winappmigrator_link::CODE_DIGITS
                         && !wizard.is_connecting();
                     widgets::control_row(ui, |ui| {
-                        widgets::field_label(ui, theme, "Pairing code");
+                        widgets::field_label(ui, theme, "Pairing Code");
                         widgets::text_field(ui, &mut wizard.code, "123 456", 120.0);
                         if widgets::button(ui, theme, ButtonKind::Primary, "Connect", ready).clicked() {
                             match wizard.chosen {
@@ -400,7 +400,7 @@ impl WinAppMigratorApp {
         }
         if pick_folder {
             save_to = rfd::FileDialog::new()
-                .set_title("Save WinAppMigrator Client in…")
+                .set_title("Choose a Folder for WinAppMigrator Client")
                 .pick_folder();
             let _ = std::env::set_current_dir(winappmigrator_core::path_utils::system_root());
         }

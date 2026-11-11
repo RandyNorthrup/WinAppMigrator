@@ -117,9 +117,9 @@ impl WinAppMigratorApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = SPACE_XS;
                 let (icon, label) = if theme.mode == ThemeMode::Dark {
-                    (Icon::Sun, "Switch to light theme")
+                    (Icon::Sun, "Switch to Light Theme")
                 } else {
-                    (Icon::Moon, "Switch to dark theme")
+                    (Icon::Moon, "Switch to Dark Theme")
                 };
                 if widgets::icon_button(ui, theme, icon, label, true).clicked() {
                     self.toggle_theme();
@@ -130,7 +130,7 @@ impl WinAppMigratorApp {
                     ui,
                     theme,
                     Icon::Refresh,
-                    "Reload the application list",
+                    "Reload the Application List",
                     can_reload,
                 )
                 .clicked()
@@ -141,10 +141,10 @@ impl WinAppMigratorApp {
                 let (label, role) = match &self.inventory_state {
                     InventoryState::Loading => ("Loading".to_owned(), Role::Neutral),
                     InventoryState::Loaded => (
-                        format!("{} apps", widgets::format_count(self.apps.len())),
+                        format!("{} Apps", widgets::format_count(self.apps.len())),
                         Role::Success,
                     ),
-                    InventoryState::Failed(_) => ("Load failed".to_owned(), Role::Danger),
+                    InventoryState::Failed(_) => ("Load Failed".to_owned(), Role::Danger),
                 };
                 widgets::status_pill(ui, theme, &label, role);
             });
@@ -170,7 +170,7 @@ impl WinAppMigratorApp {
                 theme,
                 search_id,
                 &mut self.app_search,
-                "Search by name or publisher  (Ctrl+F)",
+                "Search by Name or Publisher  (Ctrl+F)",
                 search_width,
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -180,8 +180,8 @@ impl WinAppMigratorApp {
                     &mut self.app_scope_filter,
                     &[
                         ("All", ScopeFilter::All),
-                        ("Per-user", ScopeFilter::PerUser),
-                        ("Per-machine", ScopeFilter::PerMachine),
+                        ("Per-User", ScopeFilter::PerUser),
+                        ("Per-Machine", ScopeFilter::PerMachine),
                     ],
                     true,
                 );
@@ -227,7 +227,7 @@ impl WinAppMigratorApp {
                         ui,
                         theme,
                         Icon::Apps,
-                        "No matching applications",
+                        "No Matching Applications",
                         "Adjust the search text or scope filter.",
                     );
                     return;
@@ -281,7 +281,7 @@ impl WinAppMigratorApp {
                 .as_ref()
                 .is_some_and(network_view::NetworkWizard::is_connecting);
         widgets::control_row(ui, |ui| {
-            widgets::field_label(ui, theme, "Scan source");
+            widgets::field_label(ui, theme, "Scan Source");
             let before = chosen;
             let changed = widgets::segmented(
                 ui,
@@ -289,8 +289,8 @@ impl WinAppMigratorApp {
                 &mut chosen,
                 &[
                     ("This PC", Source::ThisPc),
-                    ("Connected drive…", Source::Drive),
-                    ("Disk image…", Source::Image),
+                    ("Connected Drive…", Source::Drive),
+                    ("Disk Image…", Source::Image),
                     ("Network PC…", Source::Network),
                 ],
                 enabled,
@@ -525,7 +525,7 @@ impl WinAppMigratorApp {
                             ui,
                             theme,
                             Icon::Apps,
-                            "Pair with the old PC",
+                            "Pair with the Old PC",
                             "Once WinAppMigrator Client is running there and you have typed its \
                              code, its apps are listed here, and you build an installer from one \
                              as from this PC.",
@@ -535,7 +535,7 @@ impl WinAppMigratorApp {
                             ui,
                             theme,
                             Icon::Apps,
-                            "Pick an application",
+                            "Pick an Application",
                             "Select an app from the list to choose what to include and build its \
                              installer.",
                         );
@@ -591,7 +591,7 @@ impl WinAppMigratorApp {
                 ui,
                 theme,
                 &mut self.backup_license,
-                "License and activation data",
+                "License and Activation Data",
                 LICENSE_OPTION_TEXT,
                 enabled,
             );
@@ -599,7 +599,7 @@ impl WinAppMigratorApp {
                 ui,
                 theme,
                 &mut self.backup_user_data,
-                "User data",
+                "User Data",
                 USER_DATA_OPTION_TEXT,
                 enabled,
             );
@@ -627,7 +627,7 @@ impl WinAppMigratorApp {
             return;
         }
         ui.add_space(SPACE_SM);
-        widgets::field_label(ui, theme, "Whose data");
+        widgets::field_label(ui, theme, "Whose Data");
         ui.add_space(2.0);
         let mut chosen = picker
             .rows
@@ -709,7 +709,7 @@ impl WinAppMigratorApp {
         widgets::path_field(
             ui,
             theme,
-            "Output folder",
+            "Output Folder",
             &mut self.output_dir,
             r"C:\Users\You\WinAppMigrator",
             true,
@@ -727,9 +727,9 @@ impl WinAppMigratorApp {
         let can_build = self.can_build();
         // Once an installer exists, the result is the next thing to act on.
         let (kind, label) = if matches!(self.migrate_state, OperationState::Completed) {
-            (ButtonKind::Secondary, "Create installer again")
+            (ButtonKind::Secondary, "Create Installer Again")
         } else {
-            (ButtonKind::Primary, "Create installer")
+            (ButtonKind::Primary, "Create Installer")
         };
         if widgets::wide_button(ui, theme, kind, label, can_build).clicked() {
             self.start_migration();
@@ -762,7 +762,7 @@ impl WinAppMigratorApp {
                     theme,
                     ButtonKind::Secondary,
                     Icon::Copy,
-                    "Copy error",
+                    "Copy Error",
                     true,
                 )
                 .clicked()
@@ -805,7 +805,7 @@ impl WinAppMigratorApp {
                     Role::Accent,
                 ),
                 metric(
-                    "Installer size",
+                    "Installer Size",
                     widgets::format_bytes(*installer_bytes),
                     Role::Accent,
                 ),
@@ -843,7 +843,7 @@ impl WinAppMigratorApp {
             widgets::mono_path(ui, theme, "Installer", &path.display().to_string());
             if let Some(data_file) = package.data_file_path.as_ref() {
                 ui.add_space(SPACE_XS);
-                widgets::mono_path(ui, theme, "Data file", &data_file.display().to_string());
+                widgets::mono_path(ui, theme, "Data File", &data_file.display().to_string());
             }
             ui.add_space(SPACE_SM);
             widgets::control_row(ui, |ui| {
@@ -852,7 +852,7 @@ impl WinAppMigratorApp {
                     theme,
                     ButtonKind::Secondary,
                     Icon::Folder,
-                    "Open folder",
+                    "Open Folder",
                     true,
                 )
                 .clicked()
@@ -866,7 +866,7 @@ impl WinAppMigratorApp {
                     theme,
                     ButtonKind::Ghost,
                     Icon::Copy,
-                    "Copy path",
+                    "Copy Path",
                     true,
                 )
                 .clicked()
@@ -886,7 +886,7 @@ impl WinAppMigratorApp {
             ),
         );
 
-        warning_list(ui, theme, "Verification errors", &verification.errors, true);
+        warning_list(ui, theme, "Verification Errors", &verification.errors, true);
         // When files were lost, the list of which ones is the next thing to read.
         warning_list(
             ui,
@@ -915,7 +915,7 @@ pub(crate) fn older_windows_note(identity: &SourceIdentity) -> String {
         .unwrap_or_else(|| "an older Windows".to_owned());
     let mut note = format!(
         "This has {windows}. Installers built from it are made for Windows 10 and 11. With User \
-         data, settings that Windows quietly kept aside for an older app come along, and \
+         Data, settings that Windows quietly kept aside for an older app come along, and \
          runtimes Windows 11 does not have, such as DirectX 9, are installed with the app."
     );
     if identity.is_32_bit() {
@@ -1329,8 +1329,8 @@ pub(crate) fn arch_label(arch: &AppArchitecture) -> &'static str {
 
 pub(crate) fn scope_label(scope: &InstallScope) -> &'static str {
     match scope {
-        InstallScope::PerUser => "Per-user",
-        InstallScope::PerMachine => "Per-machine",
+        InstallScope::PerUser => "Per-User",
+        InstallScope::PerMachine => "Per-Machine",
         InstallScope::Unknown => "Unknown",
     }
 }

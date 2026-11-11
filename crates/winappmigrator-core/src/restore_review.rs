@@ -1038,25 +1038,25 @@ impl SystemChangeKind {
         match self {
             Self::Service => "Service",
             Self::Driver => "Driver",
-            Self::ScheduledTask => "Scheduled task",
-            Self::Autostart => "Starts automatically",
+            Self::ScheduledTask => "Scheduled Task",
+            Self::Autostart => "Starts Automatically",
             Self::Shortcut => "Shortcut",
             Self::PathEntry => "PATH",
-            Self::EnvironmentVariable => "Environment variable",
-            Self::ShellExtension => "Shell extension",
-            Self::ShellCommand => "Menu command",
-            Self::UrlProtocol => "Link type",
-            Self::FileType => "File type",
+            Self::EnvironmentVariable => "Environment Variable",
+            Self::ShellExtension => "Shell Extension",
+            Self::ShellCommand => "Menu Command",
+            Self::UrlProtocol => "Link Type",
+            Self::FileType => "File Type",
             Self::ComServer => "COM",
-            Self::FirewallRule => "Firewall rule",
-            Self::EventLogSource => "Event log source",
+            Self::FirewallRule => "Firewall Rule",
+            Self::EventLogSource => "Event Log Source",
             Self::Font => "Font",
-            Self::OdbcDriver => "ODBC driver",
-            Self::OdbcSource => "ODBC data source",
-            Self::CompatibilitySetting => "Compatibility setting",
-            Self::DefaultApps => "Default apps",
-            Self::ProgramName => "Program name",
-            Self::OtherSettings => "Other settings",
+            Self::OdbcDriver => "ODBC Driver",
+            Self::OdbcSource => "ODBC Data Source",
+            Self::CompatibilitySetting => "Compatibility Setting",
+            Self::DefaultApps => "Default Apps",
+            Self::ProgramName => "Program Name",
+            Self::OtherSettings => "Other Settings",
         }
     }
 }
@@ -1962,7 +1962,7 @@ fn names_of_left_out(items: &[LeftOutItem]) -> String {
 pub const CREDENTIALS_LEFT_OUT_TEXT: &str =
     "Not in this installer, because they look like credentials";
 pub const SETTINGS_LEFT_OUT_TEXT: &str =
-    "Settings and history an account keeps for the app, which only go in with the User data option";
+    "Settings and history an account keeps for the app, which only go in with the User Data option";
 pub const CERTIFICATES_LEFT_OUT_TEXT: &str =
     "The app seems to rely on certificates that were trusted on its PC, and they are not installed";
 pub const FONTS_LEFT_OUT_TEXT: &str = "These fonts go by the app's name, and nothing says they are its own, so they are not installed";
@@ -1989,7 +1989,7 @@ fn notes_on_what_is_left_out(manifest: &PackageManifest) -> Vec<String> {
     }
     if !manifest.settings_left_out.is_empty() {
         notes.push(format!(
-            "Not in this installer, because the User data option was off when it was built: the \
+            "Not in this installer, because the User Data option was off when it was built: the \
              settings and history an account keeps for the app, in {}. The app starts here as it \
              would for someone new to it.",
             names_of_left_out(&manifest.settings_left_out)

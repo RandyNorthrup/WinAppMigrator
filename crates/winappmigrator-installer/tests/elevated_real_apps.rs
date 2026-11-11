@@ -1,7 +1,7 @@
 //! The first half of moving real apps between PCs, on GitHub's throwaway Windows runner and nowhere
 //! else. `install-real-apps.ps1` has installed real open-source apps there from their publishers, each
 //! an exact version whose hash it checked, and this builds an installer of each with the real code, the
-//! way the app does, with the License and User data options off. They go to other runners, where
+//! way the app does, with the License and User Data options off. They go to other runners, where
 //! `check-moved-real-apps.ps1` installs them, asks Windows to use what was restored, and removes them.
 //!
 //! Those installers are uploaded where anyone signed in to GitHub can get them for a day, which is a
@@ -9,7 +9,7 @@
 //! It is also why this looks through each package for what is the runner's own before it goes.
 //!
 //! `install-real-apps.ps1` also leaves what an account would have in those apps' keys, with marks in it
-//! that are in nothing else. With the User data option off, none of that is anywhere in a package, in
+//! that are in nothing else. With the User Data option off, none of that is anywhere in a package, in
 //! any form. Another run of this, in a step of its own that uploads nothing, builds with it on, and
 //! `check-account-settings.ps1` shows it arrive. With `WAM_REAL_APPS_RUNTIME` set, it builds Mosquitto
 //! the way the app does, with Microsoft's redistributable in it, which is why that goes nowhere either.
@@ -41,7 +41,7 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 const OUTPUT_VARIABLE: &str = "WAM_REAL_APPS_OUTPUT";
 const USER_DATA_VARIABLE: &str = "WAM_REAL_APPS_USER_DATA";
 const RUNTIME_VARIABLE: &str = "WAM_REAL_APPS_RUNTIME";
-/// What goes with the User data option in what an account has, as `real-apps.json` says of each.
+/// What goes with the User Data option in what an account has, as `real-apps.json` says of each.
 const GOES_WITH_USER_DATA: &str = "user_data";
 const GOES_WITH_LICENSE: &str = "license";
 /// Hash, length, and magic, at the end of an installer, after the package.
@@ -650,7 +650,7 @@ fn build(options: &PackageOptions) -> TestResult<(PathBuf, PackageManifest)> {
     Ok((installer, manifest))
 }
 
-/// With the User data option on, what an account has for these apps is in what is built, and what is
+/// With the User Data option on, what an account has for these apps is in what is built, and what is
 /// a license only ever goes by the License option, whichever way the other is. Uploads nothing:
 /// `check-account-settings.ps1` installs what this leaves, on this runner.
 #[test]
@@ -669,7 +669,7 @@ fn what_an_account_has_follows_the_options() -> TestResult {
             continue;
         }
         let name = text_of(&spec, "name")?;
-        println!("\n=== {name}, with the User data option on");
+        println!("\n=== {name}, with the User Data option on");
         let app = the_app_named(&listed, name)?;
         let work = tempfile::tempdir()?;
         let (installer, manifest) = build(&PackageOptions {
@@ -740,7 +740,7 @@ fn what_an_account_has_follows_the_options() -> TestResult {
             .iter()
             .any(|mark| mark.app == id && mark.goes_with == GOES_WITH_LICENSE)
         {
-            println!("\n=== {name}, with the License option on and the User data option off");
+            println!("\n=== {name}, with the License option on and the User Data option off");
             let aside = tempfile::tempdir()?;
             let elsewhere = aside.path().join("installers");
             fs::create_dir_all(&elsewhere)?;
@@ -969,7 +969,7 @@ fn build_what_goes_to_the_other_pcs() -> TestResult {
         for problem in what_of_the_runners_it_holds(&names, &unpacked)? {
             holding_the_runners.push(format!("{name}: {problem}"));
         }
-        // With the User data option off and the License option off, as this was built.
+        // With the User Data option off and the License option off, as this was built.
         for mark in &marks {
             let found = where_a_mark_is(&mark.text, &names, &unpacked)?;
             println!(

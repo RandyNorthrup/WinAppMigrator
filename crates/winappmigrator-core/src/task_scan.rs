@@ -487,7 +487,7 @@ pub(crate) fn task_for_whoever_installs_it(xml: &str) -> Option<(String, bool)> 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TaskThatNames {
     NothingOfTheirs,
-    /// Only with the User data option does it go at all.
+    /// Only with the User Data option does it go at all.
     GoesWhole,
     /// `actions` is how many of what it runs went.
     LostSome {

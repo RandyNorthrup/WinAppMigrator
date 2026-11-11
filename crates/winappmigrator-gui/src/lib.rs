@@ -308,7 +308,7 @@ pub struct WinAppMigratorApp {
     pub(crate) also: AlsoState,
     also_worker: LatestWorker<AlsoJob>,
     also_messages: Receiver<AlsoMessage>,
-    /// The near matches a person ticked, with whether each comes with the User data option.
+    /// The near matches a person ticked, with whether each comes with the User Data option.
     pub(crate) near_picks: BTreeMap<String, bool>,
     /// How much room the drive of the output folder has, for what is in that field now.
     pub(crate) output_stats: Option<(String, Option<VolumeStats>)>,
@@ -524,7 +524,7 @@ impl WinAppMigratorApp {
             near_matches: self
                 .near_picks
                 .iter()
-                // What is in a data folder comes with the User data option.
+                // What is in a data folder comes with the User Data option.
                 .filter(|(_, follows_user_data)| !**follows_user_data || self.backup_user_data)
                 .map(|(id, _)| id.clone())
                 .collect(),
@@ -820,8 +820,8 @@ impl WinAppMigratorApp {
     /// read-only, away from the window, and its apps are listed once it is.
     pub(crate) fn pick_disk_image(&mut self) {
         let picked = rfd::FileDialog::new()
-            .set_title("Select a disk image of the other PC (.vhd or .vhdx)")
-            .add_filter("Disk images", DISK_IMAGE_EXTENSIONS)
+            .set_title("Select a Disk Image of the Other PC (.vhd or .vhdx)")
+            .add_filter("Disk Images", DISK_IMAGE_EXTENSIONS)
             .pick_file();
         // The dialog leaves this process in whatever folder was chosen, and a scan searches that.
         let _ = std::env::set_current_dir(system_root());
@@ -855,7 +855,7 @@ impl WinAppMigratorApp {
     /// Pick a connected drive (a disk from another PC) as the scan source.
     fn pick_offline_drive(&mut self) {
         let picked = rfd::FileDialog::new()
-            .set_title("Select the connected drive's root (e.g. E:\\)")
+            .set_title("Select the Connected Drive's Root (e.g. E:\\)")
             .pick_folder();
         // The dialog leaves this process in whatever folder was chosen, and a scan searches that.
         let _ = std::env::set_current_dir(system_root());

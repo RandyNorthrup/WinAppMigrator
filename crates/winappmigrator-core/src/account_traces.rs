@@ -1041,9 +1041,9 @@ fn withhold_shortcuts(
     });
     if withheld > 0 {
         let why = if withheld == 1 {
-            "1 shortcut, which only goes with the User data option".to_owned()
+            "1 shortcut, which only goes with the User Data option".to_owned()
         } else {
-            format!("{withheld} shortcuts, which only go with the User data option")
+            format!("{withheld} shortcuts, which only go with the User Data option")
         };
         left_out.settings.push(crate::models::LeftOutItem {
             name: SHORTCUTS_LEFT_OUT_NAME.to_owned(),
@@ -1090,7 +1090,7 @@ fn withhold_tasks(
                 left_out.setting_of(
                     item,
                     "It works on a place in an account's folders, or is named for one, and only \
-                     goes with the User data option",
+                     goes with the User Data option",
                 );
                 return false;
             }
@@ -1099,7 +1099,7 @@ fn withhold_tasks(
                 if actions > 0 {
                     left_out.setting_of(
                         item,
-                        "What it also runs from an account's folders only goes with the User data \
+                        "What it also runs from an account's folders only goes with the User Data \
                          option",
                     );
                 }
@@ -1128,7 +1128,7 @@ pub(crate) struct Withholding<'a> {
     pub traces: &'a AccountTraces,
 }
 
-/// With the User data option off: what of an app's settings is an account's, by what each is.
+/// With the User Data option off: what of an app's settings is an account's, by what each is.
 pub(crate) fn withhold_settings(from: &mut Withholding<'_>, left_out: &mut LeftOut) {
     withhold_shortcuts(
         from.shortcuts,
@@ -1196,9 +1196,9 @@ fn withhold_variables(
     });
     if withheld > 0 {
         let why = if withheld == 1 {
-            "1 variable, which only goes with the User data option".to_owned()
+            "1 variable, which only goes with the User Data option".to_owned()
         } else {
-            format!("{withheld} variables, which only go with the User data option")
+            format!("{withheld} variables, which only go with the User Data option")
         };
         left_out.settings.push(LeftOutItem {
             name: VARIABLES_LEFT_OUT_NAME.to_owned(),
@@ -1245,7 +1245,7 @@ fn withhold_services(
         }) {
             left_out.setting_of(
                 format!("The service {}", service.service_name),
-                "It works on a place in an account's folders, and only goes with the User data \
+                "It works on a place in an account's folders, and only goes with the User Data \
                  option",
             );
             return false;
@@ -1336,7 +1336,7 @@ fn folders_of_the_app_in(report: &ScanReport) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Everything in a scan's settings that goes only with the User data option, by what it is. Nothing
+/// Everything in a scan's settings that goes only with the User Data option, by what it is. Nothing
 /// that has gone once is said twice, so this can run again on what it has run on.
 pub(crate) fn withhold_what_is_an_accounts(report: &mut ScanReport, include_license_data: bool) {
     for task in &mut report.scheduled_tasks {
@@ -1513,7 +1513,7 @@ mod tests {
         let said = withheld(&mut shortcuts, &folders, false);
         assert_eq!(
             said,
-            ["2 shortcuts, which only go with the User data option"]
+            ["2 shortcuts, which only go with the User Data option"]
         );
         assert_eq!(shortcuts.len(), 2);
         assert_eq!(

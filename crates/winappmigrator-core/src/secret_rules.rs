@@ -670,7 +670,7 @@ impl LeftOut {
         });
     }
 
-    /// Something of an account's that only goes with the User data option, by what it is.
+    /// Something of an account's that only goes with the User Data option, by what it is.
     pub(crate) fn setting_of(&mut self, name: String, why: &str) {
         self.settings.push(LeftOutItem {
             name,
@@ -681,9 +681,9 @@ impl LeftOut {
     /// How much of what an account keeps for an app went from a key, and never what it was.
     pub(crate) fn setting(&mut self, key: String, values: usize) {
         let why = if values == 1 {
-            "1 value, which only goes with the User data option".to_owned()
+            "1 value, which only goes with the User Data option".to_owned()
         } else {
-            format!("{values} values, which only go with the User data option")
+            format!("{values} values, which only go with the User Data option")
         };
         self.settings.push(LeftOutItem { name: key, why });
     }
