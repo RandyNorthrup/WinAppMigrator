@@ -50,7 +50,7 @@ view:
 ```text
 Panel::top("header")      → brand, inventory pill, reload, theme toggle
 Panel::right("details")   → the selected app
-  Panel::bottom           → output folder and Create installer, or progress + Cancel while building
+  Panel::bottom           → output folder and Create Installer, or progress + Cancel while building
   CentralPanel            → ScrollArea: title, result, facts, how big and whether it fits,
                             options, then what goes in, what might also, and what stays out
 CentralPanel              → scan source, search + filter, the application table
@@ -67,14 +67,14 @@ visibly off-center.
 ## The one flow
 
 1. **Pick an app** from the searchable, sortable, virtualized table (name, publisher,
-   version, scope, arch), with an All / Per-user / Per-machine filter. Arrow keys move
+   version, scope, arch), with an All / Per-User / Per-Machine filter. Arrow keys move
    the selection and Ctrl+F focuses the search.
 2. **See what goes in**, which comes from a scan that starts when the app is selected. See
    [What goes in](#what-goes-in).
 3. **Choose what to include**: optionally back up the app's license/activation data,
    and optionally its user data (settings and history, Documents, Saved Games, ProgramData), and untick
-   what you do not want. An installer holds one account's data. With User data
-   on and more than one account to offer, a **Whose data** row of `segmented` controls appears,
+   what you do not want. An installer holds one account's data. With User Data
+   on and more than one account to offer, a **Whose Data** row of `segmented` controls appears,
    starting at the signed-in user. On a connected drive, the only account with data needs no
    asking, and otherwise it starts at whoever last signed in there. If who is signed in cannot
    be told, a notice says so and no one is chosen until someone is, even if only one account has
@@ -114,7 +114,7 @@ one and stops it, and only the last goes on to the end. A finished scan is made 
 on that worker: every file is added up onto a row for its folder, so a list never has a row per file.
 
 **A scan's key.** `ScanKey` holds everything its result depends on: the app, where it is read from,
-the License and User data options, whose data, and what is ticked of what might also be part of it.
+the License and User Data options, whose data, and what is ticked of what might also be part of it.
 `keep_scan_current` compares that with what the window says, each frame. When they differ, the running
 scan is told to stop and another starts, so each of those choices takes effect the same way. Messages
 from a scan go by its number, so one stopped or replaced cannot turn up. A build goes by `ready_scan`,
@@ -126,7 +126,7 @@ so they look again, and what was unticked stays unticked, since it goes by what 
 last known stays on the screen, greyed, until the new scan is ready. Unticking something, or the output folder,
 needs no scan: the size adds up rows there and then, and how much room there is comes from what a drive said
 for that folder, asked once on a worker, since it can be a drive that takes a long time to answer. A share is not
-asked about at all, as asking would connect to it. **Look again** starts another scan by hand, and past ten minutes
+asked about at all, as asking would connect to it. **Look Again** starts another scan by hand, and past ten minutes
 the screen says how long ago it was.
 
 **A scan can get old.** A build goes by it and does not look again. Each file is hashed from what is read of it
@@ -153,15 +153,15 @@ name, and drivers that cannot be passed on, then what no installer would be allo
 only takes away from what a scan found, so there is no way to ask for one of those.
 
 **Near matches** start unticked, with why. Ticking one looks again, since it is one more root for a scan, and what is in
-a data folder is greyed unless User data is on, as that is what brings data in. See
+a data folder is greyed unless User Data is on, as that is what brings data in. See
 [discovery](discovery.md#near-matches).
 
 Lists use `ScrollArea::show_rows` past six rows, and `widgets::choice_row` and `plain_row` are all of one height so that they can.
 A short list is simply in the panel's own scrolling. A row of a long list that gets the focus is brought into view by that list
 and then by the panel, since a scroll area takes what is asked of it before the one around it does.
 
-States: nothing selected, `Running` with what step it is on and a Stop button, `Ready`, `Failed` with why and Try again, and
-`Stopped` with Look again. Create installer is disabled in all but `Ready`, and while what goes with a choice is being worked
+States: nothing selected, `Running` with what step it is on and a Stop button, `Ready`, `Failed` with why and Try Again, and
+`Stopped` with Look Again. Create Installer is disabled in all but `Ready`, and while what goes with a choice is being worked
 out, or there is not the room.
 
 ## Scan source: this PC, a connected drive, or a disk image
@@ -170,10 +170,10 @@ A **scan-source selector** at the top of the app list chooses where installed
 apps are read from:
 
 - **This PC** (default) — the live running OS.
-- **Connected drive…** — a disk from another (often failing) PC, mounted here
+- **Connected Drive…** — a disk from another (often failing) PC, mounted here
   (e.g. `E:\`). Picking a folder validates it is a Windows volume (`\Windows` and
   `\Users` exist) before use.
-- **Disk image…** — a `.vhd` or `.vhdx` of another PC. The app attaches it read-only
+- **Disk Image…** — a `.vhd` or `.vhdx` of another PC. The app attaches it read-only
   with no drive letter on a worker thread (`disk_image::AttachedImage`), says so while it
   does, and from then on it is a connected drive whose place is a folder of the app's. It is
   detached when another source is picked, on a worker thread, and when the app closes.
@@ -231,7 +231,7 @@ showing a check while `EmbeddedPackage::open` hashes the whole package on a work
 That also holds the installer's own file open, and a data file if it has one, so neither can be
 changed or swapped while the window is up. An app that cannot run on this PC stops there, and says
 why. Then it reads only the manifest, straight out of the package, and shows the app, an editable
-**install location** (defaulted to the original path), how much room it needs there, **User data** /
+**Install Location** (defaulted to the original path), how much room it needs there, **User Data** /
 **License** options (shown only when `PackageManifest.included_user_data` or `included_program_data`, and
 `included_license_data`, are set), and a **Dependencies** list.
 
@@ -252,13 +252,13 @@ drive, the Windows folder, a folder such as `Program Files` that holds other thi
 in it and no install on record, which is looked at again when it is clicked. Nothing a package names is touched to work
 this out if it could be on the network.
 
-**Install** and **Preview changes** check that there is room, then unpack the package on a worker
+**Install** and **Preview Changes** check that there is room, then unpack the package on a worker
 thread only at that point, hashing each file as it comes out, then run `restore_package_monitored`.
 **Install** goes by those hashes to check each file before writing anything, and reads back what it
-installed to verify the result. **Preview changes** only works out the changes,
+installed to verify the result. **Preview Changes** only works out the changes,
 checking no file hashes beyond the package's own; it lists the first 300, with what reaches
 beyond files first. The result appears first in the
-window, and a clean install offers **Close** and **Open install folder**. Given command-line args it instead runs headlessly
+window, and a clean install offers **Close** and **Open Install Folder**. Given command-line args it instead runs headlessly
 (`--target-root … --apply`) for automation and the end-to-end test. The stub reuses
 `winappmigrator-ui` for its look.
 

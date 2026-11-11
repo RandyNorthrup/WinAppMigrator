@@ -68,7 +68,7 @@ services, and runtimes, and packs them into a single `.exe`, or two files if it 
   says if anything could not be. Later, you can uninstall it from Settings like any other app, and a file it replaced comes back, or goes beside what has
   changed since.
 
-## How it works
+## How It Works
 
 Download `WinAppMigrator-v<version>.exe` from the
 [latest release](https://github.com/RandyNorthrup/WinAppMigrator/releases/latest) and run it. There
@@ -76,29 +76,29 @@ is nothing to install. Windows asks for administrator approval, because reading 
 installing services both need it. The same app comes in a zip with this file and its license, and
 `SHA256SUMS.txt` has the checksum of both. It is an x64 program, and Windows on Arm runs it through emulation.
 
-### 1. Pick an app
+### 1. Pick an App
 
-Choose **This PC**, **Connected drive…** (a disk from another PC, plugged in), **Disk image…** (a `.vhd` or `.vhdx`
+Choose **This PC**, **Connected Drive…** (a disk from another PC, plugged in), **Disk Image…** (a `.vhd` or `.vhdx`
 of another PC, which the app attaches read-only itself), or **Network PC…** (another PC on your network, read through
 WinAppMigrator Client: see [below](#from-another-pc-over-the-network)), then search or sort the list. Another PC can have
 Windows 7, 8 or 10 as well as 11: see [Limitations](#limitations). Selecting an app looks at it in the
 background, and picking another stops that. Optionally include the app's license data and user data. An installer
 holds one account's data, so if more than one account has data for the app, you choose whose.
 
-With **User data** off, what the app remembers for you in the registry stays behind as well as its data folders:
+With **User Data** off, what the app remembers for you in the registry stays behind as well as its data folders:
 preferences along with recent files and saved sessions. So it should start on the other PC much as it would for someone new,
 except for what it keeps among its own program files and machine-wide settings, which go as they are.
 
-#### From another PC over the network
+#### From Another PC over the Network
 
 WinAppMigrator itself needs Windows 10 or 11. To move an app off a PC that is still running, even one on Windows 7, choose
 **Network PC…**, and the app walks you through it:
 
-1. **Put the client on the old PC.** Save **WinAppMigrator Client** to a USB drive, or to any folder the old PC can reach,
+1. **Put the Client on the Old PC.** Save **WinAppMigrator Client** to a USB drive, or to any folder the old PC can reach,
    such as a shared folder. It is one small program, the same for Windows 7, 8, 10 and 11, 32-bit or 64-bit.
 2. **Run it there.** Close the app you are moving, double-click the client, and let it make changes. It takes a snapshot of
    the Windows drive, so nothing it reads is locked or changing, and shows a six-digit code.
-3. **Pick the old PC and type the code.** It is found on your network by itself, or you type its name or address. Its apps
+3. **Pick the Old PC and Type the Code.** It is found on your network by itself, or you type its name or address. Its apps
    are then listed as this PC's are, and you build an installer from one in the same way, here.
 
 The client only lets this PC read the old one, and does no capturing of its own. What the build reads crosses the network,
@@ -117,7 +117,7 @@ from your local network only, and when you press Enter or close its window, it r
   <img alt="WinAppMigrator Client on Windows 7, showing the PC, its Windows, the pairing code, and the new PC reading what it needs" src="docs/images/client-windows7.png" width="640">
 </p>
 
-### 2. See what goes in
+### 2. See What Goes In
 
 The screen says how big the installer can be and whether it fits, then lists what it holds: program files, data
 folders, services, startup items, scheduled tasks, shortcuts, what ties the app into Windows, and the runtimes it
@@ -126,7 +126,7 @@ nothing to run, it goes too, and the screen says so, so no service, task, or sho
 Only what holds
 the main program, or what it cannot start without, has to stay.
 
-**Might also be part of it** lists what exact names left out and looks related, each with why, such as a folder with a
+**Might Also Be Part of It** lists what exact names left out and looks related, each with why, such as a folder with a
 close name or a part of the app that no list of apps shows. None of it goes in unless you tick it, and it then goes through
 the same checks as the rest. What looks like a credential cannot be ticked, whatever it is in. What is left out, and why,
 is at the end, by name.
@@ -138,7 +138,7 @@ is at the end, by name.
   </picture>
 </p>
 
-### 3. Build the installer
+### 3. Build the Installer
 
 Follow the progress, or cancel. The build goes by what is on the screen and reads each file then, so a file that changed
 is right, and one that has gone is listed. You get one file, named after what it contains, such as
@@ -146,7 +146,7 @@ is right, and one that has gone is listed. You get one file, named after what it
 profile folder. A package too
 big for one executable comes as two files, `.exe` and `.wamdata`, and the window says they have to stay together.
 
-With User data off, the build then looks through what the installer says about the app, though not the app's own files or
+With User Data off, the build then looks through what the installer says about the app, though not the app's own files or
 license files, for your account, profile folder, PC name, and SID. The
 finished screen says where it found any, so you can decide what to do about that, and the installer is built either way.
 
@@ -157,7 +157,7 @@ finished screen says where it found any, so you can decide what to do about that
   </picture>
 </p>
 
-### 4. Run it on the other PC
+### 4. Run It on the Other PC
 
 Copy the installer over, with its data file if it has one, and run it. Check the install location, preview the
 changes if you like, then click **Install**. If the installer holds user data or license data, each has a box, ticked to start
@@ -176,25 +176,25 @@ older than the one it came from. When it has checked what it installed, it start
 <sub>Screenshots use sample data, and follow your GitHub theme. The app has light and dark modes, and starts
 in the one Windows is in until you choose. An installer goes by the same, where it runs.</sub>
 
-## What gets captured
+## What Gets Captured
 
 | What | Included | Notes |
 | --- | --- | --- |
-| **Program files** | Yes, unless you untick a folder | Found through MSI and Inno Setup records, NSIS logs, App Paths, and folders named exactly for the product. What holds the main program always goes in. Empty folders come along too, up to 10,000 |
-| **Registry** | Yes, unless you untick a kind of it | The app's machine-wide keys, plus what points at a file it has: COM classes with their type libraries, interfaces, and AppIDs, file types, link protocols, menu commands, shell extensions, Default apps entries, and 32-bit Run and App Paths entries. Without User data, an account's keys go only where Windows itself looks for an app, plus a value saying where the app is. Values outside the app's own keys and those kinds are a row of their own in what the installer lists |
+| **Program Files** | Yes, unless you untick a folder | Found through MSI and Inno Setup records, NSIS logs, App Paths, and folders named exactly for the product. What holds the main program always goes in. Empty folders come along too, up to 10,000 |
+| **Registry** | Yes, unless you untick a kind of it | The app's machine-wide keys, plus what points at a file it has: COM classes with their type libraries, interfaces, and AppIDs, file types, link protocols, menu commands, shell extensions, Default apps entries, and 32-bit Run and App Paths entries. Without User Data, an account's keys go only where Windows itself looks for an app, plus a value saying where the app is. Values outside the app's own keys and those kinds are a row of their own in what the installer lists |
 | **Firewall rules, fonts, ODBC, event log sources, compatibility settings** | Yes, unless you untick a kind of it | Each only for a file the app has. A font in `C:\Windows\Fonts` comes only if a machine-wide install record names it, and goes in the install folder |
 | **Certificates** | Reported only | The ones the app seems to rely on are named. They are never installed, because whether to trust one is for you to decide |
 | **Services and drivers** | Yes, unless you untick one | Services keep their arguments, settings, and built-in account, and one set to start by itself is started once the install has checked what it installed. One that will not start is a warning, and the app stays installed. A custom account's password cannot be moved, so that service is set up as LocalService and the installer says so. Drivers the app owns are re-registered, though no test has loaded one. Vendor and inbox drivers are reported instead, because they cannot be redistributed |
-| **Scheduled tasks** | Yes, unless you untick one | A task that ran as a person runs as whoever installs it. With User data off, one told to work on something in someone's folders stays behind |
-| **Shortcuts** | Yes, unless you untick one | One in your own folders goes without User data only if it just opens the app, and then to the Desktop or Start Menu of whoever installs it. An app installed for one account keeps its own |
+| **Scheduled Tasks** | Yes, unless you untick one | A task that ran as a person runs as whoever installs it. With User Data off, one told to work on something in someone's folders stays behind |
+| **Shortcuts** | Yes, unless you untick one | One in your own folders goes without User Data only if it just opens the app, and then to the Desktop or Start Menu of whoever installs it. An app installed for one account keeps its own |
 | **Environment variables** | Yes, unless you untick that kind | Those that hold the app's path. A captured `Path` holds only the app's entries, and is merged into the target's, never replaced |
 | **Runtimes** | Always, even if what needed one was left out | Read from the main program and up to 64 others, nearest the top of its folder first. Visual C++ 2005 and later, and .NET 6 to 10, are embedded, or come through winget if the download failed at build time. .NET Framework 3.5 is a Windows feature that can need internet on the target, and 4.x is part of Windows. A runtime with no installer here, such as Visual C++ 2003, .NET 5, or one with no Arm64 build for an Arm64 app, is named in a warning, and nothing is installed in its place |
-| **User data** | Your choice | What an account keeps for the app in the registry, such as settings, recent files, and saved sessions, and AppData, ProgramData, Public Documents, Documents, and Saved Games. Online-only OneDrive files are listed, not copied |
+| **User Data** | Your choice | What an account keeps for the app in the registry, such as settings, recent files, and saved sessions, and AppData, ProgramData, Public Documents, Documents, and Saved Games. Online-only OneDrive files are listed, not copied |
 | **License data** | Your choice | License files and stores, and license values in the account's part of the registry. A license value in machine-wide settings or under the publisher's own key, and a store tied to the hardware, such as CodeMeter or Sentinel, are only named, never copied. With this off none of it is captured, and only their names are noted. Reports whether each is likely tied to the machine. [Never bypasses activation](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/SECURITY.md#licensing-data) |
 | **Near matches** | Only if you tick them | Folders with a close name, and parts of the app no list shows, up to 200 of them. [What is never offered](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/discovery.md#near-matches) |
 | **Credentials** | Never | Values and files that look like passwords, tokens, or private keys are left out and named before you build, and cannot be ticked. [This cannot catch everything](#security-and-signing) |
 
-## What it has been tried on
+## What It Has Been Tried On
 
 Every push to `main` moves five real open-source apps from one CI runner to fresh ones: 7-Zip, PuTTY, Eclipse Mosquitto,
 windows_exporter, and Git LFS, installed by their publishers' own setups, which are custom, MSI, NSIS, and Inno Setup. They go to
@@ -211,7 +211,7 @@ Those are small, well-behaved apps on clean machines, and this is how far that g
   another PC has not been run on CI.
 - **Windows 7.** Off CI, by hand: Windows 7 SP1 VMs, 32-bit and 64-bit, with 7-Zip 9.20, Notepad++, VLC 2.2.8 and two
   small apps of the XP era, one keeping its settings beside itself and one using DirectX 9. Each disk was exported as a
-  `.vhdx`, read with **Disk image…**'s own code, and built into installers that checked out. LegacyNotes, RetroBlocks and
+  `.vhdx`, read with **Disk Image…**'s own code, and built into installers that checked out. LegacyNotes, RetroBlocks and
   Notepad++ were installed on Windows 11 25H2, run as a person would, and uninstalled, and each started with what it had on
   Windows 7. 7-Zip and VLC were built but not installed, as that PC has newer ones.
 - **Network PC.** Off CI, by hand: the client on the same Windows 7 VMs, 32-bit and 64-bit, and on Windows 11 25H2. All
@@ -250,7 +250,7 @@ the rest are grouped below: click a group to open it.
 - **It is only for software you are licensed to move.** That part is up to you.
 
 <details>
-<summary><strong>What a build can leave behind</strong></summary>
+<summary><strong>What a Build Can Leave Behind</strong></summary>
 
 - **An app made of several packages only gets its own, unless you add the rest.** NVIDIA App's `NVIDIA Container` is a
   separate hidden entry, for example, which is offered, and it goes in if you tick it. Another entry in the list of apps
@@ -260,7 +260,7 @@ the rest are grouped below: click a group to open it.
 - **Runtimes stay as they were found.** A runtime only a folder you left out needed still goes in, since telling that
   takes knowing what else needs it. It only costs room.
 - **What is on the screen is as of when the app was looked at.** A build reads each file then, so a file that changed is
-  right, and one that has gone is listed. Something new since then is not in it until you click **Look again**.
+  right, and one that has gone is listed. Something new since then is not in it until you click **Look Again**.
 - **A link in an app's folder is not followed,** and neither is a folder more than 64 levels down. Each is named in a warning.
 - **The registry is captured up to a limit,** 1 MiB for a value, 512 keys and 8 levels for what is under one key, and
   100,000 values for an app. Reaching one is a warning, and the rest stays behind.
@@ -348,7 +348,7 @@ the rest are grouped below: click a group to open it.
 </details>
 
 <details>
-<summary><strong>Connected drives</strong></summary>
+<summary><strong>Connected Drives</strong></summary>
 
 - **A connected drive only gives what is on it.** Nothing it says is followed off it, and no link on it is
   followed at all, because a link on another PC's disk leads to this PC's files. So an app or data kept on
@@ -365,7 +365,7 @@ the rest are grouped below: click a group to open it.
 - **A disk image is attached read-only** and with no drive letter, and detached when you pick another source or close
   the app. Only `.vhd` and `.vhdx`, which Windows can attach: an image from VMware or VirtualBox has to be saved as one
   first, and one Windows already has attached is refused, since something else may be writing to it.
-- **From Windows 7 (or Vista, 8 or 8.1),** what Windows kept aside for an older app comes along with User data and goes
+- **From Windows 7 (or Vista, 8 or 8.1),** what Windows kept aside for an older app comes along with User Data and goes
   in the app's own folder and keys, an app from 32-bit Windows goes to `Program Files (x86)`, and the DirectX 9 runtime is
   installed with an app that needs it, which takes the internet where it is installed. A DLL that came from Windows 7's
   own folders and that Windows 11 lacks is named and not brought. A 16-bit program, a driver signed only for Windows 7,
@@ -374,7 +374,7 @@ the rest are grouped below: click a group to open it.
 </details>
 
 <details>
-<summary><strong>Accounts and their data</strong></summary>
+<summary><strong>Accounts and Their Data</strong></summary>
 
 - **An installer holds one account's data.** It is read from whoever is signed in, or from the account you
   choose, and goes to whoever is signed in where the installer runs. That is so even if another
@@ -389,7 +389,7 @@ the rest are grouped below: click a group to open it.
 
 Open issues are tracked in the [plan](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/PLAN.md#open-issues-most-important-first).
 
-## Security and signing
+## Security and Signing
 
 - **Only run installers you trust.** An installer runs elevated and installs what its package holds. It
   refuses what no app should do and lists what it will set up, but only a signature proves who made it.
@@ -399,7 +399,7 @@ Open issues are tracked in the [plan](https://github.com/RandyNorthrup/WinAppMig
   that does not say what it is. So treat an installer as being as sensitive as the PC it came from.
   [More](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/SECURITY.md#an-installer-can-contain-secrets).
 - **Installers from before `0.5.0` can say more.** Those can hold the name of the PC and account they were built on, and what
-  apps remember in the registry, such as recent files and hosts, even with User data off. Treat them as private.
+  apps remember in the registry, such as recent files and hosts, even with User Data off. Treat them as private.
 - **Signing.** From `v0.5.0` on, the app is signed (publisher: Randy Northrup), and from `v0.6.0` WinAppMigrator Client too; each release
   records build provenance you can check with `gh attestation verify`. Earlier downloads are
   unsigned. Installers you build are not signed unless you sign them, so Windows shows "Unknown
@@ -407,7 +407,7 @@ Open issues are tracked in the [plan](https://github.com/RandyNorthrup/WinAppMig
 
 More in [SECURITY.md](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/SECURITY.md).
 
-## Automating the installer
+## Automating the Installer
 
 Run with any argument, an installer skips its window. It previews unless you pass `--apply`, and exits
 non-zero if anything fails, after putting back what it did. With no arguments that say what to do, it
@@ -455,7 +455,7 @@ needs on each drive before it starts.
 Logs are in `%ProgramData%\WinAppMigrator\logs`, which only administrators can read, with the last 20 kept.
 They hold paths and key names, and never what a registry value, license file, or environment variable holds.
 
-### What `--force` does
+### What `--force` Does
 
 `--force` replaces existing files, registry values, services, tasks, shortcuts, and environment variables. Without it, a folder
 with files in it and no install on record stops the install before anything changes, whether or not any would be replaced, and
@@ -466,7 +466,7 @@ app's service could be running that file. Services, tasks, and what ties an app 
 Outside the install location, no program goes in a folder that was already there without an install on record. A data file
 there is replaced.
 
-## What it keeps on your PC
+## What It Keeps on Your PC
 
 - **The app** needs no install, and keeps only the light or dark mode you choose, in `%LOCALAPPDATA%\WinAppMigrator\theme.txt`.
   What it builds goes in the output folder you give it, by default under `%USERPROFILE%\WinAppMigrator`.
@@ -480,7 +480,7 @@ there is replaced.
   client removes them first. Version 0.6.0 kept its record in a `WinAppMigrator Client` folder in ProgramData, which stays, and
   which later versions leave alone.
 
-## Building from source
+## Building from Source
 
 You need Windows, [Rust](https://rustup.rs) through rustup, which picks the pinned 1.99.1 by itself, and the Visual
 Studio C++ build tools. The app carries the installer and WinAppMigrator Client inside itself, so build those first:
@@ -524,7 +524,7 @@ authority, and win if the two ever disagree.
 | [Contributing](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/CONTRIBUTING.md) | The project's rules and checks |
 | [Changelog](CHANGELOG.md) | What changed in each release |
 
-## License and support
+## License and Support
 
 [MIT](LICENSE) © 2026 Randy Northrup. Third-party attributions are in
 [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).

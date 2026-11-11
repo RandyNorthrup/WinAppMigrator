@@ -290,7 +290,7 @@ def build(args: argparse.Namespace) -> None:
         if heading is None:
             raise BuildError(f"{page.name} has no # heading to title it")
         title = plain(heading.group(1))
-        title = "WinAppMigrator documentation" if title == "WinAppMigrator" else f"{title} – WinAppMigrator"
+        title = "WinAppMigrator Documentation" if title == "WinAppMigrator" else f"{title} – WinAppMigrator"
         description = describe(rendered)
         if not description:
             raise BuildError(f"{page.name} has no paragraph to describe it")

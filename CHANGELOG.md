@@ -12,6 +12,14 @@ All notable project changes are tracked here.
   files change, when the wiki is edited, after a release, and once a day, and the build fails on any link or `#anchor` between pages
   that leads nowhere. Bing and the search engines that share its index are told which pages changed, through IndexNow.
 
+### Title case
+
+- **Titles, labels, and buttons are in title case** in the app, the installer, the uninstaller, and the network steps, such as
+  **Create Installer**, **User Data**, **Look Again**, and **Preview Changes**. Sentences, hints, and notices are not. The
+  kinds on the installer's list (**Scheduled Task**, **Firewall Rule**) and how a runtime comes (**Install Manually**) follow,
+  and the client says **Pairing Code**. The website's titles, its pages' headings, and the README's headings do too, and the
+  pictures are of the screens as they now are.
+
 ### Security
 
 - **Network PC: the client lets nothing pair after 20 wrong codes.** Before, it made a new code after each five, for as long as

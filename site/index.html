@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="color-scheme" content="light dark">
-  <title>WinAppMigrator – Move installed Windows programs to a new PC</title>
+  <title>WinAppMigrator – Move Installed Windows Programs to a New PC</title>
   <meta name="description" content="Free, open-source tool that turns an installed Windows app into one installer for another PC, even from a dead PC's drive, a disk image, or an old Windows 7 PC.">
   <link rel="canonical" href="${base_url}/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="WinAppMigrator">
-  <meta property="og:title" content="WinAppMigrator – Move installed Windows programs to a new PC">
+  <meta property="og:title" content="WinAppMigrator – Move Installed Windows Programs to a New PC">
   <meta property="og:description" content="Turn an installed Windows app into one installer you can run on another PC, even when the original installer is long gone.">
   <meta property="og:url" content="${base_url}/">
   <meta property="og:image" content="${base_url}/images/app-pick-light.png">
@@ -39,7 +39,7 @@
   </script>
 </head>
 <body class="landing">
-  <a class="skip" href="#content">Skip to the page</a>
+  <a class="skip" href="#content">Skip to the Page</a>
   <header class="top">
     <div class="top-inner">
       <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
@@ -53,13 +53,13 @@
 
   <main id="content">
     <section class="hero">
-      <h1>Move installed Windows programs to a new PC</h1>
+      <h1>Move Installed Windows Programs to a New PC</h1>
       <p class="lede">WinAppMigrator turns an app installed on one Windows PC into one installer you can run on another.
         Even when the app is on an old Windows 7 PC across your network, on a drive pulled out of a dying machine, or on an
         image of one, and the original installer is long gone.</p>
       <p class="actions">
         <a class="button primary" href="https://github.com/${repository}/releases/latest">Download ${version}</a>
-        <a class="button" href="Getting-Started">Get started</a>
+        <a class="button" href="Getting-Started">Get Started</a>
       </p>
       <p class="facts">Free and open source, MIT license · Windows 10 and 11, x64 · Signed by Randy Northrup</p>
       <picture>
@@ -70,15 +70,15 @@
     </section>
 
     <section aria-labelledby="when">
-      <h2 id="when">When it helps</h2>
+      <h2 id="when">When It Helps</h2>
       <div class="cards">
         <article>
-          <h3>Moving to a new PC</h3>
+          <h3>Moving to a New PC</h3>
           <p>An app comes along without hunting for its setup file, its license file, or its settings.</p>
           <a href="Getting-Started">Getting started</a>
         </article>
         <article>
-          <h3>The old PC will not start</h3>
+          <h3>The Old PC Will Not Start</h3>
           <p>Take its drive out, connect it to a working PC, and build an installer from an app on it. If the drive may be
             failing, make an image of it first and build from the image, since reading a failing drive can finish it off.</p>
           <a href="Moving-from-a-Connected-Drive">From a drive or a disk image</a>
@@ -90,19 +90,19 @@
           <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">Apps from older Windows</a>
         </article>
         <article>
-          <h3>The old PC still runs, on your network</h3>
+          <h3>The Old PC Still Runs, on Your Network</h3>
           <p>Run the small, signed WinAppMigrator Client on it, type the code it shows, and pick an app. Only what the build
             needs crosses the network, encrypted. Nothing has to be taken out of the PC.</p>
           <a href="Moving-over-the-Network">From a PC over the network</a>
         </article>
         <article>
-          <h3>The setup file is gone, or the company is</h3>
+          <h3>The Setup File Is Gone, or the Company Is</h3>
           <p>It works backward from what is installed: the app's files, its registry entries, its services, and the
             Microsoft runtimes it needs.</p>
           <a href="How-It-Works">How it works</a>
         </article>
         <article>
-          <h3>The same app on several PCs</h3>
+          <h3>The Same App on Several PCs</h3>
           <p>An installer it builds can preview, install and uninstall from a command prompt, so a script can install the
             same app on each PC.</p>
           <a href="Command-Line">Command line</a>
@@ -111,25 +111,25 @@
     </section>
 
     <section aria-labelledby="steps">
-      <h2 id="steps">How it works</h2>
+      <h2 id="steps">How It Works</h2>
       <ol class="steps">
         <li>
-          <h3>Pick an app</h3>
+          <h3>Pick an App</h3>
           <p>From this PC, a drive from another PC plugged into this one, a <code>.vhd</code> or <code>.vhdx</code> image
             the app attaches read-only, or another PC on your network.</p>
         </li>
         <li>
-          <h3>See what goes in</h3>
+          <h3>See What Goes In</h3>
           <p>The screen says how big the installer can be, whether it fits, and what it holds. Untick what you do not want,
             and tick what looks related that exact names missed.</p>
         </li>
         <li>
-          <h3>Build the installer</h3>
+          <h3>Build the Installer</h3>
           <p>You get one <code>.exe</code>, named after what it holds. An app too big for one comes as an <code>.exe</code>
             and a data file that stay together.</p>
         </li>
         <li>
-          <h3>Run it on the other PC</h3>
+          <h3>Run It on the Other PC</h3>
           <p>It checks its package's hashes before writing anything, installs, then reads back what it installed and checks
             that. If anything goes wrong, or you cancel, it puts back what it did, except a runtime it installed. It leaves
             an uninstaller in Settings.</p>
@@ -144,9 +144,9 @@
     </section>
 
     <section aria-labelledby="what">
-      <h2 id="what">What goes in an installer</h2>
+      <h2 id="what">What Goes in an Installer</h2>
       <ul class="checks">
-        <li><strong>Program files</strong>, found through MSI and Inno Setup records, NSIS logs, App Paths, and folders named
+        <li><strong>Program Files</strong>, found through MSI and Inno Setup records, NSIS logs, App Paths, and folders named
           exactly for the product.</li>
         <li><strong>Registry entries</strong>: the app's machine-wide keys, its COM classes, file types, link protocols, menu
           commands and shell extensions.</li>
@@ -163,7 +163,7 @@
     </section>
 
     <section aria-labelledby="rely">
-      <h2 id="rely">Before you rely on it</h2>
+      <h2 id="rely">Before You Rely on It</h2>
       <p>Every push to the project moves five real open-source apps, 7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter and
         Git LFS, from one test machine to fresh ones, and asks Windows itself to use what was restored. Those are small, well-behaved
         apps on clean machines. Desktop Windows 10 and 11 on x64 have not been run in those tests, and an app with online
@@ -174,7 +174,7 @@
     </section>
 
     <section aria-labelledby="get">
-      <h2 id="get">Get it</h2>
+      <h2 id="get">Get It</h2>
       <ol class="plain">
         <li>Download <code>WinAppMigrator-v${version}.exe</code> from the
           <a href="https://github.com/${repository}/releases/latest">latest release</a>. There is nothing to install.</li>
@@ -184,7 +184,7 @@
       </ol>
       <p class="actions">
         <a class="button primary" href="https://github.com/${repository}/releases/latest">Download ${version}</a>
-        <a class="button" href="Getting-Started">How to check the download</a>
+        <a class="button" href="Getting-Started">How to Check the Download</a>
       </p>
     </section>
   </main>

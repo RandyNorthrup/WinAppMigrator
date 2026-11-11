@@ -11,7 +11,7 @@ rather than in a public issue. Include the version and the steps to reproduce it
 Only the latest release. There is no support for older ones, and a fix is not backported.
 
 **If you have an installer built by a version before `0.5.0`, treat it as private, and do not post it or pass it on.** With or
-without the User data option, those can hold:
+without the User Data option, those can hold:
 
 - the name of the PC it was built on, and the account that built it, in what the installer shows and in the files inside it;
 - what apps remember in their part of the registry, such as the files and folders 7-Zip last opened, and the hosts PuTTY has
@@ -409,7 +409,7 @@ that find them when it is on. With it on, license files and stores come along, a
 license value in machine-wide settings or under the publisher's own key, and a store tied to the hardware, are only named.
 Credentials still do not come along.
 
-**With the User data option off, what an account keeps for an app in its part of the registry stays behind too:** recent
+**With the User Data option off, what an account keeps for an app in its part of the registry stays behind too:** recent
 files and folders, saved sessions, the hosts it has been to. All of it goes but what Windows itself looks in for an app, such as
 file types, COM classes, App Paths, Run values, its entry in Settings, and what that entry in Default apps points at, and a
 plainly named value in the app's own key whose whole data is a path in the app's own folder. That value has to be no more than two
@@ -445,13 +445,13 @@ folders.
 **What this cannot catch.** This goes by names and a few shapes of text, and a heuristic cannot find every secret:
 
 - It does not look inside an app's own files. A password in a settings file, a database, or a format of its own is
-  copied like the rest of the file, and that goes for everything the User data option adds.
+  copied like the rest of the file, and that goes for everything the User Data option adds.
 - A value whose name does not say what it holds, such as `Data` or `Blob1`, is captured, unless what it holds has one
   of those shapes.
 - Rules that catch more would break more apps, so `TokenizerPath` and `PasswordPolicyVersion` are kept, and a file
   called `tokens.txt` is too. A `.key` in binary is known by its shape alone, so one of a kind of its own is not, and a `.crt`
   is only read up to 1 MiB, so a private key in one bigger than that is not found.
-- With the User data option on, an installer says which PC it came from. With it off or on, what it holds can say more. Some of
+- With the User Data option on, an installer says which PC it came from. With it off or on, what it holds can say more. Some of
   what a setup keeps of who ran it stays behind: an Inno Setup app's uninstall log, `unins000.dat`, which names the PC and the
   account and can hold paths in that account's folders, the account, name, and organization in its entry in Settings, and where a
   Windows Installer setup was run from. A serial typed into a setup is a license like any other, so it stays behind with the License option off, and
@@ -463,7 +463,7 @@ So an installer can contain secrets, and **it has to be handled accordingly**: d
 would not hand the PC to. Reading the list of what was left out tells you what was found, and says nothing of what
 was not.
 
-With the User data option on, the package also records the name of the computer the app was on, and the name of that
+With the User Data option on, the package also records the name of the computer the app was on, and the name of that
 account's profile folder, and the installer shows them. With it off, it records neither. That is what the package says of
 where it came from. An app can keep that computer's name in its own files or machine-wide registry values, which go in
 as the app has them, and nothing looks for it there.

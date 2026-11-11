@@ -49,7 +49,7 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
 - The same with real open-source apps from their publishers, with Windows asked to use what was restored: a real
   archive, a COM class activated, a file type opened, a shortcut started, and services answering a real client, each shown
   to fail without the app, and the machine compared with how it was after an uninstall.
-- Scan source selector: **this PC or a connected offline drive** (a disk from
+- Scan Source selector: **this PC or a connected offline drive** (a disk from
   another PC). Offline reads load copies of the disk's registry hives, compare what
   its registry says with what that PC called things, and map a path to the volume in one
   place, which will not lead off it. The app writes nothing to the drive. The app runs
@@ -61,7 +61,7 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   VMs, 32-bit and 64-bit, and Windows 11 25H2.
 - A drive or an image from Windows 7, Vista, 8 or 8.1, onto Windows 10 or 11: which Windows it is, said in words; an app from
   32-bit Windows laid out as 64-bit Windows keeps it, in `Program Files (x86)` and the 32-bit registry view; what Windows kept
-  aside for an older app (`VirtualStore`) put in the app's own folder and keys with User data, since Windows 11 ignores a
+  aside for an older app (`VirtualStore`) put in the app's own folder and keys with User Data, since Windows 11 ignores a
   `VirtualStore` key an installer makes; the DirectX End-User Runtime as a prerequisite; DLLs from the old Windows folders that
   Windows 11 lacks named; and shortcuts written with a variable read. Run for real from Windows 7 SP1 VMs, 32-bit and 64-bit,
   onto Windows 11 25H2.
@@ -76,7 +76,7 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
 - Layered footprint discovery (MSI component DB, Inno `unins*.dat`, NSIS
   `uninstall.log`, App Paths, plus a Program Files/ProgramData/AppData walk), PE/delay-import/SxS/.NET analysis, runtime-prerequisite
   detection, and authoritative file counts.
-- What an account keeps for an app in the registry goes by the User data option, shown on real apps with marks searched for
+- What an account keeps for an app in the registry goes by the User Data option, shown on real apps with marks searched for
   through a whole package, and with it off, a package says nothing of who built it but what the app needs to work, and a build
   looks through what the package says about the app, though not the app's own files, for anything that does. An app's empty folders are made again.
 - A PC with no Visual C++ runtime, tried for real, and real windows opened on runners that use a software renderer, with what a person is

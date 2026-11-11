@@ -461,7 +461,7 @@ record is left out when it is what another app would take by its name, and one f
 A file its install record lists is left out when another app's record lists it too, and if that record names anything of another
 app's at all, none of the keys it lists come along. All of this is before `take_secret_files` and
 `license_scan`, so what looks like a credential stays out and a license goes by its option, however it came. What is in a
-data folder goes by the User data option, like any other.
+data folder goes by the User Data option, like any other.
 
 `wam_near_matches` runs this for every app on a PC. See [CONTRIBUTING](../CONTRIBUTING.md#seeing-what-near-matches-would-offer).
 
@@ -589,7 +589,7 @@ This cannot catch everything. See [SECURITY.md](../SECURITY.md#an-installer-can-
 
 - `ScanOptions.include_user_data` / `PackageOptions.include_user_data` — when false,
   genuine per-user data (Roaming/Local/LocalLow AppData, Documents, Saved Games) is
-  discovered and reported to the screen but not copied, and a package says nothing of it. Set from the app's "User data" option, which is
+  discovered and reported to the screen but not copied, and a package says nothing of it. Set from the app's "User Data" option, which is
   off by default. `for_executable` and the serde default set it to `true`, for library
   callers.
 - `ScanOptions.include_program_data` / `PackageOptions.include_program_data` — controls
@@ -669,7 +669,7 @@ For an offline volume, `SystemContext`:
 - **Lists its accounts from `ProfileList`** in its `SOFTWARE` hive. A profile folder with a hive and no
   record is kept too, known by its name, since this may be the only chance at it.
 - **Reads its computer name and Windows version** from those hives, for the manifest. The name only
-  goes in with the User data option on.
+  goes in with the User Data option on.
 
 Paths come in two kinds. **Logical** paths are what the source PC called things: what its registry
 holds, what a value is compared with, and everything in the report and manifest, including the install
@@ -733,7 +733,7 @@ package time via `robocopy /B`. **For a failing drive, image it first and scan t
 
 ### A disk image
 
-**Disk image…** takes a `.vhd` or `.vhdx` and reads it as a connected drive (`disk_image.rs`). That is what
+**Disk Image…** takes a `.vhd` or `.vhdx` and reads it as a connected drive (`disk_image.rs`). That is what
 Sysinternals Disk2vhd makes of a PC that is still running, what Windows 7's own "Create a system image" makes, and what
 Hyper-V keeps. Windows attaches it and its own NTFS and registry code reads it, so nothing on it is read any other way,
 and everything above holds as it does for a drive.
@@ -778,7 +778,7 @@ onto Windows 11 25H2: see `C:\Users\Randy\TestLab\README.md` for the lab.
   it wrote to its own folder in `Program Files` and to `HKLM\Software`. Windows keeps what it wrote in the account's
   `AppData\Local\VirtualStore\<path>` and `Software\Classes\VirtualStore\MACHINE\SOFTWARE\<key>`, and gives it back when the
   app reads. Apps made for Windows XP did this on Windows 7 without knowing, so that is where their settings are. With the
-  User data option on, the account's copies go in place of the app's own: files into the app's folder
+  User Data option on, the account's copies go in place of the app's own: files into the app's folder
   (`file_discovery::put_what_windows_kept_aside_in_place`), values into the app's own key
   (`registry_scan::put_what_windows_kept_aside_in_place`). Back in `VirtualStore` would not do: Windows 11 only gives an app what
   is in a `VirtualStore` key Windows itself made, and ignores one an installer made, which the app then writes over. That was
@@ -889,7 +889,7 @@ from outside the install directory) land under one `target_root` unless
 `--restore-user-data` is passed. Captured license files go under the install location when
 their paths map there, and otherwise to this PC's own folder for where they came from.
 Registry values and environment variables always go to their real locations, and shortcuts
-to this PC's own Desktop and Start Menu. The installer's window asks instead: its **User data**
+to this PC's own Desktop and Start Menu. The installer's window asks instead: its **User Data**
 option is on by default whenever data was captured. Turning it off still writes the data,
 under the install folder.
 

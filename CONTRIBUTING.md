@@ -96,7 +96,7 @@ them there and look with Windows' own tools, and say what differed.
 `elevated_real_apps.rs`, `.github/scripts/real-apps.json`, and the `real-app` scripts beside it do that with real apps.
 `install-real-apps.ps1` runs each publisher's installer on a runner, at the version and SHA-256 in the JSON, and asks the
 same of it as `check-moved-real-apps.ps1` later asks of the move, so a failure there is no fault of this project's. The test
-builds the installers the way the app does, with the License and User data options off and no runtime bundled, and looks
+builds the installers the way the app does, with the License and User Data options off and no runtime bundled, and looks
 through each package for the runner's account, folders, and tokens before anything is uploaded. On each fresh runner the script removes any
 copy it came with, shows that every check fails, installs, shows that every check works, removes each app by the string its
 entry recorded, shows that every check fails again, and compares the machine with how it was, by each registry value the
@@ -111,7 +111,7 @@ fresh runner has to end up with the task running as its own account with nothing
 
 `install-real-apps.ps1` also leaves what an account would have in 7-Zip's and PuTTY's keys, with marks in it that are in
 nothing else. The build goes through each package for those marks, in every form a value is written in, and none may be there
-with the User data option off. A step of that job that uploads nothing builds again with it on, where each has to be there, and
+with the User Data option off. A step of that job that uploads nothing builds again with it on, where each has to be there, and
 `check-account-settings.ps1` installs that on the same runner, and shows each value arrive and go. `Real apps, a PC with no runtime`
 builds Mosquitto with its runtime in it, and `check-runtime-arrives.ps1` takes that runtime off the runner and shows the broker
 cannot start, then installs with `TEMP` set to a folder nothing may use, and has it serve a client. `Elevated packaging` runs the
