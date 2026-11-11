@@ -213,15 +213,17 @@ controlled. So:
   first read as Windows would read it, so that it is the real name that is asked about.
 - **There are limits on what a drive can make this do.** A hive is copied by reading it, or in backup mode if that is denied, where
   how much room it takes is watched, since that brings streams a size says nothing of, though that route has not been run on a really
-  denied hive. Either way that is up to 4 GiB, and 32 GiB for all of a run's. There are limits on a program, an install log, an AppX manifest, a task, how many tasks an app keeps,
+  denied hive. Either way that is up to 4 GiB, and 32 GiB for all of a run's, by what was copied, not what a size said. There are limits on a program, an install log, an AppX manifest, a task, how many tasks an app keeps,
   how many accounts are listed, and how much of the registry is captured. How much of an app's own files can be read
   into a package is checked against the room there is, by what the listing says of each, and a file can only hold as
   much as was read.
 - **A disk image is attached read-only, with no drive letter,** so nothing writes to it and nothing else on the PC is
   offered it. Its volumes are mounted on folders inside an administrators-only folder under
   `%ProgramData%\WinAppMigrator\images`, read as a drive is, and detached afterward. One Windows already has attached is
-  refused, since whatever attached it may be writing to it. A run that dies leaves an image attached until the app next
-  starts or Windows restarts, and the sweep only detaches one whose volume is still mounted in that run's folder.
+  refused, since whatever attached it may be writing to it, and so is a differencing disk, before it is attached, since it
+  names another disk Windows would open too, wherever it is, a share included. A run that dies leaves an image attached until
+  the app next starts or Windows restarts, and the sweep only detaches one whose volume is still mounted in that run's
+  folder. The record of it is kept until it is no longer attached.
 - **The drive is not written to.** Loading a registry hive can replay its logs into it, so hives are copied to an
   administrators-only folder under `%ProgramData%\WinAppMigrator\hives`, and the copies are loaded. They can hold
   secrets, and are removed afterward. A run that dies leaves them, and hives loaded, so the app sweeps those when
@@ -245,19 +247,30 @@ controlled. So:
 is, above, and the link adds this:
 
 - **Only a PC with the code reads anything.** The six digits are used in SPAKE2, which does not send them and gives someone
-  listening nothing to guess them from. Someone else on the network gets one guess per connection, and the client makes a
-  new code after five wrong ones, which it shows. The code is random each run, unless a script gives one with `--code`.
+  listening nothing to guess them from. Someone else on the network gets one guess per connection, 2 seconds apart, and the
+  client makes a new code after five wrong ones, which it shows. After 20 wrong codes it lets nothing pair until it is started
+  again, so a guess gets in one time in fifty thousand at most. The code is random each run, unless a script gives one with
+  `--code`.
 - **What crosses the network is encrypted and checked.** ChaCha20-Poly1305, one key each way from HKDF over the pairing,
   and a count as each nonce: a message changed, replayed, reordered or reflected is refused, and the link ends.
 - **The client only reads, and only below the snapshot's root.** Every path is checked for names Windows would read as
   something else and for `..`, and each folder on the way for a link, which is never followed. It writes nothing on the PC
   but its own record, a snapshot, two firewall rules, and while it runs a copy of itself in Program Files, all removed when it
-  stops or by its next run.
+  stops or by its next run. It never gives out `SAM` or `SECURITY`, the hives that hold the PC's passwords and secrets.
+- **Run the client from a USB drive or a folder only you can write to.** Once Windows has asked whether it may run, it copies
+  itself into Program Files and runs that copy. Someone else who could write to the folder it was run from could, in that
+  moment, put a program of their own in its place, and have that copied and run instead.
 - **The client is reachable from the local network while it runs.** Its rules allow its two ports from the local subnet,
   for whoever is there, and only the code stands between them and the PC's files. Run it on a network you know, and stop it
   when the build is done. Discovery is in the open: anyone there can see the PC's name and Windows.
 - **What it says about itself is not trusted.** A PC's name and Windows, from discovery or from the client, are shown and
   nothing more. What the build reads from it is a drive's to this app, so everything above about a drive applies.
+- **What it answers is held to what it said first.** What the client first says of a path is kept until it is disconnected,
+  and a file is never read past that size, nor is more than was asked for taken. A folder's listing ends at 250,000 entries,
+  and a name in one that would lead out of the folder, such as `..`, `C:\Windows` or `\\server\share`, is dropped. A request
+  has two minutes in all, however slowly its answer comes, and Disconnect ends one that is waiting.
+- **Saving the client writes through no link.** A folder that is a link is refused, and the client and its note are written
+  under a new random name and renamed, with a link of their name taken away first, not what it leads to.
 - **The client is signed**, by the release workflow, as the app is, and the UAC prompt names Randy Northrup as its
   publisher. A Windows 7 without the root it chains to, Microsoft Identity Verification Root Certificate Authority 2020,
   cannot check it and says the publisher is unknown, which leaves checking its file the only way to know it is the one the

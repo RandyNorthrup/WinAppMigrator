@@ -12,6 +12,43 @@ All notable project changes are tracked here.
   files change, when the wiki is edited, after a release, and once a day, and the build fails on any link or `#anchor` between pages
   that leads nowhere. Bing and the search engines that share its index are told which pages changed, through IndexNow.
 
+### Security
+
+- **Network PC: the client lets nothing pair after 20 wrong codes.** Before, it made a new code after each five, for as long as
+  it ran, so something on the network that kept guessing would get in in time. Each wrong code now holds up the next by 2
+  seconds, and pairing has 15 seconds, so a PC that connects and says nothing cannot keep another from pairing.
+- **Network PC: the client keeps its record in Program Files.** It was in a folder in ProgramData, which any account can make
+  first, and own, and then have a link in it lead the client's writes, and its removal of the record, to a file of its choosing.
+  A 0.6.0 record left there is not looked at.
+- **Network PC: what the client starts runs from `System32`,** not the folder the client was run from, which could be a USB
+  drive anyone can write to, and is told not to look for a program in the folder it starts in. `ping` is named by its full path.
+- **Network PC: the client never gives out `SAM` or `SECURITY`,** the hives that hold the PC's passwords and secrets, as no build
+  needs them, and lists a folder in pages that fit in a message however long its names are.
+- **The website loads only the one file of Mermaid's from jsDelivr,** rather than anything there. `scripts/sign.ps1` installs
+  the one version of the signing module the release uses.
+
+- **A release builds in a job that cannot sign or push, and signs in one that runs nothing from the repository or crates.io.**
+  Before, the tests, build scripts and `cargo-about` ran where the app was signed, and could have signed anything. `cargo-about`
+  is now pinned, and the signing action no longer restores its tools from a cache a build could write.
+- **Network PC: a client that always says a folder has more is stopped.** A folder's listing ends at 250,000 entries, and a
+  part of one that is empty but says there is more is an error.
+- **Network PC: a file is never read past the size the client first gave it.** What it first says of a path is kept until it
+  is disconnected, so it cannot say a file is small and then send without end, past the room a build checked for. Shortcuts,
+  tasks, programs and key files are read with a limit as well.
+- **Network PC: more of a file than was asked for is an error.** Before, a client that sent more stopped the app.
+- **Network PC: a name in a listing that would lead out of its folder is dropped,** such as `..`, `C:\Windows` or
+  `\\server\share`, which this PC could have sent its sign-in to. What is asked about is checked the same way.
+- **Network PC: a request has two minutes in all, and Disconnect ends one.** Before, each wait for a byte had two minutes, so a
+  client sending a byte at a time could keep a request going for ever.
+- **Hive copies count what was copied.** The 32 GiB a run may copy of a drive's hives went by the sizes the drive gave. It now
+  goes by what was copied, a copy stops at what is left of it, and Cancel stops one part-way.
+- **A differencing `.vhd` or `.vhdx` is refused before it is attached.** It names the disk it was made from, which Windows
+  would open too, wherever it is, a share included.
+- **A disk image's record is kept until it is detached,** so one a run attached just before it died is found again by the next
+  start, and one with no partitions is detached too.
+- **Saving the client never writes through a link.** A folder that is a link is refused, and the client and its note are
+  written under a new random name and then renamed, with a link of their name taken away first, not what it leads to.
+
 ## 0.6.0 — 2026-11-09
 
 ### Network PC: another PC, over your network

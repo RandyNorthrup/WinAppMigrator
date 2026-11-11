@@ -1,6 +1,8 @@
-# Windows only: the lockfile also lists crates for other platforms that never compile.
+# Windows only: the lockfile also lists crates for other platforms that never compile. The app and
+# the stub are 64-bit. The client is 32-bit, built for i686-win7-windows-msvc, which compiles the
+# same crates as i686-pc-windows-msvc.
 [graph]
-targets = ["x86_64-pc-windows-msvc"]
+targets = ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc"]
 
 [advisories]
 version = 2

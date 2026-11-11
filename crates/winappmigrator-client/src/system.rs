@@ -79,8 +79,12 @@ fn give_windows_environment(command: &mut Command) {
     let powershell_home = system32.join(r"WindowsPowerShell\v1.0");
     let temp = windows.join("Temp");
     let program_data = program_data();
+    // A tool told a bare name looks for it in the folder it starts in before `Path`, and the client
+    // starts in whatever folder it was run from, which can be a USB drive anyone can write to.
     command
+        .current_dir(&system32)
         .env_clear()
+        .env("NoDefaultCurrentDirectoryInExePath", "1")
         .env("SystemRoot", &windows)
         .env("windir", &windows)
         .env("SystemDrive", system_drive())
@@ -199,9 +203,11 @@ pub fn new_code() -> io::Result<String> {
     }
 }
 
-/// The folder the state file is in, under `ProgramData`.
-fn state_folder() -> PathBuf {
-    program_data().join(STATE_FOLDER)
+/// The record of what a run did, in [`safe_folder`], which only an administrator can change. A folder
+/// in `ProgramData` would not do: any account can make one there first, and own it, and could then
+/// have this open, empty, and remove a file of its choosing through a link in it.
+fn state_path() -> PathBuf {
+    safe_folder().join(STATE_FILE)
 }
 
 /// What a run has done to the PC, held open for as long as it runs.
@@ -213,9 +219,8 @@ pub struct RunState {
 impl RunState {
     /// Undo what an earlier run left, unless it is still running, and start this run's record.
     pub fn begin() -> io::Result<Self> {
-        let folder = state_folder();
-        fs::create_dir_all(&folder)?;
-        let path = folder.join(STATE_FILE);
+        fs::create_dir_all(safe_folder())?;
+        let path = state_path();
         let left_by_another = path.exists();
         // Held from here, so that the record is read, undone and started again by this run alone.
         let mut file = OpenOptions::new()
@@ -272,6 +277,7 @@ pub fn start_caretaker() -> io::Result<Child> {
     let start = |flags| {
         Command::new(&program)
             .arg(CARETAKER)
+            .current_dir(windows_folder().join("System32"))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -286,7 +292,7 @@ pub fn start_caretaker() -> io::Result<Child> {
 /// left alone. Then remove the copy of the client the run and this ran from.
 pub fn take_care() {
     let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
-    let path = state_folder().join(STATE_FILE);
+    let path = state_path();
     for _ in 0..CARETAKER_TRIES {
         match OpenOptions::new()
             .read(true)
@@ -347,16 +353,20 @@ pub fn runs_from_safe_folder() -> bool {
 pub fn run_from_safe_folder() -> io::Result<ExitStatus> {
     let folder = safe_folder();
     fs::create_dir_all(&folder)?;
-    // What an earlier run could not remove. One still in use is left.
+    // What an earlier run could not remove. One still in use is left, and so is the record of what an
+    // earlier run did, which the run started here undoes.
     if let Ok(entries) = fs::read_dir(&folder) {
         for entry in entries.flatten() {
-            let _ = fs::remove_file(entry.path());
+            if !entry.file_name().eq_ignore_ascii_case(STATE_FILE) {
+                let _ = fs::remove_file(entry.path());
+            }
         }
     }
     let copy = folder.join(format!("WinAppMigrator Client {}.exe", std::process::id()));
     fs::copy(std::env::current_exe()?, &copy)?;
     let status = Command::new(&copy)
         .args(std::env::args_os().skip(1))
+        .current_dir(windows_folder().join("System32"))
         .status();
     for _ in 0..CARETAKER_TRIES {
         match fs::remove_file(&copy) {
@@ -380,10 +390,13 @@ fn remove_this_copy_once_ended() {
     if !runs_from_safe_folder() {
         return;
     }
-    // `ping` is what waits: `cmd` has no pause that needs no console.
+    // `ping` is what waits: `cmd` has no pause that needs no console. Named by where it is, so that no
+    // other `ping` can be found first.
+    let ping = windows_folder().join(r"System32\PING.EXE");
     let _ = windows_tool("cmd.exe")
         .raw_arg(format!(
-            "/d /c ping -n 3 127.0.0.1 >nul & del /f /q \"{}\" & rd \"{}\"",
+            "/d /s /c \"\"{}\" -n 3 127.0.0.1 >nul & del /f /q \"{}\" & rd \"{}\"\"",
+            ping.display(),
             program.display(),
             safe_folder().display()
         ))

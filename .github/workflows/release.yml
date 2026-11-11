@@ -16,6 +16,10 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# What builds runs code from the repository and crates.io, so it gets no secrets and no token
+# that can sign or push. Signing is done in jobs of its own, which run only pinned actions. Every
+# step of a job that may sign in to Azure can sign, so nothing else may run there. See
+# docs/signing.md.
 jobs:
   # The client the app saves for the old PC, built for Windows 7 and later, which takes the standard
   # library built for that target; see the script. The app carries it, so it is signed before the app
@@ -26,6 +30,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -79,6 +85,8 @@ jobs:
           description: WinAppMigrator Client
           description-url: https://github.com/RandyNorthrup/WinAppMigrator
           exclude-environment-credential: true
+          # A build job can write the cache it would restore its signing tools from.
+          cache-dependencies: false
 
       - name: Hand on the signed client
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -88,21 +96,19 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  release:
-    name: Build, sign, and publish Windows x64 release
+  # Builds and checks the release with no secrets and a token that can only read. Clippy, the
+  # tests, build scripts, and cargo-about all run here, and none of them can sign or push.
+  build:
+    name: Build and check Windows x64 release
     needs: sign-client
     runs-on: windows-latest
-    # Azure trusts GitHub's sign-in token only from this environment, which only v*
-    # tags can use.
-    environment: release
     permissions:
-      contents: write # publishes the release
-      id-token: write # signs in to Azure for code signing and signs the provenance
-      attestations: write # stores it on GitHub, for `gh attestation verify`
-
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Has to be the version in rust-toolchain.toml, which is what cargo goes by.
       - name: Install Rust toolchain
@@ -129,12 +135,12 @@ jobs:
         run: cargo test --locked --workspace --all-features
 
       # Regenerate the open-source attribution bundle so it always matches the
-      # dependencies actually compiled into this release. This installs a tool from
-      # crates.io, so it runs before anything can sign in to Azure.
+      # dependencies actually compiled into this release. The tool comes from crates.io,
+      # so its version is pinned, and it runs in this job, which cannot sign.
       - name: Generate third-party license attribution
         shell: pwsh
         run: |
-          cargo install cargo-about --locked --features cli
+          cargo install cargo-about --version 0.9.3 --locked --features cli
           cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md
           if (-not (Test-Path THIRD-PARTY-LICENSES.md)) { throw 'THIRD-PARTY-LICENSES.md was not generated' }
 
@@ -186,10 +192,42 @@ jobs:
         shell: pwsh
         run: .github/scripts/check-stub-embedded.ps1 -App target/release/winappmigrator.exe -Stub "$env:RUNNER_TEMP\wam-client\winappmigrator-client.exe" -Name client
 
-      # Code signing with Azure Artifact Signing, under the maintainer's verified
-      # identity (CN=Randy Northrup). No password is stored anywhere: Azure accepts
-      # GitHub's OIDC token for this repo's "release" environment only, and that
-      # identity may do nothing but sign with this one certificate profile.
+      - name: Hand on the app
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wam-app-unsigned
+          path: target\release\winappmigrator.exe
+          retention-days: 1
+          if-no-files-found: error
+
+      # The one generated above, for the zip.
+      - name: Hand on the license attribution
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wam-third-party-licenses
+          path: THIRD-PARTY-LICENSES.md
+          retention-days: 1
+          if-no-files-found: error
+
+  # Code signing with Azure Artifact Signing, under the maintainer's verified
+  # identity (CN=Randy Northrup). No password is stored anywhere: Azure accepts
+  # GitHub's OIDC token for this repo's "release" environment only, and that
+  # identity may do nothing but sign with this one certificate profile. As for the
+  # client, only pinned actions run here, and the app, which is not run.
+  sign:
+    name: Sign the app
+    needs: build
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      id-token: write # signs in to Azure for code signing
+    steps:
+      - name: Take the app
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wam-app-unsigned
+          path: ${{ runner.temp }}\wam-app
+
       - name: Sign in to Azure for code signing
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
@@ -203,15 +241,64 @@ jobs:
           endpoint: https://wus.codesigning.azure.net/
           signing-account-name: scnetsolutions
           certificate-profile-name: SAKUtility
-          files: ${{ github.workspace }}\target\release\winappmigrator.exe
+          files: ${{ runner.temp }}\wam-app\winappmigrator.exe
           description: WinAppMigrator
           description-url: https://github.com/RandyNorthrup/WinAppMigrator
           exclude-environment-credential: true
+          # A build job can write the cache it would restore its signing tools from.
+          cache-dependencies: false
 
       - name: Check the signature
         shell: pwsh
         run: |
-          $signature = Get-AuthenticodeSignature target/release/winappmigrator.exe
+          $signature = Get-AuthenticodeSignature "$env:RUNNER_TEMP\wam-app\winappmigrator.exe"
+          if ($signature.Status -ne 'Valid') { throw "The app's signature is $($signature.Status): $($signature.StatusMessage)" }
+          if ($signature.SignerCertificate.Subject -notmatch 'CN=Randy Northrup') { throw "Signed by someone else: $($signature.SignerCertificate.Subject)" }
+          if (-not $signature.TimeStamperCertificate) { throw 'The signature has no timestamp.' }
+          Write-Host "Signed by $($signature.SignerCertificate.Subject), timestamped by $($signature.TimeStamperCertificate.Subject)"
+
+      - name: Hand on the signed app
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wam-app-signed
+          path: ${{ runner.temp }}\wam-app\winappmigrator.exe
+          retention-days: 1
+          if-no-files-found: error
+
+  # Not in the release environment, so the OIDC token here is not one Azure accepts.
+  # It signs the provenance with it, and publishes.
+  publish:
+    name: Publish Windows x64 release
+    needs: sign
+    runs-on: windows-latest
+    permissions:
+      contents: write # publishes the release
+      id-token: write # signs the provenance
+      attestations: write # stores it on GitHub, for `gh attestation verify`
+    steps:
+      # For README.md, CHANGELOG.md and LICENSE, which go in the zip.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Take the signed app
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wam-app-signed
+          path: ${{ runner.temp }}\wam-app
+
+      - name: Take the license attribution
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wam-third-party-licenses
+          path: ${{ runner.temp }}\wam-licenses
+
+      # Checked here too, as what this job takes from another.
+      - name: Check the app's signature
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature "$env:RUNNER_TEMP\wam-app\winappmigrator.exe"
           if ($signature.Status -ne 'Valid') { throw "The app's signature is $($signature.Status): $($signature.StatusMessage)" }
           if ($signature.SignerCertificate.Subject -notmatch 'CN=Randy Northrup') { throw "Signed by someone else: $($signature.SignerCertificate.Subject)" }
           if (-not $signature.TimeStamperCertificate) { throw 'The signature has no timestamp.' }
@@ -223,12 +310,13 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
+          $app = "$env:RUNNER_TEMP\wam-app\winappmigrator.exe"
           $name = "WinAppMigrator-$env:TAG-windows-x64"
           New-Item -ItemType Directory -Force -Path dist, "dist/$name" | Out-Null
-          Copy-Item target/release/winappmigrator.exe "dist/$name/winappmigrator.exe"
-          Copy-Item README.md, CHANGELOG.md, LICENSE, THIRD-PARTY-LICENSES.md "dist/$name/"
+          Copy-Item $app "dist/$name/winappmigrator.exe"
+          Copy-Item README.md, CHANGELOG.md, LICENSE, "$env:RUNNER_TEMP\wam-licenses\THIRD-PARTY-LICENSES.md" "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip" -Force
-          Copy-Item target/release/winappmigrator.exe "dist/WinAppMigrator-$env:TAG.exe"
+          Copy-Item $app "dist/WinAppMigrator-$env:TAG.exe"
           foreach ($f in @("dist/$name.zip", "dist/WinAppMigrator-$env:TAG.exe")) {
             $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
             "$h  $(Split-Path $f -Leaf)" | Out-File dist/SHA256SUMS.txt -Append -Encoding ascii
@@ -246,6 +334,7 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         shell: pwsh
         run: |

@@ -33,7 +33,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::Read as _;
+use std::io::{Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -110,6 +110,8 @@ const WINDOWS_OWN_ACCOUNTS: &[&str] = &[
     "Everyone",
 ];
 const MAX_HIVE_BYTES_IN_ALL: u64 = 32 * 1024 * 1024 * 1024;
+/// How much of a hive is copied at a time, between looks at whether to stop.
+const HIVE_COPY_BUFFER_BYTES: usize = 1024 * 1024;
 const UNLOAD_ATTEMPTS: u32 = 20;
 const UNLOAD_RETRY_WAIT: Duration = Duration::from_millis(250);
 /// How many of the paths a drive named and this did not follow to list, of however many.
@@ -705,14 +707,22 @@ fn copy_a_hive_file(
     if size > most_of_it {
         return Err(too_large_for_a_hive(source, size));
     }
-    *bytes_left -= size;
     // By reading it, since `fs::copy` also brings the streams stored under its name, of any size.
     match source_fs::open(source) {
-        Ok(from) => {
+        Ok(mut from) => {
             let mut to = File::create(destination)
                 .map_err(|error| WinAppMigratorError::io(destination, error))?;
-            std::io::copy(&mut from.take(MAX_HIVE_BYTES), &mut to)
-                .map_err(|error| WinAppMigratorError::io(source, error))?;
+            // A size is only what the source says. What is counted is what was copied.
+            let copied = copy_at_most(&mut from, &mut to, most_of_it, cancel)
+                .map_err(|error| error.into_error(source, destination));
+            drop(to);
+            match copied {
+                Ok(copied) => *bytes_left = bytes_left.saturating_sub(copied),
+                Err(error) => {
+                    let _ = fs::remove_file(destination);
+                    return Err(error);
+                }
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             copy_a_denied_hive_file(source, destination, size, most_of_it, bytes_left, cancel)?;
@@ -729,6 +739,56 @@ fn copy_a_hive_file(
             .map_err(|error| WinAppMigratorError::io(destination, error))?;
     }
     Ok(())
+}
+
+/// Why [`copy_at_most`] stopped.
+#[derive(Debug)]
+enum CopyStopped {
+    /// After this many bytes, more than it could take.
+    TooLarge(u64),
+    Cancelled,
+    Reading(std::io::Error),
+    Writing(std::io::Error),
+}
+
+impl CopyStopped {
+    fn into_error(self, source: &Path, destination: &Path) -> WinAppMigratorError {
+        match self {
+            Self::TooLarge(copied) => too_large_for_a_hive(source, copied),
+            Self::Cancelled => WinAppMigratorError::Cancelled,
+            Self::Reading(error) => WinAppMigratorError::io(source, error),
+            Self::Writing(error) => WinAppMigratorError::io(destination, error),
+        }
+    }
+}
+
+/// Copy all of `from` if it is no more than `most` bytes, saying how many it was, and stop as
+/// soon as it is more or `cancel` is set.
+fn copy_at_most(
+    from: &mut impl Read,
+    to: &mut impl Write,
+    most: u64,
+    cancel: Option<&AtomicBool>,
+) -> std::result::Result<u64, CopyStopped> {
+    let mut buffer = vec![0_u8; HIVE_COPY_BUFFER_BYTES];
+    let mut copied = 0_u64;
+    loop {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+            return Err(CopyStopped::Cancelled);
+        }
+        let read = match from.read(&mut buffer) {
+            Ok(0) => return Ok(copied),
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(CopyStopped::Reading(error)),
+        };
+        copied = copied.saturating_add(read as u64);
+        if copied > most {
+            return Err(CopyStopped::TooLarge(copied));
+        }
+        to.write_all(&buffer[..read])
+            .map_err(CopyStopped::Writing)?;
+    }
 }
 
 fn too_large_for_a_hive(source: &Path, size: u64) -> WinAppMigratorError {
@@ -771,8 +831,8 @@ fn copy_a_denied_hive_file(
         return Err(too_large_for_a_hive(source, taken().max(most)));
     }
     copied?;
-    // Its size has been counted. What it brought besides has not.
-    *bytes_left = bytes_left.saturating_sub(taken().saturating_sub(size));
+    // What it took, and at least what it said it was.
+    *bytes_left = bytes_left.saturating_sub(taken().max(size));
     Ok(())
 }
 
@@ -2172,6 +2232,49 @@ mod tests {
             control_set: control_set.to_owned(),
             identity: SourceIdentity::default(),
         }
+    }
+
+    #[test]
+    fn a_hive_copy_counts_what_it_copied_and_stops_at_its_share() {
+        // What a source gives is counted, whatever it said its size was.
+        let mut copied = Vec::new();
+        let given = copy_at_most(&mut &[7_u8; 100][..], &mut copied, 100, None);
+        assert_eq!(given.ok(), Some(100));
+        assert_eq!(copied.len(), 100);
+        let mut copied = Vec::new();
+        let given = copy_at_most(&mut &[7_u8; 100][..], &mut copied, 99, None);
+        assert!(matches!(given, Err(CopyStopped::TooLarge(100))));
+        let cancel = AtomicBool::new(true);
+        let given = copy_at_most(&mut &[7_u8; 100][..], &mut Vec::new(), 100, Some(&cancel));
+        assert!(matches!(given, Err(CopyStopped::Cancelled)));
+
+        let folder = std::env::temp_dir().join(format!("wam-hive-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        if fs::create_dir_all(&folder).is_err()
+            || fs::write(folder.join("hive"), [1_u8; 64]).is_err()
+        {
+            return;
+        }
+        let mut bytes_left = 1000;
+        let copied = copy_a_hive_file(
+            &folder.join("hive"),
+            &folder.join("copy"),
+            &mut bytes_left,
+            None,
+        );
+        assert!(copied.is_ok(), "{copied:?}");
+        assert_eq!(bytes_left, 1000 - 64);
+        // Past what is left of a run's share, the copy is refused and taken away.
+        let mut bytes_left = 10;
+        let copied = copy_a_hive_file(
+            &folder.join("hive"),
+            &folder.join("over"),
+            &mut bytes_left,
+            None,
+        );
+        assert!(copied.is_err());
+        assert!(!folder.join("over").exists());
+        let _ = fs::remove_dir_all(&folder);
     }
 
     #[test]

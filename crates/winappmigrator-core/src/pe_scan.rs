@@ -186,7 +186,8 @@ fn read_program(path: &Path) -> Result<Vec<u8>> {
     {
         return Ok(bytes);
     }
-    crate::source_fs::read(path).map_err(|source| WinAppMigratorError::io(path, source))
+    crate::source_fs::read_at_most(path, MAX_PROGRAM_BYTES)
+        .map_err(|source| WinAppMigratorError::io(path, source))
 }
 
 /// A program of this size or less is read whole, as it costs next to nothing.

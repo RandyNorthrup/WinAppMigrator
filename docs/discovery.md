@@ -744,9 +744,15 @@ and everything above holds as it does for a drive.
   is the source.
 - **An image Windows already has attached is refused,** since whatever attached it may be writing to it. Pick its drive as
   a connected drive instead, or detach it.
+- **A differencing disk is refused before it is attached.** It names the disk it was made from, which Windows opens too,
+  wherever that is, a share included. What it is goes by what is in it, not its name: a VHD's footer, at its end and the copy
+  at its start, says disk type 4, or a VHDX's file parameters, by either copy of its region table, say it has a parent, or
+  it has a parent locator. Merge it into its parent first. A file that is neither is refused too.
 - **It is detached** when another source is chosen or the app closes. A run holds a lease in its folder, as one that loads
   hives does, and `sweep_leaked_images` detaches what a run that died left, but only an image with a volume still mounted in
-  that run's folder. An attached image does not outlive a restart of Windows anyway.
+  that run's folder. Its folder, which records the image, is kept until the image is no longer attached, so one a run
+  attached just before it died, with nothing mounted yet, is found again once Windows has let it go. An attached image does
+  not outlive a restart of Windows anyway.
 - **Not read:** VMware's `.vmdk` and VirtualBox's `.vdi`, which Windows cannot attach (VirtualBox can save a disk as
   `.vhd`), a Hyper-V checkpoint's `.avhdx` (export the VM's disk), and a volume encrypted with BitLocker until it is unlocked.
 
@@ -819,8 +825,9 @@ Windows has:
   Everything is read from the snapshot's device, `\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN\`, through which a 32-bit
   program sees the real 64-bit `System32`. Nothing it reads is locked, and nothing changes while it is read.
 - **Two Windows Firewall rules** for its own program and ports, TCP 47732 and UDP 47731, from the local subnet only, by `netsh`.
-- **A record** of both, `%ProgramData%\WinAppMigrator Client\running.txt`, held open while it runs. Enter removes both and the
-  record. So does closing the window, which ends the run before it can: each run starts a copy of the client with
+- **A record** of both, `running.txt` in `%ProgramFiles%\WinAppMigrator Client`, held open while it runs. Not in ProgramData,
+  where any account can make the folder first and own it, and then have a link in it lead the client's writes, and its removal
+  of the record, to a file of its choosing. Enter removes both and the record. So does closing the window, which ends the run before it can: each run starts a copy of the client with
   `--caretaker`, with no console and out of any job the run is in that lets it go, sharing nothing with it but a pipe.
   When the pipe closes, however the run ended, the caretaker waits for the record to be let go of and removes what it names.
   A run that ended with its caretaker too, as when Windows shuts down, leaves the record, and the next run removes what it
@@ -830,19 +837,25 @@ Before any of that, the client copies itself into `%ProgramFiles%\WinAppMigrator
 change, runs the copy in the same window, and removes it when that ends, as its caretaker does after a closed window
 (`run_from_safe_folder` in `system.rs`). Windows loads some DLLs only when first needed, by name, beside the program first: on
 32-bit Windows 7, `RtlGenRandom` loads `cryptbase.dll` so, and a copy planted beside the client was loaded into it. Every
-Windows tool it starts gets an environment of Windows' own, not the person's. See
-[signing.md](signing.md#why-the-client-may-be-signed).
+Windows tool it starts gets an environment of Windows' own, not the person's, starts in `System32` rather than the folder the
+client was run from, and is told not to look for a program in the folder it starts in. The `ping` its caretaker waits with is
+named by its full path. See [signing.md](signing.md#why-the-client-may-be-signed).
 
-A paired link that asks nothing for 30 minutes is closed. The client keeps running, with its snapshot and rules, until it is
-stopped.
+Pairing has 15 seconds, so a PC that connects and says nothing cannot keep another from pairing. A paired link that asks
+nothing for 30 minutes is closed. The client keeps running, with its snapshot and rules, until it is stopped.
+
+It never gives out the hives in `System32\config` that hold the PC's passwords and secrets, `SAM` and `SECURITY`, or any file
+there named for them, as no build needs them. A folder is listed in pages that fit in a message, however long its names are.
 
 **Finding it.** The app sends a query to the broadcast address of each IPv4 network it is on (`Get-NetIPAddress`) and to
 `255.255.255.255`, and each client answers with its PC's name, Windows and architecture (`winappmigrator_link::discovery`). That
 is only where to connect. A PC across a router can be typed in by name or address.
 
 **Pairing.** The client shows six random digits. The app connects and both run SPAKE2 with them (`spake2` 0.4, Ed25519), so the
-code never crosses the network, and what does lets no one test guesses away from the client. Each guess takes a connection, and
-the client makes a new code after five wrong ones. The key it agrees is stretched with HKDF-SHA256 over both sides' messages
+code never crosses the network, and what does lets no one test guesses away from the client. Each guess takes a connection,
+each wrong one holds up the next by 2 seconds, and the client makes a new code after five wrong ones. After 20 wrong codes in a
+run it lets nothing pair until it is started again, which keeps the chance of a guess getting in at one in fifty thousand,
+however long it is left running. The key it agrees is stretched with HKDF-SHA256 over both sides' messages
 into one key for each direction, and each side proves it holds its key before anything else is said.
 
 **The link.** Every message after that is sealed with ChaCha20-Poly1305 under its direction's key, with a count as its nonce, so
@@ -857,7 +870,17 @@ Windows refuses to open, and the source is a `ScanSource::OfflineVolume` there. 
 `source_fs`, which answers a path of this PC as `std::fs` does and one below that root through the link. So hives are copied
 here and loaded as a drive's are, and everything above about a drive holds. What cannot be asked over the link is not:
 backup-mode reads of a file only its own account may read, and who owns a file, so data of an app installed for one account
-that is outside that account's profile is left out. Each request waits up to two minutes for its answer.
+that is outside that account's profile is left out.
+
+The client is not trusted any more than a drive is. The snapshot does not change, so what it first says of a path, by
+listing or describing it, is what that path is until it is disconnected: a file is never read past the size it was first
+said to be, and an answer with more than was asked for is an error. Shortcuts, tasks, programs and key files are read with
+a limit of their own besides. A folder's listing ends at 250,000 entries, and a part of one that is empty but says there is
+more is an error. A name in a listing that is not an ordinary one (`winappmigrator_link::paths`), such as `..`,
+`C:\Windows` or `\\server\share`, is dropped, since joined to the folder's path it would lead somewhere else, and no path
+with such a name is asked about. Each request has two minutes in all, however slowly its answer comes, and **Disconnect**
+shuts the connection and ends one that is waiting within a quarter of a second. A request that fails part-way closes the
+link, since what came after it could not be told apart.
 
 ## Restoring user data to real locations
 

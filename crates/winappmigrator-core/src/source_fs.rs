@@ -274,11 +274,15 @@ impl File {
         match self {
             Self::Local(file) => std::os::windows::fs::FileExt::seek_read(file, buffer, offset),
             Self::Remote(file) => {
-                let wanted = u32::try_from(buffer.len())
-                    .unwrap_or(MAX_READ)
-                    .min(MAX_READ);
-                let bytes = file.remote.read(&file.path, offset, wanted)?;
-                buffer[..bytes.len()].copy_from_slice(&bytes);
+                let wanted = file.left_from(offset).min(buffer.len() as u64);
+                if wanted == 0 {
+                    return Ok(0);
+                }
+                let bytes = file.remote.read(&file.path, offset, read_size(wanted))?;
+                let Some(into) = buffer.get_mut(..bytes.len()) else {
+                    return Err(more_than_asked_for());
+                };
+                into.copy_from_slice(&bytes);
                 Ok(bytes.len())
             }
         }
@@ -312,7 +316,8 @@ pub fn open(path: impl AsRef<Path>) -> io::Result<File> {
     }
 }
 
-/// All of a file.
+/// All of a file. Another PC's is never more than it was first said to be, which can be anything.
+/// What is expected to be small is read with [`read_at_most`].
 pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     let path = path.as_ref();
     match remote_of(path) {
@@ -323,6 +328,42 @@ pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
             Ok(bytes)
         }
     }
+}
+
+/// All of a file that is no more than `limit` bytes, or an error. What it says of its size is
+/// checked first, and no more than that is read whatever it says.
+pub fn read_at_most(path: impl AsRef<Path>, limit: u64) -> io::Result<Vec<u8>> {
+    let path = path.as_ref();
+    let file = open(path)?;
+    let size = file.metadata()?.len();
+    if size > limit {
+        return Err(too_large(size, limit));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(too_large(bytes.len() as u64, limit));
+    }
+    Ok(bytes)
+}
+
+fn too_large(size: u64, limit: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("it is {size} bytes, and no more than {limit} were expected"),
+    )
+}
+
+fn more_than_asked_for() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "the other PC sent more of a file than was asked for",
+    )
+}
+
+/// What one read asks for, of `wanted` bytes.
+fn read_size(wanted: u64) -> u32 {
+    u32::try_from(wanted).unwrap_or(MAX_READ).min(MAX_READ)
 }
 
 pub fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
@@ -365,14 +406,25 @@ impl Seek for File {
     }
 }
 
+impl RemoteFile {
+    /// How much of the file there is from `offset`, by the size it was first said to be.
+    fn left_from(&self, offset: u64) -> u64 {
+        self.len.saturating_sub(offset)
+    }
+}
+
 impl Read for RemoteFile {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if buffer.is_empty() || self.position >= self.len {
+        let left = self.left_from(self.position);
+        if buffer.is_empty() || left == 0 {
             return Ok(0);
         }
         let buffered_end = self.buffer_start + self.buffer.len() as u64;
         if self.position < self.buffer_start || self.position >= buffered_end {
-            self.buffer = self.remote.read(&self.path, self.position, MAX_READ)?;
+            // Never past its end, and the client may send no more than is asked for.
+            self.buffer = self
+                .remote
+                .read(&self.path, self.position, read_size(left))?;
             self.buffer_start = self.position;
             if self.buffer.is_empty() {
                 // It is shorter than when it was opened. A snapshot does not change, so this is a
@@ -437,6 +489,11 @@ mod tests {
             metadata(folder.join("a.txt")).map(|m| m.len()).ok(),
             Some(3)
         );
+        assert_eq!(
+            read_at_most(folder.join("a.txt"), 3).ok().as_deref(),
+            Some(&b"abc"[..])
+        );
+        assert!(read_at_most(folder.join("a.txt"), 2).is_err());
         assert_eq!(
             read(folder.join("a.txt")).ok().as_deref(),
             Some(&b"abc"[..])

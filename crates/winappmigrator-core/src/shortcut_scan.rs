@@ -207,7 +207,7 @@ fn read_shortcuts_on_a_drive(
 pub(crate) fn read_shortcut_file(path: &Path) -> Option<Vec<u8>> {
     let size = crate::source_fs::metadata(path).ok()?.len();
     (size <= MAX_SHORTCUT_BYTES)
-        .then(|| crate::source_fs::read(path).ok())
+        .then(|| crate::source_fs::read_at_most(path, MAX_SHORTCUT_BYTES).ok())
         .flatten()
 }
 

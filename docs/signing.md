@@ -55,7 +55,8 @@ here does (below):
 - **Every Windows tool it starts gets an environment of Windows' own**, not the person's, as below.
 
 The release workflow signs it in a job of its own, which runs nothing from the repository or crates.io,
-then checks its signature and that the app carries it byte for byte.
+as it does the app, then checks its signature and that the app carries it byte for byte. See
+[how release signing is set up](#how-release-signing-is-set-up).
 
 ## Signing an installer you built
 
@@ -122,7 +123,21 @@ Signing uses [Azure Artifact Signing][signing] with no stored password or certif
 - **Role:** `Artifact Signing Certificate Profile Signer`, scoped to the one certificate
   profile `SAKUtility` in account `scnetsolutions`, resource group `SAK`.
 - **GitHub environment `release`:** deployable from `v*` tags only. It holds the
-  `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` secrets, which identify but do not authenticate.
+  `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` secrets, which identify but do not authenticate. Only the two
+  jobs that sign use it.
+
+Any step of a job that can ask GitHub for that token can sign with this certificate, so the release
+workflow keeps everything that runs code from the repository or crates.io out of those jobs:
+
+- **Building** happens in jobs with no secrets and a token that can only read. Build scripts, clippy,
+  the tests, and `cargo-about`, pinned to one version, run there. They hand on the client, then the app,
+  unsigned.
+- **Signing** happens in jobs of their own, in the `release` environment, that run only pinned actions
+  and no checkout. They take the file, sign in to Azure, sign it, and check the signature. The signing
+  action does not restore its tools from GitHub's cache, which a build job could have written.
+- **Publishing** happens in a job outside that environment, so Azure does not accept its token. It
+  checks the app's signature again, records where the downloads were built, and publishes them. It is
+  the only job that can write to the repository, and it runs nothing from it.
 
 Cut a release by pushing a `v*` tag of three parts that matches the version in `Cargo.toml`, or the run stops at its
 first check: see [Cutting a release](../CONTRIBUTING.md#cutting-a-release). To retry a run that failed before publishing, start the

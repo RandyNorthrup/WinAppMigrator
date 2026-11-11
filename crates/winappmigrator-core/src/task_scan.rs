@@ -239,7 +239,8 @@ fn read_task_file(tasks_root: &Path, path: &Path) -> Result<TaskFile, String> {
     if size > MAX_TASK_FILE_BYTES {
         return Err(format!("it is {size} bytes, too large to be a task"));
     }
-    let bytes = crate::source_fs::read(path).map_err(|error| error.to_string())?;
+    let bytes = crate::source_fs::read_at_most(path, MAX_TASK_FILE_BYTES)
+        .map_err(|error| error.to_string())?;
     let definition_xml = decode_task_xml(&bytes)?;
     let parsed = parse_task_xml(&definition_xml)?;
     let (task_name, task_path) = task_name_and_path(tasks_root, path);

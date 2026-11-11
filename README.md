@@ -474,10 +474,11 @@ there is replaced.
   and while one runs, what it has unpacked. A scan of a connected drive, or of an account that is not signed in, also keeps copies
   of registry files there while it runs.
 - **WinAppMigrator Client**, on the PC an app is moving off, keeps a snapshot of the Windows drive, two Windows Firewall rules
-  named `WinAppMigrator Client (link)` and `(discovery)`, and a record of both, `%ProgramData%\WinAppMigrator Client\running.txt`,
-  only while it runs. It runs from a copy of itself in `%ProgramFiles%\WinAppMigrator Client`, which only an administrator can
-  change. Stopping it or closing its window removes all of them. If the PC shuts down while it runs, the next run of the client
-  removes them first. The empty `WinAppMigrator Client` folder in ProgramData stays.
+  named `WinAppMigrator Client (link)` and `(discovery)`, and a record of both, only while it runs. It runs from a copy of itself
+  in `%ProgramFiles%\WinAppMigrator Client`, which only an administrator can change, and keeps the record there too, as
+  `running.txt`. Stopping it or closing its window removes all of them. If the PC shuts down while it runs, the next run of the
+  client removes them first. Version 0.6.0 kept its record in a `WinAppMigrator Client` folder in ProgramData, which stays, and
+  which later versions leave alone.
 
 ## Building from source
 

@@ -26,9 +26,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if (-not (Get-Module -ListAvailable ArtifactSigning)) {
-    Install-Module -Name ArtifactSigning -Scope CurrentUser -Force -AcceptLicense
+# The version the signing action in release.yml uses. This runs under an account that can sign, so it takes that one
+# version and no newer one that may turn up.
+$moduleVersion = '0.1.8'
+if (-not (Get-Module -ListAvailable ArtifactSigning | Where-Object Version -eq $moduleVersion)) {
+    Install-Module -Name ArtifactSigning -RequiredVersion $moduleVersion -Repository PSGallery -Scope CurrentUser -Force -AcceptLicense
 }
+Import-Module ArtifactSigning -RequiredVersion $moduleVersion
 
 $files = foreach ($item in $Path) { (Resolve-Path -LiteralPath $item).Path }
 

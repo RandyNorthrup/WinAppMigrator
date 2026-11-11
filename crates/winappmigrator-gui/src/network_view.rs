@@ -141,7 +141,19 @@ fn usb_drives() -> Vec<UsbDrive> {
 
 /// Save the client, and a note on how to use it, in a folder. It replaces a client saved there
 /// before.
+///
+/// The app runs elevated, and a USB drive can come with anything on it, such as a link named as the
+/// note is that leads to a file of Windows'. So nothing is written through a link: a folder that is
+/// one is refused, and is held while this writes in it so it cannot become one, and a link in it of
+/// either name is taken away, not what it leads to.
 pub(crate) fn save_client(folder: &Path) -> Result<PathBuf, String> {
+    let could_not_save = |error: std::io::Error| {
+        format!(
+            "the client could not be saved in {}: {error}",
+            folder.display()
+        )
+    };
+    let _held = winappmigrator_core::privilege::hold_real_folder(folder).map_err(could_not_save)?;
     if EMBEDDED_CLIENT.is_empty() {
         return Err(
             "this build of WinAppMigrator does not carry the client. Build it with \
@@ -149,20 +161,69 @@ pub(crate) fn save_client(folder: &Path) -> Result<PathBuf, String> {
                 .to_owned(),
         );
     }
-    let client = folder.join(CLIENT_FILE_NAME);
-    let partial = folder.join(format!("{CLIENT_FILE_NAME}.partial"));
-    std::fs::write(&partial, EMBEDDED_CLIENT)
-        .and_then(|()| std::fs::rename(&partial, &client))
-        .map_err(|error| {
-            let _ = std::fs::remove_file(&partial);
-            format!(
-                "the client could not be saved in {}: {error}",
-                folder.display()
-            )
-        })?;
-    std::fs::write(folder.join(CLIENT_NOTE_NAME), CLIENT_NOTE)
+    let client =
+        save_in_place(folder, CLIENT_FILE_NAME, EMBEDDED_CLIENT).map_err(could_not_save)?;
+    save_in_place(folder, CLIENT_NOTE_NAME, CLIENT_NOTE.as_bytes())
         .map_err(|error| format!("the note beside it could not be saved: {error}"))?;
     Ok(client)
+}
+
+/// Opens a link itself, not what it leads to.
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// Save `bytes` as `name` in `folder`. They are written to a new file, of a name no one could have
+/// made ready, which is then renamed to `name`. A rename replaces a name, and never writes to what a
+/// link of that name leads to.
+fn save_in_place(folder: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    use std::hash::BuildHasher;
+    use std::io::Write;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let destination = folder.join(name);
+    let fresh = std::collections::hash_map::RandomState::new().hash_one((
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos()),
+    ));
+    let partial = folder.join(format!("{name}.{fresh:016x}.partial"));
+    let saved = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&partial)
+        .and_then(|mut file| {
+            let written = file.write_all(bytes).and_then(|()| file.sync_all());
+            drop(file);
+            written
+                .and_then(|()| remove_a_link(&destination))
+                .and_then(|()| std::fs::rename(&partial, &destination))
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_file(&partial);
+                })
+        });
+    saved.map(|()| destination)
+}
+
+/// Take away a link of this name, itself and not what it leads to, so that what is saved can take
+/// its name. Anything else of the name is left for the rename to replace, or to refuse.
+fn remove_a_link(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    let attributes = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata.file_attributes(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+        Ok(())
+    } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 impl WinAppMigratorApp {
@@ -445,6 +506,76 @@ mod tests {
             assert!(folder.join(CLIENT_NOTE_NAME).is_file());
             // Again, over the first.
             assert!(save_client(&folder).is_ok());
+            // And nothing else is left there.
+            assert_eq!(
+                std::fs::read_dir(&folder).map(Iterator::count).ok(),
+                Some(2)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A junction needs no special right, unlike a symbolic link. Temp folders only.
+    fn make_junction(link: &Path, target: &Path) -> bool {
+        winappmigrator_core::path_utils::hidden_command("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    #[test]
+    fn a_link_where_the_client_or_its_note_goes_is_not_written_through() {
+        let folder = std::env::temp_dir().join(format!("wam-client-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        let elsewhere = folder.join("elsewhere");
+        let victim = elsewhere.join("system.dll");
+        if std::fs::create_dir_all(&elsewhere).is_err() || std::fs::write(&victim, b"keep").is_err()
+        {
+            return;
+        }
+        let drive = folder.join("drive");
+        let note = drive.join(CLIENT_NOTE_NAME);
+        let _ = std::fs::create_dir_all(&drive);
+        let is_link = |path: &Path| {
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        };
+
+        // A junction of the note's name, to a folder.
+        if make_junction(&note, &elsewhere) {
+            assert!(save_in_place(&drive, CLIENT_NOTE_NAME, b"note").is_ok());
+            assert!(!is_link(&note));
+            assert_eq!(std::fs::read(&note).ok().as_deref(), Some(&b"note"[..]));
+            assert_eq!(std::fs::read(&victim).ok().as_deref(), Some(&b"keep"[..]));
+        }
+
+        // A symbolic link of the note's name, to a file, where this account may make one.
+        let _ = std::fs::remove_file(&note);
+        if std::os::windows::fs::symlink_file(&victim, &note).is_ok() {
+            assert!(save_in_place(&drive, CLIENT_NOTE_NAME, b"note").is_ok());
+            assert!(!is_link(&note));
+            assert_eq!(std::fs::read(&note).ok().as_deref(), Some(&b"note"[..]));
+            assert_eq!(std::fs::read(&victim).ok().as_deref(), Some(&b"keep"[..]));
+        }
+        let partial = std::fs::read_dir(&drive).map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".partial"))
+                .count()
+        });
+        assert_eq!(partial.ok(), Some(0), "nothing half-saved is left");
+
+        // A folder that is itself a link is refused, before anything is written.
+        let linked = folder.join("linked");
+        if make_junction(&linked, &elsewhere) {
+            assert!(save_client(&linked).is_err_and(|error| error.contains("link")));
+            assert_eq!(
+                std::fs::read_dir(&elsewhere).map(Iterator::count).ok(),
+                Some(1)
+            );
         }
         let _ = std::fs::remove_dir_all(&folder);
     }

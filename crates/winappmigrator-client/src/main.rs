@@ -19,10 +19,25 @@ use winappmigrator_link::{DISCOVERY_PORT, LINK_PORT, LinkError, MAGIC, PROTOCOL_
 
 /// Wrong codes a code is given before it is replaced, so that guessing it gets nowhere.
 const ATTEMPTS_PER_CODE: u32 = 5;
+/// Wrong codes a run is given in all, after which it stops letting anything pair. Each guess has one
+/// chance in a million, so this many keeps the chance of a guess getting in at one in fifty thousand,
+/// however long the client is left running.
+const WRONG_CODES_PER_RUN: u32 = 20;
+/// How long a wrong code holds up the next try.
+const WRONG_CODE_PAUSE: Duration = Duration::from_secs(2);
+/// How long pairing may take. A PC that connects and says nothing would otherwise keep any other
+/// from pairing for as long as it liked.
+const PAIRING_LIMIT: Duration = Duration::from_secs(15);
 /// How long a paired builder may go without asking anything before the link is closed.
 const IDLE_LIMIT: Duration = Duration::from_secs(30 * 60);
+/// How long an answer may wait for a builder to take it.
+const SEND_LIMIT: Duration = Duration::from_secs(120);
 
 fn main() -> ExitCode {
+    // Started in the folder it was run from, which can be a USB drive or a share anyone can write to,
+    // and which nothing here needs.
+    let _ =
+        std::env::set_current_dir(winappmigrator_client::system::windows_folder().join("System32"));
     if std::env::args().nth(1).as_deref() == Some(winappmigrator_client::system::CARETAKER) {
         winappmigrator_client::system::take_care();
         return ExitCode::SUCCESS;
@@ -155,6 +170,7 @@ fn run() -> io::Result<()> {
     let serving_code = Arc::clone(&code);
     thread::spawn(move || {
         let mut wrong = 0;
+        let mut wrong_in_all = 0;
         for stream in listener.incoming() {
             let Ok(stream) = stream else {
                 continue;
@@ -163,13 +179,16 @@ fn run() -> io::Result<()> {
                 |_| "another PC".to_owned(),
                 |address| address.ip().to_string(),
             );
-            let _ = stream.set_read_timeout(Some(IDLE_LIMIT));
+            let _ = stream.set_read_timeout(Some(PAIRING_LIMIT));
+            let _ = stream.set_write_timeout(Some(PAIRING_LIMIT));
             // Each answer goes as soon as it is sealed, rather than waiting to be joined by more.
             let _ = stream.set_nodelay(true);
             let current = lock(&serving_code);
             match pair_as_client(stream, &current) {
                 Ok(mut channel) => {
                     wrong = 0;
+                    let _ = channel.stream().set_read_timeout(Some(IDLE_LIMIT));
+                    let _ = channel.stream().set_write_timeout(Some(SEND_LIMIT));
                     println!("Paired with {from}. It is reading what it needs...");
                     match serve(&mut channel, &root, &about) {
                         Ok(answered) => println!("{from} is done ({answered} requests answered)."),
@@ -178,7 +197,20 @@ fn run() -> io::Result<()> {
                 }
                 Err(LinkError::WrongCode) => {
                     wrong += 1;
+                    wrong_in_all += 1;
                     println!("{from} tried a code that is not this one.");
+                    if wrong_in_all >= WRONG_CODES_PER_RUN {
+                        println!();
+                        println!(
+                            "Too many wrong codes were tried, so no PC can pair with this one now."
+                        );
+                        println!(
+                            "Something on your network may be guessing. To pair, stop the client"
+                        );
+                        println!("and start it again, and type the new code it shows.");
+                        return;
+                    }
+                    thread::sleep(WRONG_CODE_PAUSE);
                     if wrong >= ATTEMPTS_PER_CODE {
                         wrong = 0;
                         if let Ok(fresh) = new_code() {

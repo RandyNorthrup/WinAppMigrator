@@ -17,6 +17,14 @@ use winappmigrator_link::{LinkError, Result};
 /// What a request could not be answered with.
 type Refusal = (FailureKind, String);
 
+/// How much of a message a page of a listing may take, well inside what the link carries, since what
+/// a name takes depends on its letters as much as on how many there are.
+const MAX_LISTED_BYTES: usize = 512 * 1024;
+
+/// The hives of `System32\config` that hold this PC's passwords and secrets. A build never needs them,
+/// so no builder is given them, with each file Windows keeps beside one for its log or a backup.
+const SECRET_HIVES: &[&str] = &["sam", "security"];
+
 /// Answer a builder until it closes the link. Each folder found not to be a link is remembered for
 /// the session, as a scan asks about many files in the same few folders.
 pub fn serve<S: Read + Write>(
@@ -107,9 +115,26 @@ fn list(
         }
     }
     entries.sort_by_cached_key(|entry| entry.name.to_lowercase());
-    let more = entries.len() > from.saturating_add(MAX_LISTED);
-    let entries = entries.into_iter().skip(from).take(MAX_LISTED).collect();
-    Ok((Response::Listed { entries, more }, Vec::new()))
+    let total = entries.len();
+    let mut page = Vec::new();
+    let mut bytes = 0;
+    for entry in entries.into_iter().skip(from).take(MAX_LISTED) {
+        let size = encode(&entry, &[]).map_or(MAX_LISTED_BYTES, |message| message.len());
+        // At least one, so that a listing always gets somewhere.
+        if !page.is_empty() && bytes + size > MAX_LISTED_BYTES {
+            break;
+        }
+        bytes += size;
+        page.push(entry);
+    }
+    let more = total > from.saturating_add(page.len());
+    Ok((
+        Response::Listed {
+            entries: page,
+            more,
+        },
+        Vec::new(),
+    ))
 }
 
 fn read(
@@ -152,6 +177,12 @@ fn locate(
             "that is not a path below the drive's root in ordinary names".to_owned(),
         )
     })?;
+    if is_secret_hive(&names) {
+        return Err((
+            FailureKind::Refused,
+            "that holds this PC's passwords, which no build needs".to_owned(),
+        ));
+    }
     let mut full = root.to_path_buf();
     let last = names.len().saturating_sub(1);
     for (index, name) in names.iter().enumerate() {
@@ -173,6 +204,23 @@ fn locate(
         }
     }
     Ok(full)
+}
+
+/// Whether a path is one of [`SECRET_HIVES`] in Windows' `System32\config`, or below it, as its log, a
+/// backup in `RegBack`, or anything else named for it. The first name is the Windows folder, whatever it
+/// is called.
+fn is_secret_hive(names: &[&str]) -> bool {
+    names.len() > 3
+        && names[1].eq_ignore_ascii_case("System32")
+        && names[2].eq_ignore_ascii_case("config")
+        && names[3..].iter().any(|name| {
+            let stem = name
+                .split('.')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            SECRET_HIVES.contains(&stem.as_str())
+        })
 }
 
 fn not_a_link(full: &Path) -> std::result::Result<(), Refusal> {
@@ -406,5 +454,109 @@ mod tests {
             ));
             let _ = std::fs::remove_dir(&junction);
         }
+    }
+
+    #[test]
+    fn the_hives_that_hold_passwords_are_never_given() {
+        let Some(root) = root() else {
+            return;
+        };
+        let mut checked = HashSet::new();
+        let refused = |response: &Response| {
+            matches!(
+                response,
+                Response::Failed {
+                    kind: FailureKind::Refused,
+                    ..
+                }
+            )
+        };
+        for path in [
+            r"Windows\System32\config\SAM",
+            r"WINDOWS\system32\CONFIG\sam.LOG1",
+            r"Windows\System32\config\SECURITY",
+            r"Windows\System32\config\RegBack\SECURITY",
+            r"WINNT\System32\config\SAM.sav",
+        ] {
+            let (response, _) = answer(
+                Request::Read {
+                    path: path.to_owned(),
+                    offset: 0,
+                    length: 10,
+                },
+                &root.0,
+                &about(),
+                &mut checked,
+            );
+            assert!(refused(&response), "{path}: {response:?}");
+        }
+        // What a build reads, and an app's own file that happens to have the name, are asked about.
+        for path in [
+            r"Windows\System32\config\SOFTWARE",
+            r"Windows\System32\config\SYSTEM",
+            r"Program Files\Acme\config\SAM.dat",
+        ] {
+            let (response, _) = answer(
+                Request::Describe {
+                    path: path.to_owned(),
+                },
+                &root.0,
+                &about(),
+                &mut checked,
+            );
+            assert!(!refused(&response), "{path}: {response:?}");
+        }
+    }
+
+    #[test]
+    fn a_page_of_long_names_still_fits_in_a_message() {
+        let Some(root) = root() else {
+            return;
+        };
+        let folder = root.0.join("Long");
+        if std::fs::create_dir(&folder).is_err() {
+            return;
+        }
+        // Each name takes three bytes a letter, so a page of as many as a page can list would not fit.
+        const FILES: usize = 900;
+        let long = "字".repeat(200);
+        for index in 0..FILES {
+            if std::fs::write(folder.join(format!("{index:04}{long}")), b"").is_err() {
+                return;
+            }
+        }
+        let mut checked = HashSet::new();
+        let mut names = Vec::new();
+        let mut pages = 0;
+        loop {
+            let (response, body) = answer(
+                Request::List {
+                    path: "Long".to_owned(),
+                    from: names.len(),
+                },
+                &root.0,
+                &about(),
+                &mut checked,
+            );
+            let size = encode(&response, &body).map_or(usize::MAX, |message| message.len());
+            assert!(
+                size <= winappmigrator_link::channel::MAX_MESSAGE,
+                "a page of {size} bytes"
+            );
+            let Response::Listed { entries, more } = response else {
+                panic!("{response:?}");
+            };
+            pages += 1;
+            names.extend(entries.into_iter().map(|entry| entry.name));
+            if !more {
+                break;
+            }
+        }
+        assert!(pages > 1, "it took more than one page");
+        assert_eq!(names.len(), FILES);
+        assert!(
+            names.windows(2).all(|pair| pair[0] < pair[1]),
+            "in order, once each"
+        );
     }
 }

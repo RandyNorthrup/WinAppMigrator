@@ -188,8 +188,10 @@ Versions and tags have three parts, as in `v0.5.0`. The two four-part tags from 
 4. Run the checks above, push `main`, and wait for CI to pass on that commit.
 5. Tag that commit and push the tag: `git tag vX.Y.Z`, then `git push origin vX.Y.Z`.
 
-`.github/workflows/release.yml` then runs. It stops unless the tag is `v` and the version in `Cargo.toml`, runs clippy and the
-tests, stops if the stub has a signature or the app does not hold the stub byte for byte, signs the app, checks that signature,
-records where the downloads were built, and publishes them. Only a `v*` tag can reach the signing, in the `release` environment. To
+`.github/workflows/release.yml` then runs, in separate jobs. The one that builds holds no secrets and cannot push. It stops
+unless the tag is `v` and the version in `Cargo.toml`, runs clippy and the tests, and stops if the stub has a signature or the app
+does not hold the stub byte for byte. The next signs the app, running nothing from the repository or crates.io, and checks that
+signature. The last, which cannot sign, records where the downloads were built and publishes them. Only a `v*` tag can reach the
+signing, in the `release` environment. To
 retry a run that failed before publishing, start the workflow from that tag. If the release already exists, delete it first. See
 [docs/signing.md](docs/signing.md) for how signing is set up, which a fork does not have.

@@ -40,9 +40,9 @@ SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
 MERMAID_URL = "https://cdn.jsdelivr.net/npm/mermaid@12.2.0/dist/mermaid.min.js"
 MERMAID_SRI = "sha384-8xUhuLNMjW/cI2Dacg3DR4WliYznvIg0LVG1stctThKD/YVrJFI9TNCFxft5NYgp"
 
-# The only other hosts a page may load anything from, as its Content-Security-Policy says. The wiki's screenshots come
-# from the repository; Mermaid comes from jsDelivr.
-ALLOWED_SOURCES = ("https://raw.githubusercontent.com/", "https://cdn.jsdelivr.net/npm/")
+# The only other places a page may load anything from, as its Content-Security-Policy says. The wiki's screenshots come
+# from the repository, and from jsDelivr only that one file of Mermaid's, since jsDelivr serves whatever anyone publishes.
+ALLOWED_SOURCES = ("https://raw.githubusercontent.com/", MERMAID_URL)
 
 # A search result shows about this many characters of a description.
 DESCRIPTION_MAX = 160
@@ -273,6 +273,7 @@ def build(args: argparse.Namespace) -> None:
         "version": html.escape(version),
         "release_date": released.date().isoformat(),
         "repository": args.repository,
+        "mermaid_url": MERMAID_URL,
     }
 
     sitemap: dict[str, str] = {}

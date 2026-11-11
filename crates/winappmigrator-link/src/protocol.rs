@@ -117,8 +117,10 @@ pub fn decode<T: DeserializeOwned>(message: &[u8]) -> Result<(T, &[u8])> {
         .get(..4)
         .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize)
         .ok_or_else(malformed)?;
-    let header = message.get(4..4 + length).ok_or_else(malformed)?;
-    let body = &message[4 + length..];
+    // Added with a check, as a length near the top of a 32-bit client's `usize` would wrap.
+    let end = length.checked_add(4).ok_or_else(malformed)?;
+    let header = message.get(4..end).ok_or_else(malformed)?;
+    let body = message.get(end..).ok_or_else(malformed)?;
     let header = serde_json::from_slice(header).map_err(|_| malformed())?;
     Ok((header, body))
 }

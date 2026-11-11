@@ -1483,7 +1483,9 @@ fn read_small_file(path: &Path) -> Option<Vec<u8>> {
     crate::source_fs::metadata(path)
         .ok()
         .filter(|metadata| metadata.len() <= crate::secret_rules::MAX_KEY_FILE_BYTES)
-        .and_then(|_| crate::source_fs::read(path).ok())
+        .and_then(|_| {
+            crate::source_fs::read_at_most(path, crate::secret_rules::MAX_KEY_FILE_BYTES).ok()
+        })
 }
 
 fn create_package_dirs(root: &Path) -> Result<()> {

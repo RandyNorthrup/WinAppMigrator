@@ -117,7 +117,7 @@ fn read_within(path: &Path, limit: u64, system: &SystemContext) -> Option<Vec<u8
     }
     let size = crate::source_fs::metadata(path).ok()?.len();
     (size <= limit)
-        .then(|| crate::source_fs::read(path).ok())
+        .then(|| crate::source_fs::read_at_most(path, limit).ok())
         .flatten()
 }
 
