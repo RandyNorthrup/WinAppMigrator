@@ -14,7 +14,7 @@ fn main() -> eframe::Result {
             .set_description(format!(
                 "{}\n\n{}",
                 winappmigrator_i18n::t!("app-window-could-not-open", error = error.to_string()),
-                winappmigrator_ui::NEEDS_DIRECT3D_12_TEXT
+                winappmigrator_ui::needs_direct3d_12_text()
             ))
             .show();
     }

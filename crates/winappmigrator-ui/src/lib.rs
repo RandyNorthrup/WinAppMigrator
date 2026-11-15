@@ -13,8 +13,9 @@ pub mod widgets;
 pub mod window;
 
 /// What a person is told of why a window could not open, whatever the error was.
-pub const NEEDS_DIRECT3D_12_TEXT: &str = "This needs Direct3D 12 to draw its window, which an old \
-     graphics driver or a virtual machine may not have.";
+pub fn needs_direct3d_12_text() -> String {
+    winappmigrator_i18n::t!("ui-needs-direct3d-12")
+}
 
 /// What every window of these programs opens with. They run elevated, and what elevation hands on
 /// includes the environment of the account that started them, which any program of that account can
