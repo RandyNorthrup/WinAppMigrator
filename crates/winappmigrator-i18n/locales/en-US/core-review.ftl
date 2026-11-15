@@ -62,6 +62,7 @@ core-space-for-what-is-replaced = keeping what it replaces
 core-space-for-build-work = what a build works with
 core-space-for-installer = the installer
 core-space-for-package = the package
+core-space-for-unpacking-and-installing = unpacking the package and installing it
 # What goes between two of those, as in "unpacking the package and the app's files". Keep the quotes: they keep the
 # spaces.
 core-space-purposes-joiner = {" and "}

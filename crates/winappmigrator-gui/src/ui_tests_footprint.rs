@@ -11,14 +11,13 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 
 use winappmigrator_core::{
-    AppArchitecture, CREDENTIALS_LEFT_OUT_TEXT, ChoiceId, ExecutableMetadata, FileClassification,
-    FileEntry, FirewallRuleEntry, Footprint, FootprintKind, FootprintLocation, InstallScope,
-    InstalledApp, LeftOutItem, LicenseArtifact, LicenseArtifactKind, LicenseFramework,
-    MatchConfidence, NearMatch, NearMatchKind, RegistryEntry, RegistryHive, RegistryValueKind,
-    RuntimePrerequisite, RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, SETTINGS_LEFT_OUT_TEXT,
-    ScanFlags, ScanMonitor, ScanOptions, ScanReport, ScheduledTaskEntry, ServiceEntry,
-    ShortcutEntry, SignatureStatus, SystemChangeKind, TransferableHint, VolumeStats,
-    WinAppMigratorError,
+    AppArchitecture, ChoiceId, ExecutableMetadata, FileClassification, FileEntry,
+    FirewallRuleEntry, Footprint, FootprintKind, FootprintLocation, InstallScope, InstalledApp,
+    LeftOutItem, LicenseArtifact, LicenseArtifactKind, LicenseFramework, MatchConfidence,
+    NearMatch, NearMatchKind, RegistryEntry, RegistryHive, RegistryValueKind, RuntimePrerequisite,
+    RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanFlags, ScanMonitor, ScanOptions, ScanReport,
+    ScheduledTaskEntry, ServiceEntry, ShortcutEntry, SignatureStatus, SystemChangeKind,
+    TransferableHint, VolumeStats, WinAppMigratorError,
 };
 
 use crate::theme::ThemeMode;
@@ -737,7 +736,7 @@ fn what_stays_out_is_named_and_cannot_be_ticked() {
     harness.run_steps(2);
     assert!(
         harness
-            .query_by_label_contains(CREDENTIALS_LEFT_OUT_TEXT)
+            .query_by_label_contains(&winappmigrator_core::credentials_left_out_text())
             .is_some(),
         "in the installer's words"
     );
@@ -754,7 +753,7 @@ fn what_stays_out_is_named_and_cannot_be_ticked() {
     );
     assert!(
         harness
-            .query_by_label_contains(SETTINGS_LEFT_OUT_TEXT)
+            .query_by_label_contains(&winappmigrator_core::settings_left_out_text())
             .is_some(),
         "what an account keeps is said to be left out"
     );

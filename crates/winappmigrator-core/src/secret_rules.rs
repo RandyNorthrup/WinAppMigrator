@@ -199,8 +199,6 @@ const NOT_A_CREDENTIAL: &[&str] = &["0", "1", "false", "no", "none", "true", "ye
 const DPAPI_PROVIDER_GUID_HEX: &str = "d08c9ddf0115d1118c7a00c04fc297eb";
 /// In hex: four bytes of version come before that.
 const DPAPI_GUID_OFFSET: usize = 8;
-/// The English of `core-secret-why-credential`, for code that has yet to ask the catalog for it.
-pub(crate) const LEFT_OUT_REASON_SECRET: &str = "it looks like a credential";
 /// A default value is named by its key, but not one under this: `Acme.Token` is a file type.
 const NOT_NAMED_BY_THEIR_KEY: &str = r"software\classes";
 /// Keys whose names are nobody's license, whatever they are called: a file type or an app's entry

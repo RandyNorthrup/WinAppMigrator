@@ -581,7 +581,7 @@ impl InstallerApp {
         let room = RoomCheck::on_this_pc(&[PlaceNeed {
             place: PathBuf::from(text),
             bytes: self.unpacked_bytes.saturating_mul(2),
-            what: "unpacking the package and installing it",
+            what: winappmigrator_core::space::FOR_UNPACKING_AND_INSTALLING,
         }]);
         *checked = Some((text.to_owned(), room.clone()));
         Some(room)
@@ -1872,7 +1872,7 @@ mod tests {
                 drive: "C:".to_owned(),
                 needed_bytes,
                 free_bytes,
-                what_for: vec!["unpacking the package and installing it"],
+                what_for: vec![winappmigrator_core::space::FOR_UNPACKING_AND_INSTALLING],
             }],
         }
     }

@@ -31,20 +31,16 @@ use crate::prerequisites::handling_before_a_build;
 use crate::registry_target::is_path_variable;
 use crate::restore_policy::is_autostart_entry;
 use crate::restore_review::{
-    AppKeys, CERTIFICATES_LEFT_OUT_TEXT, CREDENTIALS_LEFT_OUT_TEXT, ChangeRow, FONTS_LEFT_OUT_TEXT,
-    ReviewedPackage, SETTINGS_LEFT_OUT_TEXT, SystemChange, SystemChangeKind, autostart_choice,
-    certificate_label, change_kind_of, described_rows, driver_choice, is_other_setting, notes_of,
-    registry_item, service_choice, shortcut_choice, task_choice,
+    AppKeys, ChangeRow, ReviewedPackage, SystemChange, SystemChangeKind, autostart_choice,
+    certificate_label, certificates_left_out_text, change_kind_of, credentials_left_out_text,
+    described_rows, driver_choice, fonts_left_out_text, is_other_setting, notes_of, registry_item,
+    service_choice, settings_left_out_text, shortcut_choice, task_choice,
 };
 use crate::space::BuildInputs;
 
 /// What in a task's definition is one path, however many spaces are in it.
 const TASK_TAGS_OF_ONE_PATH: &[&str] = &["Command", "WorkingDirectory"];
 
-/// What the list of what is left out says of licenses, before anything has been built, in
-/// English. A person reads `core-footprint-licenses-left-out` from the catalog, in their own
-/// language.
-pub const LICENSES_LEFT_OUT_TEXT: &str = "Not in this installer, because the License option is off";
 /// Where what goes with a service is kept.
 const SERVICES_KEY_PREFIX: &str = r"system\currentcontrolset\services\";
 /// Where Windows keeps fonts, below the drive it is on. A package holds one of those only if a
@@ -366,20 +362,14 @@ impl Footprint {
         let stays_behind = t!("core-footprint-font-stays-behind");
         let reinstall = t!("core-footprint-driver-reinstall");
         let groups = [
-            (
-                CREDENTIALS_LEFT_OUT_TEXT.to_owned(),
-                report.secrets_left_out.clone(),
-            ),
+            (credentials_left_out_text(), report.secrets_left_out.clone()),
             (
                 t!("core-footprint-licenses-left-out"),
                 report.licenses_left_out.clone(),
             ),
+            (settings_left_out_text(), report.settings_left_out.clone()),
             (
-                SETTINGS_LEFT_OUT_TEXT.to_owned(),
-                report.settings_left_out.clone(),
-            ),
-            (
-                CERTIFICATES_LEFT_OUT_TEXT.to_owned(),
+                certificates_left_out_text(),
                 report
                     .certificates
                     .iter()
@@ -387,7 +377,7 @@ impl Footprint {
                     .collect(),
             ),
             (
-                FONTS_LEFT_OUT_TEXT.to_owned(),
+                fonts_left_out_text(),
                 report
                     .fonts_reported
                     .iter()
@@ -2035,7 +2025,7 @@ mod tests {
         let group = footprint
             .left_out
             .iter()
-            .find(|group| group.title == SETTINGS_LEFT_OUT_TEXT)
+            .find(|group| group.title == settings_left_out_text())
             .ok_or_else(|| {
                 crate::errors::WinAppMigratorError::InvalidInput("no group".to_owned())
             })?;
@@ -2821,7 +2811,7 @@ mod tests {
         assert_eq!(
             titles,
             [
-                CREDENTIALS_LEFT_OUT_TEXT.to_owned(),
+                credentials_left_out_text(),
                 t!("core-footprint-licenses-left-out")
             ]
         );

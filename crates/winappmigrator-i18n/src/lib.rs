@@ -90,9 +90,20 @@ thread_local! {
 
 /// Speak `language` from now on, everywhere in this program, writing numbers as Windows' Region settings say.
 pub fn use_language(language: &'static Language) {
+    use_language_and_separators(language, Separators::windows_over(language));
+}
+
+/// Speak English from now on, writing numbers as English does whatever Windows' Region settings
+/// say, for what a script reads: `1,234.5` in a log is the same on every PC.
+pub fn use_english_for_scripts() {
+    use_language_and_separators(ENGLISH, Separators::of(ENGLISH));
+}
+
+/// Speak `language` from now on, everywhere in this program, writing numbers with `separators`.
+pub fn use_language_and_separators(language: &'static Language, separators: Separators) {
     let active = Arc::new(Active {
         language,
-        separators: Separators::windows_over(language),
+        separators,
         catalog: catalog(language),
     });
     match CHOSEN.write() {

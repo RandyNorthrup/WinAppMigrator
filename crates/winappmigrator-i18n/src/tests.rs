@@ -234,19 +234,20 @@ fn rust_files(folder: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// The message names in `t!("…")`, `tr("…")`, and `tr_attribute("…", "…")` calls.
+/// The message names in `t!("…")`, `tr("…")`, and `tr_attribute("…", "…")` calls, wherever the
+/// formatter breaks their lines.
 fn asked_for(text: &str) -> Vec<(String, Option<String>)> {
     let mut found = Vec::new();
     for (opening, has_attribute) in [
-        ("t!(\"", false),
-        ("t_english!(\"", false),
-        ("tr(\"", false),
-        ("tr_english(\"", false),
-        ("tr_attribute(\"", true),
+        ("t!(", false),
+        ("t_english!(", false),
+        ("tr(", false),
+        ("tr_english(", false),
+        ("tr_attribute(", true),
     ] {
         let mut rest = text;
         while let Some(start) = rest.find(opening) {
-            // `format!("` ends in `t!("`, and `str("` in `tr("`: a call starts where a name does.
+            // `format!(` ends in `t!(`, and `str(` in `tr(`: a call starts where a name does.
             let part_of_a_name = rest[..start]
                 .chars()
                 .next_back()
@@ -255,17 +256,24 @@ fn asked_for(text: &str) -> Vec<(String, Option<String>)> {
             if part_of_a_name {
                 continue;
             }
-            let Some(end) = rest.find('"') else { break };
-            let id = rest[..end].to_owned();
+            // A name the code works out, such as `tr(what, None)`, is checked where it is made.
+            let Some(quoted) = rest.trim_start().strip_prefix('"') else {
+                continue;
+            };
+            let Some(end) = quoted.find('"') else { break };
+            let id = quoted[..end].to_owned();
             let attribute = has_attribute
                 .then(|| {
-                    let after = rest[end + 1..].trim_start().strip_prefix(',')?.trim_start();
+                    let after = quoted[end + 1..]
+                        .trim_start()
+                        .strip_prefix(',')?
+                        .trim_start();
                     let after = after.strip_prefix('"')?;
                     after.find('"').map(|close| after[..close].to_owned())
                 })
                 .flatten();
             found.push((id, attribute));
-            rest = &rest[end..];
+            rest = &quoted[end..];
         }
     }
     // `Warning::localized(code, "message", ...)`: the message is its second string.
@@ -283,13 +291,17 @@ fn asked_for(text: &str) -> Vec<(String, Option<String>)> {
 #[test]
 fn calls_are_found_in_source_text() {
     let found = asked_for(
-        "format!(\"{x}\"); my_str(\"no\"); let a = t!(\"one\"); let b = t!(\"two\", x = 1); tr(\"three\", None); tr_attribute(\"four\", \"tip\", None);",
+        "format!(\"{x}\"); my_str(\"no\"); let a = t!(\"one\"); let b = t!(\"two\", x = 1); tr(\"three\", None); tr_attribute(\"four\", \"tip\", None); tr(what, None); let c = t!(
+        \"five\",
+        x = 2
+    );",
     );
     assert!(found.contains(&("one".to_owned(), None)));
     assert!(found.contains(&("two".to_owned(), None)));
     assert!(found.contains(&("three".to_owned(), None)));
     assert!(found.contains(&("four".to_owned(), Some("tip".to_owned()))));
-    assert_eq!(found.len(), 4, "{found:?}");
+    assert!(found.contains(&("five".to_owned(), None)));
+    assert_eq!(found.len(), 5, "{found:?}");
 }
 
 // ---- AC-I18N-FALLBACK ----

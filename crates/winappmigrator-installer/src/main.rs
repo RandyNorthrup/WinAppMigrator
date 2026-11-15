@@ -53,7 +53,7 @@ fn main() -> ExitCode {
                 .set_description(format!(
                     "{}\n\n{}\n\n{}",
                     t!("installer-window-failed", error = error.to_string()),
-                    winappmigrator_ui::NEEDS_DIRECT3D_12_TEXT,
+                    winappmigrator_ui::needs_direct3d_12_text(),
                     t!("installer-window-failed-without-one")
                 ))
                 .show();

@@ -954,7 +954,7 @@ fn files_to_pack(
             ));
             secrets_since.push(LeftOutItem {
                 name,
-                why: crate::secret_rules::LEFT_OUT_REASON_SECRET.to_owned(),
+                why: t!("core-secret-why-credential"),
             });
             not_packable.insert(file.original_path.clone());
             continue;

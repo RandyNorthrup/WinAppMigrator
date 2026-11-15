@@ -61,7 +61,7 @@ pub struct InstallerCli {
 pub fn run() -> ExitCode {
     // Scripts read what this prints, so it is English whatever this PC speaks. Its words are in the
     // catalog all the same, with the rest of the installer's.
-    winappmigrator_i18n::use_language(winappmigrator_i18n::ENGLISH);
+    winappmigrator_i18n::use_english_for_scripts();
     match run_inner(std::env::args_os()) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {

@@ -131,6 +131,7 @@ pub const FOR_WHAT_IS_REPLACED: &str = "core-space-for-what-is-replaced";
 pub const FOR_BUILD_WORK: &str = "core-space-for-build-work";
 pub const FOR_INSTALLER: &str = "core-space-for-installer";
 pub const FOR_PACKAGE: &str = "core-space-for-package";
+pub const FOR_UNPACKING_AND_INSTALLING: &str = "core-space-for-unpacking-and-installing";
 
 /// What room is for, in the language in use.
 fn purpose_text(what: &str) -> String {

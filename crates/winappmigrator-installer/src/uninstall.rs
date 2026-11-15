@@ -78,7 +78,7 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
         };
     }
     // Scripts read what this prints, so it is English whatever this PC speaks.
-    winappmigrator_i18n::use_language(winappmigrator_i18n::ENGLISH);
+    winappmigrator_i18n::use_english_for_scripts();
     match run_quiet(&cli) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
@@ -100,7 +100,7 @@ fn no_window_text(error: &str, id: &str) -> String {
     format!(
         "{}\n\n{}\n\n{}\n\n{this_program} {UNINSTALL_FLAG} {id} --quiet",
         t!("uninstaller-window-failed", error = error),
-        winappmigrator_ui::NEEDS_DIRECT3D_12_TEXT,
+        winappmigrator_ui::needs_direct3d_12_text(),
         t!("uninstaller-window-failed-quiet")
     )
 }

@@ -530,7 +530,11 @@ impl WinAppMigratorApp {
             let row = rows[index];
             let mut included = footprint.folder_is_in(row, &self.choices);
             let detail = match row.locked {
-                Some(why) => t!("app-footprint-folder-row", count = row.files, detail = why),
+                Some(why) => t!(
+                    "app-footprint-folder-row",
+                    count = row.files,
+                    detail = why.to_string()
+                ),
                 None => t!(
                     "app-footprint-folder-row",
                     count = row.files,

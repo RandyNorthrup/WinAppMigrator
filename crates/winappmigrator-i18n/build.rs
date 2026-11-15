@@ -66,9 +66,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     for (tag, files) in &catalogs {
         let mut source = Vec::new();
         for file in files {
-            source.extend(fs::read(file)?);
-            // A file need not end in a line break, and the next must start on a line of its own.
-            source.push(b'\n');
+            // Comments are for translators, not for the program. A line that starts with `#` is always one: a
+            // message's own lines after its first are indented.
+            for line in fs::read(file)?.split(|byte| *byte == b'\n') {
+                if line.first() != Some(&b'#') {
+                    source.extend(line.strip_suffix(b"\r").unwrap_or(line));
+                    source.push(b'\n');
+                }
+            }
         }
         let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
         encoder.write_all(&source)?;

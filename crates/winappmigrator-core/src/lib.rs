@@ -55,8 +55,8 @@ pub use archive::{
 pub use errors::{Result, WinAppMigratorError, panic_text};
 pub use footprint::{
     AlsoLeftOut, ChoiceId, ChosenScan, FolderGroup, FolderRow, Footprint, FootprintChoices,
-    IntegrationRow, ItemRow, LICENSES_LEFT_OUT_TEXT, LeftOutGroup, PrerequisiteRow, ScanFlags,
-    WhatGoes, apply_choices, what_goes_with,
+    IntegrationRow, ItemRow, LeftOutGroup, PrerequisiteRow, ScanFlags, WhatGoes, apply_choices,
+    what_goes_with,
 };
 pub use models::*;
 pub use near_match::{NearMatchLook, RefusedNearMatch, near_matches_of};
@@ -74,11 +74,11 @@ pub use restore::{
     default_install_location, main_program_already_in, restore_package, restore_package_monitored,
 };
 pub use restore_review::{
-    CERTIFICATES_LEFT_OUT_TEXT, CREDENTIALS_LEFT_OUT_TEXT, FONTS_LEFT_OUT_TEXT,
-    SETTINGS_LEFT_OUT_TEXT, SystemChange, SystemChangeKind, SystemChanges,
-    files_no_install_put_there, folder_has_files, install_location_problem, install_places,
-    location_a_list_is_for, refuse_what_cannot_run_here, refuse_without_room_to_install,
-    system_changes, system_changes_restoring,
+    SystemChange, SystemChangeKind, SystemChanges, certificates_left_out_text,
+    credentials_left_out_text, files_no_install_put_there, folder_has_files, fonts_left_out_text,
+    install_location_problem, install_places, location_a_list_is_for, refuse_what_cannot_run_here,
+    refuse_without_room_to_install, settings_left_out_text, system_changes,
+    system_changes_restoring,
 };
 pub use scan::scan_app;
 pub use space::{

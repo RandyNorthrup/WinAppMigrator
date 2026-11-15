@@ -2087,16 +2087,6 @@ pub fn fonts_left_out_text() -> String {
     t!("core-review-left-out-fonts")
 }
 
-/// The English of [`credentials_left_out_text`] and the others, for what has not yet moved to the
-/// catalog.
-pub const CREDENTIALS_LEFT_OUT_TEXT: &str =
-    "Not in this installer, because they look like credentials";
-pub const SETTINGS_LEFT_OUT_TEXT: &str =
-    "Settings and history an account keeps for the app, which only go in with the User Data option";
-pub const CERTIFICATES_LEFT_OUT_TEXT: &str =
-    "The app seems to rely on certificates that were trusted on its PC, and they are not installed";
-pub const FONTS_LEFT_OUT_TEXT: &str = "These fonts go by the app's name, and nothing says they are its own, so they are not installed";
-
 /// What a person ought to know is not coming, and why. Certificates are only ever this: which to
 /// trust is for them to decide.
 fn notes_on_what_is_left_out(manifest: &PackageManifest) -> Vec<String> {
