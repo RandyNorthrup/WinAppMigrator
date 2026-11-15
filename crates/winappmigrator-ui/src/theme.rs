@@ -225,12 +225,14 @@ fn loaded_fallbacks_id() -> egui::Id {
 
 /// Load only the fallback fonts that `texts` needs, once each. These are tens of megabytes
 /// each, and most machines list no application that needs them, but without them
-/// a Korean, Japanese, Chinese, Hindi, Bengali, or Thai name draws as empty boxes.
+/// a Korean, Japanese, Chinese, Hindi, Bengali, or Thai name draws as empty boxes. Returns
+/// whether it loaded one now: egui uses it from the next pass on.
 pub fn add_fallback_fonts<'a>(
     ctx: &egui::Context,
     fonts_dir: &Path,
     texts: impl IntoIterator<Item = &'a str>,
-) {
+) -> bool {
+    let mut added = false;
     let mut needed: Vec<Script> = Vec::new();
     for character in texts.into_iter().flat_map(str::chars) {
         if let Some(script) = fallback_script(character)
@@ -251,6 +253,7 @@ pub fn add_fallback_fonts<'a>(
                     .0
                     .push(file);
             });
+            added = true;
             ctx.add_font(FontInsert::new(
                 file,
                 FontData::from_owned(bytes),
@@ -267,6 +270,7 @@ pub fn add_fallback_fonts<'a>(
             ));
         }
     }
+    added
 }
 
 impl Theme {

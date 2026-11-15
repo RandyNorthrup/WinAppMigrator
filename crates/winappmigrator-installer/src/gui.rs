@@ -1000,7 +1000,9 @@ impl InstallerApp {
                     .fill(theme.surface)
                     .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_MD as i8)),
             )
-            .show(ui, |ui| self.draw_header(ui, &theme));
+            .show(ui, |ui| {
+                widgets::page(ui, |ui| self.draw_header(ui, &theme))
+            });
 
         if matches!(self.screen, Screen::Ready) {
             egui::Panel::bottom("actions")
@@ -1009,7 +1011,9 @@ impl InstallerApp {
                         .fill(theme.surface)
                         .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_MD as i8)),
                 )
-                .show(ui, |ui| self.draw_actions(ui, &theme));
+                .show(ui, |ui| {
+                    widgets::page(ui, |ui| self.draw_actions(ui, &theme))
+                });
         }
 
         egui::CentralPanel::default()
@@ -1022,7 +1026,7 @@ impl InstallerApp {
                             .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_LG as i8))
                             .show(ui, |ui| {
                                 ui.set_max_width(ui.available_width());
-                                self.draw_body(ui, &theme);
+                                widgets::page(ui, |ui| self.draw_body(ui, &theme));
                             });
                     });
             });
@@ -1035,14 +1039,16 @@ impl InstallerApp {
                     ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
                 widgets::paint_logo(ui.painter(), rect, theme);
                 ui.add_space(SPACE_XS);
-                ui.vertical(|ui| {
+                widgets::column(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(
+                    widgets::label(
+                        ui,
                         RichText::new(t!("installer-window-title"))
                             .font(theme::semibold(16.0))
                             .color(theme.text),
                     );
-                    ui.label(
+                    widgets::label(
+                        ui,
                         RichText::new(t!("installer-tagline"))
                             .size(12.5)
                             .color(theme.text_muted),
@@ -1051,7 +1057,7 @@ impl InstallerApp {
                 if !matches!(self.screen, Screen::Ready) {
                     return None;
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                widgets::trailing(ui, |ui| {
                     // Not while it installs: the install is held to the list as it was shown, in the
                     // words it was shown in.
                     ui.add_enabled_ui(self.phase != Phase::Running, |ui| {
@@ -1059,7 +1065,6 @@ impl InstallerApp {
                     })
                     .inner
                 })
-                .inner
             })
             .inner;
         match chosen {
@@ -1078,7 +1083,8 @@ impl InstallerApp {
     fn draw_body(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         match &self.screen {
             Screen::Checking => {
-                ui.label(
+                widgets::label(
+                    ui,
                     RichText::new(t!("installer-checking"))
                         .size(13.5)
                         .color(theme.text),
@@ -1257,8 +1263,11 @@ impl InstallerApp {
                 }
                 for prereq in &self.prereqs {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(&prereq.name).size(13.5).color(theme.text));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        widgets::label(
+                            ui,
+                            RichText::new(&prereq.name).size(13.5).color(theme.text),
+                        );
+                        widgets::trailing(ui, |ui| {
                             widgets::status_pill(ui, theme, &prereq.handling, prereq.role);
                         });
                     });
@@ -1273,9 +1282,10 @@ impl InstallerApp {
             let cancelling = self.is_cancelling();
             let (label, fraction) = step_label(self.step, self.applied_now, cancelling);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(label).size(13.0).color(theme.text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
+                widgets::label(ui, RichText::new(label).size(13.0).color(theme.text));
+                widgets::trailing(ui, |ui| {
+                    widgets::label(
+                        ui,
                         RichText::new(widgets::format_elapsed(elapsed))
                             .size(12.5)
                             .color(theme.text_muted),
@@ -1431,8 +1441,11 @@ fn system_changes_ui(ui: &mut egui::Ui, theme: &Theme, changes: &SystemChanges) 
 
 fn system_change_row(ui: &mut egui::Ui, theme: &Theme, change: &SystemChange) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(&change.title).size(13.5).color(theme.text));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        widgets::label(
+            ui,
+            RichText::new(&change.title).size(13.5).color(theme.text),
+        );
+        widgets::trailing(ui, |ui| {
             let role = if change.high_rights {
                 Role::Warning
             } else {
@@ -1471,11 +1484,10 @@ fn refused_ui(ui: &mut egui::Ui, theme: &Theme, refused: &[String]) {
             .max_height(MORE_LEFT_OUT_HEIGHT)
             .show_rows(ui, row_height, rest.len(), |ui, rows| {
                 for reason in &rest[rows] {
-                    ui.add(
-                        egui::Label::new(RichText::new(reason).size(12.5).color(theme.text_muted))
-                            .truncate(),
-                    )
-                    .on_hover_text(reason);
+                    widgets::truncated_label(
+                        ui,
+                        RichText::new(reason).size(12.5).color(theme.text_muted),
+                    );
                 }
             });
     });

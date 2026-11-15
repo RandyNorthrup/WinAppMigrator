@@ -149,7 +149,7 @@ impl WinAppMigratorApp {
         let can_look_again = matches!(look, Look::Ready) && !self.is_building();
         widgets::control_row(ui, |ui| {
             widgets::field_label(ui, theme, &t!("app-footprint-heading"));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            widgets::trailing(ui, |ui| {
                 if can_look_again
                     && widgets::button(
                         ui,
@@ -172,12 +172,13 @@ impl WinAppMigratorApp {
                 widgets::control_row(ui, |ui| {
                     ui.spinner();
                     ui.add_space(SPACE_XS);
-                    ui.label(
+                    widgets::label(
+                        ui,
                         RichText::new(scan_step_text(step))
                             .size(13.0)
                             .color(theme.text),
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    widgets::trailing(ui, |ui| {
                         if widgets::button(ui, theme, ButtonKind::Ghost, &t!("app-scan-stop"), true)
                             .clicked()
                         {
@@ -285,7 +286,7 @@ impl WinAppMigratorApp {
         // Worth saying, and not worth a line of a window with few to spare.
         let most_it_could_need = t!("app-room-most-it-could-need");
         if short {
-            tiles.response.on_hover_text(most_it_could_need);
+            widgets::tooltip(tiles.response, most_it_could_need);
         } else {
             ui.add_space(SPACE_XS);
             widgets::hint(ui, theme, &most_it_could_need);
@@ -542,16 +543,18 @@ impl WinAppMigratorApp {
                 ),
             };
             let trailing = size(row.bytes);
-            let response = widgets::choice_row(
-                ui,
-                theme,
-                &mut included,
-                &row.name,
-                &detail,
-                Some(&trailing),
-                enabled && row.locked.is_none(),
-            )
-            .on_hover_text(row.path.display().to_string());
+            let response = widgets::tooltip(
+                widgets::choice_row(
+                    ui,
+                    theme,
+                    &mut included,
+                    &row.name,
+                    &detail,
+                    Some(&trailing),
+                    enabled && row.locked.is_none(),
+                ),
+                row.path.display().to_string(),
+            );
             if response.changed() {
                 self.set_included(&row.id, included);
             }
@@ -786,16 +789,18 @@ impl WinAppMigratorApp {
             NearMatchKind::Folder => t!("app-footprint-near-match-folder", place = place),
             NearMatchKind::HiddenEntry => t!("app-footprint-near-match-hidden", place = place),
         };
-        let response = widgets::choice_row(
-            ui,
-            theme,
-            &mut ticked,
-            &near.name,
-            &detail,
-            Some(&amount),
-            enabled && usable,
-        )
-        .on_hover_text(about);
+        let response = widgets::tooltip(
+            widgets::choice_row(
+                ui,
+                theme,
+                &mut ticked,
+                &near.name,
+                &detail,
+                Some(&amount),
+                enabled && usable,
+            ),
+            about,
+        );
         if response.changed() {
             if ticked {
                 self.near_picks
@@ -903,7 +908,8 @@ fn draw_none_found(ui: &mut egui::Ui, theme: &Theme, footprint: &Footprint) {
         return;
     }
     ui.add_space(SPACE_XS);
-    ui.label(
+    widgets::label(
+        ui,
         RichText::new(t!("app-none-found", list = join_list(&none)))
             .font(theme::regular(12.5))
             .color(theme.text_muted),

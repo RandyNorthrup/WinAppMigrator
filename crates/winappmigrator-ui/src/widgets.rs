@@ -4,16 +4,187 @@ use std::path::PathBuf;
 
 use eframe::egui::Role as A11yRole;
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Margin, Rect, Response,
-    RichText, Sense, Shape, Stroke, StrokeKind, TextStyle, TextWrapMode, Ui, WidgetInfo, pos2,
-    text::LayoutJob, vec2,
+    self, Color32, CornerRadius, CursorIcon, FontId, Margin, Rect, Response, RichText, Sense,
+    Shape, Stroke, StrokeKind, TextStyle, TextWrapMode, Ui, WidgetInfo, pos2, vec2,
 };
 
+use crate::bidi::{self, TextBlock, right_to_left};
 use crate::theme::{
     self, CONTROL_HEIGHT, RADIUS_LG, RADIUS_MD, RADIUS_SM, Role, SPACE_LG, SPACE_MD, SPACE_SM,
     SPACE_XS, Theme,
 };
 use winappmigrator_i18n::t;
+
+/// Positions inside a widget, worked out as for a left-to-right window, and turned around inside it for a
+/// right-to-left one.
+#[derive(Clone, Copy, Debug)]
+pub struct Mirror {
+    left: f32,
+    right: f32,
+    on: bool,
+}
+
+impl Mirror {
+    /// Mirroring inside `rect`, when the language in use reads right to left.
+    pub fn of(rect: Rect) -> Self {
+        Self {
+            left: rect.left(),
+            right: rect.right(),
+            on: right_to_left(),
+        }
+    }
+
+    /// Where `x` is.
+    pub fn x(self, x: f32) -> f32 {
+        if self.on {
+            self.left + self.right - x
+        } else {
+            x
+        }
+    }
+
+    /// Where `rect` is.
+    pub fn rect(self, rect: Rect) -> Rect {
+        if self.on {
+            Rect::from_x_y_ranges(self.x(rect.right())..=self.x(rect.left()), rect.y_range())
+        } else {
+            rect
+        }
+    }
+
+    /// The left edge of something `width` wide that starts at `x`.
+    pub fn left_of(self, x: f32, width: f32) -> f32 {
+        if self.on { self.x(x) - width } else { x }
+    }
+}
+
+/// A row that runs the way the language reads, centered on its line.
+fn reading_row() -> egui::Layout {
+    if right_to_left() {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    }
+}
+
+/// What a page holds, its lines starting at the side the language starts reading from. Rows inside it, made with
+/// `ui.horizontal`, run that way too.
+pub fn page<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    if right_to_left() {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Max), contents)
+            .inner
+    } else {
+        contents(ui)
+    }
+}
+
+/// A column whose lines start at the side the language starts reading from.
+pub fn column<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    if right_to_left() {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Max), contents)
+            .inner
+    } else {
+        ui.vertical(contents).inner
+    }
+}
+
+/// What goes at the far end of a row, after everything else in it: at its right, or its left in a right-to-left
+/// window. The first thing added is the one furthest along.
+pub fn trailing<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let layout = if right_to_left() {
+        egui::Layout::left_to_right(egui::Align::Center)
+    } else {
+        egui::Layout::right_to_left(egui::Align::Center)
+    };
+    ui.with_layout(layout, contents).inner
+}
+
+/// The font and color `text` is drawn in.
+fn font_and_color(ui: &Ui, text: &RichText) -> (FontId, Color32) {
+    let job = egui::WidgetText::from(text.clone()).into_layout_job(
+        ui.style(),
+        egui::FontSelection::Default,
+        egui::Align::Min,
+    );
+    job.sections.first().map_or_else(
+        || {
+            (
+                TextStyle::Body.resolve(ui.style()),
+                ui.visuals().text_color(),
+            )
+        },
+        |section| {
+            let color = if section.format.color == Color32::PLACEHOLDER {
+                ui.visuals().text_color()
+            } else {
+                section.format.color
+            };
+            (section.format.font_id.clone(), color)
+        },
+    )
+}
+
+/// A label, read in the direction of the language in use. It wraps where an egui label would.
+pub fn label(ui: &mut Ui, text: impl Into<RichText>) -> Response {
+    let text = text.into();
+    if !bidi::needs_bidi(text.text(), winappmigrator_i18n::direction()) {
+        return ui.label(text);
+    }
+    let wrap = ui.wrap_mode() == TextWrapMode::Wrap;
+    let (font, color) = font_and_color(ui, &text);
+    bidi::label(ui, text.text(), font, color, wrap)
+}
+
+/// A label that wraps to the width there is, read in the direction of the language in use.
+pub fn wrapped_label(ui: &mut Ui, text: impl Into<RichText>) -> Response {
+    let text = text.into();
+    if !bidi::needs_bidi(text.text(), winappmigrator_i18n::direction()) {
+        return ui.add(egui::Label::new(text).wrap_mode(TextWrapMode::Wrap));
+    }
+    let (font, color) = font_and_color(ui, &text);
+    bidi::label(ui, text.text(), font, color, true)
+}
+
+/// A label of one line, cut short with `…` to the width there is, all of it in its tooltip when it is cut.
+pub fn truncated_label(ui: &mut Ui, text: impl Into<RichText>) -> Response {
+    let text = text.into();
+    if !bidi::needs_bidi(text.text(), winappmigrator_i18n::direction()) {
+        return ui.add(egui::Label::new(text).truncate());
+    }
+    let (font, color) = font_and_color(ui, &text);
+    let width = ui.available_width();
+    let galley = bidi::elided_galley(ui.painter(), text.text(), font.clone(), color, width);
+    let whole = bidi::line_galley(ui.painter(), text.text(), font, color);
+    let (rect, response) = ui.allocate_exact_size(vec2(width, galley.size().y), Sense::hover());
+    let left = Mirror::of(rect).left_of(rect.left(), galley.size().x);
+    ui.painter().galley(pos2(left, rect.top()), galley, color);
+    let full = winappmigrator_i18n::without_isolation(text.text()).into_owned();
+    response.widget_info(|| WidgetInfo::labeled(A11yRole::Label, true, &full));
+    if whole.size().x > width {
+        tooltip(response, full)
+    } else {
+        response
+    }
+}
+
+/// A tooltip, read in the direction of the language in use.
+pub fn tooltip(response: Response, text: impl Into<String>) -> Response {
+    let text = text.into();
+    if !bidi::needs_bidi(&text, winappmigrator_i18n::direction()) {
+        return response.on_hover_text(text);
+    }
+    response.on_hover_ui(move |ui| {
+        let font = TextStyle::Body.resolve(ui.style());
+        let color = ui.visuals().text_color();
+        let wide = ui
+            .painter()
+            .layout_no_wrap(text.clone(), font.clone(), color)
+            .size()
+            .x
+            > ui.available_width();
+        bidi::label(ui, &text, font, color, wide);
+    })
+}
 
 /// Visual weight for action buttons.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -42,6 +213,7 @@ pub enum Icon {
     ChevronUp,
     ChevronDown,
     ChevronRight,
+    ChevronLeft,
 }
 
 /// A single value tile shown in a metrics row.
@@ -85,19 +257,22 @@ pub fn card_titled<R>(
         heading(ui, theme, title);
         if let Some(subtitle) = subtitle {
             ui.add_space(2.0);
-            ui.label(RichText::new(subtitle).size(12.5).color(theme.text_muted));
+            label(
+                ui,
+                RichText::new(subtitle).size(12.5).color(theme.text_muted),
+            );
         }
         ui.add_space(SPACE_MD);
         contents(ui)
     })
 }
 
-/// A left-to-right row centered on the shared control height, so labels line up with
+/// A row, in the direction the language reads, centered on the shared control height, so labels line up with
 /// the buttons and fields beside them.
 pub fn control_row<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
     ui.allocate_ui_with_layout(
         vec2(ui.available_width(), CONTROL_HEIGHT),
-        egui::Layout::left_to_right(egui::Align::Center),
+        reading_row(),
         contents,
     )
     .inner
@@ -105,19 +280,18 @@ pub fn control_row<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
 
 /// A semibold heading.
 pub fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
-    ui.add(
-        egui::Label::new(
-            RichText::new(text)
-                .font(theme::semibold(15.0))
-                .color(theme.text),
-        )
-        .wrap_mode(TextWrapMode::Wrap),
+    wrapped_label(
+        ui,
+        RichText::new(text)
+            .font(theme::semibold(15.0))
+            .color(theme.text),
     );
 }
 
 /// A small label above a field or a group of controls.
 pub fn field_label(ui: &mut Ui, theme: &Theme, text: &str) {
-    ui.label(
+    label(
+        ui,
         RichText::new(text)
             .font(theme::semibold(12.5))
             .color(theme.text_muted),
@@ -126,24 +300,7 @@ pub fn field_label(ui: &mut Ui, theme: &Theme, text: &str) {
 
 /// Muted supporting text that wraps to the available width.
 pub fn hint(ui: &mut Ui, theme: &Theme, text: &str) {
-    ui.add(
-        egui::Label::new(RichText::new(text).size(12.5).color(theme.text_muted))
-            .wrap_mode(TextWrapMode::Wrap),
-    );
-}
-
-/// Lay a single line of text out, cutting it with `…` at `max_width` when it does
-/// not fit.
-fn elided_galley(
-    ui: &Ui,
-    text: &str,
-    font: FontId,
-    color: Color32,
-    max_width: f32,
-) -> std::sync::Arc<Galley> {
-    let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(0.0));
-    ui.painter().layout_job(job)
+    wrapped_label(ui, RichText::new(text).size(12.5).color(theme.text_muted));
 }
 
 /// Whether a line of text fits in this much room, which is when there is no need to offer all of it
@@ -156,19 +313,24 @@ pub fn text_fits(ui: &Ui, text: &str, font: FontId, width: f32) -> bool {
         <= width
 }
 
-/// Paint one line of text left-aligned at `left`, centered vertically on `center_y`,
-/// cut with `…` at `max_width`.
+/// Paint one line of text from `start`, which is its left edge, or its right edge in a right-to-left window, centered
+/// vertically on `center_y`, cut with `…` at `max_width`.
 pub fn paint_elided(
     ui: &Ui,
     text: &str,
     font: FontId,
     color: Color32,
-    left: f32,
+    start: f32,
     center_y: f32,
     max_width: f32,
 ) {
-    let galley = elided_galley(ui, text, font, color, max_width);
+    let galley = bidi::elided_galley(ui.painter(), text, font, color, max_width);
     let top = center_y - galley.size().y / 2.0;
+    let left = if right_to_left() {
+        start - galley.size().x
+    } else {
+        start
+    };
     ui.painter().galley(pos2(left, top), galley, color);
 }
 
@@ -219,7 +381,7 @@ pub fn icon_button(ui: &mut Ui, theme: &Theme, icon: Icon, label: &str, enabled:
         Rect::from_center_size(rect.center(), vec2(16.0, 16.0)),
         color,
     );
-    response.on_hover_text(label)
+    tooltip(response, label)
 }
 
 fn allocate_control(ui: &mut Ui, size: egui::Vec2, enabled: bool) -> (Rect, Response) {
@@ -320,7 +482,7 @@ fn draw_button(
     };
     let ink = button_ink(theme, kind, enabled);
     let text = label.unwrap_or_default();
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, ink);
+    let galley = bidi::line_galley(ui.painter(), text, font, ink);
     let icon_width = icon.map_or(0.0, |_| ICON_SIZE + ICON_GAP);
     let content_width = icon_width + galley.size().x;
     let desired_width = width.unwrap_or(content_width + PADDING * 2.0);
@@ -329,17 +491,19 @@ fn draw_button(
     response.widget_info(|| WidgetInfo::labeled(A11yRole::Button, enabled, text));
     paint_button_background(ui, theme, kind, rect, &response, enabled);
 
+    let mirror = Mirror::of(rect);
     let mut x = rect.center().x - content_width / 2.0;
     if let Some(icon) = icon {
         let icon_rect = Rect::from_min_size(
             pos2(x, rect.center().y - ICON_SIZE / 2.0),
             vec2(ICON_SIZE, ICON_SIZE),
         );
-        paint_icon(ui.painter(), icon, icon_rect, ink);
+        paint_icon(ui.painter(), icon, mirror.rect(icon_rect), ink);
         x += ICON_SIZE + ICON_GAP;
     }
     let top = rect.center().y - galley.size().y / 2.0;
-    ui.painter().galley(pos2(x, top), galley, ink);
+    let left = mirror.left_of(x, galley.size().x);
+    ui.painter().galley(pos2(left, top), galley, ink);
     response
 }
 
@@ -370,7 +534,7 @@ pub fn segmented<T: Copy + PartialEq>(
             } else {
                 theme::regular(13.0)
             };
-            let galley = ui.painter().layout_no_wrap((*label).to_owned(), font, ink);
+            let galley = bidi::line_galley(ui.painter(), label, font, ink);
             (*label, *value, selected, ink, galley)
         })
         .collect();
@@ -391,13 +555,14 @@ pub fn segmented<T: Copy + PartialEq>(
     );
 
     let mut changed = false;
+    let mirror = Mirror::of(rect);
     let mut left = rect.left() + INSET;
     for (label, value, selected, ink, galley) in segments {
         let segment_width = galley.size().x + SEGMENT_PADDING;
-        let segment = Rect::from_min_size(
+        let segment = mirror.rect(Rect::from_min_size(
             pos2(left, rect.top() + INSET),
             vec2(segment_width, CONTROL_HEIGHT - INSET * 2.0),
-        );
+        ));
         left += segment_width + GAP;
 
         let sense = if enabled {
@@ -448,9 +613,7 @@ fn capsule(ui: &mut Ui, theme: &Theme, text: &str, color: Color32, dot: bool) {
     const DOT_SPACE: f32 = 12.0;
 
     let dark = theme.mode == theme::ThemeMode::Dark;
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), theme::regular(12.0), theme.text);
+    let galley = bidi::line_galley(ui.painter(), text, theme::regular(12.0), theme.text);
     let dot_space = if dot { DOT_SPACE } else { 0.0 };
     let size = vec2(galley.size().x + PADDING * 2.0 + dot_space, HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
@@ -463,13 +626,15 @@ fn capsule(ui: &mut Ui, theme: &Theme, text: &str, color: Color32, dot: bool) {
         Stroke::new(1.0, theme::alpha(color, 110)),
         StrokeKind::Inside,
     );
+    let mirror = Mirror::of(rect);
     let mut x = rect.left() + PADDING;
     if dot {
-        painter.circle_filled(pos2(x + 3.5, rect.center().y), 3.5, color);
+        painter.circle_filled(pos2(mirror.x(x + 3.5), rect.center().y), 3.5, color);
         x += DOT_SPACE;
     }
     let top = rect.center().y - galley.size().y / 2.0;
-    painter.galley(pos2(x, top), galley, theme.text);
+    let left = mirror.left_of(x, galley.size().x);
+    painter.galley(pos2(left, top), galley, theme.text);
 }
 
 /// How much room a row of tiles takes up.
@@ -491,6 +656,10 @@ pub fn metric_tiles_sized(ui: &mut Ui, theme: &Theme, metrics: &[Metric], size: 
         return;
     }
     ui.columns(metrics.len(), |columns| {
+        // The first is where reading starts.
+        if right_to_left() {
+            columns.reverse();
+        }
         for (column, metric) in columns.iter_mut().zip(metrics) {
             metric_tile(column, theme, metric, size);
         }
@@ -510,16 +679,20 @@ fn metric_tile(ui: &mut Ui, theme: &Theme, metric: &Metric, size: TileSize) {
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(
-                RichText::new(&metric.value)
-                    .font(theme::semibold(value_size))
-                    .color(theme.role(metric.role)),
-            );
-            ui.label(
-                RichText::new(&metric.label)
-                    .size(12.0)
-                    .color(theme.text_muted),
-            );
+            page(ui, |ui| {
+                label(
+                    ui,
+                    RichText::new(&metric.value)
+                        .font(theme::semibold(value_size))
+                        .color(theme.role(metric.role)),
+                );
+                label(
+                    ui,
+                    RichText::new(&metric.label)
+                        .size(12.0)
+                        .color(theme.text_muted),
+                );
+            });
         });
 }
 
@@ -530,17 +703,25 @@ pub fn kv_row(ui: &mut Ui, theme: &Theme, key: &str, value: &str) {
         let (rect, response) = ui.allocate_exact_size(vec2(KEY_WIDTH, 18.0), Sense::hover());
         // Painted, so it would otherwise not be there for a screen reader.
         response.widget_info(|| WidgetInfo::labeled(A11yRole::Label, true, key));
-        ui.painter().text(
-            pos2(rect.left(), rect.center().y),
-            Align2::LEFT_CENTER,
+        let key_text = TextBlock::new(
+            ui.painter(),
             key,
             theme::regular(13.0),
             theme.text_muted,
+            None,
         );
-        ui.add(
-            egui::Label::new(RichText::new(value).size(13.0).color(theme.text))
-                .wrap_mode(TextWrapMode::Wrap),
+        let start = if right_to_left() {
+            rect.right()
+        } else {
+            rect.left()
+        };
+        key_text.paint(
+            ui.painter(),
+            start,
+            rect.center().y - key_text.size().y / 2.0,
+            theme.text_muted,
         );
+        wrapped_label(ui, RichText::new(value).size(13.0).color(theme.text));
     });
 }
 
@@ -581,10 +762,7 @@ pub fn notice(ui: &mut Ui, theme: &Theme, role: Role, message: &str) {
                 let (rect, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
                 let icon_rect = Rect::from_center_size(rect.center(), vec2(15.0, 15.0));
                 paint_icon(ui.painter(), role_icon(role), icon_rect, color);
-                ui.add(
-                    egui::Label::new(RichText::new(message).size(13.0).color(theme.text))
-                        .wrap_mode(TextWrapMode::Wrap),
-                );
+                wrapped_label(ui, RichText::new(message).size(13.0).color(theme.text));
             });
         });
 }
@@ -610,10 +788,7 @@ pub fn empty_state(ui: &mut Ui, theme: &Theme, icon: Icon, title: &str, body: &s
         ui.add_space(SPACE_MD);
         heading(ui, theme, title);
         ui.add_space(2.0);
-        ui.add(
-            egui::Label::new(RichText::new(body).size(13.0).color(theme.text_muted))
-                .wrap_mode(TextWrapMode::Wrap),
-        );
+        wrapped_label(ui, RichText::new(body).size(13.0).color(theme.text_muted));
     });
 }
 
@@ -633,19 +808,21 @@ pub fn option_row(
 
     let width = ui.available_width();
     let text_width = (width - BOX_SIZE - BOX_GAP - PADDING * 2.0).max(40.0);
-    let title_galley = ui.painter().layout(
-        title.to_owned(),
+    let title_text = TextBlock::new(
+        ui.painter(),
+        title,
         theme::semibold(13.5),
         theme.text,
-        text_width,
+        Some(text_width),
     );
-    let description_galley = ui.painter().layout(
-        description.to_owned(),
+    let description_text = TextBlock::new(
+        ui.painter(),
+        description,
         theme::regular(12.5),
         theme.text_muted,
-        text_width,
+        Some(text_width),
     );
-    let height = title_galley.size().y + description_galley.size().y + 2.0 + PADDING * 2.0;
+    let height = title_text.size().y + description_text.size().y + 2.0 + PADDING * 2.0;
     let (rect, mut response) = allocate_control(ui, vec2(width, height), enabled);
     if enabled && response.clicked() {
         *checked = !*checked;
@@ -660,10 +837,13 @@ pub fn option_row(
     }
     paint_focus_ring(ui, theme, rect, &response);
 
+    let mirror = Mirror::of(rect);
     let box_rect = Rect::from_min_size(
         pos2(rect.left() + PADDING, rect.top() + PADDING + 1.0),
         vec2(BOX_SIZE, BOX_SIZE),
     );
+    let text_left = box_rect.right() + BOX_GAP;
+    let box_rect = mirror.rect(box_rect);
     let accent = if enabled {
         theme.accent_fill
     } else {
@@ -682,16 +862,12 @@ pub fn option_row(
         );
     }
 
-    let text_left = box_rect.right() + BOX_GAP;
-    let title_height = title_galley.size().y;
-    painter.galley(
-        pos2(text_left, rect.top() + PADDING),
-        title_galley,
-        theme.text,
-    );
-    painter.galley(
-        pos2(text_left, rect.top() + PADDING + title_height + 2.0),
-        description_galley,
+    let start = mirror.x(text_left);
+    title_text.paint(painter, start, rect.top() + PADDING, theme.text);
+    description_text.paint(
+        painter,
+        start,
+        rect.top() + PADDING + title_text.size().y + 2.0,
         theme.text_muted,
     );
     response
@@ -714,15 +890,22 @@ fn paint_list_row_text(
     trailing: Option<&str>,
 ) {
     const TRAILING_GAP: f32 = SPACE_SM;
+    let mirror = Mirror::of(rect);
     let right = rect.right() - SPACE_SM;
     let trailing_left = trailing.map_or(right, |text| {
-        let galley =
-            ui.painter()
-                .layout_no_wrap(text.to_owned(), theme::regular(12.5), theme.text_muted);
+        let galley = bidi::line_galley(ui.painter(), text, theme::regular(12.5), theme.text_muted);
         let top = rect.top() + 7.0;
         let left = right - galley.size().x;
-        ui.painter()
-            .galley(pos2(left, top), galley, theme.text_muted);
+        ui.painter().galley(
+            pos2(
+                mirror
+                    .rect(Rect::from_x_y_ranges(left..=right, top..=top))
+                    .left(),
+                top,
+            ),
+            galley,
+            theme.text_muted,
+        );
         left
     });
     paint_elided(
@@ -730,7 +913,7 @@ fn paint_list_row_text(
         title,
         theme::semibold(13.5),
         theme.text,
-        left,
+        mirror.x(left),
         rect.top() + 14.0,
         (trailing_left - TRAILING_GAP - left).max(0.0),
     );
@@ -739,7 +922,7 @@ fn paint_list_row_text(
         detail,
         theme::regular(12.5),
         theme.text_muted,
-        left,
+        mirror.x(left),
         rect.top() + 31.0,
         (right - left).max(0.0),
     );
@@ -766,7 +949,7 @@ pub fn choice_row(
         response.mark_changed();
     }
     let selected = *checked;
-    let name = format!("{title}, {detail}");
+    let name = winappmigrator_i18n::join_list(&[title, detail]);
     response.widget_info(|| WidgetInfo::selected(A11yRole::CheckBox, enabled, selected, &name));
     if enabled && response.hovered() {
         ui.painter().rect_filled(rect, RADIUS_SM, theme.card_hover);
@@ -783,7 +966,13 @@ pub fn choice_row(
         pos2(rect.left() + SPACE_XS, rect.top() + 6.0),
         vec2(BOX_SIZE, BOX_SIZE),
     );
-    paint_checkbox(ui, theme, box_rect, selected, enabled);
+    paint_checkbox(
+        ui,
+        theme,
+        Mirror::of(rect).rect(box_rect),
+        selected,
+        enabled,
+    );
     paint_list_row_text(
         ui,
         theme,
@@ -793,7 +982,7 @@ pub fn choice_row(
         detail,
         trailing,
     );
-    response.on_hover_text(format!("{title}\n{detail}"))
+    tooltip(response, format!("{title}\n{detail}"))
 }
 
 /// A checkbox with one line of text, sized to it, to sit beside others in a row. What it does is
@@ -808,9 +997,7 @@ pub fn inline_choice(
 ) -> Response {
     const BOX_SIZE: f32 = 16.0;
     const BOX_GAP: f32 = 7.0;
-    let galley = ui
-        .painter()
-        .layout_no_wrap(title.to_owned(), theme::semibold(13.0), theme.text);
+    let galley = bidi::line_galley(ui.painter(), title, theme::semibold(13.0), theme.text);
     let size = vec2(
         BOX_SIZE + BOX_GAP + galley.size().x + SPACE_XS,
         CONTROL_HEIGHT,
@@ -821,21 +1008,22 @@ pub fn inline_choice(
         response.mark_changed();
     }
     let selected = *checked;
-    let name = format!("{title}, {description}");
+    let name = winappmigrator_i18n::join_list(&[title, description]);
     response.widget_info(|| WidgetInfo::selected(A11yRole::CheckBox, enabled, selected, &name));
     if enabled && response.hovered() {
         ui.painter().rect_filled(rect, RADIUS_SM, theme.card_hover);
     }
     paint_focus_ring(ui, theme, rect, &response);
+    let mirror = Mirror::of(rect);
     let box_rect = Rect::from_min_size(
         pos2(rect.left() + 2.0, rect.center().y - BOX_SIZE / 2.0),
         vec2(BOX_SIZE, BOX_SIZE),
     );
-    paint_checkbox(ui, theme, box_rect, selected, enabled);
+    paint_checkbox(ui, theme, mirror.rect(box_rect), selected, enabled);
     let top = rect.center().y - galley.size().y / 2.0;
-    ui.painter()
-        .galley(pos2(box_rect.right() + BOX_GAP, top), galley, theme.text);
-    response.on_hover_text(description)
+    let left = mirror.left_of(box_rect.right() + BOX_GAP, galley.size().x);
+    ui.painter().galley(pos2(left, top), galley, theme.text);
+    tooltip(response, description)
 }
 
 fn paint_checkbox(ui: &Ui, theme: &Theme, box_rect: Rect, selected: bool, enabled: bool) {
@@ -874,7 +1062,7 @@ fn paint_checkbox(ui: &Ui, theme: &Theme, box_rect: Rect, selected: bool, enable
 pub fn plain_row(ui: &mut Ui, theme: &Theme, title: &str, detail: &str, trailing: Option<&str>) {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, LIST_ROW_HEIGHT), Sense::hover());
-    let name = format!("{title}, {detail}");
+    let name = winappmigrator_i18n::join_list(&[title, detail]);
     response.widget_info(|| WidgetInfo::labeled(A11yRole::Label, true, &name));
     paint_list_row_text(
         ui,
@@ -885,7 +1073,7 @@ pub fn plain_row(ui: &mut Ui, theme: &Theme, title: &str, detail: &str, trailing
         detail,
         trailing,
     );
-    response.on_hover_text(format!("{title}\n{detail}"));
+    tooltip(response, format!("{title}\n{detail}"));
 }
 
 /// A heading that opens and closes what is below it, with a summary at its right. Returns whether
@@ -900,41 +1088,53 @@ pub fn disclosure_row(
     const HEIGHT: f32 = 34.0;
     let width = ui.available_width();
     let (rect, response) = allocate_control(ui, vec2(width, HEIGHT), true);
-    let name = format!(
-        "{title}, {summary}, {}",
-        if open { "open" } else { "closed" }
+    let name = t!(
+        "ui-disclosure",
+        title = title,
+        summary = summary,
+        state = if open { "open" } else { "closed" }
     );
     response.widget_info(|| WidgetInfo::labeled(A11yRole::Button, true, &name));
     if response.hovered() {
         ui.painter().rect_filled(rect, RADIUS_SM, theme.card_hover);
     }
     paint_focus_ring(ui, theme, rect, &response);
+    let mirror = Mirror::of(rect);
     let icon_rect =
         Rect::from_center_size(pos2(rect.left() + 11.0, rect.center().y), vec2(11.0, 11.0));
+    // Closed, it points the way the language reads.
+    let closed = if right_to_left() {
+        Icon::ChevronLeft
+    } else {
+        Icon::ChevronRight
+    };
     paint_icon(
         ui.painter(),
-        if open {
-            Icon::ChevronDown
-        } else {
-            Icon::ChevronRight
-        },
-        icon_rect,
+        if open { Icon::ChevronDown } else { closed },
+        mirror.rect(icon_rect),
         theme.text_muted,
     );
-    let summary_galley =
-        ui.painter()
-            .layout_no_wrap(summary.to_owned(), theme::regular(12.5), theme.text_muted);
+    let summary_galley = bidi::line_galley(
+        ui.painter(),
+        summary,
+        theme::regular(12.5),
+        theme.text_muted,
+    );
     let summary_left = rect.right() - SPACE_XS - summary_galley.size().x;
     let top = rect.center().y - summary_galley.size().y / 2.0;
-    ui.painter()
-        .galley(pos2(summary_left, top), summary_galley, theme.text_muted);
+    let summary_rect = Rect::from_min_size(pos2(summary_left, top), summary_galley.size());
+    ui.painter().galley(
+        mirror.rect(summary_rect).min,
+        summary_galley,
+        theme.text_muted,
+    );
     let title_left = icon_rect.right() + SPACE_XS;
     paint_elided(
         ui,
         title,
         theme::semibold(13.5),
         theme.text,
-        title_left,
+        mirror.x(title_left),
         rect.center().y,
         (summary_left - SPACE_SM - title_left).max(0.0),
     );
@@ -962,6 +1162,14 @@ pub fn search_field(
     width: f32,
 ) -> Response {
     const ICON_SIZE: f32 = 14.0;
+    const ICON_SIDE: i8 = 32;
+    const CLEAR_SIDE: i8 = 30;
+    // The icon goes where reading starts, the clear button at the other end.
+    let (left, right) = if right_to_left() {
+        (CLEAR_SIDE, ICON_SIDE)
+    } else {
+        (ICON_SIDE, CLEAR_SIDE)
+    };
     let response = ui.add(
         egui::TextEdit::singleline(value)
             .id(id)
@@ -969,28 +1177,30 @@ pub fn search_field(
             .desired_width(width)
             .min_size(vec2(width, CONTROL_HEIGHT))
             .margin(Margin {
-                left: 32,
-                right: 30,
+                left,
+                right,
                 top: 8,
                 bottom: 8,
             }),
     );
+    let mirror = Mirror::of(response.rect);
     let center_y = response.rect.center().y;
-    let icon_rect = Rect::from_center_size(
+    let icon_rect = mirror.rect(Rect::from_center_size(
         pos2(response.rect.left() + 17.0, center_y),
         vec2(ICON_SIZE, ICON_SIZE),
-    );
+    ));
     paint_icon(ui.painter(), Icon::Search, icon_rect, theme.text_subtle);
 
     if !value.is_empty() {
-        let clear_rect = Rect::from_center_size(
+        let clear_rect = mirror.rect(Rect::from_center_size(
             pos2(response.rect.right() - 16.0, center_y),
             vec2(20.0, 20.0),
+        ));
+        let clear = tooltip(
+            ui.interact(clear_rect, id.with("clear"), Sense::click())
+                .on_hover_cursor(CursorIcon::PointingHand),
+            t!("ui-clear-search"),
         );
-        let clear = ui
-            .interact(clear_rect, id.with("clear"), Sense::click())
-            .on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text(t!("ui-clear-search"));
         clear.widget_info(|| WidgetInfo::labeled(A11yRole::Button, true, t!("ui-clear-search")));
         if clear.hovered() {
             ui.painter()
@@ -1031,19 +1241,21 @@ pub fn path_field(
             // Only when some of it cannot be seen. It would otherwise only cover what is below.
             let font = egui::TextStyle::Body.resolve(ui.style());
             if !text_fits(ui, &current, font, width - FIELD_MARGINS) {
-                field.on_hover_text(current);
+                tooltip(field, current);
             }
         });
-        if draw_button(
-            ui,
-            theme,
-            ButtonKind::Secondary,
-            None,
-            Some(&t!("ui-browse")),
-            enabled,
-            Some(BROWSE_WIDTH),
+        if tooltip(
+            draw_button(
+                ui,
+                theme,
+                ButtonKind::Secondary,
+                None,
+                Some(&t!("ui-browse")),
+                enabled,
+                Some(BROWSE_WIDTH),
+            ),
+            t!("ui-browse-tooltip", field = label),
         )
-        .on_hover_text(t!("ui-browse-tooltip", field = label))
         .clicked()
             && let Some(path) = pick()
         {
@@ -1075,10 +1287,11 @@ pub fn progress_bar(ui: &mut Ui, theme: &Theme, fraction: Option<f32>) {
         }
     };
     if end > start {
-        let fill = Rect::from_min_max(
+        // It fills from where the language starts reading.
+        let fill = Mirror::of(rect).rect(Rect::from_min_max(
             pos2(rect.left() + rect.width() * start, rect.top()),
             pos2(rect.left() + rect.width() * end, rect.bottom()),
-        );
+        ));
         painter.rect_filled(fill, radius, theme.accent_fill);
     }
 }
@@ -1247,20 +1460,10 @@ pub fn paint_icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color3
         Icon::ChevronRight => {
             line(&[(0.34, 0.14), (0.7, 0.5), (0.34, 0.86)]);
         }
-    }
-}
-
-/// Format a count for people: `1,380`.
-pub fn format_count(count: usize) -> String {
-    let digits = count.to_string();
-    let mut text = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            text.push(',');
+        Icon::ChevronLeft => {
+            line(&[(0.66, 0.14), (0.3, 0.5), (0.66, 0.86)]);
         }
-        text.push(digit);
     }
-    text
 }
 
 /// Format a duration as `mm:ss`, or `h:mm:ss` past an hour.
@@ -1313,27 +1516,181 @@ mod tests {
         );
     }
 
+    // ---- AC-RTL-MIRROR: a right-to-left window is the mirror image of a left-to-right one ----
+
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    use winappmigrator_i18n::{ENGLISH, Language, PSEUDO_RTL, with_language};
+
+    const WIDTH: f32 = 400.0;
+
+    /// The shapes `draw` paints in a window `WIDTH` wide, speaking `language`.
+    fn painted(language: &'static Language, draw: impl FnMut(&mut Ui)) -> Vec<Shape> {
+        with_language(language, || {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(WIDTH, 300.0))),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, draw);
+            output.textures_delta.clear();
+            output
+                .shapes
+                .into_iter()
+                .map(|clipped| clipped.shape)
+                .collect()
+        })
+    }
+
+    /// The rectangles painted that are `size` across, such as a checkbox.
+    fn squares(shapes: &[Shape], size: f32) -> Vec<Rect> {
+        shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                Shape::Rect(rect) if (rect.rect.width() - size).abs() < 0.5 => Some(rect.rect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the buttons named `first` and `second` are, added in that order to a row of a page.
+    fn row_of_two(language: &'static Language, trailing_too: bool) -> (Rect, Rect) {
+        with_language(language, || {
+            let theme = Theme::new(theme::ThemeMode::Light);
+            let mut harness = Harness::new_ui(|ui| {
+                page(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        button(ui, &theme, ButtonKind::Secondary, "First", true);
+                        if trailing_too {
+                            trailing(ui, |ui| {
+                                button(ui, &theme, ButtonKind::Secondary, "Second", true)
+                            });
+                        } else {
+                            button(ui, &theme, ButtonKind::Secondary, "Second", true);
+                        }
+                    });
+                });
+            });
+            harness.run();
+            (
+                harness.get_by_label("First").rect(),
+                harness.get_by_label("Second").rect(),
+            )
+        })
+    }
+
+    #[test]
+    fn a_row_runs_the_way_the_language_reads() {
+        let (first, second) = row_of_two(ENGLISH, false);
+        assert!(first.center().x < second.center().x, "{first:?} {second:?}");
+        let (first, second) = row_of_two(&PSEUDO_RTL, false);
+        assert!(first.center().x > second.center().x, "{first:?} {second:?}");
+    }
+
+    #[test]
+    fn what_trails_a_row_is_at_its_far_end() {
+        let (first, second) = row_of_two(ENGLISH, true);
+        assert!(second.left() > first.right(), "{first:?} {second:?}");
+        let (first, second) = row_of_two(&PSEUDO_RTL, true);
+        assert!(second.right() < first.left(), "{first:?} {second:?}");
+    }
+
+    #[test]
+    fn a_checkbox_is_where_reading_starts() {
+        let draw = |ui: &mut Ui| {
+            let theme = Theme::new(theme::ThemeMode::Light);
+            choice_row(
+                ui,
+                &theme,
+                &mut false,
+                "Title",
+                "Detail",
+                Some("1 MB"),
+                true,
+            );
+        };
+        let english = squares(&painted(ENGLISH, draw), 16.0);
+        let mirrored = squares(&painted(&PSEUDO_RTL, draw), 16.0);
+        assert_eq!(
+            (english.len(), mirrored.len()),
+            (1, 1),
+            "{english:?} {mirrored:?}"
+        );
+        assert!(english[0].center().x < WIDTH / 4.0, "{english:?}");
+        assert!(mirrored[0].center().x > WIDTH * 3.0 / 4.0, "{mirrored:?}");
+        assert!(
+            (english[0].left() + mirrored[0].right() - WIDTH).abs() < 20.0,
+            "mirror images: {english:?} {mirrored:?}"
+        );
+    }
+
+    #[test]
+    fn progress_fills_from_where_reading_starts() {
+        let draw = |ui: &mut Ui| {
+            progress_bar(ui, &Theme::new(theme::ThemeMode::Light), Some(0.25));
+        };
+        let fill_of = |shapes: Vec<Shape>| -> Vec<Rect> {
+            shapes
+                .into_iter()
+                .filter_map(|shape| match shape {
+                    Shape::Rect(rect) if rect.rect.width() < WIDTH / 2.0 => Some(rect.rect),
+                    _ => None,
+                })
+                .collect()
+        };
+        let english = fill_of(painted(ENGLISH, draw));
+        let mirrored = fill_of(painted(&PSEUDO_RTL, draw));
+        assert!(english[0].left() < 20.0, "{english:?}");
+        assert!(mirrored[0].right() > WIDTH - 20.0, "{mirrored:?}");
+    }
+
+    #[test]
+    fn a_label_starts_at_the_side_reading_starts() {
+        let text_left = |language: &'static Language| -> (f32, f32) {
+            let shapes = painted(language, |ui| {
+                page(ui, |ui| {
+                    label(ui, "Short");
+                });
+            });
+            shapes
+                .iter()
+                .find_map(|shape| match shape {
+                    Shape::Text(text) => Some((text.pos.x, text.pos.x + text.galley.size().x)),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        let (left, _) = text_left(ENGLISH);
+        assert!(left < 20.0, "{left}");
+        let (_, right) = text_left(&PSEUDO_RTL);
+        assert!(right > WIDTH - 20.0, "{right}");
+    }
+
+    #[test]
+    fn mirroring_turns_positions_around_inside_a_rect() {
+        let rect = Rect::from_min_max(egui::pos2(100.0, 0.0), egui::pos2(300.0, 10.0));
+        with_language(&PSEUDO_RTL, || {
+            let mirror = Mirror::of(rect);
+            assert_eq!(mirror.x(110.0), 290.0);
+            assert_eq!(
+                mirror.rect(Rect::from_min_max(
+                    egui::pos2(100.0, 0.0),
+                    egui::pos2(120.0, 10.0)
+                )),
+                Rect::from_min_max(egui::pos2(280.0, 0.0), egui::pos2(300.0, 10.0))
+            );
+            assert_eq!(mirror.left_of(110.0, 30.0), 260.0);
+        });
+        with_language(ENGLISH, || {
+            assert_eq!(Mirror::of(rect).x(110.0), 110.0);
+        });
+    }
+
     #[test]
     fn elapsed_time_adds_hours_only_when_needed() {
         assert_eq!(format_elapsed(0), "00:00");
         assert_eq!(format_elapsed(65), "01:05");
         assert_eq!(format_elapsed(3661), "1:01:01");
-    }
-
-    #[test]
-    fn counts_are_grouped_by_thousands() {
-        for (count, text) in [
-            (0, "0"),
-            (7, "7"),
-            (999, "999"),
-            (1000, "1,000"),
-            (1380, "1,380"),
-            (53_504, "53,504"),
-            (100_000, "100,000"),
-            (1_234_567, "1,234,567"),
-        ] {
-            assert_eq!(format_count(count), text);
-        }
     }
 
     #[test]

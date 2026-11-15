@@ -36,12 +36,16 @@ pub fn language_menu(ui: &mut Ui, fonts_dir: &Path) -> Option<LanguageAction> {
     egui::ComboBox::from_label(t!("ui-language"))
         .selected_text(current.native_name)
         .show_ui(ui, |ui| {
-            // Each name is in its own script, which needs its font while the list is open.
-            theme::add_fallback_fonts(
+            // Each name is in its own script, which needs its font while the list is open. A font
+            // loaded now is used from the next pass, so the names wait for it rather than show as boxes.
+            if theme::add_fallback_fonts(
                 ui.ctx(),
                 fonts_dir,
                 winappmigrator_i18n::shipped().map(|language| language.native_name),
-            );
+            ) {
+                ui.ctx().request_discard("the fonts for the languages' names");
+                return;
+            }
             for language in winappmigrator_i18n::shipped() {
                 let row = ui
                     .selectable_label(language == current, language.native_name)
@@ -52,7 +56,7 @@ pub fn language_menu(ui: &mut Ui, fonts_dir: &Path) -> Option<LanguageAction> {
             }
             if current != ENGLISH {
                 ui.separator();
-                ui.label(t!("ui-machine-translated"));
+                crate::widgets::wrapped_label(ui, t!("ui-machine-translated"));
                 if ui.link(t!("ui-report-translation-problem")).clicked() {
                     action = Some(LanguageAction::Report(translation_issue_url(current)));
                 }
@@ -154,6 +158,8 @@ mod tests {
                 let _ = language_menu(ui, &windows_fonts());
             });
         });
+        // As the app and the installer do before their first frame.
+        theme::install_fonts(&harness.ctx, &windows_fonts());
         harness.run();
         harness.get_by_role(egui::accesskit::Role::ComboBox).click();
         harness.run();

@@ -211,14 +211,18 @@ impl UninstallApp {
                     .fill(theme.surface)
                     .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_MD as i8)),
             )
-            .show(ui, |ui| self.draw_header(ui, &theme));
+            .show(ui, |ui| {
+                widgets::page(ui, |ui| self.draw_header(ui, &theme))
+            });
         egui::Panel::bottom("actions")
             .frame(
                 egui::Frame::new()
                     .fill(theme.surface)
                     .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_MD as i8)),
             )
-            .show(ui, |ui| self.draw_actions(ui, &theme));
+            .show(ui, |ui| {
+                widgets::page(ui, |ui| self.draw_actions(ui, &theme))
+            });
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme.bg))
             .show(ui, |ui| {
@@ -229,7 +233,7 @@ impl UninstallApp {
                             .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_LG as i8))
                             .show(ui, |ui| {
                                 ui.set_max_width(ui.available_width());
-                                self.draw_body(ui, &theme);
+                                widgets::page(ui, |ui| self.draw_body(ui, &theme));
                             });
                     });
             });
@@ -240,7 +244,7 @@ impl UninstallApp {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
             widgets::paint_logo(ui.painter(), rect, theme);
             ui.add_space(SPACE_XS);
-            ui.vertical(|ui| {
+            widgets::column(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let title = if self.summary.app_name.is_empty() {
                     t!("uninstaller-window-title")
@@ -250,12 +254,14 @@ impl UninstallApp {
                         app_name = self.summary.app_name.as_str()
                     )
                 };
-                ui.label(
+                widgets::label(
+                    ui,
                     RichText::new(title)
                         .font(theme::semibold(16.0))
                         .color(theme.text),
                 );
-                ui.label(
+                widgets::label(
+                    ui,
                     RichText::new(t!("uninstaller-tagline"))
                         .size(12.5)
                         .color(theme.text_muted),
@@ -267,7 +273,8 @@ impl UninstallApp {
     fn draw_body(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         match &self.stage {
             Stage::Opening => {
-                ui.label(
+                widgets::label(
+                    ui,
                     RichText::new(t!("uninstaller-reading"))
                         .size(13.5)
                         .color(theme.text),
@@ -334,9 +341,10 @@ impl UninstallApp {
             let (label, fraction) = step_label(self.step);
             let elapsed = self.started.map_or(0, |start| start.elapsed().as_secs());
             ui.horizontal(|ui| {
-                ui.label(RichText::new(label).size(13.0).color(theme.text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
+                widgets::label(ui, RichText::new(label).size(13.0).color(theme.text));
+                widgets::trailing(ui, |ui| {
+                    widgets::label(
+                        ui,
                         RichText::new(widgets::format_elapsed(elapsed))
                             .size(12.5)
                             .color(theme.text_muted),

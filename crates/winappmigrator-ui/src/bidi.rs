@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Color32, FontId, Galley, Response, Role, Sense, Ui, WidgetInfo, text::LayoutJob,
-    text::TextFormat, vec2,
+    self, Color32, FontId, Galley, Painter, Response, Role, Sense, Ui, Vec2, WidgetInfo, pos2,
+    text::LayoutJob, text::TextFormat, vec2,
 };
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use winappmigrator_i18n::{Direction, is_isolation_mark, without_isolation};
@@ -161,38 +161,170 @@ pub fn line_job(line: &[Run], font: &FontId, color: Color32) -> LayoutJob {
     job
 }
 
-/// Text as a label, laid out bidirectionally in the direction of the language in use: lines start at the right edge in
-/// a right-to-left window. `wrap` breaks it to the width there is. Screen readers get the text in the order it is read.
-pub fn label(ui: &mut Ui, text: &str, font: FontId, color: Color32, wrap: bool) -> Response {
+/// Whether windows are laid out right to left, for the language in use.
+pub fn right_to_left() -> bool {
+    winappmigrator_i18n::direction() == Direction::RightToLeft
+}
+
+/// Text laid out to be drawn: one line, or lines broken to a width, each with its runs in the order they are seen.
+/// Text that needs no bidirectional layout is laid out by egui alone, as it always was.
+pub struct TextBlock {
+    lines: Vec<Arc<Galley>>,
+    size: Vec2,
+}
+
+impl TextBlock {
+    pub fn new(
+        painter: &Painter,
+        text: &str,
+        font: FontId,
+        color: Color32,
+        wrap_width: Option<f32>,
+    ) -> Self {
+        let base = winappmigrator_i18n::direction();
+        let lines: Vec<Arc<Galley>> = if needs_bidi(text, base) {
+            visual_lines(text, base, wrap_width, |piece| {
+                painter
+                    .layout_no_wrap(piece.to_owned(), font.clone(), color)
+                    .size()
+                    .x
+            })
+            .iter()
+            .map(|line| painter.layout_job(line_job(line, &font, color)))
+            .collect()
+        } else {
+            vec![match wrap_width {
+                Some(width) => painter.layout(text.to_owned(), font, color, width),
+                None => painter.layout_no_wrap(text.to_owned(), font, color),
+            }]
+        };
+        let width = lines
+            .iter()
+            .map(|line| line.size().x)
+            .fold(0.0_f32, f32::max);
+        let height = lines.iter().map(|line| line.size().y).sum();
+        Self {
+            lines,
+            size: vec2(width, height),
+        }
+    }
+
+    pub fn size(&self) -> Vec2 {
+        self.size
+    }
+
+    /// Draw it from `top` down, each line starting at `start`: its left edge in a left-to-right window, its right edge
+    /// in a right-to-left one.
+    pub fn paint(&self, painter: &Painter, start: f32, top: f32, color: Color32) {
+        let from_the_right = right_to_left();
+        let mut y = top;
+        for line in &self.lines {
+            let left = if from_the_right {
+                start - line.size().x
+            } else {
+                start
+            };
+            painter.galley(pos2(left, y), Arc::clone(line), color);
+            y += line.size().y;
+        }
+    }
+
+    /// Draw it from `top` down, each line centered on `center`.
+    pub fn paint_centered(&self, painter: &Painter, center: f32, top: f32, color: Color32) {
+        let mut y = top;
+        for line in &self.lines {
+            painter.galley(
+                pos2(center - line.size().x / 2.0, y),
+                Arc::clone(line),
+                color,
+            );
+            y += line.size().y;
+        }
+    }
+}
+
+/// One line of text as it is drawn, in the order it is seen. Text with line breaks keeps them.
+pub fn line_galley(painter: &Painter, text: &str, font: FontId, color: Color32) -> Arc<Galley> {
     let base = winappmigrator_i18n::direction();
-    let wrap_width = wrap.then(|| ui.available_width());
-    let painter = ui.painter().clone();
-    let lines = visual_lines(text, base, wrap_width, |piece| {
+    if !needs_bidi(text, base) {
+        return painter.layout_no_wrap(text.to_owned(), font, color);
+    }
+    let lines = visual_lines(text, base, None, |piece| {
         painter
             .layout_no_wrap(piece.to_owned(), font.clone(), color)
             .size()
             .x
     });
-    let galleys: Vec<Arc<Galley>> = lines
-        .iter()
-        .map(|line| painter.layout_job(line_job(line, &font, color)))
-        .collect();
-    let widest = galleys
-        .iter()
-        .map(|galley| galley.size().x)
-        .fold(0.0_f32, f32::max);
-    let height: f32 = galleys.iter().map(|galley| galley.size().y).sum();
-    let width = wrap_width.unwrap_or(widest).max(widest);
-    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-    let mut top = rect.top();
-    for galley in galleys {
-        let left = match base {
-            Direction::RightToLeft => rect.right() - galley.size().x,
-            Direction::LeftToRight => rect.left(),
+    let mut job = LayoutJob::default();
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            job.append("\n", 0.0, TextFormat::simple(font.clone(), color));
+        }
+        for run in line {
+            job.append(&run.text, 0.0, TextFormat::simple(font.clone(), color));
+        }
+    }
+    painter.layout_job(job)
+}
+
+/// What ends text that was cut short to fit.
+const ELLIPSIS: char = '…';
+
+/// One line of text, cut short with `…` where it is read to end, so as to be no wider than `max_width`.
+pub fn elided_galley(
+    painter: &Painter,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    max_width: f32,
+) -> Arc<Galley> {
+    let max_width = max_width.max(0.0);
+    if !needs_bidi(text, winappmigrator_i18n::direction()) {
+        let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(max_width);
+        return painter.layout_job(job);
+    }
+    let whole = line_galley(painter, text, font.clone(), color);
+    if whole.size().x <= max_width {
+        return whole;
+    }
+    let cut = |letters: usize| -> Arc<Galley> {
+        let end = text
+            .char_indices()
+            .nth(letters)
+            .map_or(text.len(), |(at, _)| at);
+        let shortened = format!("{}{ELLIPSIS}", text[..end].trim_end());
+        line_galley(painter, &shortened, font.clone(), color)
+    };
+    // The most letters that fit, found by halves: a longer piece is never narrower.
+    let (mut fits, mut too_many) = (0, text.chars().count());
+    while too_many - fits > 1 {
+        let middle = usize::midpoint(fits, too_many);
+        if cut(middle).size().x <= max_width {
+            fits = middle;
+        } else {
+            too_many = middle;
+        }
+    }
+    cut(fits)
+}
+
+/// Text as a label, laid out bidirectionally in the direction of the language in use: lines start at the right edge in
+/// a right-to-left window. `wrap` breaks it to the width there is. Screen readers get the text in the order it is read.
+pub fn label(ui: &mut Ui, text: &str, font: FontId, color: Color32, wrap: bool) -> Response {
+    let wrap_width = wrap.then(|| ui.available_width());
+    let block = TextBlock::new(ui.painter(), text, font, color, wrap_width);
+    let width = wrap_width.unwrap_or(block.size().x).max(block.size().x);
+    let (rect, response) = ui.allocate_exact_size(vec2(width, block.size().y), Sense::hover());
+    if ui.layout().horizontal_align() == egui::Align::Center {
+        block.paint_centered(ui.painter(), rect.center().x, rect.top(), color);
+    } else {
+        let start = if right_to_left() {
+            rect.right()
+        } else {
+            rect.left()
         };
-        let size = galley.size();
-        ui.painter().galley(egui::pos2(left, top), galley, color);
-        top += size.y;
+        block.paint(ui.painter(), start, rect.top(), color);
     }
     response.widget_info(|| WidgetInfo::labeled(Role::Label, true, without_isolation(text)));
     response

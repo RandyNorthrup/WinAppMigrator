@@ -7,6 +7,15 @@ ui-browse = Browse
 # A tooltip on Browse. { $field } is the field's own label, such as "Install Location".
 ui-browse-tooltip = Choose a folder for { $field }
 
+## Headings that open and close what is below them
+
+# What a screen reader says for such a heading. { $title } is the heading, { $summary } a short count of what is below,
+# such as "3 of 12 chosen"; $state is "open" or "closed", and only the words for each are translated.
+ui-disclosure = { $state ->
+        [open] { $title }, { $summary }, open
+       *[closed] { $title }, { $summary }, closed
+    }
+
 ## The Language menu. Its list shows each language by its own name, which is not translated.
 
 ui-language = Language

@@ -487,7 +487,7 @@ impl WinAppMigratorApp {
 fn busy_line(ui: &mut egui::Ui, theme: &Theme, text: &str) {
     ui.horizontal(|ui| {
         ui.spinner();
-        ui.label(RichText::new(text).size(13.0).color(theme.text_muted));
+        widgets::label(ui, RichText::new(text).size(13.0).color(theme.text_muted));
     });
 }
 

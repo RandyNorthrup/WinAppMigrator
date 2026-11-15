@@ -86,15 +86,25 @@ impl WinAppMigratorApp {
                         if short { SPACE_SM } else { SPACE_MD } as i8,
                     )),
             )
-            .show(ui, |ui| self.draw_header(ui, &theme));
+            .show(ui, |ui| {
+                widgets::page(ui, |ui| self.draw_header(ui, &theme))
+            });
 
         let detail_width = (ui.ctx().content_rect().width() * DETAIL_PANEL_SHARE)
             .clamp(MIN_DETAIL_PANEL_WIDTH, MAX_DETAIL_PANEL_WIDTH);
-        egui::Panel::right("details")
+        // The details are at the end of the window, where reading ends.
+        let details = if winappmigrator_ui::bidi::right_to_left() {
+            egui::Panel::left("details")
+        } else {
+            egui::Panel::right("details")
+        };
+        details
             .exact_size(detail_width)
             .resizable(false)
             .frame(egui::Frame::new().fill(theme.surface))
-            .show(ui, |ui| self.draw_details(ui, &theme));
+            .show(ui, |ui| {
+                widgets::page(ui, |ui| self.draw_details(ui, &theme))
+            });
 
         egui::CentralPanel::default()
             .frame(
@@ -102,7 +112,9 @@ impl WinAppMigratorApp {
                     .fill(theme.bg)
                     .inner_margin(Margin::same(SPACE_LG as i8)),
             )
-            .show(ui, |ui| self.draw_applications(ui, &theme));
+            .show(ui, |ui| {
+                widgets::page(ui, |ui| self.draw_applications(ui, &theme))
+            });
     }
 
     fn draw_header(&mut self, ui: &mut egui::Ui, theme: &Theme) {
@@ -110,21 +122,23 @@ impl WinAppMigratorApp {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), Sense::hover());
             widgets::paint_logo(ui.painter(), rect, theme);
             ui.add_space(SPACE_XS);
-            ui.vertical(|ui| {
+            widgets::column(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(
+                widgets::label(
+                    ui,
                     RichText::new(t!("app-name"))
                         .font(theme::semibold(16.0))
                         .color(theme.text),
                 );
-                ui.label(
+                widgets::label(
+                    ui,
                     RichText::new(t!("app-tagline"))
                         .size(12.5)
                         .color(theme.text_muted),
                 );
             });
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            widgets::trailing(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = SPACE_XS;
                 let (icon, label) = if theme.mode == ThemeMode::Dark {
                     (Icon::Sun, t!("app-theme-to-light"))
@@ -188,7 +202,7 @@ impl WinAppMigratorApp {
                 &t!("app-list-search"),
                 search_width,
             );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            widgets::trailing(ui, |ui| {
                 let (all, per_user, per_machine) = (
                     t!("app-list-filter-all"),
                     t!("app-scope-per-user"),
@@ -333,7 +347,8 @@ impl WinAppMigratorApp {
         // On a line of its own: a path and the name of a Windows can be long.
         if self.image_receiver.is_some() {
             ui.add_space(SPACE_XS);
-            ui.label(
+            widgets::label(
+                ui,
                 RichText::new(t!("app-source-attaching-image"))
                     .size(13.0)
                     .color(theme.text_muted),
@@ -367,9 +382,9 @@ impl WinAppMigratorApp {
                 let room = (ui.available_width() - CHANGE_BUTTON_ROOM).max(MIN_SOURCE_TEXT_WIDTH);
                 ui.scope(|ui| {
                     ui.set_max_width(room);
-                    ui.add(
-                        egui::Label::new(RichText::new(text).size(13.0).color(theme.text_muted))
-                            .truncate(),
+                    widgets::truncated_label(
+                        ui,
+                        RichText::new(text).size(13.0).color(theme.text_muted),
                     );
                 });
                 let change = if self.remote.is_some() {
@@ -485,11 +500,15 @@ impl WinAppMigratorApp {
                 theme.text_subtle
             };
             let font = theme::semibold(12.0);
-            let galley = ui.painter().layout_no_wrap(label, font, color);
+            let galley = winappmigrator_ui::bidi::line_galley(ui.painter(), &label, font, color);
             let text_size = galley.size();
             let top = cell.center().y - text_size.y / 2.0;
-            ui.painter()
-                .galley(egui::pos2(cell.left(), top), galley, color);
+            let mirror = widgets::Mirror::of(cell);
+            ui.painter().galley(
+                egui::pos2(mirror.left_of(cell.left(), text_size.x), top),
+                galley,
+                color,
+            );
             if sorted {
                 let icon = if self.sort_ascending {
                     Icon::ChevronUp
@@ -497,7 +516,7 @@ impl WinAppMigratorApp {
                     Icon::ChevronDown
                 };
                 let icon_rect = egui::Rect::from_center_size(
-                    egui::pos2(cell.left() + text_size.x + 10.0, cell.center().y),
+                    egui::pos2(mirror.x(cell.left() + text_size.x + 10.0), cell.center().y),
                     egui::vec2(10.0, 10.0),
                 );
                 widgets::paint_icon(ui.painter(), icon, icon_rect, theme.text);
@@ -573,7 +592,9 @@ impl WinAppMigratorApp {
                     .fill(theme.surface)
                     .inner_margin(Margin::same(if short { SPACE_MD } else { SPACE_LG } as i8)),
             )
-            .show(ui, |ui| self.draw_actions(ui, theme));
+            .show(ui, |ui| {
+                widgets::page(ui, |ui| self.draw_actions(ui, theme))
+            });
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme.surface))
@@ -590,14 +611,16 @@ impl WinAppMigratorApp {
                         .inner_margin(Margin::same(SPACE_LG as i8))
                         .show(ui, |ui| {
                             ui.set_max_width(ui.available_width());
-                            draw_app_title(ui, theme, &app, short);
-                            // The result goes first: it is what the user is waiting
-                            // for, and it holds the installer's path and folder button.
-                            self.draw_build_result(ui, theme);
-                            ui.add_space(if short { SPACE_XS } else { SPACE_SM });
-                            draw_app_facts(ui, theme, &app, short);
-                            ui.add_space(if short { SPACE_SM } else { SPACE_MD });
-                            self.draw_footprint(ui, theme);
+                            widgets::page(ui, |ui| {
+                                draw_app_title(ui, theme, &app, short);
+                                // The result goes first: it is what the user is waiting
+                                // for, and it holds the installer's path and folder button.
+                                self.draw_build_result(ui, theme);
+                                ui.add_space(if short { SPACE_XS } else { SPACE_SM });
+                                draw_app_facts(ui, theme, &app, short);
+                                ui.add_space(if short { SPACE_SM } else { SPACE_MD });
+                                self.draw_footprint(ui, theme);
+                            });
                         });
                 });
             });
@@ -693,9 +716,10 @@ impl WinAppMigratorApp {
                 .build_started
                 .map_or(0, |start| start.elapsed().as_secs());
             ui.horizontal(|ui| {
-                ui.label(RichText::new(label).size(13.0).color(theme.text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
+                widgets::label(ui, RichText::new(label).size(13.0).color(theme.text));
+                widgets::trailing(ui, |ui| {
+                    widgets::label(
+                        ui,
                         RichText::new(widgets::format_elapsed(elapsed))
                             .size(12.5)
                             .color(theme.text_muted),
@@ -955,13 +979,11 @@ pub(crate) fn older_windows_note(identity: &SourceIdentity) -> String {
 }
 
 fn draw_app_title(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp, short: bool) {
-    ui.add(
-        egui::Label::new(
-            RichText::new(&app.display_name)
-                .font(theme::semibold(17.0))
-                .color(theme.text),
-        )
-        .wrap_mode(egui::TextWrapMode::Wrap),
+    widgets::wrapped_label(
+        ui,
+        RichText::new(&app.display_name)
+            .font(theme::semibold(17.0))
+            .color(theme.text),
     );
     ui.add_space(SPACE_XS);
     ui.horizontal(|ui| {
@@ -975,13 +997,11 @@ fn draw_app_title(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp, short: b
         widgets::badge(ui, theme, &arch_label(&app.architecture), theme.text_muted);
         if short {
             ui.add_space(SPACE_XS);
-            ui.add(
-                egui::Label::new(
-                    RichText::new(who_and_which_version(app))
-                        .size(12.5)
-                        .color(theme.text_muted),
-                )
-                .truncate(),
+            widgets::truncated_label(
+                ui,
+                RichText::new(who_and_which_version(app))
+                    .size(12.5)
+                    .color(theme.text_muted),
             );
         }
     });
@@ -1018,7 +1038,7 @@ fn draw_app_facts(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp, short: b
 fn busy_row(ui: &mut egui::Ui, theme: &Theme, label: &str) {
     ui.horizontal(|ui| {
         ui.spinner();
-        ui.label(RichText::new(label).color(theme.text));
+        widgets::label(ui, RichText::new(label).color(theme.text));
     });
 }
 
@@ -1111,16 +1131,16 @@ fn warning_row(ui: &mut egui::Ui, theme: &Theme, warning: &Warning) {
             icon_rect,
             theme.role(role),
         );
-        ui.vertical(|ui| {
+        widgets::column(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            ui.add(
-                egui::Label::new(RichText::new(warning.text()).size(12.5).color(theme.text))
-                    .wrap_mode(egui::TextWrapMode::Wrap),
+            widgets::wrapped_label(
+                ui,
+                RichText::new(warning.text()).size(12.5).color(theme.text),
             );
             if let Some(source) = warning.source.as_deref() {
-                ui.add(
-                    egui::Label::new(RichText::new(source).size(11.5).color(theme.text_muted))
-                        .wrap_mode(egui::TextWrapMode::Wrap),
+                widgets::wrapped_label(
+                    ui,
+                    RichText::new(source).size(11.5).color(theme.text_muted),
                 );
             }
         });
@@ -1232,7 +1252,7 @@ fn app_row(
             text,
             font,
             color,
-            cell.left(),
+            reading_start(cell),
             cell.center().y,
             cell.width(),
         );
@@ -1248,12 +1268,13 @@ fn app_row(
     if names_fit {
         response
     } else {
-        response.on_hover_text(format!("{}\n{publisher}", app.display_name))
+        widgets::tooltip(response, format!("{}\n{publisher}", app.display_name))
     }
 }
 
-/// The cell rectangles of a table row, with a gutter between columns.
+/// The cell rectangles of a table row, with a gutter between columns, the first where reading starts.
 pub(crate) fn column_rects(rect: egui::Rect) -> [egui::Rect; 5] {
+    let mirror = widgets::Mirror::of(rect);
     let usable = rect.width() - COLUMN_GUTTER;
     let names = (usable - VERSION_COLUMN - SCOPE_COLUMN - ARCH_COLUMN).max(0.0);
     let mut left = rect.left() + COLUMN_GUTTER;
@@ -1270,8 +1291,17 @@ pub(crate) fn column_rects(rect: egui::Rect) -> [egui::Rect; 5] {
             egui::vec2((width - COLUMN_GUTTER).max(0.0), rect.height()),
         );
         left += width;
-        cell
+        mirror.rect(cell)
     })
+}
+
+/// Where text in a cell starts: its left edge, or its right edge in a right-to-left window.
+fn reading_start(cell: egui::Rect) -> f32 {
+    if winappmigrator_ui::bidi::right_to_left() {
+        cell.right()
+    } else {
+        cell.left()
+    }
 }
 
 fn compare_apps(left: &InstalledApp, right: &InstalledApp, column: SortColumn) -> Ordering {
