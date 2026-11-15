@@ -1,10 +1,10 @@
 # A red drill: prove a test catches the defect it is there for. In a disposable git worktree (never this one), it runs
-# the test command and needs it to pass, puts one defect into one file, needs the same command to fail with the
-# expected message, puts the file back byte for byte, and needs the command to pass again. It writes what happened to a
-# log and a JSON summary, and exits 0 only if all of that held.
+# the test command and needs it to pass, puts one defect into one file, needs the same command to fail with output
+# holding the expected text (the whole line it is on is recorded), puts the file back byte for byte, and needs the
+# command to pass again. It writes what happened to a log and a JSON summary, and exits 0 only if all of that held.
 #
 #   scripts/red-drill.ps1 -Worktree <path> -File <relative path> -Find <text> -Replace <text> `
-#       -Command <command line> -Expect <regex> -Out <folder> -Name <drill name> [-Setup <command>] [-Cleanup <command>]
+#       -Command <command line> -Expect <text> -Out <folder> -Name <drill name> [-Setup <command>] [-Cleanup <command>]
 #
 # Make the worktree with `git worktree add --detach <path> HEAD`, and give it its own CARGO_TARGET_DIR so that drills
 # never touch this repository's build. -Setup makes a fixture the drill then changes, such as a second catalog, and
@@ -86,10 +86,15 @@ try {
 
     $mutated = Invoke-Step 'mutated'
     $summary.mutated_exit = $mutated.Code
-    $match = [regex]::Match($mutated.Text, $Expect)
-    if ($match.Success) { $summary.observed_diagnostic = $match.Value }
+    $at = $mutated.Text.IndexOf($Expect, [StringComparison]::Ordinal)
+    if ($at -ge 0) {
+        $lineStart = $mutated.Text.LastIndexOf("`n", $at) + 1
+        $lineEnd = $mutated.Text.IndexOf("`n", $at)
+        if ($lineEnd -lt 0) { $lineEnd = $mutated.Text.Length }
+        $summary.observed_diagnostic = $mutated.Text.Substring($lineStart, $lineEnd - $lineStart).Trim()
+    }
     if ($mutated.Code -eq 0) { throw 'the defect was not caught: the command passed' }
-    if (-not $match.Success) { throw 'the command failed, but not with the expected message' }
+    if ($at -lt 0) { throw 'the command failed, but not with the expected message' }
 } catch {
     $failure = $_.Exception.Message
 } finally {
