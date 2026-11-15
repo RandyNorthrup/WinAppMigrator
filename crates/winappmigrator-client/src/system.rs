@@ -23,6 +23,7 @@ use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY};
 /// shown `WOW6432Node`. On 32-bit Windows the flag is ignored.
 const KEY_READ: u32 = winreg::enums::KEY_READ | KEY_WOW64_64KEY;
 
+use winappmigrator_i18n::t;
 use winappmigrator_link::protocol::About;
 use winappmigrator_link::{CODE_DIGITS, DISCOVERY_PORT, LINK_PORT};
 
@@ -232,10 +233,7 @@ impl RunState {
             .open(&path)
             .map_err(|error| {
                 if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
-                    io::Error::other(
-                        "the client is already running on this PC, or is cleaning up after one \
-                         that was closed. Use that one, or wait a moment and start this again.",
-                    )
+                    io::Error::other(t!("client-already-running"))
                 } else {
                     error
                 }
@@ -441,17 +439,20 @@ impl Snapshot {
         let text = text_of(&output);
         let mut parts = text.split('|');
         let (Some(id), Some(device), taken) = (parts.next(), parts.next(), parts.next()) else {
-            return Err(io::Error::other(format!(
-                "Windows did not make a snapshot of {drive}: {text} {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+            return Err(io::Error::other(t!(
+                "client-snapshot-failed",
+                drive = drive.as_str(),
+                details = format!("{text} {}", String::from_utf8_lossy(&output.stderr).trim())
             )));
         };
         if !output.status.success()
             || !id.starts_with('{')
             || !device.starts_with(r"\\?\GLOBALROOT\Device\")
         {
-            return Err(io::Error::other(format!(
-                "Windows did not make a snapshot of {drive}: {text}"
+            return Err(io::Error::other(t!(
+                "client-snapshot-failed",
+                drive = drive.as_str(),
+                details = text.as_str()
             )));
         }
         state.note(&format!("snapshot {id}"))?;
@@ -500,9 +501,9 @@ pub fn open_firewall(program: &Path) -> io::Result<()> {
             .args(["remoteip=localsubnet", "profile=any"])
             .output()?;
         if !output.status.success() {
-            return Err(io::Error::other(format!(
-                "Windows Firewall would not let the client listen: {}",
-                text_of(&output)
+            return Err(io::Error::other(t!(
+                "client-firewall-failed",
+                details = text_of(&output)
             )));
         }
     }

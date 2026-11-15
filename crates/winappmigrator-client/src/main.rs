@@ -13,6 +13,8 @@ use winappmigrator_client::serve::serve;
 use winappmigrator_client::system::{
     RunState, Snapshot, about_this_pc, new_code, open_firewall, start_caretaker,
 };
+use winappmigrator_client::{CODE, HELP, LANG, argument_after};
+use winappmigrator_i18n::t;
 use winappmigrator_link::channel::pair_as_client;
 use winappmigrator_link::discovery::{Announcement, answer};
 use winappmigrator_link::{DISCOVERY_PORT, LINK_PORT, LinkError, MAGIC, PROTOCOL_VERSION};
@@ -32,6 +34,9 @@ const PAIRING_LIMIT: Duration = Duration::from_secs(15);
 const IDLE_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// How long an answer may wait for a builder to take it.
 const SEND_LIMIT: Duration = Duration::from_secs(120);
+/// What a PC that connected is called when its address cannot be told, which each message words as
+/// "another PC".
+const UNKNOWN_PC: &str = "unknown";
 
 fn main() -> ExitCode {
     // Started in the folder it was run from, which can be a USB drive or a share anyone can write to,
@@ -43,19 +48,36 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     // Run from a folder only an administrator can change, before anything here can have Windows
-    // load a DLL by name: see `safe_folder`.
+    // load a DLL by name: see `safe_folder`. The copy is given the same arguments, `--lang` too, and
+    // chooses its language itself, so this one only does if the copy cannot be run.
     if !winappmigrator_client::system::runs_from_safe_folder() {
         return match winappmigrator_client::system::run_from_safe_folder() {
             Ok(status) if status.success() => ExitCode::SUCCESS,
             Ok(_) => ExitCode::FAILURE,
             Err(error) => {
-                println!("WinAppMigrator Client could not start from a folder only administrators");
-                println!("can change: {error}");
-                println!("Press Enter to close this window.");
+                speak();
+                println!(
+                    "{}",
+                    t!("client-safe-folder-failed", error = error.to_string())
+                );
+                println!("{}", t!("client-press-enter-to-close"));
                 let _ = io::stdin().lock().read_line(&mut String::new());
                 ExitCode::FAILURE
             }
         };
+    }
+    speak();
+    // Waits for Enter, as an elevated program started from a console that is not elevated gets a
+    // window of its own, which would otherwise close before this could be read.
+    if std::env::args()
+        .skip(1)
+        .any(|argument| HELP.contains(&argument.as_str()))
+    {
+        println!("{}", t!("client-usage"));
+        println!();
+        println!("{}", t!("client-press-enter-to-close"));
+        let _ = io::stdin().lock().read_line(&mut String::new());
+        return ExitCode::SUCCESS;
     }
     // The window says what it is, rather than whatever started it. `title` changes the console it
     // shares with this, and nothing else. Raw, since `title` keeps any quotes it is given.
@@ -63,19 +85,21 @@ fn main() -> ExitCode {
         .args(["/d", "/c"])
         .raw_arg("title WinAppMigrator Client")
         .status();
-    // Each line fits the 80 columns Windows 7 gives a console.
-    println!("WinAppMigrator Client {}", winappmigrator_client::VERSION);
+    // Each line fits the 80 columns Windows 7 gives a console: a message's lines are broken where its
+    // language breaks them, to fit.
+    println!(
+        "{}",
+        t!("client-heading", version = winappmigrator_client::VERSION)
+    );
     println!();
-    println!("This lets WinAppMigrator on your new PC read the apps on this PC over your");
-    println!("network. It changes nothing here: it reads a snapshot of the Windows drive,");
-    println!("which it removes when you stop it.");
+    println!("{}", t!("client-intro"));
     println!();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             println!();
-            println!("The client stopped: {error}");
-            println!("Press Enter to close this window.");
+            println!("{}", t!("client-stopped", error = error.to_string()));
+            println!("{}", t!("client-press-enter-to-close"));
             let _ = io::stdin().lock().read_line(&mut String::new());
             ExitCode::FAILURE
         }
@@ -88,11 +112,13 @@ fn run() -> io::Result<()> {
     // record to be let go of, on a way out that drops it rather than ending it.
     let _caretaker = start_caretaker()
         .inspect_err(|error| {
-            println!("If this window is closed rather than stopped, the snapshot and firewall");
-            println!("rules stay until the client is next run here ({error}).");
+            println!(
+                "{}",
+                t!("client-caretaker-failed", error = error.to_string())
+            );
         })
         .ok();
-    print!("Taking a snapshot of the Windows drive... ");
+    print!("{}", t!("client-snapshot-taking"));
     let snapshot = match Snapshot::take(&mut state) {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -100,7 +126,7 @@ fn run() -> io::Result<()> {
             return Err(error);
         }
     };
-    println!("done.");
+    println!("{}", t!("client-snapshot-taken"));
     let program = std::env::current_exe()?;
     if let Err(error) = open_firewall(&program) {
         state.end(Some(&snapshot));
@@ -109,9 +135,7 @@ fn run() -> io::Result<()> {
     let about = about_this_pc(&snapshot.taken);
     // `--code 123456` sets the first code, for a script that starts the client and the builder both.
     // It still has to be typed into the builder, and wrong ones still replace it.
-    let given = std::env::args()
-        .skip_while(|argument| argument != "--code")
-        .nth(1)
+    let given = argument_after(std::env::args(), CODE)
         .map(|code| {
             code.chars()
                 .filter(char::is_ascii_digit)
@@ -139,8 +163,10 @@ fn run() -> io::Result<()> {
             thread::spawn(move || answer_queries(&socket, &announcement));
         }
         Err(error) => {
-            println!("This PC will not show up by itself ({error}).");
-            println!("On the new PC, type this PC's name or address instead.");
+            println!(
+                "{}",
+                t!("client-discovery-failed", error = error.to_string())
+            );
         }
     }
     let listener = match TcpListener::bind((Ipv4Addr::UNSPECIFIED, LINK_PORT)) {
@@ -152,18 +178,29 @@ fn run() -> io::Result<()> {
     };
 
     println!();
-    let bits = if about.architecture.eq_ignore_ascii_case("x86") {
-        "32-bit"
+    let bits: u32 = if about.architecture.eq_ignore_ascii_case("x86") {
+        32
     } else {
-        "64-bit"
+        64
     };
-    println!("  This PC:       {}", about.computer_name);
-    println!("  Windows:       {}, {bits}", about.windows_name);
-    println!("  Pairing Code:  {}", lock(&code));
+    println!(
+        "{}",
+        t!(
+            "client-this-pc",
+            computer_name = about.computer_name.as_str()
+        )
+    );
+    println!(
+        "{}",
+        t!(
+            "client-windows",
+            windows_name = about.windows_name.as_str(),
+            bits = bits
+        )
+    );
+    println!("{}", t!("client-pairing-code", code = lock(&code)));
     println!();
-    println!("On your new PC, in WinAppMigrator, choose Network PC... and type this code.");
-    println!("Close the app you are moving first, so its files are as it left them.");
-    println!("To stop, press Enter here or close this window.");
+    println!("{}", t!("client-pairing-steps"));
     println!();
 
     let root = snapshot.root.clone();
@@ -176,7 +213,7 @@ fn run() -> io::Result<()> {
                 continue;
             };
             let from = stream.peer_addr().map_or_else(
-                |_| "another PC".to_owned(),
+                |_| UNKNOWN_PC.to_owned(),
                 |address| address.ip().to_string(),
             );
             let _ = stream.set_read_timeout(Some(PAIRING_LIMIT));
@@ -189,48 +226,72 @@ fn run() -> io::Result<()> {
                     wrong = 0;
                     let _ = channel.stream().set_read_timeout(Some(IDLE_LIMIT));
                     let _ = channel.stream().set_write_timeout(Some(SEND_LIMIT));
-                    println!("Paired with {from}. It is reading what it needs...");
+                    println!("{}", t!("client-paired", from = from.as_str()));
                     match serve(&mut channel, &root, &about) {
-                        Ok(answered) => println!("{from} is done ({answered} requests answered)."),
-                        Err(error) => println!("The link to {from} ended: {error}"),
+                        Ok(answered) => println!(
+                            "{}",
+                            t!(
+                                "client-builder-done",
+                                from = from.as_str(),
+                                count = answered
+                            )
+                        ),
+                        Err(error) => println!(
+                            "{}",
+                            t!(
+                                "client-link-ended",
+                                from = from.as_str(),
+                                error = error.to_string()
+                            )
+                        ),
                     }
                 }
                 Err(LinkError::WrongCode) => {
                     wrong += 1;
                     wrong_in_all += 1;
-                    println!("{from} tried a code that is not this one.");
+                    println!("{}", t!("client-wrong-code", from = from.as_str()));
                     if wrong_in_all >= WRONG_CODES_PER_RUN {
                         println!();
-                        println!(
-                            "Too many wrong codes were tried, so no PC can pair with this one now."
-                        );
-                        println!(
-                            "Something on your network may be guessing. To pair, stop the client"
-                        );
-                        println!("and start it again, and type the new code it shows.");
+                        println!("{}", t!("client-too-many-wrong-codes"));
                         return;
                     }
                     thread::sleep(WRONG_CODE_PAUSE);
                     if wrong >= ATTEMPTS_PER_CODE {
                         wrong = 0;
                         if let Ok(fresh) = new_code() {
-                            println!("Too many wrong codes. The new pairing code is: {fresh}");
+                            println!("{}", t!("client-new-code", code = fresh.as_str()));
                             if let Ok(mut code) = serving_code.lock() {
                                 *code = fresh;
                             }
                         }
                     }
                 }
-                Err(error) => println!("{from} could not pair: {error}"),
+                Err(error) => println!(
+                    "{}",
+                    t!(
+                        "client-pair-failed",
+                        from = from.as_str(),
+                        error = error.to_string()
+                    )
+                ),
             }
         }
     });
 
     let _ = io::stdin().lock().read_line(&mut String::new());
-    println!("Stopping: removing the snapshot and the firewall rules...");
+    println!("{}", t!("client-stopping"));
     state.end(Some(&snapshot));
-    println!("Done.");
+    println!("{}", t!("client-stop-done"));
     Ok(())
+}
+
+/// Speak the language `--lang` asks for, or Windows' display language, saying first, in English, if
+/// the console cannot show it.
+fn speak() {
+    let speaking = winappmigrator_client::speak(argument_after(std::env::args(), LANG).as_deref());
+    if let Some(note) = winappmigrator_client::console_note(&speaking) {
+        println!("{note}");
+    }
 }
 
 fn answer_queries(socket: &UdpSocket, announcement: &Announcement) {

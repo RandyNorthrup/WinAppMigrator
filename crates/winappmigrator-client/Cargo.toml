@@ -20,6 +20,7 @@ doctest = false
 
 [dependencies]
 winappmigrator-link.workspace = true
+winappmigrator-i18n.workspace = true
 winreg.workspace = true
 getrandom = "0.3.4"
 
