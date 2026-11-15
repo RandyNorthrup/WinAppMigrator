@@ -36,13 +36,14 @@ use winappmigrator_core::{
     read_embedded_manifest, refuse_without_room_to_install, restore_package_monitored,
     system_changes_restoring,
 };
+use winappmigrator_i18n::t;
+use winappmigrator_ui::language::{LanguageAction, declare_language, language_menu};
 use winappmigrator_ui::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
 };
 use winappmigrator_ui::widgets::{self, ButtonKind, Icon, metric};
 use winappmigrator_ui::window::{Opening, WindowSizes};
 
-const WINDOW_TITLE: &str = "WinAppMigrator Installer";
 const WINDOW_SIZES: WindowSizes = WindowSizes {
     opens_at: egui::vec2(760.0, 720.0),
     at_least: egui::vec2(620.0, 520.0),
@@ -56,23 +57,13 @@ const MAX_LISTED_CHANGES: usize = 300;
 const MAX_LISTED_REFUSALS: usize = 20;
 /// How tall the list of the rest of them gets, in points.
 const MORE_LEFT_OUT_HEIGHT: f32 = 240.0;
-const UNSIGNED_TEXT: &str = "Not signed: publisher unknown";
 /// What a cancelled install is called in its errors.
 const CANCELLED_CODE: &str = "install_cancelled";
-/// Added to what the person agrees to when they click Install.
-const BEYOND_FILES_TEXT: &str = "All of this is done with administrator rights. If the install \
-                                 fails, what it changed is put back, and you are told of anything \
-                                 that could not be. You can also undo the install later from \
-                                 Settings, under Installed apps. Files it replaces come back, and \
-                                 runtimes it installs stay.";
-/// Said when what would be done at this location is not known yet, and so cannot be agreed to.
-const WORKING_OUT_TEXT: &str = "Working out what this would set up at this location…";
-/// Said beside the buttons when the install location is why they are off.
-const LOCATION_BLOCKS_TEXT: &str = "Install and Preview Changes are off until the Install \
-                                    Location can be used. The reason is above, under it.";
-/// Said beside the buttons when the package cannot go to the chosen location.
-const PACKAGE_BLOCKS_TEXT: &str = "Install is off because this package cannot go to this \
-                                   location. The reason is above.";
+
+/// Where Windows keeps its fonts, for the language in use and for names in other scripts.
+fn fonts_dir() -> PathBuf {
+    system_root().join("Fonts")
+}
 
 /// Why the install location cannot be used. Install and Preview Changes stay off while there is one,
 /// so it is said where it cannot be missed, with what to do about it.
@@ -93,39 +84,28 @@ impl LocationProblem {
     /// What the window says, for an app of this name.
     fn explained(&self, app: &str) -> String {
         match self {
-            Self::AppAlreadyThere => format!(
-                "{app} is already installed in this folder, so this copy cannot go here. To \
-                 install it here, first uninstall the copy on this PC, in Windows Settings under \
-                 Apps, and then open this installer again. Or enter a new, empty folder above."
+            Self::AppAlreadyThere => t!("installer-location-app-already-there", app_name = app),
+            Self::OtherAppThere(other) => t!(
+                "installer-location-other-app-there",
+                other_app = other.as_str(),
+                app_name = app
             ),
-            Self::OtherAppThere(other) => format!(
-                "{other} is installed in this folder, so {app} cannot go here. Enter a new, empty \
-                 folder above. Or, if you no longer need {other}, uninstall it first, in Windows \
-                 Settings under Apps, and then open this installer again."
-            ),
-            Self::HasFiles => "This folder already has files in it that were not installed by \
-                               WinAppMigrator. They may belong to another app, so nothing is \
-                               installed over them. Enter a new, empty folder above."
-                .to_owned(),
-            Self::Refused(reason) => {
-                format!("This folder cannot be used: {reason}. Enter another folder above.")
-            }
+            Self::HasFiles => t!("installer-location-has-files"),
+            Self::Refused(reason) => t!("installer-location-refused", reason = reason.as_str()),
         }
     }
 }
 
-/// Said when the list was out of date by the time Install was clicked.
-const LIST_CHANGED_TEXT: &str = "What this would do here has changed, so nothing was installed. Look \
-                                 over the list below, and click Install again if it is what you want.";
-
 pub fn run() -> eframe::Result {
+    // It runs on the PC the app is moved to, and speaks that PC's language. It saves no choice.
+    winappmigrator_i18n::use_preferred_language(None);
     let native_options =
         winappmigrator_ui::window_options(WINDOW_SIZES.viewport("winappmigrator-installer"));
     eframe::run_native(
-        WINDOW_TITLE,
+        &t!("installer-window-title"),
         native_options,
         Box::new(move |cc| {
-            theme::install_fonts(&cc.egui_ctx, &system_root().join("Fonts"));
+            theme::install_fonts(&cc.egui_ctx, &fonts_dir());
             let mut app = InstallerApp::blank();
             (app.opening, app.theme) = Opening::on_this_account(WINDOW_SIZES);
             app.theme.apply(&cc.egui_ctx);
@@ -190,6 +170,7 @@ impl Outcome {
 enum SignatureState {
     Checking,
     Unsigned,
+    /// By whom, as the certificate names them; empty if it names nobody.
     Signed(String),
     /// There is a signature, and it does not hold up. The reason is Windows' own status.
     Invalid(String),
@@ -324,7 +305,9 @@ impl InstallerApp {
             let exe = std::env::current_exe();
             let loaded = match exe.as_deref() {
                 Ok(exe) => load_package(exe),
-                Err(error) => Loaded::Failed(format!("Could not locate the installer: {error}")),
+                Err(error) => {
+                    Loaded::Failed(t!("installer-locate-failed", error = error.to_string()))
+                }
             };
             let _ = sender.send(loaded);
             ctx.request_repaint();
@@ -351,7 +334,7 @@ impl InstallerApp {
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.load_receiver = None;
                 if matches!(self.screen, Screen::Checking) {
-                    self.screen = Screen::Failed("The check of the installer stopped.".to_owned());
+                    self.screen = Screen::Failed(t!("installer-check-stopped"));
                 }
             }
         }
@@ -368,16 +351,9 @@ impl InstallerApp {
                 self.changes_by_choice = changes_by_choice;
                 self.show_changes_for_the_choices();
                 self.screen = Screen::Ready;
-                theme::add_fallback_fonts(
-                    ctx,
-                    &system_root().join("Fonts"),
-                    [self.title.as_str(), self.publisher.as_str()],
-                );
+                self.add_fonts_for_the_names(ctx);
                 self.theme.apply(ctx);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                    "Install {}",
-                    self.title
-                )));
+                self.retitle(ctx);
             }
             Loaded::NoPackage => self.screen = Screen::NoPackage,
             Loaded::Failed(reason) => self.screen = Screen::Failed(reason),
@@ -397,7 +373,7 @@ impl InstallerApp {
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
             })
-            .unwrap_or_else(|| "Application".to_owned());
+            .unwrap_or_else(|| t!("installer-unnamed-app"));
         self.publisher = meta
             .and_then(|app| app.publisher.clone())
             .unwrap_or_default();
@@ -416,6 +392,49 @@ impl InstallerApp {
             .iter()
             .map(prereq_row)
             .collect();
+    }
+
+    /// The app's name and its publisher's can be in a script the language in use does not need, and
+    /// take a font of their own.
+    fn add_fonts_for_the_names(&self, ctx: &egui::Context) {
+        theme::add_fallback_fonts(
+            ctx,
+            &fonts_dir(),
+            [self.title.as_str(), self.publisher.as_str()],
+        );
+    }
+
+    /// The window's title in the taskbar, naming the app.
+    fn retitle(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(t!(
+            "installer-window-title-app",
+            app_name = self.title.as_str()
+        )));
+    }
+
+    /// Speak another language from now on, for as long as this window is open. Nothing is saved: the
+    /// next installer opens in this PC's language again. What was worked out in words, such as the
+    /// list of what it sets up, is worked out again in the new one, as Install is agreeing to the
+    /// list as it was shown.
+    fn choose_language(
+        &mut self,
+        language: &'static winappmigrator_i18n::Language,
+        ctx: &egui::Context,
+    ) {
+        winappmigrator_i18n::use_language(language);
+        theme::install_fonts(ctx, &fonts_dir());
+        self.add_fonts_for_the_names(ctx);
+        self.retitle(ctx);
+        if let Some(manifest) = self.manifest.as_deref() {
+            self.prereqs = manifest
+                .runtime_prerequisites
+                .iter()
+                .map(prereq_row)
+                .collect();
+            self.listed_for.clear();
+            self.list_receiver = None;
+        }
+        *self.checked_target.borrow_mut() = None;
     }
 
     /// What the boxes say, as an install is given it.
@@ -464,7 +483,7 @@ impl InstallerApp {
                     return;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    self.list_problem = Some("working out what it would do stopped".to_owned());
+                    self.list_problem = Some(t!("installer-list-stopped"));
                     self.listed_for = self.target_root.trim().to_owned();
                 }
             }
@@ -578,13 +597,13 @@ impl InstallerApp {
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(error) => {
-                self.error = Some(format!("Could not locate the installer: {error}"));
+                self.error = Some(t!("installer-locate-failed", error = error.to_string()));
                 self.phase = Phase::Done;
                 return;
             }
         };
         let Some(package) = self.package.clone() else {
-            self.error = Some("This installer carries no package.".to_owned());
+            self.error = Some(t!("installer-carries-no-package"));
             self.phase = Phase::Done;
             return;
         };
@@ -628,9 +647,9 @@ impl InstallerApp {
             .unwrap_or_else(|panic| {
                 let reason = panic_text(panic.as_ref());
                 tracing::error!(%reason, "the install stopped unexpectedly");
-                Msg::Failed(format!(
-                    "The install stopped unexpectedly: {reason}. If it had begun, running an \
-                     installer again undoes what it did first."
+                Msg::Failed(t!(
+                    "installer-stopped-unexpectedly-because",
+                    reason = reason
                 ))
             });
             let _ = sender.send(message);
@@ -673,7 +692,7 @@ impl InstallerApp {
                     return;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    self.error = Some("The install stopped unexpectedly.".to_owned());
+                    self.error = Some(t!("installer-stopped-unexpectedly"));
                     self.finish_run();
                     return;
                 }
@@ -754,16 +773,21 @@ fn load_package(exe: &Path) -> Loaded {
     let package = match EmbeddedPackage::open(exe) {
         Ok(Some(package)) => package,
         Ok(None) => return Loaded::NoPackage,
-        Err(error) => return Loaded::Failed(format!("Could not read the installer: {error}")),
+        Err(error) => {
+            return Loaded::Failed(t!("installer-read-failed", error = error.to_string()));
+        }
     };
     let manifest = match read_embedded_manifest(&package) {
         Ok(manifest) => manifest,
-        Err(error) => return Loaded::Failed(format!("Could not read the installer: {error}")),
+        Err(error) => {
+            return Loaded::Failed(t!("installer-read-failed", error = error.to_string()));
+        }
     };
     match changes_for_every_choice(&manifest, &location_a_list_is_for(&manifest)) {
         Ok(changes) => Loaded::Ready(Arc::new(package), Arc::new(manifest), changes),
-        Err(error) => Loaded::Failed(format!(
-            "This installer's package cannot be used on this PC: {error}"
+        Err(error) => Loaded::Failed(t!(
+            "installer-cannot-be-used-here",
+            error = error.to_string()
         )),
     }
 }
@@ -796,11 +820,9 @@ fn installer_signature(exe: &Path) -> SignatureState {
     match has_certificate_table(exe) {
         Ok(false) => SignatureState::Unsigned,
         Ok(true) => match read_signature(exe) {
-            Ok(signature) if signature.is_valid() => SignatureState::Signed(
-                signature
-                    .signer_name()
-                    .unwrap_or_else(|| "an unnamed publisher".to_owned()),
-            ),
+            Ok(signature) if signature.is_valid() => {
+                SignatureState::Signed(signature.signer_name().unwrap_or_default())
+            }
             Ok(signature) => SignatureState::Invalid(signature.status),
             Err(reason) => SignatureState::Invalid(reason),
         },
@@ -830,7 +852,12 @@ fn run_restore(
     }
     let manifest = match read_embedded_manifest(package) {
         Ok(manifest) => manifest,
-        Err(error) => return failed(format!("Could not read the package: {error}")),
+        Err(error) => {
+            return failed(t!(
+                "installer-package-read-failed",
+                error = error.to_string()
+            ));
+        }
     };
     // Once more now that Install has been clicked, so that nothing is unpacked for nothing. What is
     // agreed to is what was on screen, and the install holds itself to that as well when it gets there.
@@ -845,15 +872,17 @@ fn run_restore(
     // Remove extraction directories from previous or crashed runs first, so nothing
     // accumulates even if a prior window was killed before its own cleanup could run.
     let Some(state_root) = machine_state_root() else {
-        return failed(
-            "This PC's ProgramData folder could not be found, so the install could not be undone."
-                .to_owned(),
-        );
+        return failed(t!("installer-no-programdata"));
     };
     crate::cleanup::sweep_stale_extractions(exe, Some(&state_root));
     let unpacked_bytes = match package.unpacked_bytes() {
         Ok(bytes) => bytes,
-        Err(error) => return failed(format!("Could not read the package: {error}")),
+        Err(error) => {
+            return failed(t!(
+                "installer-package-read-failed",
+                error = error.to_string()
+            ));
+        }
     };
     // Stage on the install destination's drive, so a large package never fails to
     // extract for lack of space on C:.
@@ -864,7 +893,9 @@ fn run_restore(
         Some(&state_root),
     ) {
         Ok(staging) => staging,
-        Err(error) => return failed(format!("Could not create a staging folder: {error}")),
+        Err(error) => {
+            return failed(t!("installer-staging-failed", error = error.to_string()));
+        }
     };
     let places = if apply {
         install_places(
@@ -890,7 +921,9 @@ fn run_restore(
     match package.extract_monitored(staging.path(), monitor) {
         Ok(()) => {}
         Err(WinAppMigratorError::Cancelled) => return Msg::Cancelled,
-        Err(error) => return failed(format!("Could not unpack the package: {error}")),
+        Err(error) => {
+            return failed(t!("installer-unpack-failed", error = error.to_string()));
+        }
     }
     let options = RestoreOptions {
         agreed_to,
@@ -958,6 +991,7 @@ impl InstallerApp {
         // the mutable field access the form controls need.
         let theme = self.theme.clone();
         let ctx = ui.ctx().clone();
+        declare_language(&ctx);
         self.keep_the_list_for_the_location(&ctx);
 
         egui::Panel::top("header")
@@ -994,46 +1028,67 @@ impl InstallerApp {
             });
     }
 
-    fn draw_header(&self, ui: &mut egui::Ui, theme: &Theme) {
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
-            widgets::paint_logo(ui.painter(), rect, theme);
-            ui.add_space(SPACE_XS);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(
-                    RichText::new(WINDOW_TITLE)
-                        .font(theme::semibold(16.0))
-                        .color(theme.text),
-                );
-                ui.label(
-                    RichText::new("Reinstalls an application captured on another PC")
-                        .size(12.5)
-                        .color(theme.text_muted),
-                );
-            });
-        });
+    fn draw_header(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        let chosen = ui
+            .horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                widgets::paint_logo(ui.painter(), rect, theme);
+                ui.add_space(SPACE_XS);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(
+                        RichText::new(t!("installer-window-title"))
+                            .font(theme::semibold(16.0))
+                            .color(theme.text),
+                    );
+                    ui.label(
+                        RichText::new(t!("installer-tagline"))
+                            .size(12.5)
+                            .color(theme.text_muted),
+                    );
+                });
+                if !matches!(self.screen, Screen::Ready) {
+                    return None;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Not while it installs: the install is held to the list as it was shown, in the
+                    // words it was shown in.
+                    ui.add_enabled_ui(self.phase != Phase::Running, |ui| {
+                        language_menu(ui, &fonts_dir())
+                    })
+                    .inner
+                })
+                .inner
+            })
+            .inner;
+        match chosen {
+            Some(LanguageAction::Choose(language)) => {
+                let ctx = ui.ctx().clone();
+                self.choose_language(language, &ctx);
+            }
+            Some(LanguageAction::Report(url)) => {
+                // The browser opening or not is all there is to it.
+                let _ = hidden_command("explorer").arg(url).spawn();
+            }
+            None => {}
+        }
     }
 
     fn draw_body(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         match &self.screen {
             Screen::Checking => {
                 ui.label(
-                    RichText::new("Checking the installer…")
+                    RichText::new(t!("installer-checking"))
                         .size(13.5)
                         .color(theme.text),
                 );
                 ui.add_space(SPACE_SM);
                 widgets::progress_bar(ui, theme, None);
             }
-            Screen::NoPackage => widgets::notice(
-                ui,
-                theme,
-                Role::Accent,
-                "This is a WinAppMigrator installer stub, and it carries no application \
-                 package. Build an installer with WinAppMigrator, then run the produced .exe \
-                 here.",
-            ),
+            Screen::NoPackage => {
+                widgets::notice(ui, theme, Role::Accent, &t!("installer-stub-no-package"));
+            }
             Screen::Failed(reason) => widgets::notice(ui, theme, Role::Danger, reason),
             Screen::Ready => self.ready_ui(ui, theme),
         }
@@ -1058,11 +1113,11 @@ impl InstallerApp {
             widgets::section_gap(ui);
         }
         if self.cancelled_early {
-            widgets::notice(ui, theme, Role::Neutral, "Cancelled. Nothing was changed.");
+            widgets::notice(ui, theme, Role::Neutral, &t!("installer-cancelled-early"));
             widgets::section_gap(ui);
         }
         if self.list_changed {
-            widgets::notice(ui, theme, Role::Warning, LIST_CHANGED_TEXT);
+            widgets::notice(ui, theme, Role::Warning, &t!("installer-list-changed"));
             widgets::section_gap(ui);
         }
         if let Some(outcome) = self.outcome.as_ref() {
@@ -1074,27 +1129,27 @@ impl InstallerApp {
                 ui,
                 theme,
                 Role::Warning,
-                &format!("An earlier install of {app} never finished. Install undoes it first."),
+                &t!("installer-interrupted", app_name = app.as_str()),
             );
             widgets::section_gap(ui);
         }
 
         widgets::card_titled(ui, theme, &title, subtitle.as_deref(), |ui| {
             if !source_computer.is_empty() {
-                widgets::kv_row(ui, theme, "Captured From", &source_computer);
+                widgets::kv_row(ui, theme, &t!("installer-captured-from"), &source_computer);
             }
             signature_row(ui, theme, &self.signature);
             ui.add_space(SPACE_SM);
             widgets::path_field(
                 ui,
                 theme,
-                "Install Location",
+                &t!("installer-install-location"),
                 &mut self.target_root,
                 r"C:\Program Files\App",
                 enabled,
                 || {
                     rfd::FileDialog::new()
-                        .set_title("Choose the Install Location")
+                        .set_title(t!("installer-choose-location"))
                         .pick_folder()
                 },
             );
@@ -1103,27 +1158,18 @@ impl InstallerApp {
                 widgets::notice(ui, theme, Role::Danger, &problem.explained(&title));
             } else if folder_has_files(Path::new(self.target_root.trim())) {
                 ui.add_space(SPACE_SM);
-                widgets::notice(
-                    ui,
-                    theme,
-                    Role::Warning,
-                    "This folder already has files. Files with the same names are replaced, \
-                     and come back if you uninstall.",
-                );
+                widgets::notice(ui, theme, Role::Warning, &t!("installer-folder-has-files"));
             }
             if let Some(room) = self.room_for_target() {
                 ui.add_space(SPACE_XS);
-                widgets::kv_row(ui, theme, "Room Needed", &room.summary());
+                widgets::kv_row(ui, theme, &t!("installer-room-needed"), &room.summary());
                 for shortfall in room.shortfalls() {
                     ui.add_space(SPACE_XS);
                     widgets::notice(
                         ui,
                         theme,
                         Role::Warning,
-                        &format!(
-                            "There may not be enough room here: {shortfall}. It can unpack on \
-                             another drive, but the app's files still have to fit."
-                        ),
+                        &t!("installer-room-short", shortfall = shortfall),
                     );
                 }
                 for note in room.could_not_tell() {
@@ -1138,19 +1184,19 @@ impl InstallerApp {
         widgets::card_titled(
             ui,
             theme,
-            "What This Sets Up Beyond Files",
-            Some(BEYOND_FILES_TEXT),
+            &t!("installer-beyond-files"),
+            Some(t!("installer-beyond-files-agreed").as_str()),
             |ui| {
                 if let Some(problem) = self.list_problem.as_ref() {
                     widgets::notice(
                         ui,
                         theme,
                         Role::Danger,
-                        &format!("This package cannot go to this location: {problem}"),
+                        &t!("installer-cannot-go-here", problem = problem.as_str()),
                     );
                     ui.add_space(SPACE_SM);
                 } else if self.list_receiver.is_some() {
-                    widgets::hint(ui, theme, WORKING_OUT_TEXT);
+                    widgets::hint(ui, theme, &t!("installer-working-out"));
                     ui.add_space(SPACE_SM);
                 }
                 system_changes_ui(ui, theme, &self.changes);
@@ -1160,16 +1206,14 @@ impl InstallerApp {
 
         let mut changed_a_choice = false;
         if self.show_user_data || self.show_license {
-            widgets::card_titled(ui, theme, "Options", None, |ui| {
+            widgets::card_titled(ui, theme, &t!("installer-options"), None, |ui| {
                 if self.show_user_data {
                     changed_a_choice |= widgets::option_row(
                         ui,
                         theme,
                         &mut self.restore_user_data,
-                        "User Data",
-                        "On: settings, Documents, and Saved Games go to the usual folders of \
-                         whoever is signed in. Off: all of it goes under the install folder, and \
-                         nothing is set up to run from it.",
+                        &t!("installer-user-data"),
+                        &t!("installer-user-data-detail"),
                         enabled,
                     )
                     .changed();
@@ -1177,7 +1221,10 @@ impl InstallerApp {
                         widgets::hint(
                             ui,
                             theme,
-                            &format!("This holds the data of {}.", self.user_data_profile),
+                            &t!(
+                                "installer-user-data-whose",
+                                account = self.user_data_profile.as_str()
+                            ),
                         );
                     }
                 }
@@ -1186,8 +1233,8 @@ impl InstallerApp {
                         ui,
                         theme,
                         &mut self.restore_license,
-                        "License",
-                        "Activation and license files and keys. Some may need reactivation here.",
+                        &t!("installer-license"),
+                        &t!("installer-license-detail"),
                         enabled,
                     )
                     .changed();
@@ -1202,15 +1249,11 @@ impl InstallerApp {
         widgets::card_titled(
             ui,
             theme,
-            "Dependencies",
-            Some("What this app needs, and how each is provided."),
+            &t!("installer-dependencies"),
+            Some(t!("installer-dependencies-detail").as_str()),
             |ui| {
                 if self.prereqs.is_empty() {
-                    widgets::hint(
-                        ui,
-                        theme,
-                        "No additional runtime dependencies were detected.",
-                    );
+                    widgets::hint(ui, theme, &t!("installer-dependencies-none"));
                 }
                 for prereq in &self.prereqs {
                     ui.horizontal(|ui| {
@@ -1246,8 +1289,14 @@ impl InstallerApp {
                 && !self
                     .step
                     .is_some_and(|step| step.phase == InstallPhase::RollingBack);
-            if widgets::wide_button(ui, theme, ButtonKind::Secondary, "Cancel", can_cancel)
-                .clicked()
+            if widgets::wide_button(
+                ui,
+                theme,
+                ButtonKind::Secondary,
+                &t!("installer-cancel"),
+                can_cancel,
+            )
+            .clicked()
                 && let Some(monitor) = self.monitor.as_ref()
             {
                 monitor.cancel();
@@ -1263,20 +1312,22 @@ impl InstallerApp {
         // Beside the buttons too, as that is where a person looks when one will not click.
         if !installed {
             let why = if !self.target_is_valid() {
-                Some(LOCATION_BLOCKS_TEXT)
+                Some(t!("installer-location-blocks"))
             } else if self.list_problem.is_some() {
-                Some(PACKAGE_BLOCKS_TEXT)
+                Some(t!("installer-package-blocks"))
             } else {
                 None
             };
             if let Some(why) = why {
-                widgets::hint(ui, theme, why);
+                widgets::hint(ui, theme, &why);
                 ui.add_space(SPACE_SM);
             }
         }
         widgets::control_row(ui, |ui| {
             if installed {
-                if widgets::button(ui, theme, ButtonKind::Primary, "Close", true).clicked() {
+                if widgets::button(ui, theme, ButtonKind::Primary, &t!("installer-close"), true)
+                    .clicked()
+                {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 if widgets::icon_text_button(
@@ -1284,7 +1335,7 @@ impl InstallerApp {
                     theme,
                     ButtonKind::Secondary,
                     Icon::Folder,
-                    "Open Install Folder",
+                    &t!("installer-open-folder"),
                     true,
                 )
                 .clicked()
@@ -1293,17 +1344,35 @@ impl InstallerApp {
                         .arg(self.target_root.trim())
                         .spawn();
                     if let Err(error) = opened {
-                        self.error = Some(format!("Could not open the folder: {error}"));
+                        self.error = Some(t!(
+                            "installer-open-folder-failed",
+                            error = error.to_string()
+                        ));
                     }
                 }
                 return;
             }
             let valid = self.target_is_valid();
             let can_agree = valid && self.list_is_for_this_location();
-            if widgets::button(ui, theme, ButtonKind::Primary, "Install", can_agree).clicked() {
+            if widgets::button(
+                ui,
+                theme,
+                ButtonKind::Primary,
+                &t!("installer-install"),
+                can_agree,
+            )
+            .clicked()
+            {
                 self.start(true, &ctx);
             }
-            if widgets::button(ui, theme, ButtonKind::Secondary, "Preview Changes", valid).clicked()
+            if widgets::button(
+                ui,
+                theme,
+                ButtonKind::Secondary,
+                &t!("installer-preview"),
+                valid,
+            )
+            .clicked()
             {
                 self.start(false, &ctx);
             }
@@ -1314,13 +1383,24 @@ impl InstallerApp {
 /// Whether this installer proves who made it. The name a package gives for its publisher
 /// comes from the package and proves nothing, so this is said separately.
 fn signature_row(ui: &mut egui::Ui, theme: &Theme, signature: &SignatureState) {
+    let installer = t!("installer-signature");
     match signature {
         SignatureState::Checking => {
-            widgets::kv_row(ui, theme, "Installer", "Checking its signature…");
+            widgets::kv_row(ui, theme, &installer, &t!("installer-signature-checking"));
         }
-        SignatureState::Unsigned => widgets::kv_row(ui, theme, "Installer", UNSIGNED_TEXT),
+        SignatureState::Unsigned => {
+            widgets::kv_row(ui, theme, &installer, &t!("installer-signature-unsigned"));
+        }
+        SignatureState::Signed(name) if name.is_empty() => {
+            widgets::kv_row(ui, theme, &installer, &t!("installer-signature-unnamed"));
+        }
         SignatureState::Signed(name) => {
-            widgets::kv_row(ui, theme, "Installer", &format!("Signed by {name}"));
+            widgets::kv_row(
+                ui,
+                theme,
+                &installer,
+                &t!("installer-signature-signed-by", publisher = name.as_str()),
+            );
         }
         SignatureState::Invalid(reason) => {
             ui.add_space(SPACE_XS);
@@ -1328,10 +1408,7 @@ fn signature_row(ui: &mut egui::Ui, theme: &Theme, signature: &SignatureState) {
                 ui,
                 theme,
                 Role::Danger,
-                &format!(
-                    "This installer's signature is not valid ({reason}). It may have been changed \
-                     since it was signed."
-                ),
+                &t!("installer-signature-invalid", reason = reason.as_str()),
             );
         }
     }
@@ -1339,11 +1416,7 @@ fn signature_row(ui: &mut egui::Ui, theme: &Theme, signature: &SignatureState) {
 
 fn system_changes_ui(ui: &mut egui::Ui, theme: &Theme, changes: &SystemChanges) {
     if changes.changes.is_empty() {
-        widgets::hint(
-            ui,
-            theme,
-            "Nothing: it only copies files, and settings in the app's own registry keys.",
-        );
+        widgets::hint(ui, theme, &t!("installer-beyond-files-none"));
     }
     for change in &changes.changes {
         system_change_row(ui, theme, change);
@@ -1386,12 +1459,9 @@ fn refused_ui(ui: &mut egui::Ui, theme: &Theme, refused: &[String]) {
     };
     ui.add_space(SPACE_XS);
     egui::CollapsingHeader::new(
-        RichText::new(format!(
-            "{} more were left out",
-            widgets::format_count(rest.len())
-        ))
-        .size(13.0)
-        .color(theme.text),
+        RichText::new(t!("installer-more-left-out", count = rest.len()))
+            .size(13.0)
+            .color(theme.text),
     )
     .id_salt("more left out")
     .show(ui, |ui| {
@@ -1422,46 +1492,47 @@ fn step_label(
     applying: bool,
     cancelling: bool,
 ) -> (String, Option<f32>) {
-    let counted = |text: &str, step: &InstallStep| {
+    let counted = |text: String, step: &InstallStep| {
         if step.total > 0 {
-            format!(
-                "{text}: {} of {}…",
-                widgets::format_count(step.done.min(step.total)),
-                widgets::format_count(step.total)
+            t!(
+                "installer-step-counted",
+                step = text,
+                done = step.done.min(step.total),
+                total = step.total
             )
         } else {
-            format!("{text}…")
+            t!("installer-step-uncounted", step = text)
         }
     };
     let Some(step) = step else {
-        return ("Getting ready…".to_owned(), None);
+        return (t!("installer-step-getting-ready"), None);
     };
     if step.phase == InstallPhase::RollingBack {
         return (
-            counted("Putting back what was changed", &step),
+            counted(t!("installer-step-putting-back"), &step),
             step.fraction(),
         );
     }
     if cancelling {
-        return ("Cancelling after the current step…".to_owned(), None);
+        return (t!("installer-step-cancelling"), None);
     }
     let text = match step.phase {
-        InstallPhase::Unpacking => "Unpacking",
-        InstallPhase::CheckingPackage => "Checking the package",
-        InstallPhase::RecoveringEarlierInstall => "Undoing an earlier install that never finished",
-        _ if !applying => "Working out what would change",
-        InstallPhase::Prerequisites => "Installing runtimes",
-        InstallPhase::Files => "Copying files",
-        InstallPhase::Services => "Setting up services",
-        InstallPhase::Drivers => "Setting up drivers",
-        InstallPhase::Registry => "Writing registry settings",
-        InstallPhase::License => "Restoring license data",
-        InstallPhase::ScheduledTasks => "Setting up scheduled tasks",
-        InstallPhase::Shortcuts => "Making shortcuts",
-        InstallPhase::Environment => "Setting environment variables",
-        InstallPhase::UninstallEntry => "Adding the app to Settings",
-        InstallPhase::Verifying => "Checking what was installed",
-        InstallPhase::RollingBack | InstallPhase::Uninstalling => "Undoing",
+        InstallPhase::Unpacking => t!("installer-step-unpacking"),
+        InstallPhase::CheckingPackage => t!("installer-step-checking-package"),
+        InstallPhase::RecoveringEarlierInstall => t!("installer-step-recovering"),
+        _ if !applying => t!("installer-step-previewing"),
+        InstallPhase::Prerequisites => t!("installer-step-runtimes"),
+        InstallPhase::Files => t!("installer-step-files"),
+        InstallPhase::Services => t!("installer-step-services"),
+        InstallPhase::Drivers => t!("installer-step-drivers"),
+        InstallPhase::Registry => t!("installer-step-registry"),
+        InstallPhase::License => t!("installer-step-license"),
+        InstallPhase::ScheduledTasks => t!("installer-step-tasks"),
+        InstallPhase::Shortcuts => t!("installer-step-shortcuts"),
+        InstallPhase::Environment => t!("installer-step-environment"),
+        InstallPhase::UninstallEntry => t!("installer-step-settings-entry"),
+        InstallPhase::Verifying => t!("installer-step-verifying"),
+        InstallPhase::RollingBack | InstallPhase::Uninstalling => t!("installer-step-undoing"),
     };
     (counted(text, &step), step.fraction())
 }
@@ -1469,7 +1540,12 @@ fn step_label(
 fn log_location_ui(ui: &mut egui::Ui, theme: &Theme, log_path: Option<&Path>) {
     if let Some(log_path) = log_path {
         ui.add_space(SPACE_SM);
-        widgets::mono_path(ui, theme, "Log", &log_path.display().to_string());
+        widgets::mono_path(
+            ui,
+            theme,
+            &t!("installer-log"),
+            &log_path.display().to_string(),
+        );
     }
 }
 
@@ -1486,45 +1562,31 @@ fn rollback_ui(ui: &mut egui::Ui, theme: &Theme, report: &UndoReport) {
 
 fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Option<&Path>) {
     let heading = if outcome.applied {
-        "Install Result"
+        t!("installer-result")
     } else {
-        "Preview: Nothing Has Been Changed Yet"
+        t!("installer-result-preview")
     };
-    widgets::card_titled(ui, theme, heading, None, |ui| {
+    widgets::card_titled(ui, theme, &heading, None, |ui| {
         if outcome.installed_cleanly() {
-            widgets::notice(
-                ui,
-                theme,
-                Role::Success,
-                if outcome.refused.is_empty() {
-                    "The application was installed and passed its hash check."
-                } else {
-                    "The application was installed and passed its hash check, without what is \
-                     listed as left out below."
-                },
-            );
+            let text = if outcome.refused.is_empty() {
+                t!("installer-result-installed")
+            } else {
+                t!("installer-result-installed-without-left-out")
+            };
+            widgets::notice(ui, theme, Role::Success, &text);
             ui.add_space(SPACE_SM);
         } else if outcome.applied {
             let (role, text) = match outcome.rollback.as_ref() {
-                Some(report) if !report.failed.is_empty() || report.waits_for_a_drive() => (
-                    Role::Danger,
-                    "The install failed, and not all of what it changed could be put back. What \
-                     is left is listed below, and the next install tries again.",
-                ),
-                Some(_) if outcome.cancelled => (
-                    Role::Warning,
-                    "The install was cancelled, and what it changed was put back.",
-                ),
-                Some(_) => (
-                    Role::Danger,
-                    "The install failed, and what it changed was put back.",
-                ),
-                None => (
-                    Role::Danger,
-                    "The install did not finish cleanly. Review the problems below.",
-                ),
+                Some(report) if !report.failed.is_empty() || report.waits_for_a_drive() => {
+                    (Role::Danger, t!("installer-result-not-all-put-back"))
+                }
+                Some(_) if outcome.cancelled => {
+                    (Role::Warning, t!("installer-result-cancelled-put-back"))
+                }
+                Some(_) => (Role::Danger, t!("installer-result-failed-put-back")),
+                None => (Role::Danger, t!("installer-result-not-clean")),
             };
-            widgets::notice(ui, theme, role, text);
+            widgets::notice(ui, theme, role, &text);
             log_location_ui(ui, theme, log_path);
             ui.add_space(SPACE_SM);
         }
@@ -1534,23 +1596,23 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
             &[
                 match outcome.rollback.as_ref() {
                     Some(report) => metric(
-                        "Changes Put Back",
-                        widgets::format_count(report.undone.len()),
+                        t!("installer-result-changes-put-back"),
+                        count_text(report.undone.len()),
                         Role::Accent,
                     ),
                     None => metric(
                         if outcome.applied {
-                            "Changes Made"
+                            t!("installer-result-changes-made")
                         } else {
-                            "Changes Planned"
+                            t!("installer-result-changes-planned")
                         },
-                        widgets::format_count(outcome.changes.len()),
+                        count_text(outcome.changes.len()),
                         Role::Accent,
                     ),
                 },
                 metric(
-                    "Warnings",
-                    widgets::format_count(outcome.warnings),
+                    t!("installer-result-warnings"),
+                    count_text(outcome.warnings),
                     if outcome.warnings > 0 {
                         Role::Warning
                     } else {
@@ -1558,8 +1620,8 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
                     },
                 ),
                 metric(
-                    "Errors",
-                    widgets::format_count(outcome.errors),
+                    t!("installer-result-errors"),
+                    count_text(outcome.errors),
                     if outcome.errors > 0 {
                         Role::Danger
                     } else {
@@ -1571,38 +1633,35 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
         ui.add_space(SPACE_SM);
         ui.horizontal(|ui| {
             if let Some(valid) = outcome.package_valid {
+                let text = if valid {
+                    t!("installer-result-package-valid")
+                } else {
+                    t!("installer-result-package-invalid")
+                };
                 widgets::status_pill(
                     ui,
                     theme,
-                    if valid {
-                        "Package Hashes Valid"
-                    } else {
-                        "Package Hashes INVALID"
-                    },
+                    &text,
                     if valid { Role::Success } else { Role::Danger },
                 );
             }
             if let Some(valid) = outcome.restore_valid {
+                let text = if valid {
+                    t!("installer-result-files-valid")
+                } else {
+                    t!("installer-result-files-invalid")
+                };
                 widgets::status_pill(
                     ui,
                     theme,
-                    if valid {
-                        "Installed Files Valid"
-                    } else {
-                        "Installed Files INVALID"
-                    },
+                    &text,
                     if valid { Role::Success } else { Role::Danger },
                 );
             }
         });
         if outcome.reboot {
             ui.add_space(SPACE_SM);
-            widgets::notice(
-                ui,
-                theme,
-                Role::Warning,
-                "A dependency needs a reboot to finish. Restart Windows, then launch the app.",
-            );
+            widgets::notice(ui, theme, Role::Warning, &t!("installer-result-reboot"));
         }
         for (role, message) in &outcome.messages {
             ui.add_space(SPACE_XS);
@@ -1616,9 +1675,9 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
         if !outcome.changes.is_empty() && outcome.rollback.is_none() {
             ui.add_space(SPACE_SM);
             egui::CollapsingHeader::new(
-                RichText::new(format!(
-                    "Changes ({})",
-                    widgets::format_count(outcome.changes.len())
+                RichText::new(t!(
+                    "installer-result-changes",
+                    count = outcome.changes.len()
                 ))
                 .font(theme::semibold(13.0))
                 .color(theme.text),
@@ -1632,9 +1691,9 @@ fn outcome_ui(ui: &mut egui::Ui, theme: &Theme, outcome: &Outcome, log_path: Opt
                     widgets::hint(
                         ui,
                         theme,
-                        &format!(
-                            "and {} more.",
-                            widgets::format_count(outcome.changes.len() - MAX_LISTED_CHANGES)
+                        &t!(
+                            "installer-result-changes-more",
+                            count = outcome.changes.len() - MAX_LISTED_CHANGES
                         ),
                     );
                 }
@@ -1648,21 +1707,24 @@ fn prereq_row(prereq: &RuntimePrerequisite) -> PrereqRow {
         let spec = spec_for_bundle(&prereq.kind, bundle);
         let spec = spec.as_ref();
         if let Some(feature) = spec.and_then(|spec| spec.windows_feature.as_deref()) {
-            (format!("Windows Feature: {feature}"), Role::Accent)
+            (
+                t!("installer-dependency-windows-feature", feature = feature),
+                Role::Accent,
+            )
         } else if spec.is_some_and(|spec| spec.bundleable) && bundle.package_relative_path.is_some()
         {
-            ("Included".to_owned(), Role::Accent)
+            (t!("installer-dependency-included"), Role::Accent)
         } else if let Some(id) = spec.and_then(|spec| spec.winget_id.as_deref()) {
-            (format!("Installed with winget: {id}"), Role::Accent)
+            (t!("installer-dependency-winget", id = id), Role::Accent)
         } else {
-            ("Install Manually".to_owned(), Role::Warning)
+            (t!("installer-dependency-manual"), Role::Warning)
         }
     } else if matches!(prereq.kind, RuntimePrerequisiteKind::DotNetFramework4x) {
-        ("Built into Windows".to_owned(), Role::Success)
+        (t!("installer-dependency-built-in"), Role::Success)
     } else if !prereq.install_manually {
-        ("Ships with the App".to_owned(), Role::Success)
+        (t!("installer-dependency-ships-with-app"), Role::Success)
     } else {
-        ("Install Manually".to_owned(), Role::Warning)
+        (t!("installer-dependency-manual"), Role::Warning)
     };
     PrereqRow {
         name: prereq.name.clone(),
@@ -1678,7 +1740,7 @@ fn outcome_from(result: &RestoreResult, applied: bool) -> Outcome {
         .any(|warning| warning.code.contains("reboot"));
     let mut messages: Vec<(Role, String)> = Vec::new();
     for error in &result.errors {
-        messages.push((Role::Danger, error.message.clone()));
+        messages.push((Role::Danger, error.text()));
     }
     // Surface a few of the most relevant warnings without flooding the panel.
     for warning in result
@@ -1687,7 +1749,7 @@ fn outcome_from(result: &RestoreResult, applied: bool) -> Outcome {
         .filter(|warning| !matches!(warning.severity, WarningSeverity::Info))
         .take(5)
     {
-        messages.push((severity_role(&warning.severity), warning.message.clone()));
+        messages.push((severity_role(&warning.severity), warning.text()));
     }
     let (package_valid, restore_valid) =
         result.verification.as_ref().map_or((None, None), |report| {
@@ -1702,17 +1764,18 @@ fn outcome_from(result: &RestoreResult, applied: bool) -> Outcome {
         restore_valid,
         reboot,
         messages,
-        refused: result
-            .refused
-            .iter()
-            .map(|refused| refused.message.clone())
-            .collect(),
+        refused: result.refused.iter().map(Warning::text).collect(),
         rollback: result.rollback.clone(),
         cancelled: result
             .errors
             .iter()
             .any(|error| error.code == CANCELLED_CODE),
     }
+}
+
+/// A count on its own, as the language in use writes numbers.
+fn count_text(count: usize) -> String {
+    winappmigrator_i18n::number(count as u64)
 }
 
 fn severity_role(severity: &WarningSeverity) -> Role {
@@ -1729,6 +1792,7 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use winappmigrator_core::Result;
+    use winappmigrator_i18n::{PSEUDO_LONG, is_marked, with_language};
 
     use super::*;
     use winappmigrator_core::SystemChangeKind;
@@ -2308,6 +2372,56 @@ mod tests {
         }
     }
 
+    /// The installer runs on the PC an app is moved to, and its words come from the catalog, in that
+    /// PC's language. A word left in the code would be the same in every language, unmarked.
+    #[test]
+    fn the_ready_screen_takes_its_words_from_the_catalog() {
+        with_language(&PSEUDO_LONG, || {
+            let mut harness = harness_for(sample_installer(ThemeMode::Dark));
+            let install = t!("installer-install");
+            assert!(is_marked(&install), "{install}");
+            assert_eq!(
+                harness.get_by_label(&install).accesskit_node().role(),
+                egui::accesskit::Role::Button
+            );
+            assert!(harness.query_by_label("Install").is_none());
+            preview(&mut harness, "ready-pseudo-dark");
+        });
+    }
+
+    /// Only once there is something to install is there a language to choose for it.
+    #[test]
+    fn the_ready_screen_offers_a_language_menu() {
+        let harness = harness_for(sample_installer(ThemeMode::Dark));
+        assert!(
+            harness
+                .query_by_role(egui::accesskit::Role::ComboBox)
+                .is_some()
+        );
+        let harness = harness_for(InstallerApp::blank());
+        assert!(
+            harness
+                .query_by_role(egui::accesskit::Role::ComboBox)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_language_menu_waits_while_it_installs() {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.phase = Phase::Running;
+        app.applied_now = true;
+        app.step = Some(InstallStep::new(InstallPhase::Files, 1, 2));
+        app.monitor = Some(InstallMonitor::default());
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .get_by_role(egui::accesskit::Role::ComboBox)
+                .accesskit_node()
+                .is_disabled()
+        );
+    }
+
     #[test]
     fn what_it_sets_up_beyond_files_is_listed_before_installing() {
         let mut app = sample_installer(ThemeMode::Dark);
@@ -2385,7 +2499,11 @@ mod tests {
     #[test]
     fn an_unsigned_installer_says_its_publisher_is_unknown() {
         let harness = harness_for(sample_installer(ThemeMode::Dark));
-        assert!(harness.query_by_label(UNSIGNED_TEXT).is_some());
+        assert!(
+            harness
+                .query_by_label(&t!("installer-signature-unsigned"))
+                .is_some()
+        );
     }
 
     #[test]
@@ -2394,7 +2512,20 @@ mod tests {
         app.signature = SignatureState::Signed("Fabrikam, Inc.".to_owned());
         let harness = harness_for(app);
         assert!(harness.query_by_label("Signed by Fabrikam, Inc.").is_some());
-        assert!(harness.query_by_label(UNSIGNED_TEXT).is_none());
+        assert!(
+            harness
+                .query_by_label(&t!("installer-signature-unsigned"))
+                .is_none()
+        );
+
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.signature = SignatureState::Signed(String::new());
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .query_by_label("Signed by an unnamed publisher")
+                .is_some()
+        );
     }
 
     #[test]
@@ -2508,7 +2639,11 @@ mod tests {
                 "{label}"
             );
         }
-        assert!(harness.query_by_label(LOCATION_BLOCKS_TEXT).is_some());
+        assert!(
+            harness
+                .query_by_label(&t!("installer-location-blocks"))
+                .is_some()
+        );
     }
 
     /// Issue #2: the buttons were off, and all that said why was a grey line that read like help.
@@ -2585,8 +2720,16 @@ mod tests {
                 .accesskit_node()
                 .is_disabled()
         );
-        assert!(harness.query_by_label(LOCATION_BLOCKS_TEXT).is_none());
-        assert!(harness.query_by_label(PACKAGE_BLOCKS_TEXT).is_none());
+        assert!(
+            harness
+                .query_by_label(&t!("installer-location-blocks"))
+                .is_none()
+        );
+        assert!(
+            harness
+                .query_by_label(&t!("installer-package-blocks"))
+                .is_none()
+        );
         Ok(())
     }
 
@@ -2605,8 +2748,16 @@ mod tests {
                 .accesskit_node()
                 .is_disabled()
         );
-        assert!(harness.query_by_label(PACKAGE_BLOCKS_TEXT).is_some());
-        assert!(harness.query_by_label(LOCATION_BLOCKS_TEXT).is_none());
+        assert!(
+            harness
+                .query_by_label(&t!("installer-package-blocks"))
+                .is_some()
+        );
+        assert!(
+            harness
+                .query_by_label(&t!("installer-location-blocks"))
+                .is_none()
+        );
         Ok(())
     }
 

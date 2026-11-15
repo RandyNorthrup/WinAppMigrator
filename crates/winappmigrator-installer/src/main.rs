@@ -23,6 +23,7 @@
 use std::process::ExitCode;
 
 use winappmigrator_core::logging;
+use winappmigrator_i18n::t;
 use winappmigrator_installer::{gui, headless, uninstall};
 
 fn main() -> ExitCode {
@@ -42,17 +43,18 @@ fn main() -> ExitCode {
     match gui::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            // A windowed program has nowhere to print this, and its window is what failed.
+            // A windowed program has nowhere to print this, and its window is what failed. It is said
+            // in the language the window would have spoken.
             logging::open_machine_log();
             tracing::error!(%error, "the installer's window could not open");
             rfd::MessageDialog::new()
                 .set_level(rfd::MessageLevel::Error)
-                .set_title("WinAppMigrator Installer")
+                .set_title(t!("installer-window-title"))
                 .set_description(format!(
-                    "The installer's window could not open: {error}\n\n{}\n\nIt can still install \
-                     without one: run this file from an administrator's command prompt with \
-                     --apply, and --target-root followed by a folder to choose where.",
-                    winappmigrator_ui::NEEDS_DIRECT3D_12_TEXT
+                    "{}\n\n{}\n\n{}",
+                    t!("installer-window-failed", error = error.to_string()),
+                    winappmigrator_ui::NEEDS_DIRECT3D_12_TEXT,
+                    t!("installer-window-failed-without-one")
                 ))
                 .show();
             ExitCode::FAILURE

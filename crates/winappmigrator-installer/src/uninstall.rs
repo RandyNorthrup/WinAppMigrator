@@ -15,6 +15,7 @@ use winappmigrator_core::rollback::{
     UninstallOutcome, open_install, report_lines, schedule_removal_of_running_uninstaller,
 };
 use winappmigrator_core::{InstallMonitor, Result, WinAppMigratorError};
+use winappmigrator_i18n::{t, t_english};
 
 /// Arguments accepted by the stub when uninstalling.
 #[derive(Debug, Parser)]
@@ -47,12 +48,8 @@ pub fn is_requested(args: &[std::ffi::OsString]) -> bool {
 
 /// Where installs are recorded. Fixed, and not something a command line can change.
 pub(crate) fn state_root() -> Result<PathBuf> {
-    machine_state_root().ok_or_else(|| {
-        WinAppMigratorError::InvalidInput(
-            "this PC's ProgramData folder could not be found, so there is no record to read"
-                .to_owned(),
-        )
-    })
+    machine_state_root()
+        .ok_or_else(|| WinAppMigratorError::InvalidInput(t!("uninstaller-no-programdata")))
 }
 
 pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
@@ -64,23 +61,30 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 tracing::error!(%error, "the uninstaller's window could not open");
-                eprintln!("error: {error}");
+                // What is printed is for scripts, and English, as with --quiet.
+                eprintln!(
+                    "{}",
+                    t_english!("uninstaller-cli-error", error = error.to_string())
+                );
                 // Started from Settings there is nowhere that would show. It would seem to do nothing.
+                // The window chose the language before it failed, and this is said in it.
                 rfd::MessageDialog::new()
                     .set_level(rfd::MessageLevel::Error)
-                    .set_title("WinAppMigrator Uninstaller")
+                    .set_title(t!("uninstaller-window-failed-title"))
                     .set_description(no_window_text(&error.to_string(), &id))
                     .show();
                 ExitCode::FAILURE
             }
         };
     }
+    // Scripts read what this prints, so it is English whatever this PC speaks.
+    winappmigrator_i18n::use_language(winappmigrator_i18n::ENGLISH);
     match run_quiet(&cli) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(error) => {
             tracing::error!(%error, "could not uninstall");
-            eprintln!("error: {error}");
+            eprintln!("{}", t!("uninstaller-cli-error", error = error.to_string()));
             ExitCode::FAILURE
         }
     }
@@ -89,13 +93,15 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
 /// What a person is told when the window cannot open: what would do the same without one.
 fn no_window_text(error: &str, id: &str) -> String {
     let this_program = std::env::current_exe().map_or_else(
-        |_| "this program".to_owned(),
+        |_| t!("uninstaller-this-program"),
         |path| format!("\"{}\"", path.display()),
     );
+    // The command itself is not translated: it is what is typed.
     format!(
-        "The uninstaller's window could not open: {error}\n\n{}\n\nIt can still uninstall without \
-         one, from an administrator's command prompt:\n\n{this_program} {UNINSTALL_FLAG} {id} --quiet",
-        winappmigrator_ui::NEEDS_DIRECT3D_12_TEXT
+        "{}\n\n{}\n\n{}\n\n{this_program} {UNINSTALL_FLAG} {id} --quiet",
+        t!("uninstaller-window-failed", error = error),
+        winappmigrator_ui::NEEDS_DIRECT3D_12_TEXT,
+        t!("uninstaller-window-failed-quiet")
     )
 }
 
@@ -107,11 +113,20 @@ fn run_quiet(cli: &UninstallCli) -> Result<bool> {
     let log = logging::open_machine_log();
     let opened = open_install(&state_root()?, &cli.id)?;
     let summary = opened.summary();
-    println!("Uninstalling {}.", summary.app_name);
+    println!(
+        "{}",
+        t!(
+            "uninstaller-cli-uninstalling",
+            app_name = summary.app_name.as_str()
+        )
+    );
     let outcome = opened.uninstall(cli.remove_user_data, &InstallMonitor::default());
     print_outcome(&outcome);
     if let Some(log) = log {
-        println!("Log: {}", log.display());
+        println!(
+            "{}",
+            t!("uninstaller-cli-log", path = log.display().to_string())
+        );
     }
     finish(&outcome);
     Ok(outcome.finished)

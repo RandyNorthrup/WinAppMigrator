@@ -21,6 +21,7 @@ test = false
 
 [dependencies]
 winappmigrator-core.workspace = true
+winappmigrator-i18n.workspace = true
 winappmigrator-ui.workspace = true
 eframe.workspace = true
 rfd.workspace = true

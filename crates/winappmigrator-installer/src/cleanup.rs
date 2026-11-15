@@ -14,6 +14,7 @@ use winappmigrator_core::privilege::{
     ProtectedFolder, TOOL_TEMP_PREFIX, others_could_keep_a_folder_made_in, tool_temp_root_in,
 };
 use winappmigrator_core::space::{on_same_volume, volume_stats_at};
+use winappmigrator_i18n::t;
 
 const DELETE: u32 = 0x0001_0000;
 const FILE_SHARE_READ: u32 = 0x0000_0001;
@@ -223,15 +224,14 @@ fn create_staging_dir_where(
         .or_else(|| beside_installer.and_then(make_in))
         .or_else(|| make_in(&temp))
         .ok_or_else(|| {
-            let why = why_not_the_records_folder
+            let said = match why_not_the_records_folder
                 .take()
                 .or_else(|| last_failure.take())
-                .map_or_else(String::new, |failure| {
-                    format!(". The one to look at is {failure}")
-                });
-            std::io::Error::other(format!(
-                "there is nowhere to unpack the package that only administrators can get into{why}"
-            ))
+            {
+                Some(failure) => t!("installer-staging-nowhere-look-at", failure = failure),
+                None => t!("installer-staging-nowhere"),
+            };
+            std::io::Error::other(said)
         })
 }
 

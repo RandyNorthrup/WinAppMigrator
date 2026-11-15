@@ -20,6 +20,7 @@ use winappmigrator_core::{
     read_embedded_manifest, refuse_what_cannot_run_here, refuse_without_room_to_install,
     restore_package_monitored, system_changes_restoring, verify_unpacked_package,
 };
+use winappmigrator_i18n::t;
 
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_FAILURE: u8 = 1;
@@ -58,17 +59,28 @@ pub struct InstallerCli {
 }
 
 pub fn run() -> ExitCode {
+    // Scripts read what this prints, so it is English whatever this PC speaks. Its words are in the
+    // catalog all the same, with the rest of the installer's.
+    winappmigrator_i18n::use_language(winappmigrator_i18n::ENGLISH);
     match run_inner(std::env::args_os()) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             tracing::error!(%error, "nothing was installed");
             if let Some(log) = logging::current_log_file() {
-                eprintln!("log: {}", log.display());
+                eprintln!(
+                    "{}",
+                    t!("installer-cli-error-log", path = log.display().to_string())
+                );
             }
-            eprintln!("error: {error}");
+            eprintln!("{}", t!("installer-cli-error", error = error.to_string()));
             ExitCode::FAILURE
         }
     }
+}
+
+/// A count as a script reads it: digits alone, however this PC groups them.
+fn digits(count: usize) -> String {
+    count.to_string()
 }
 
 fn run_inner<I, T>(args: I) -> Result<u8>
@@ -83,11 +95,8 @@ where
     // A bare stub (no embedded package) is only ever the template the app copies
     // when building an installer — it has nothing to install.
     if !has_embedded_self_archive(&executable)? {
-        println!("WinAppMigrator installer stub — it carries no application package.");
-        println!(
-            "Build an installer with the WinAppMigrator app, then run the produced .exe on the \
-             target machine."
-        );
+        println!("{}", t!("installer-cli-stub"));
+        println!("{}", t!("installer-cli-stub-how"));
         return Ok(EXIT_SUCCESS);
     }
 
@@ -106,10 +115,10 @@ fn about_what(source: Option<&str>) -> String {
 fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
     let cli = InstallerCli::parse_from(raw_args);
     if cli.target_root.is_none() && !cli.apply && !cli.dry_run {
-        println!("WinAppMigrator self-extracting installer.");
-        println!("Run it with no arguments to open the graphical installer, or:");
-        println!("  preview the reinstall: --dry-run [--target-root <DIR>]");
-        println!("  reinstall:             --apply [--target-root <DIR>]");
+        println!("{}", t!("installer-cli-usage-title"));
+        println!("{}", t!("installer-cli-usage"));
+        println!("  {}", t!("installer-cli-usage-preview"));
+        println!("  {}", t!("installer-cli-usage-apply"));
         return Ok(EXIT_SUCCESS);
     }
     if let Some(path) = cli.log.as_deref() {
@@ -122,18 +131,14 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
 
     // Checked before anything is parsed, and held open so it cannot be swapped afterward.
     let Some(package) = EmbeddedPackage::open(executable)? else {
-        return Err(WinAppMigratorError::InvalidInput(
-            "installer does not contain an embedded package".to_owned(),
-        ));
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "installer-cli-no-package"
+        )));
     };
     let manifest = read_embedded_manifest(&package)?;
     let target_root = choose_target_root(cli.target_root.clone(), &manifest)?;
-    let state_root = machine_state_root().ok_or_else(|| {
-        WinAppMigratorError::InvalidInput(
-            "this PC's ProgramData folder could not be found, so an install could not be undone"
-                .to_owned(),
-        )
-    })?;
+    let state_root = machine_state_root()
+        .ok_or_else(|| WinAppMigratorError::InvalidInput(t!("installer-cli-no-programdata")))?;
     if cli.apply {
         refuse_a_folder_with_files(&target_root, cli.force, &state_root)?;
     }
@@ -171,9 +176,9 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
         preview_needs(temp_dir.path(), unpacked_bytes)
     };
     let room = refuse_without_room_to_install(&places)?;
-    println!("Room: {}", room.summary());
+    println!("{}", t!("installer-cli-room", summary = room.summary()));
     for note in room.could_not_tell() {
-        println!("  Note: {note}");
+        println!("  {}", t!("installer-cli-note", note = note));
     }
     package.extract_to(temp_dir.path())?;
 
@@ -186,7 +191,13 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
         restore_license,
     );
     if let Ok(changes) = listed.as_ref() {
-        println!("Sets up: {}", changes.changes.len());
+        println!(
+            "{}",
+            t!(
+                "installer-cli-sets-up",
+                count = digits(changes.changes.len())
+            )
+        );
         for change in &changes.changes {
             println!(
                 "  {}: {}: {}",
@@ -196,7 +207,7 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
             );
         }
         for note in &changes.notes {
-            println!("  Note: {note}");
+            println!("  {}", t!("installer-cli-note", note = note.as_str()));
         }
     }
     let result = restore_package_monitored(
@@ -214,14 +225,28 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
         &InstallMonitor::default(),
         Some(&package),
     )?;
+    if applied {
+        println!("{}", t!("installer-cli-applied"));
+    } else {
+        println!("{}", t!("installer-cli-previewed"));
+    }
     println!(
-        "Reinstall {}.",
-        if applied { "applied" } else { "previewed" }
+        "{}",
+        t!(
+            "installer-cli-changes-logged",
+            count = digits(result.changes_logged.len())
+        )
     );
-    println!("Changes logged: {}", result.changes_logged.len());
     // The restore logs are in the staging folder, which is removed when this returns, so
-    // this is the only place automation can see what went wrong.
-    println!("Warnings: {}", result.warnings.len());
+    // this is the only place automation can see what went wrong. A warning is said as recorded, in
+    // English.
+    println!(
+        "{}",
+        t!(
+            "installer-cli-warnings",
+            count = digits(result.warnings.len())
+        )
+    );
     for warning in &result.warnings {
         println!(
             "  {}: {}{}",
@@ -230,7 +255,10 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
             about_what(warning.source.as_deref())
         );
     }
-    println!("Errors: {}", result.errors.len());
+    println!(
+        "{}",
+        t!("installer-cli-errors", count = digits(result.errors.len()))
+    );
     for error in &result.errors {
         println!(
             "  {}: {}{}",
@@ -239,7 +267,13 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
             about_what(error.source.as_deref())
         );
     }
-    println!("Refused: {}", result.refused.len());
+    println!(
+        "{}",
+        t!(
+            "installer-cli-refused",
+            count = digits(result.refused.len())
+        )
+    );
     for refused in &result.refused {
         println!("  {}", refused.message);
     }
@@ -259,25 +293,38 @@ fn run_installer(raw_args: Vec<OsString>, executable: &Path) -> Result<u8> {
             },
         )?,
     };
-    println!("Package hashes valid: {}", verification.package_valid);
+    // `true` or `false`, as a script reads it.
+    println!(
+        "{}",
+        t!(
+            "installer-cli-package-valid",
+            valid = verification.package_valid.to_string()
+        )
+    );
     let restore_ok = match verification.restore_valid {
         Some(valid) => {
-            println!("Reinstall hashes valid: {valid}");
+            println!(
+                "{}",
+                t!("installer-cli-reinstall-valid", valid = valid.to_string())
+            );
             valid
         }
         None => true,
     };
     if let Some(id) = result.install_id.as_deref() {
-        println!("Install id: {id}");
+        println!("{}", t!("installer-cli-install-id", id = id));
     }
     if let Some(report) = result.rollback.as_ref() {
-        println!("The install failed, so what it changed was put back.");
+        println!("{}", t!("installer-cli-put-back"));
         for line in report_lines(report) {
             println!("{line}");
         }
     }
     if let Some(log) = logging::current_log_file() {
-        println!("Log: {}", log.display());
+        println!(
+            "{}",
+            t!("installer-cli-log", path = log.display().to_string())
+        );
     }
 
     if verification.package_valid && restore_ok && result.errors.is_empty() {
@@ -294,9 +341,10 @@ fn refuse_a_folder_with_files(target_root: &Path, force: bool, state_root: &Path
         return Ok(());
     }
     match files_no_install_put_there(target_root, Some(state_root)) {
-        Some(problem) => Err(WinAppMigratorError::InvalidInput(format!(
-            "{} cannot be used: {problem}. Give --force only if you know it is this app's",
-            target_root.display()
+        Some(problem) => Err(WinAppMigratorError::InvalidInput(t!(
+            "installer-cli-folder-has-files",
+            path = target_root.display().to_string(),
+            problem = problem
         ))),
         None => Ok(()),
     }
@@ -309,15 +357,15 @@ fn choose_target_root(asked_for: Option<PathBuf>, manifest: &PackageManifest) ->
         return Ok(asked_for);
     }
     let Some(recorded) = default_install_location(manifest) else {
-        return Err(WinAppMigratorError::InvalidInput(
-            "this package does not say where its app was, so give a --target-root".to_owned(),
-        ));
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "installer-cli-no-location"
+        )));
     };
     match install_location_problem(&recorded) {
-        Some(problem) => Err(WinAppMigratorError::InvalidInput(format!(
-            "this package's app was in {}, and that cannot be used: {problem}. Give a \
-             --target-root",
-            recorded.display()
+        Some(problem) => Err(WinAppMigratorError::InvalidInput(t!(
+            "installer-cli-location-refused",
+            path = recorded.display().to_string(),
+            problem = problem
         ))),
         None => Ok(recorded),
     }

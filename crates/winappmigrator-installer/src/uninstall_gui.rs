@@ -14,6 +14,8 @@ use winappmigrator_core::logging;
 use winappmigrator_core::path_utils::system_root;
 use winappmigrator_core::rollback::{OpenInstall, UninstallOutcome, open_install};
 use winappmigrator_core::{InstallMonitor, InstallStep};
+use winappmigrator_i18n::t;
+use winappmigrator_ui::language::declare_language;
 use winappmigrator_ui::theme::{
     self, Role, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, Theme, ThemeMode,
 };
@@ -22,7 +24,6 @@ use winappmigrator_ui::window::{Opening, WindowSizes};
 
 use crate::uninstall::UninstallCli;
 
-const WINDOW_TITLE: &str = "Uninstall";
 const WINDOW_SIZES: WindowSizes = WindowSizes {
     opens_at: egui::vec2(620.0, 560.0),
     at_least: egui::vec2(520.0, 420.0),
@@ -33,10 +34,12 @@ const BUSY_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_LISTED_ITEMS: usize = 30;
 
 pub fn run(cli: UninstallCli) -> eframe::Result {
+    // It speaks this PC's language, as the installer did. It saves no choice.
+    winappmigrator_i18n::use_preferred_language(None);
     let finished: Arc<Mutex<Option<UninstallOutcome>>> = Arc::new(Mutex::new(None));
     let for_window = Arc::clone(&finished);
     let result = eframe::run_native(
-        WINDOW_TITLE,
+        &t!("uninstaller-window-title"),
         winappmigrator_ui::window_options(WINDOW_SIZES.viewport("winappmigrator-uninstaller")),
         Box::new(move |cc| {
             theme::install_fonts(&cc.egui_ctx, &system_root().join("Fonts"));
@@ -165,9 +168,9 @@ impl UninstallApp {
                     self.opened = Some(*opened);
                     self.summary = *summary;
                     self.stage = Stage::Ready;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                        "Uninstall {}",
-                        self.summary.app_name
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Title(t!(
+                        "uninstaller-window-title-app",
+                        app_name = self.summary.app_name.as_str()
                     )));
                     return;
                 }
@@ -191,8 +194,7 @@ impl UninstallApp {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if matches!(self.stage, Stage::Running | Stage::Opening) {
-                        self.stage =
-                            Stage::Failed("The uninstall stopped unexpectedly.".to_owned());
+                        self.stage = Stage::Failed(t!("uninstaller-stopped-unexpectedly"));
                     }
                     return;
                 }
@@ -202,6 +204,7 @@ impl UninstallApp {
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
+        declare_language(ui.ctx());
         egui::Panel::top("header")
             .frame(
                 egui::Frame::new()
@@ -240,9 +243,12 @@ impl UninstallApp {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let title = if self.summary.app_name.is_empty() {
-                    WINDOW_TITLE.to_owned()
+                    t!("uninstaller-window-title")
                 } else {
-                    format!("Uninstall {}", self.summary.app_name)
+                    t!(
+                        "uninstaller-window-title-app",
+                        app_name = self.summary.app_name.as_str()
+                    )
                 };
                 ui.label(
                     RichText::new(title)
@@ -250,7 +256,7 @@ impl UninstallApp {
                         .color(theme.text),
                 );
                 ui.label(
-                    RichText::new("Undoes what its installer did")
+                    RichText::new(t!("uninstaller-tagline"))
                         .size(12.5)
                         .color(theme.text_muted),
                 );
@@ -262,7 +268,7 @@ impl UninstallApp {
         match &self.stage {
             Stage::Opening => {
                 ui.label(
-                    RichText::new("Reading the record of this install…")
+                    RichText::new(t!("uninstaller-reading"))
                         .size(13.5)
                         .color(theme.text),
                 );
@@ -278,42 +284,44 @@ impl UninstallApp {
     fn draw_plan(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         let enabled = matches!(self.stage, Stage::Ready);
         let summary = &self.summary;
-        widgets::card_titled(ui, theme, "What Will Be Removed", None, |ui| {
-            widgets::kv_row(
-                ui,
-                theme,
-                "Install Location",
-                &summary.target_root.display().to_string(),
-            );
-            for (label, count) in [
-                ("Files", summary.files),
-                ("Registry Values", summary.registry_values),
-                ("Services", summary.services),
-                ("Drivers", summary.drivers),
-                ("Scheduled Tasks", summary.tasks),
-                ("Environment", summary.environment),
-            ] {
-                if count > 0 {
-                    widgets::kv_row(ui, theme, label, &widgets::format_count(count));
+        widgets::card_titled(
+            ui,
+            theme,
+            &t!("uninstaller-what-will-be-removed"),
+            None,
+            |ui| {
+                widgets::kv_row(
+                    ui,
+                    theme,
+                    &t!("uninstaller-install-location"),
+                    &summary.target_root.display().to_string(),
+                );
+                for (label, count) in [
+                    (t!("uninstaller-files"), summary.files),
+                    (t!("uninstaller-registry-values"), summary.registry_values),
+                    (t!("uninstaller-services"), summary.services),
+                    (t!("uninstaller-drivers"), summary.drivers),
+                    (t!("uninstaller-scheduled-tasks"), summary.tasks),
+                    (t!("uninstaller-environment"), summary.environment),
+                ] {
+                    if count > 0 {
+                        widgets::kv_row(ui, theme, &label, &count_text(count));
+                    }
                 }
-            }
-            ui.add_space(SPACE_SM);
-            widgets::hint(ui, theme, &plan_hint(summary));
-        });
+                ui.add_space(SPACE_SM);
+                widgets::hint(ui, theme, &plan_hint(summary));
+            },
+        );
         let keepable = summary.user_data + summary.license;
         if keepable > 0 {
             widgets::section_gap(ui);
-            let description = format!(
-                "{keepable} items of its settings, data, and license. They stay unless this is \
-                 on. What they replaced comes back, or goes beside them if they have changed \
-                 since."
-            );
-            widgets::card_titled(ui, theme, "Options", None, |ui| {
+            let description = t!("uninstaller-remove-user-data-detail", count = keepable);
+            widgets::card_titled(ui, theme, &t!("uninstaller-options"), None, |ui| {
                 widgets::option_row(
                     ui,
                     theme,
                     &mut self.remove_user_data,
-                    "Also Remove User Data and License Data",
+                    &t!("uninstaller-remove-user-data"),
                     &description,
                     enabled,
                 );
@@ -343,13 +351,37 @@ impl UninstallApp {
         let ready = matches!(self.stage, Stage::Ready);
         widgets::control_row(ui, |ui| {
             if ready {
-                if widgets::button(ui, theme, ButtonKind::Primary, "Uninstall", true).clicked() {
+                if widgets::button(
+                    ui,
+                    theme,
+                    ButtonKind::Primary,
+                    &t!("uninstaller-uninstall"),
+                    true,
+                )
+                .clicked()
+                {
                     self.start_uninstall(&ctx);
                 }
-                if widgets::button(ui, theme, ButtonKind::Secondary, "Cancel", true).clicked() {
+                if widgets::button(
+                    ui,
+                    theme,
+                    ButtonKind::Secondary,
+                    &t!("uninstaller-cancel"),
+                    true,
+                )
+                .clicked()
+                {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-            } else if widgets::button(ui, theme, ButtonKind::Primary, "Close", true).clicked() {
+            } else if widgets::button(
+                ui,
+                theme,
+                ButtonKind::Primary,
+                &t!("uninstaller-close"),
+                true,
+            )
+            .clicked()
+            {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
@@ -378,35 +410,40 @@ impl eframe::App for UninstallApp {
     }
 }
 
+/// What stays, and what comes back: a sentence for each that applies.
 fn plan_hint(summary: &InstallSummary) -> String {
-    let mut hint = "Files you added or changed stay, with the folders they are in.".to_owned();
+    let mut sentences = vec![t!("uninstaller-plan-stays")];
     if summary.files_coming_back > 0 {
-        hint.push_str(&format!(
-            " {} files this install replaced come back, or go beside a file that has changed \
-             since.",
-            widgets::format_count(summary.files_coming_back)
+        sentences.push(t!(
+            "uninstaller-plan-coming-back",
+            count = summary.files_coming_back
         ));
     }
     if !summary.runtimes_left.is_empty() {
-        hint.push_str(&format!(
-            " Runtimes it installed stay, because other programs may use them: {}.",
-            summary.runtimes_left.join(", ")
+        sentences.push(t!(
+            "uninstaller-plan-runtimes",
+            runtimes = winappmigrator_i18n::join_list(&summary.runtimes_left)
         ));
     }
-    hint
+    sentences.join(" ")
+}
+
+/// A count on its own, as the language in use writes numbers.
+fn count_text(count: usize) -> String {
+    winappmigrator_i18n::number(count as u64)
 }
 
 fn step_label(step: Option<InstallStep>) -> (String, Option<f32>) {
     match step {
         Some(step) if step.total > 0 => (
-            format!(
-                "Undoing the install: {} of {}…",
-                widgets::format_count(step.done),
-                widgets::format_count(step.total)
+            t!(
+                "uninstaller-step-counted",
+                done = step.done,
+                total = step.total
             ),
             step.fraction(),
         ),
-        _ => ("Undoing the install…".to_owned(), None),
+        _ => (t!("uninstaller-step"), None),
     }
 }
 
@@ -418,39 +455,28 @@ fn draw_outcome(
 ) {
     let report = &outcome.report;
     if outcome.finished {
-        widgets::notice(
-            ui,
-            theme,
-            Role::Success,
-            if report.kept.is_empty() {
-                "The app was uninstalled."
-            } else {
-                "The app was uninstalled, except for what is listed below."
-            },
-        );
+        let text = if report.kept.is_empty() {
+            t!("uninstaller-done")
+        } else {
+            t!("uninstaller-done-except")
+        };
+        widgets::notice(ui, theme, Role::Success, &text);
     } else if report.failed.is_empty() {
-        widgets::notice(
-            ui,
-            theme,
-            Role::Warning,
-            "Part of it is on a drive that is not connected. Connect it, and uninstall again \
-             from Settings.",
-        );
+        widgets::notice(ui, theme, Role::Warning, &t!("uninstaller-waits-for-drive"));
     } else {
-        widgets::notice(
-            ui,
-            theme,
-            Role::Danger,
-            "Not all of it could be undone. Close what is using it, and uninstall again from \
-             Settings.",
-        );
+        widgets::notice(ui, theme, Role::Danger, &t!("uninstaller-not-all-undone"));
         for line in &report.failed {
             ui.add_space(SPACE_XS);
             widgets::notice(ui, theme, Role::Danger, line);
         }
         if let Some(log_path) = log_path {
             ui.add_space(SPACE_SM);
-            widgets::mono_path(ui, theme, "Log", &log_path.display().to_string());
+            widgets::mono_path(
+                ui,
+                theme,
+                &t!("uninstaller-log"),
+                &log_path.display().to_string(),
+            );
         }
     }
     widgets::section_gap(ui);
@@ -459,13 +485,13 @@ fn draw_outcome(
         theme,
         &[
             widgets::metric(
-                "Undone",
-                widgets::format_count(report.undone.len()),
+                t!("uninstaller-undone"),
+                count_text(report.undone.len()),
                 Role::Accent,
             ),
             widgets::metric(
-                "Left in Place",
-                widgets::format_count(report.kept.len()),
+                t!("uninstaller-left-in-place"),
+                count_text(report.kept.len()),
                 if report.kept.is_empty() {
                     Role::Neutral
                 } else {
@@ -473,8 +499,8 @@ fn draw_outcome(
                 },
             ),
             widgets::metric(
-                "Could Not Be Undone",
-                widgets::format_count(report.failed.len()),
+                t!("uninstaller-could-not-be-undone"),
+                count_text(report.failed.len()),
                 if report.failed.is_empty() {
                     Role::Success
                 } else {
@@ -486,7 +512,7 @@ fn draw_outcome(
     let left: Vec<&String> = report.kept.iter().chain(&report.left_behind).collect();
     if !left.is_empty() {
         widgets::section_gap(ui);
-        widgets::card_titled(ui, theme, "Left in Place", None, |ui| {
+        widgets::card_titled(ui, theme, &t!("uninstaller-left-in-place"), None, |ui| {
             for line in left.iter().take(MAX_LISTED_ITEMS) {
                 widgets::hint(ui, theme, line);
             }
@@ -494,9 +520,9 @@ fn draw_outcome(
                 widgets::hint(
                     ui,
                     theme,
-                    &format!(
-                        "and {} more.",
-                        widgets::format_count(left.len() - MAX_LISTED_ITEMS)
+                    &t!(
+                        "uninstaller-and-more",
+                        count = left.len() - MAX_LISTED_ITEMS
                     ),
                 );
             }
