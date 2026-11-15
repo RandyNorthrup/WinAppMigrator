@@ -121,13 +121,13 @@ fn differences(english: &Shape, translated: &Shape) -> Vec<String> {
 }
 
 fn english_shape() -> Shape {
-    let source = source_of(ENGLISH.tag).unwrap_or_default();
+    let source = catalog_source(ENGLISH.tag).unwrap_or_default();
     shape(&source).unwrap_or_else(|problem| panic!("English: {problem}"))
 }
 
 #[test]
 fn english_is_built_in_and_parses_whole() {
-    let Some(source) = source_of(ENGLISH.tag) else {
+    let Some(source) = catalog_source(ENGLISH.tag) else {
         panic!("no English catalog is built in");
     };
     assert!(build(ENGLISH, source).is_some());
@@ -140,7 +140,7 @@ fn every_catalog_has_exactly_the_english_messages_with_their_placeholders() {
     let english = english_shape();
     let mut problems = Vec::new();
     for (tag, _) in CATALOGS {
-        let source = source_of(tag).unwrap_or_default();
+        let source = catalog_source(tag).unwrap_or_default();
         match shape(&source) {
             Ok(translated) => problems.extend(
                 differences(&english, &translated)

@@ -32,9 +32,9 @@ pub const PSEUDO_RTL: Language = lang(
 );
 
 /// Opens every message in a test language.
-pub const START: char = '⟦';
+pub const START: char = '«';
 /// Closes every message in a test language.
-pub const END: char = '⟧';
+pub const END: char = '»';
 /// How much longer a test language's text is than the English, as German and Russian often are.
 const GROWTH: f64 = 0.4;
 const PADDING: char = '~';
@@ -155,8 +155,8 @@ mod tests {
         };
         assert!(pseudo.contains("Îñštáll"), "{pseudo}");
         assert!(pseudo.contains("{ $app }"), "{pseudo}");
-        assert!(pseudo.contains("⟦"), "{pseudo}");
-        assert!(pseudo.contains("~~~~⟧"), "{pseudo}");
+        assert!(pseudo.contains('«'), "{pseudo}");
+        assert!(pseudo.contains("~~~~»"), "{pseudo}");
         assert!(
             pseudo.contains(
                 "Öñé fílé
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn marked_text_is_told_from_unmarked() {
-        assert!(is_marked("⟦Îñštáll~~⟧"));
+        assert!(is_marked("«Îñštáll~~»"));
         assert!(!is_marked("C:\\Program Files\\App"));
     }
 }

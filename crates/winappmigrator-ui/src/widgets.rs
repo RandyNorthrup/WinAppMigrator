@@ -13,6 +13,7 @@ use crate::theme::{
     self, CONTROL_HEIGHT, RADIUS_LG, RADIUS_MD, RADIUS_SM, Role, SPACE_LG, SPACE_MD, SPACE_SM,
     SPACE_XS, Theme,
 };
+use winappmigrator_i18n::t;
 
 /// Visual weight for action buttons.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -989,8 +990,8 @@ pub fn search_field(
         let clear = ui
             .interact(clear_rect, id.with("clear"), Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text("Clear Search");
-        clear.widget_info(|| WidgetInfo::labeled(A11yRole::Button, true, "Clear Search"));
+            .on_hover_text(t!("ui-clear-search"));
+        clear.widget_info(|| WidgetInfo::labeled(A11yRole::Button, true, t!("ui-clear-search")));
         if clear.hovered() {
             ui.painter()
                 .rect_filled(clear_rect, RADIUS_SM - 2, theme.card_hover);
@@ -1038,11 +1039,11 @@ pub fn path_field(
             theme,
             ButtonKind::Secondary,
             None,
-            Some("Browse"),
+            Some(&t!("ui-browse")),
             enabled,
             Some(BROWSE_WIDTH),
         )
-        .on_hover_text(format!("Choose {}", label.to_lowercase()))
+        .on_hover_text(t!("ui-browse-tooltip", field = label))
         .clicked()
             && let Some(path) = pick()
         {
@@ -1254,20 +1255,10 @@ pub fn format_count(count: usize) -> String {
     text
 }
 
-/// Format a byte count for people.
+/// A byte count for people, in the language in use. Removed once the app and the installer call
+/// `winappmigrator_i18n::size` themselves (T-APP-TEXT, T-INSTALLER-TEXT).
 pub fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
+    winappmigrator_i18n::size(bytes)
 }
 
 /// Format a duration as `mm:ss`, or `h:mm:ss` past an hour.
@@ -1291,8 +1282,8 @@ mod tests {
 
     #[test]
     fn bytes_read_in_the_largest_whole_unit() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(0), "0 bytes");
+        assert_eq!(format_bytes(1023), "1,023 bytes");
         assert_eq!(format_bytes(1024), "1.0 KB");
         assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
         assert_eq!(format_bytes(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");

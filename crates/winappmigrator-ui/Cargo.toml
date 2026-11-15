@@ -11,6 +11,10 @@ publish = false
 workspace = true
 
 [dependencies]
+winappmigrator-i18n.workspace = true
 eframe.workspace = true
 # Not called directly: selects the Direct3D 12 backend for eframe's renderer.
 wgpu.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true

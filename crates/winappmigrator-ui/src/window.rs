@@ -21,50 +21,72 @@ const WINDOW_FRAME: Vec2 = vec2(16.0, 39.0);
 const TASKBAR: f32 = 48.0;
 const SETTINGS_DIR: &str = "WinAppMigrator";
 const MODE_FILE: &str = "theme.txt";
-/// More than either word it can hold.
-const MOST_MODE_FILE_BYTES: u64 = 16;
+const LANGUAGE_FILE: &str = "language.txt";
+/// More than any word or language tag a setting holds.
+const MOST_SETTING_BYTES: u64 = 16;
 
-fn file_of_the_chosen_mode() -> Option<PathBuf> {
+fn settings_file(name: &str) -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
-    Some(base.join(SETTINGS_DIR).join(MODE_FILE))
+    Some(base.join(SETTINGS_DIR).join(name))
 }
 
 /// The mode a person chose in the app, if they have, on this account.
 fn chosen_mode() -> Option<ThemeMode> {
-    mode_in(&file_of_the_chosen_mode()?)
+    mode_in(&settings_file(MODE_FILE)?)
 }
 
-/// These programs run elevated, and this file is in a folder the account they were started from can
-/// change. So it is only ever one of two words, and only if it is really a file there, as something
-/// else could be made to keep a window from opening.
+/// The language a person chose in the app, if they have, on this account, as its tag. Whether it still ships is for
+/// the caller to ask.
+pub fn chosen_language() -> Option<String> {
+    setting_in(&settings_file(LANGUAGE_FILE)?)
+}
+
 fn mode_in(path: &Path) -> Option<ThemeMode> {
+    ThemeMode::from_tag(&setting_in(path)?)
+}
+
+/// These programs run elevated, and a setting is in a folder the account they were started from can
+/// change. So it is only ever a short word, and only if it is really a file there, as something
+/// else could be made to keep a window from opening.
+fn setting_in(path: &Path) -> Option<String> {
     if !fs::symlink_metadata(path).ok()?.is_file() {
         return None;
     }
-    let mut tag = String::new();
+    let mut text = String::new();
     File::open(path)
         .ok()?
-        .take(MOST_MODE_FILE_BYTES + 1)
-        .read_to_string(&mut tag)
+        .take(MOST_SETTING_BYTES + 1)
+        .read_to_string(&mut text)
         .ok()?;
-    if tag.len() as u64 > MOST_MODE_FILE_BYTES {
+    if text.len() as u64 > MOST_SETTING_BYTES {
         return None;
     }
-    ThemeMode::from_tag(tag.trim())
+    Some(text.trim().to_owned())
 }
 
 /// Remember the mode a person chose. Losing this is harmless, so a failure to write it is not worth
 /// interrupting them for.
 pub fn remember_chosen_mode(mode: ThemeMode) {
-    if let Some(path) = file_of_the_chosen_mode() {
+    if let Some(path) = settings_file(MODE_FILE) {
         write_mode(&path, mode);
     }
+}
+
+/// Remember the language a person chose, the same way.
+pub fn remember_chosen_language(tag: &str) {
+    if let Some(path) = settings_file(LANGUAGE_FILE) {
+        write_setting(&path, tag);
+    }
+}
+
+fn write_mode(path: &Path, mode: ThemeMode) {
+    write_setting(path, mode.as_tag());
 }
 
 /// With the app elevated, writing to what is already there would write through a link to it, to any
 /// file an administrator can change. A new file put in its place replaces the name, and leaves alone
 /// whatever else that name led to. And a link in the way of the folder is not written through at all.
-fn write_mode(path: &Path, mode: ThemeMode) {
+fn write_setting(path: &Path, text: &str) {
     static ATTEMPTS: AtomicU32 = AtomicU32::new(0);
     let Some(folder) = path.parent() else {
         return;
@@ -77,16 +99,28 @@ fn write_mode(path: &Path, mode: ThemeMode) {
         return;
     }
     let attempt = ATTEMPTS.fetch_add(1, Ordering::Relaxed);
-    let name = format!("{MODE_FILE}.{}.{attempt}", std::process::id());
-    put_mode_in_place(path, mode, &folder.join(name));
+    let Some(file_name) = path.file_name() else {
+        return;
+    };
+    let name = format!(
+        "{}.{}.{attempt}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    );
+    put_in_place(path, text, &folder.join(name));
 }
 
+#[cfg(test)]
 fn put_mode_in_place(path: &Path, mode: ThemeMode, beside: &Path) {
+    put_in_place(path, mode.as_tag(), beside);
+}
+
+fn put_in_place(path: &Path, text: &str, beside: &Path) {
     // Not over anything already there, which is not to be written through either.
     let Ok(mut file) = OpenOptions::new().write(true).create_new(true).open(beside) else {
         return;
     };
-    let written = file.write_all(mode.as_tag().as_bytes());
+    let written = file.write_all(text.as_bytes());
     drop(file);
     if written.is_err() || fs::rename(beside, path).is_err() {
         let _ = fs::remove_file(beside);
@@ -399,6 +433,18 @@ mod tests {
         assert!(fs::remove_file(&file).is_ok());
         assert!(fs::create_dir(&file).is_ok());
         assert_eq!(mode_in(&file), None, "a folder of that name");
+    }
+
+    #[test]
+    fn a_language_that_was_chosen_is_read_back_as_its_tag() {
+        let place = Place::new("language");
+        let file = place.0.join(LANGUAGE_FILE);
+        assert_eq!(setting_in(&file), None, "nothing is there");
+        write_setting(&file, "it-IT");
+        assert_eq!(fs::read_to_string(&file).ok().as_deref(), Some("it-IT"));
+        assert_eq!(setting_in(&file).as_deref(), Some("it-IT"));
+        assert!(fs::write(&file, "it-IT".repeat(100)).is_ok());
+        assert_eq!(setting_in(&file), None, "too long to be a tag");
     }
 
     #[test]

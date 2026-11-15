@@ -13,6 +13,7 @@ use eframe::egui::{
     Stroke, TextStyle,
     epaint::text::{FontInsert, FontPriority, InsertFontFamily},
 };
+use winappmigrator_i18n::Script;
 
 /// Corner radius tokens, in points.
 pub const RADIUS_SM: u8 = 6;
@@ -114,7 +115,8 @@ pub fn regular(size: f32) -> FontId {
 }
 
 /// Use the native Windows interface fonts, so the app looks at home on the
-/// desktop. Nothing is bundled: a missing font keeps `egui`'s built-in default.
+/// desktop, with the font of the language in use right after Segoe UI. Nothing is bundled: a missing font keeps
+/// `egui`'s built-in default. Call it again when the language changes.
 pub fn install_fonts(ctx: &egui::Context, fonts_dir: &Path) {
     let mut fonts = FontDefinitions::default();
     let mut proportional = fonts
@@ -142,6 +144,19 @@ pub fn install_fonts(ctx: &egui::Context, fonts_dir: &Path) {
         }
     }
 
+    // Right after Segoe UI: the same character can be drawn differently in Chinese and Japanese, and a Japanese window
+    // must take it from the Japanese font.
+    let language = winappmigrator_i18n::current();
+    if let Some((file, bytes)) = first_font(fonts_dir, script_fonts(language.script)) {
+        fonts
+            .font_data
+            .insert(file.to_owned(), Arc::new(FontData::from_owned(bytes)));
+        for family in [&mut proportional, &mut heavier] {
+            let after_segoe = usize::from(!family.is_empty());
+            family.insert(after_segoe.min(family.len()), file.to_owned());
+        }
+    }
+
     fonts
         .families
         .insert(FontFamily::Proportional, proportional);
@@ -150,36 +165,81 @@ pub fn install_fonts(ctx: &egui::Context, fonts_dir: &Path) {
         .insert(FontFamily::Name(SEMIBOLD_FAMILY.into()), heavier);
     fonts.families.insert(FontFamily::Monospace, monospace);
     ctx.set_fonts(fonts);
+    ctx.data_mut(|data| data.remove::<LoadedFallbacks>(loaded_fallbacks_id()));
 }
 
-/// Windows font holding the given script, for text Segoe UI does not cover.
-fn fallback_font_file(character: char) -> Option<&'static str> {
+/// The Windows fonts that draw a script, best first; the first one a PC has is used. Segoe UI draws Latin, Cyrillic,
+/// Arabic, and Hebrew itself. Windows 11 has Nirmala UI as a collection, Windows 10 as a single font.
+pub fn script_fonts(script: Script) -> &'static [&'static str] {
+    match script {
+        Script::Latin | Script::Cyrillic | Script::Arabic | Script::Hebrew => &[],
+        Script::SimplifiedChinese => &["msyh.ttc"],
+        Script::TraditionalChinese => &["msjh.ttc"],
+        Script::Japanese => &["YuGothR.ttc", "meiryo.ttc"],
+        Script::Korean => &["malgun.ttf"],
+        Script::Devanagari | Script::Bengali => &["Nirmala.ttc", "Nirmala.ttf"],
+        Script::Thai => &["LeelawUI.ttf", "leelawad.ttf"],
+    }
+}
+
+fn first_font(fonts_dir: &Path, files: &[&'static str]) -> Option<(&'static str, Vec<u8>)> {
+    files.iter().find_map(|file| {
+        std::fs::read(fonts_dir.join(file))
+            .ok()
+            .map(|bytes| (*file, bytes))
+    })
+}
+
+/// The script of a character that Segoe UI does not draw, for text that is not in the language in use, such as an
+/// app's name or the Language menu's own names.
+fn fallback_script(character: char) -> Option<Script> {
     match u32::from(character) {
-        0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF => Some("malgun.ttf"),
-        0x3040..=0x30FF => Some("YuGothR.ttc"),
-        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF => Some("msyh.ttc"),
+        0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF => Some(Script::Korean),
+        0x3040..=0x30FF => Some(Script::Japanese),
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF => Some(Script::SimplifiedChinese),
+        0x0900..=0x097F => Some(Script::Devanagari),
+        0x0980..=0x09FF => Some(Script::Bengali),
+        0x0E00..=0x0E7F => Some(Script::Thai),
         _ => None,
     }
 }
 
-/// Load only the fallback fonts that `texts` needs. These are tens of megabytes
+/// The fallback fonts already added since the fonts were last installed.
+#[derive(Clone, Default)]
+struct LoadedFallbacks(Vec<&'static str>);
+
+fn loaded_fallbacks_id() -> egui::Id {
+    egui::Id::unique("winappmigrator-fallback-fonts")
+}
+
+/// Load only the fallback fonts that `texts` needs, once each. These are tens of megabytes
 /// each, and most machines list no application that needs them, but without them
-/// a Korean, Japanese, or Chinese application name draws as empty boxes.
+/// a Korean, Japanese, Chinese, Hindi, Bengali, or Thai name draws as empty boxes.
 pub fn add_fallback_fonts<'a>(
     ctx: &egui::Context,
     fonts_dir: &Path,
     texts: impl IntoIterator<Item = &'a str>,
 ) {
-    let mut needed: Vec<&'static str> = Vec::new();
+    let mut needed: Vec<Script> = Vec::new();
     for character in texts.into_iter().flat_map(str::chars) {
-        if let Some(file) = fallback_font_file(character)
-            && !needed.contains(&file)
+        if let Some(script) = fallback_script(character)
+            && !needed.contains(&script)
         {
-            needed.push(file);
+            needed.push(script);
         }
     }
-    for file in needed {
-        if let Ok(bytes) = std::fs::read(fonts_dir.join(file)) {
+    for script in needed {
+        let loaded = ctx.data(|data| data.get_temp::<LoadedFallbacks>(loaded_fallbacks_id()));
+        let candidates = script_fonts(script);
+        if loaded.is_some_and(|loaded| candidates.iter().any(|file| loaded.0.contains(file))) {
+            continue;
+        }
+        if let Some((file, bytes)) = first_font(fonts_dir, candidates) {
+            ctx.data_mut(|data| {
+                data.get_temp_mut_or_default::<LoadedFallbacks>(loaded_fallbacks_id())
+                    .0
+                    .push(file);
+            });
             ctx.add_font(FontInsert::new(
                 file,
                 FontData::from_owned(bytes),
@@ -383,7 +443,7 @@ pub enum Role {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color32, Theme, ThemeMode, alpha, egui, fallback_font_file};
+    use super::{Color32, Script, Theme, ThemeMode, alpha, egui, fallback_script, script_fonts};
 
     /// WCAG AA minimum for normal-size text.
     const AA_TEXT: f32 = 4.5;
@@ -515,10 +575,17 @@ mod tests {
 
     #[test]
     fn fallback_fonts_are_chosen_by_script() {
-        assert_eq!(fallback_font_file('A'), None);
-        assert_eq!(fallback_font_file('é'), None);
-        assert_eq!(fallback_font_file('한'), Some("malgun.ttf"));
-        assert_eq!(fallback_font_file('カ'), Some("YuGothR.ttc"));
-        assert_eq!(fallback_font_file('微'), Some("msyh.ttc"));
+        assert_eq!(fallback_script('A'), None);
+        assert_eq!(fallback_script('é'), None);
+        assert_eq!(fallback_script('ب'), None, "Segoe UI draws Arabic");
+        assert_eq!(fallback_script('한'), Some(Script::Korean));
+        assert_eq!(fallback_script('カ'), Some(Script::Japanese));
+        assert_eq!(fallback_script('微'), Some(Script::SimplifiedChinese));
+        assert_eq!(fallback_script('ह'), Some(Script::Devanagari));
+        assert_eq!(fallback_script('ব'), Some(Script::Bengali));
+        assert_eq!(fallback_script('ไ'), Some(Script::Thai));
+        assert_eq!(script_fonts(Script::Korean), ["malgun.ttf"]);
+        assert_eq!(script_fonts(Script::Japanese)[0], "YuGothR.ttc");
+        assert!(script_fonts(Script::Arabic).is_empty());
     }
 }

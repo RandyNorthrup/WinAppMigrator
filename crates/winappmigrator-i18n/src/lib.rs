@@ -309,9 +309,9 @@ fn catalog(language: &'static Language) -> Option<Arc<Catalog>> {
         return catalog.clone();
     }
     let source = if language == &PSEUDO_LONG || language == &PSEUDO_RTL {
-        source_of(ENGLISH.tag).and_then(|english| pseudo::pseudo_source(&english))
+        catalog_source(ENGLISH.tag).and_then(|english| pseudo::pseudo_source(&english))
     } else {
-        source_of(language.tag)
+        catalog_source(language.tag)
     };
     let catalog = source
         .and_then(|source| build(language, source))
@@ -320,8 +320,8 @@ fn catalog(language: &'static Language) -> Option<Arc<Catalog>> {
     catalog
 }
 
-/// A language's catalog source, as built in.
-pub(crate) fn source_of(tag: &str) -> Option<String> {
+/// A language's catalog source, as built in, also for checks such as whether its fonts draw every letter in it.
+pub fn catalog_source(tag: &str) -> Option<String> {
     let (_, compressed) = CATALOGS.iter().find(|(its, _)| *its == tag)?;
     let mut source = String::new();
     flate2::read::DeflateDecoder::new(*compressed)

@@ -5,6 +5,7 @@
 //! crate means the two front ends stay visually identical without duplication.
 
 pub mod hardening;
+pub mod language;
 pub mod theme;
 pub mod widgets;
 pub mod window;
