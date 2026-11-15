@@ -461,3 +461,16 @@ fn english_text_is_english_whatever_the_language() {
     });
     assert_eq!(text, ("1 Mo".to_owned(), "1 MB".to_owned()));
 }
+
+#[test]
+fn a_list_is_joined_the_language_s_way() {
+    assert_eq!(
+        with_language(ENGLISH, || join_list(&["a", "b", "c"])),
+        "a, b, c"
+    );
+    let chinese = with_source(lang("zh-CN"), "list-separator = {\"、\"}\n", || {
+        join_list(&["a", "b"])
+    });
+    assert_eq!(chinese, "a、b");
+    assert_eq!(with_language(ENGLISH, || join_list::<&str>(&[])), "");
+}

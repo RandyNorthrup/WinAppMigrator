@@ -280,6 +280,16 @@ pub fn size(bytes: u64) -> String {
     tr(unit.message(), Some(&args))
 }
 
+/// Items written as a list in the language in use: `services, tasks, shortcuts`, or `服务、任务` in Chinese.
+pub fn join_list<S: AsRef<str>>(items: &[S]) -> String {
+    let separator = tr("list-separator", None);
+    items
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>()
+        .join(&separator)
+}
+
 /// A whole number, grouped the way the language in use and Windows' Region settings write it.
 pub fn number(value: u64) -> String {
     integer(value, &active().separators)

@@ -303,6 +303,34 @@ be run again from there.
 - No restore/verify-against-target code lives in the app. The app only builds
   and confirms the package's own hashes.
 
+## Words and languages
+
+Every word a person reads comes from the catalog in `crates/winappmigrator-i18n/locales`, one folder per language, with
+English in `en-US` the source of every other. See [TRANSLATING.md](TRANSLATING.md) for translators.
+
+- **Show a message with `t!`:** `t!("installer-install-button")`, or with what it is given,
+  `t!("installer-room-needed", size = winappmigrator_i18n::size(bytes))`. The name is a string literal, so a test can
+  hold every name the code asks for to the English catalog.
+- **Names** are lowercase and hyphenated, and start with their part: `ui-`, `core-`, `app-`, `installer-`, `uninstaller-`,
+  `client-`. Each part keeps its English in its own file (`ui.ftl`, `core.ftl`, `app.ftl`, `installer.ftl`, `client.ftl`;
+  shared ones, such as sizes, in `winappmigrator.ftl`).
+- **A whole sentence is one message.** Never build a sentence from translated pieces, as other languages order its parts
+  differently: give the message what changes (`{ $app }`, `{ $path }`) and let it place them.
+- **Lists** are `winappmigrator_i18n::join_list(&items)`, as not every language puts a comma between items.
+- **Counts** are given as numbers (`count = files.len()`), and a message that depends on one says so with Fluent's plural
+  selection (`{ $count -> [one] … *[other] … }`), never with `if count == 1` in code. Numbers in a message are written with
+  the reader's separators. **Sizes** are `winappmigrator_i18n::size(bytes)`.
+- **Labels, titles, and buttons** stay in title case in English; other languages follow their own rules.
+- **What is not translated:** logs (`tracing`), names of files, registry keys, services, and commands, command-line flags,
+  codes, and anything written to disk, the registry, or a package for a program to read. A warning a package records is
+  made with `Warning::localized(code, "core-warning-…", severity, args, source)`, which keeps its English for logs and its
+  message by name, and is shown with `Warning::text()`, so an installer shows it in its own PC's language.
+- **Tests** look controls up by their English words, which the catalog keeps the same; the pseudo languages
+  (`PSEUDO_LONG`, `PSEUDO_RTL`) show text left in code and text cut off.
+- **Fonts:** `theme::install_fonts` loads the font of the language in use; call it again, and `add_fallback_fonts` for names
+  on screen, when the language changes. Each window calls `language::declare_language` every frame, so screen readers read
+  it in the right voice.
+
 ## Validation
 
 Do **not** drive the live window with scripted mouse clicks or `SendKeys` (it is flaky

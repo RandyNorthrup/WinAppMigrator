@@ -13,3 +13,8 @@ size-kb = { $value } KB
 size-mb = { $value } MB
 size-gb = { $value } GB
 size-tb = { $value } TB
+
+## Lists
+
+# What goes between the items of a list, such as "services, tasks, shortcuts". Keep the quotes: they keep the space.
+list-separator = {", "}
