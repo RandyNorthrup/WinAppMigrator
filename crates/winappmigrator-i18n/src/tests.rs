@@ -239,7 +239,9 @@ fn asked_for(text: &str) -> Vec<(String, Option<String>)> {
     let mut found = Vec::new();
     for (opening, has_attribute) in [
         ("t!(\"", false),
+        ("t_english!(\"", false),
         ("tr(\"", false),
+        ("tr_english(\"", false),
         ("tr_attribute(\"", true),
     ] {
         let mut rest = text;
@@ -438,4 +440,15 @@ fn the_catalogs_add_little_to_every_installer() {
         .map(|(_, compressed)| compressed.len())
         .sum();
     assert!(total < BUDGET, "{total} bytes");
+}
+
+#[test]
+fn english_text_is_english_whatever_the_language() {
+    let text = with_source(lang("it-IT"), "size-mb = { $value } Mo\n", || {
+        (
+            t!("size-mb", value = "1"),
+            t_english!("size-mb", value = "1"),
+        )
+    });
+    assert_eq!(text, ("1 Mo".to_owned(), "1 MB".to_owned()));
 }

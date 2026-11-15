@@ -48,6 +48,20 @@ macro_rules! t {
     }};
 }
 
+/// The same as [`t!`], in English whatever the language in use: for what a package records to be shown later on another
+/// PC, which shows it by its name in that PC's language, and for logs.
+#[macro_export]
+macro_rules! t_english {
+    ($id:literal $(,)?) => {
+        $crate::tr_english($id, None)
+    };
+    ($id:literal, $($name:ident = $value:expr),+ $(,)?) => {{
+        let mut args = $crate::FluentArgs::new();
+        $(args.set(stringify!($name), $crate::FluentValue::from($value));)+
+        $crate::tr_english($id, Some(&args))
+    }};
+}
+
 type Bundle = FluentBundle<FluentResource>;
 
 struct Catalog {
@@ -167,6 +181,11 @@ fn active() -> Arc<Active> {
 /// A message in the language in use, or in English if that language lacks it.
 pub fn tr(id: &str, args: Option<&FluentArgs>) -> String {
     message(id, None, args)
+}
+
+/// A message in English, with numbers written the English way, whatever the language in use.
+pub fn tr_english(id: &str, args: Option<&FluentArgs>) -> String {
+    with_language(ENGLISH, || tr(id, args))
 }
 
 /// One of a message's attributes, such as a control's `.tooltip`, the same way.
