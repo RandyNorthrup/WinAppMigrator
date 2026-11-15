@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use serde::Deserialize;
+use winappmigrator_i18n::t;
 
 use crate::path_utils::{
     POWERSHELL_IMPORT_SECURITY, POWERSHELL_IMPORT_UTILITY, POWERSHELL_UTF8_OUTPUT,
@@ -70,13 +71,13 @@ pub fn read_signature(path: &Path) -> Result<Signature, String> {
             ))
         .env(PATH_VARIABLE, path)
         .output()
-        .map_err(|error| format!("could not start PowerShell: {error}"))?;
+        .map_err(|error| t!("core-signature-no-powershell", error = error.to_string()))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
     }
     let text = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(text.trim_start_matches('\u{feff}').trim())
-        .map_err(|error| format!("could not read the signature: {error}"))
+        .map_err(|error| t!("core-signature-unreadable", error = error.to_string()))
 }
 
 /// Check that a file is validly signed by Microsoft, with the reason if it is not.
@@ -86,14 +87,12 @@ pub fn check_microsoft_signature(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     if signature.is_valid() {
-        return Err(format!(
-            "it is signed by {}, not Microsoft",
-            signature
-                .signer_name()
-                .unwrap_or_else(|| "someone else".to_owned())
-        ));
+        return Err(match signature.signer_name() {
+            Some(signer) => t!("core-signature-not-microsoft", signer = signer),
+            None => t!("core-signature-not-microsoft-unnamed"),
+        });
     }
-    Err(format!("its signature status is {}", signature.status))
+    Err(t!("core-signature-status", status = signature.status))
 }
 
 /// One attribute from a certificate name such as

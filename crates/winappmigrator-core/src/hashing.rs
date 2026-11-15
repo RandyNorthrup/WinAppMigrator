@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sha2::{Digest, Sha256};
 
+use winappmigrator_i18n::t;
+
 use crate::errors::{Result, WinAppMigratorError, panic_text};
 use crate::packer::worker_count;
 
@@ -88,10 +90,10 @@ pub(crate) fn read_back_files(
                     let result =
                         catch_unwind(AssertUnwindSafe(|| read_back_file(path, is_cancelled)))
                             .unwrap_or_else(|panic| {
-                                Err(WinAppMigratorError::InvalidInput(format!(
-                                    "{} could not be read back: {}",
-                                    path.display(),
-                                    panic_text(panic.as_ref())
+                                Err(WinAppMigratorError::InvalidInput(t!(
+                                    "core-package-not-read-back",
+                                    path = path.display().to_string(),
+                                    reason = panic_text(panic.as_ref())
                                 )))
                             });
                     if let Ok(mut results) = results.lock() {

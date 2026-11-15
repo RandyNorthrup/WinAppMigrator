@@ -7,6 +7,7 @@ use filetime::{FileTime, set_file_times};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use winappmigrator_i18n::t;
 
 use crate::account_traces::{
     say_nothing_of_who_it_was, what_a_package_still_says, withhold_what_is_an_accounts,
@@ -69,8 +70,9 @@ const ENVIRONMENT_FILE: &str = "environment_variables.json";
 /// Where a file only a backup-mode copy can read goes while it is read, in the protected folder.
 const SPOOL_DIR: &str = ".spool";
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
-/// A file a package does not have, for one reason or the other.
-const FILE_COPY_FAILED_CODE: &str = "file_copy_failed";
+/// What a package says of a file it does not have because it was gone, for the tests that look
+/// for it. Where it is said, it is written out, for what checks the catalog to find.
+#[cfg(test)]
 const FILE_GONE_CODE: &str = "file_gone_since_it_was_looked_at";
 /// How often to look at whether a backup-mode copy has finished, or the build was cancelled.
 const BACKUP_COPY_FIRST_LOOK: std::time::Duration = std::time::Duration::from_millis(1);
@@ -126,9 +128,9 @@ pub fn create_package_from_scan(
 ) -> Result<PackageResult> {
     monitor.report(BuildStep::Preparing);
     if !is_scan_of(report, &options.selection) {
-        return Err(WinAppMigratorError::InvalidInput(
-            "this scan is of another app than the one being built, so nothing was built".to_owned(),
-        ));
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-package-scan-of-another-app"
+        )));
     }
     let is_off = |classification: &FileClassification| match classification {
         FileClassification::UserData => !options.include_user_data,
@@ -150,10 +152,9 @@ pub fn create_package_from_scan(
                     .iter()
                     .any(|artifact| artifact.should_copy)));
     if brought_in_what_is_off {
-        return Err(WinAppMigratorError::InvalidInput(
-            "this scan brought in data that this build was not asked to, so nothing was built"
-                .to_owned(),
-        ));
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-package-scan-brought-in-more"
+        )));
     }
     refuse_a_scan_whose_program_is_gone(report)?;
     let adds_something = report.near_matches.iter().any(|near| near.picked);
@@ -229,9 +230,9 @@ fn refuse_a_scan_whose_program_is_gone(report: &ScanReport) -> Result<()> {
     if reader.check(readable).is_ok() && crate::source_fs::metadata(readable).is_ok() {
         return Ok(());
     }
-    Err(WinAppMigratorError::InvalidInput(format!(
-        "{} is not there any more, so nothing was built. Look at the app again.",
-        main.display()
+    Err(WinAppMigratorError::InvalidInput(t!(
+        "core-package-program-gone",
+        path = main.display().to_string()
     )))
 }
 
@@ -355,11 +356,12 @@ fn build_package(
     let mut warnings = report.warnings.clone();
 
     let stub = if options.create_self_extracting_archive {
-        Some(options.self_extracting_stub.as_ref().ok_or_else(|| {
-            WinAppMigratorError::InvalidInput(
-                "a self-extracting archive requires an installer stub".to_owned(),
-            )
-        })?)
+        Some(
+            options
+                .self_extracting_stub
+                .as_ref()
+                .ok_or_else(|| WinAppMigratorError::InvalidInput(t!("core-package-needs-stub")))?,
+        )
     } else {
         None
     };
@@ -456,18 +458,19 @@ fn build_package(
                 let is_gone = reader.check(&file.path).is_ok()
                     && crate::source_fs::symlink_metadata(&file.path).is_err();
                 warnings.push(if is_gone {
-                    Warning::new(
-                        FILE_GONE_CODE,
+                    Warning::localized(
+                        "file_gone_since_it_was_looked_at",
+                        "core-warning-build-file-gone",
                         WarningSeverity::Warning,
-                        "This was there when the app was looked at and is gone now, so it is not \
-                         in the installer.",
+                        Vec::new(),
                         Some(file.original_path.display().to_string()),
                     )
                 } else {
-                    Warning::new(
-                        FILE_COPY_FAILED_CODE,
+                    Warning::localized(
+                        "file_copy_failed",
+                        "core-warning-build-file-copy-failed",
                         WarningSeverity::Warning,
-                        format!("Could not copy file into package: {error}"),
+                        vec![("error", error.as_str().into())],
                         Some(file.original_path.display().to_string()),
                     )
                 });
@@ -529,15 +532,15 @@ fn build_package(
     if let Some(traces) = traces.as_ref() {
         let (written, not_read) = written_about_the_package(&options.output_dir, &reports_dir);
         if !not_read.is_empty() {
-            warnings.push(Warning::new(
-                crate::account_traces::MENTIONS_CODE,
+            // The code is `account_traces::MENTIONS_CODE`, written out for what checks the catalog.
+            warnings.push(Warning::localized(
+                "package_mentions_an_account",
+                "core-warning-build-not-looked-through",
                 WarningSeverity::Warning,
-                format!(
-                    "This package has {} that could not be looked through for who it came from: {}. \
-                     What it says may say that.",
-                    if not_read.len() == 1 { "a file" } else { "files" },
-                    not_read.join(", ")
-                ),
+                vec![
+                    ("count", not_read.len().into()),
+                    ("names", winappmigrator_i18n::join_list(&not_read).into()),
+                ],
                 None,
             ));
         }
@@ -571,9 +574,7 @@ fn build_package(
         packer.expect(&held);
         for outcome in packer.pack(&held, &HELD_FILES)? {
             outcome.map_err(|reason| {
-                WinAppMigratorError::Archive(format!(
-                    "a file in the staging folder could not go in the package: {reason}"
-                ))
+                WinAppMigratorError::Archive(t!("core-package-staged-file-failed", reason = reason))
             })?;
         }
         monitor.checkpoint()?;
@@ -654,13 +655,11 @@ fn keep_what_an_installer_will_make(folders: &mut Vec<FileEntry>, warnings: &mut
         return;
     }
     folders.truncate(MAX_EMPTY_FOLDERS);
-    warnings.push(Warning::new(
+    warnings.push(Warning::localized(
         "empty_folders_truncated",
+        "core-warning-build-empty-folders-truncated",
         WarningSeverity::Warning,
-        format!(
-            "This app has more than {MAX_EMPTY_FOLDERS} empty folders, and only that many will be \
-             made again."
-        ),
+        vec![("count", MAX_EMPTY_FOLDERS.into())],
         None,
     ));
 }
@@ -915,10 +914,9 @@ fn refuse_without_room(room: &RoomCheck) -> Result<()> {
     if shortfalls.is_empty() {
         return Ok(());
     }
-    Err(WinAppMigratorError::InvalidInput(format!(
-        "there is not enough room to build this installer, so nothing was read or written. {}. \
-         Free up some space there, or choose an output folder on another drive.",
-        shortfalls.join(". ")
+    Err(WinAppMigratorError::InvalidInput(t!(
+        "core-package-not-enough-room",
+        shortfalls = shortfalls.join(". ")
     )))
 }
 
@@ -947,10 +945,11 @@ fn files_to_pack(
         });
         if is_a_secret_by_now {
             let name = file.original_path.display().to_string();
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "secret_left_out",
+                "core-warning-build-credential-by-now",
                 WarningSeverity::Info,
-                "Left out of the package: it looks like a credential by now.",
+                Vec::new(),
                 Some(name.clone()),
             ));
             secrets_since.push(LeftOutItem {
@@ -961,10 +960,11 @@ fn files_to_pack(
             continue;
         }
         let Some(relative) = file.package_relative_path.as_ref() else {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "package_relative_path_missing",
+                "core-warning-build-no-package-path",
                 WarningSeverity::Warning,
-                "Copyable file had no package relative path.",
+                Vec::new(),
                 Some(file.original_path.display().to_string()),
             ));
             not_packable.insert(file.original_path.clone());
@@ -1084,19 +1084,21 @@ impl SourceReader {
     /// is not on a disk here, or that leads into another account's folders by now. All from the top
     /// each time, since a folder that was fine for the last file may not be now.
     fn check(&self, path: &Path) -> Result<()> {
+        let shown = || path.display().to_string();
         let refusal = match self.volume.as_ref() {
             Some(volume) if !volume.may_read(path) => {
-                Some("goes through a link or is not on the connected drive")
+                Some(t!("core-package-not-read-off-the-drive", path = shown()))
             }
-            None if !is_on_a_local_disk(path) => Some("is not on a disk of this PC"),
-            None if self.other_accounts.hold(path) => Some("leads into another account's folders"),
+            None if !is_on_a_local_disk(path) => {
+                Some(t!("core-package-not-read-not-local", path = shown()))
+            }
+            None if self.other_accounts.hold(path) => {
+                Some(t!("core-package-not-read-other-account", path = shown()))
+            }
             _ => None,
         };
         match refusal {
-            Some(why) => Err(WinAppMigratorError::InvalidInput(format!(
-                "{} {why}, so it was not read",
-                path.display()
-            ))),
+            Some(why) => Err(WinAppMigratorError::InvalidInput(why)),
             None => Ok(()),
         }
     }
@@ -1115,9 +1117,9 @@ impl SourceReader {
     fn locate(&self, logical: &Path) -> Result<PathBuf> {
         let located = match self.volume.as_ref() {
             Some(volume) => volume.to_volume(logical).ok_or_else(|| {
-                WinAppMigratorError::InvalidInput(format!(
-                    "{} is not on the connected drive, so it was not read",
-                    logical.display()
+                WinAppMigratorError::InvalidInput(t!(
+                    "core-package-not-on-the-drive",
+                    path = logical.display().to_string()
                 ))
             })?,
             None => logical.to_path_buf(),
@@ -1206,39 +1208,41 @@ fn plan_one_prerequisite(
     let destination = match package_destination_path(&options.output_dir, &relative) {
         Ok(path) => path,
         Err(error) => {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "prerequisite_path_invalid",
+                "core-warning-build-prerequisite-path-invalid",
                 WarningSeverity::Warning,
-                format!(
-                    "Could not place bundled prerequisite {}: {error}",
-                    spec.file_name
-                ),
+                vec![
+                    ("file_name", spec.file_name.as_str().into()),
+                    ("error", error.to_string().into()),
+                ],
                 None,
             ));
             return without_payload;
         }
     };
     if let Err(error) = crate::prerequisites::download(&spec.download_url, &destination) {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "prerequisite_download_failed",
+            "core-warning-build-prerequisite-download-failed",
             WarningSeverity::Warning,
-            format!(
-                "Could not download {} ({error}); the installer will try winget on the target.",
-                prerequisite.name
-            ),
+            vec![
+                ("runtime", prerequisite.name.as_str().into()),
+                ("error", error.to_string().into()),
+            ],
             Some(spec.download_url.clone()),
         ));
         return without_payload;
     }
     if let Err(reason) = check_microsoft_signature(&destination) {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "prerequisite_signature_failed",
+            "core-warning-build-prerequisite-signature-failed",
             WarningSeverity::Warning,
-            format!(
-                "The download of {} failed its signature check, so it was not bundled: {reason}. \
-                 The installer will try winget on the target.",
-                prerequisite.name
-            ),
+            vec![
+                ("runtime", prerequisite.name.as_str().into()),
+                ("reason", reason.into()),
+            ],
             Some(spec.download_url.clone()),
         ));
         let _ = fs::remove_file(&destination);
@@ -1252,13 +1256,14 @@ fn plan_one_prerequisite(
             crate::prerequisites::bundle_record(architecture, Some(relative), Some(hash), size)
         }
         Err(error) => {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "prerequisite_hash_failed",
+                "core-warning-build-prerequisite-hash-failed",
                 WarningSeverity::Warning,
-                format!(
-                    "Downloaded {} but could not hash it ({error}); the installer will try winget on the target instead.",
-                    prerequisite.name
-                ),
+                vec![
+                    ("runtime", prerequisite.name.as_str().into()),
+                    ("error", error.to_string().into()),
+                ],
                 Some(destination.display().to_string()),
             ));
             let _ = fs::remove_file(&destination);
@@ -1301,13 +1306,14 @@ fn package_drivers(
                     driver.package_relative_path = Some(relative);
                 }
                 Err(error) => {
-                    warnings.push(Warning::new(
+                    warnings.push(Warning::localized(
                         "driver_copy_failed",
+                        "core-warning-build-driver-copy-failed",
                         WarningSeverity::Warning,
-                        format!(
-                            "Could not bundle driver image for '{}': {error}",
-                            driver.service_name
-                        ),
+                        vec![
+                            ("service", driver.service_name.as_str().into()),
+                            ("error", error.to_string().into()),
+                        ],
                         Some(driver.image_path.display().to_string()),
                     ));
                 }
@@ -1338,11 +1344,15 @@ fn package_license_artifacts(
             continue;
         }
         if artifact.should_copy {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "license_file_not_copied",
+                "core-warning-build-license-not-copied",
                 WarningSeverity::Warning,
-                "License data could not be copied (missing or unreadable); recorded as metadata only.",
-                artifact.path.as_ref().map(|path| path.display().to_string()),
+                Vec::new(),
+                artifact
+                    .path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
             ));
             artifact.should_copy = false;
             artifact.package_relative_path = None;
@@ -1373,10 +1383,11 @@ fn package_one_license_artifact(
     if crate::source_fs::is_file(&source) {
         // A license goes by its option, and what looks like a credential goes nowhere, by now as well.
         if crate::secret_rules::is_secret_file(&source, || read_small_file(&source)) {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "license_store_file_left_out",
+                "core-warning-build-license-file-credential",
                 WarningSeverity::Info,
-                "A license file looks like a credential, and was left out.",
+                Vec::new(),
                 Some(logical.display().to_string()),
             ));
             return false;
@@ -1426,10 +1437,11 @@ fn copy_license_store(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                warnings.push(Warning::new(
+                warnings.push(Warning::localized(
                     "license_store_walk_failed",
+                    "core-warning-build-license-store-walk-failed",
                     WarningSeverity::Info,
-                    format!("Could not enumerate part of a license store: {error}"),
+                    vec![("error", error.to_string().into())],
                     Some(source.display().to_string()),
                 ));
                 continue;
@@ -1446,10 +1458,11 @@ fn copy_license_store(
         }
         // A store is copied whole, and what looks like a credential goes no more than anywhere else.
         if crate::secret_rules::is_secret_file(&entry.path, || read_small_file(&entry.path)) {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "license_store_file_left_out",
+                "core-warning-build-license-store-credential",
                 WarningSeverity::Info,
-                "A file in a license store looks like a credential, and was left out.",
+                Vec::new(),
                 Some(entry.path.display().to_string()),
             ));
             continue;
@@ -1466,10 +1479,11 @@ fn copy_license_store(
             }),
             Err(error) => {
                 let _ = fs::remove_file(&target);
-                warnings.push(Warning::new(
+                warnings.push(Warning::localized(
                     "license_store_file_skipped",
+                    "core-warning-build-license-store-file-skipped",
                     WarningSeverity::Info,
-                    format!("Skipped a license store file: {error}"),
+                    vec![("error", error.to_string().into())],
                     Some(entry.path.display().to_string()),
                 ));
             }
@@ -1597,15 +1611,15 @@ pub(crate) fn copy_file_backup_mode_unless(
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<()> {
     let (Some(source_dir), Some(file_name)) = (source.parent(), source.file_name()) else {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "cannot backup-copy a file without a parent directory: {}",
-            source.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-package-backup-copy-no-parent",
+            path = source.display().to_string()
         )));
     };
     let Some(destination_dir) = destination.parent() else {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "backup-copy destination has no parent directory: {}",
-            destination.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-package-backup-copy-destination-no-parent",
+            path = destination.display().to_string()
         )));
     };
     let mut robocopy = hidden_command("robocopy")
@@ -1646,9 +1660,9 @@ pub(crate) fn copy_file_backup_mode_unless(
     if !copied_ok {
         return Err(WinAppMigratorError::io(
             destination,
-            std::io::Error::other(format!(
-                "robocopy backup-mode copy failed (exit {:?})",
-                status.code()
+            std::io::Error::other(t!(
+                "core-package-robocopy-failed",
+                code = format!("{:?}", status.code())
             )),
         ));
     }
@@ -1857,8 +1871,9 @@ impl PreparedPackage {
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case(ZIP_EXTENSION))
         {
-            let temp_dir = ProtectedFolder::new_in_temp(TEMP_PACKAGE_PREFIX)
-                .map_err(|source| WinAppMigratorError::io("temporary package folder", source))?;
+            let temp_dir = ProtectedFolder::new_in_temp(TEMP_PACKAGE_PREFIX).map_err(|source| {
+                WinAppMigratorError::io(t!("core-package-temporary-folder"), source)
+            })?;
             extract_zip_archive(package_root, temp_dir.path())?;
             return Ok(Self {
                 package_root: temp_dir.path().to_path_buf(),

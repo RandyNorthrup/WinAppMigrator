@@ -11,6 +11,7 @@ use std::fs::File;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 
 use sha2::{Digest, Sha256};
+use winappmigrator_i18n::t;
 
 const LOCAL_HEADER_SIGNATURE: u32 = 0x0403_4B50;
 const CENTRAL_HEADER_SIGNATURE: u32 = 0x0201_4B50;
@@ -132,7 +133,7 @@ impl ZipStream {
         if u16::try_from(name.len()).is_err() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("this name is too long for a zip: {name}"),
+                t!("core-archive-name-too-long", name = name),
             ));
         }
         Ok(name.as_bytes().to_vec())

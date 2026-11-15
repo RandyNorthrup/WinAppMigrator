@@ -10,7 +10,10 @@
 //! to have been: a service that runs a file in a folder left out is not set up to run nothing.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+use winappmigrator_i18n::t;
 
 use crate::account_settings::is_account_setting;
 use crate::errors::Result;
@@ -38,7 +41,9 @@ use crate::space::BuildInputs;
 /// What in a task's definition is one path, however many spaces are in it.
 const TASK_TAGS_OF_ONE_PATH: &[&str] = &["Command", "WorkingDirectory"];
 
-/// What the list of what is left out says of licenses, before anything has been built.
+/// What the list of what is left out says of licenses, before anything has been built, in
+/// English. A person reads `core-footprint-licenses-left-out` from the catalog, in their own
+/// language.
 pub const LICENSES_LEFT_OUT_TEXT: &str = "Not in this installer, because the License option is off";
 /// Where what goes with a service is kept.
 const SERVICES_KEY_PREFIX: &str = r"system\currentcontrolset\services\";
@@ -119,9 +124,33 @@ pub struct FolderRow {
     pub bytes: u64,
     pub largest_file_bytes: u64,
     /// Why it cannot be left out, if so, and it then says why.
-    pub locked: Option<&'static str>,
+    pub locked: Option<Locked>,
     /// What decides whether it goes in, rather than a choice of its own.
     pub goes_with: Option<ChoiceId>,
+}
+
+/// Why a folder cannot be left out. Written out, it says so in the language in use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Locked {
+    /// It is the app's own folder.
+    AppFolder,
+    /// The main program is in it.
+    HoldsTheMainProgram,
+    /// What the main program cannot start without is in it.
+    HoldsWhatItNeeds,
+    /// It is where Windows keeps fonts, and goes with the choice of fonts.
+    GoesWithItsFont,
+}
+
+impl fmt::Display for Locked {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&match self {
+            Self::AppFolder => t!("core-footprint-locked-app-folder"),
+            Self::HoldsTheMainProgram => t!("core-footprint-locked-main-program"),
+            Self::HoldsWhatItNeeds => t!("core-footprint-locked-needed"),
+            Self::GoesWithItsFont => t!("core-footprint-locked-font"),
+        })
+    }
 }
 
 /// Something set up by itself, in the words the installer's list uses.
@@ -248,6 +277,8 @@ impl Footprint {
             flags,
             near_matches: report.near_matches.clone(),
             allowed: allowed_by(&review),
+            // In English, as recorded: the window takes each apart at " was left out: ", and the
+            // reason is only there in the sentence.
             refused: review
                 .refused
                 .iter()
@@ -332,12 +363,23 @@ impl Footprint {
             name,
             why: why.to_owned(),
         };
+        let stays_behind = t!("core-footprint-font-stays-behind");
+        let reinstall = t!("core-footprint-driver-reinstall");
         let groups = [
-            (CREDENTIALS_LEFT_OUT_TEXT, report.secrets_left_out.clone()),
-            (LICENSES_LEFT_OUT_TEXT, report.licenses_left_out.clone()),
-            (SETTINGS_LEFT_OUT_TEXT, report.settings_left_out.clone()),
             (
-                CERTIFICATES_LEFT_OUT_TEXT,
+                CREDENTIALS_LEFT_OUT_TEXT.to_owned(),
+                report.secrets_left_out.clone(),
+            ),
+            (
+                t!("core-footprint-licenses-left-out"),
+                report.licenses_left_out.clone(),
+            ),
+            (
+                SETTINGS_LEFT_OUT_TEXT.to_owned(),
+                report.settings_left_out.clone(),
+            ),
+            (
+                CERTIFICATES_LEFT_OUT_TEXT.to_owned(),
                 report
                     .certificates
                     .iter()
@@ -345,36 +387,27 @@ impl Footprint {
                     .collect(),
             ),
             (
-                FONTS_LEFT_OUT_TEXT,
+                FONTS_LEFT_OUT_TEXT.to_owned(),
                 report
                     .fonts_reported
                     .iter()
-                    .map(|font| item_of(font.clone(), "It stays behind."))
+                    .map(|font| item_of(font.clone(), &stays_behind))
                     .collect(),
             ),
             (
-                "Drivers that belong to Windows or a vendor, which cannot be passed on, so \
-                 reinstall them on the other PC",
+                t!("core-footprint-drivers-left-out"),
                 manifest
                     .drivers_detected
                     .iter()
                     .filter(|driver| driver.package_relative_path.is_none())
-                    .map(|driver| {
-                        item_of(
-                            driver.service_name.clone(),
-                            "Reinstall it from its vendor's own package.",
-                        )
-                    })
+                    .map(|driver| item_of(driver.service_name.clone(), &reinstall))
                     .collect(),
             ),
         ];
         self.left_out = groups
             .into_iter()
             .filter(|(_, items)| !items.is_empty())
-            .map(|(title, items)| LeftOutGroup {
-                title: title.to_owned(),
-                items,
-            })
+            .map(|(title, items)| LeftOutGroup { title, items })
             .collect();
     }
 
@@ -499,16 +532,16 @@ fn is_data(classification: &FileClassification) -> bool {
 }
 
 /// What a kind of data folder is, in words.
-fn place_of_kind(kind: &FootprintKind) -> Option<&'static str> {
+fn place_of_kind(kind: &FootprintKind) -> Option<String> {
     Some(match kind {
-        FootprintKind::RoamingAppData => "Settings in your profile (AppData)",
+        FootprintKind::RoamingAppData => t!("core-footprint-place-roaming"),
         FootprintKind::LocalAppData | FootprintKind::LocalLowAppData => {
-            "Settings for this PC in your profile (AppData)"
+            t!("core-footprint-place-local")
         }
-        FootprintKind::ProgramData => "Shared by everyone on the PC (ProgramData)",
-        FootprintKind::Documents => "In your Documents",
-        FootprintKind::SavedGames => "In your Saved Games",
-        FootprintKind::PublicDocuments => "In Public Documents",
+        FootprintKind::ProgramData => t!("core-footprint-place-program-data"),
+        FootprintKind::Documents => t!("core-footprint-place-documents"),
+        FootprintKind::SavedGames => t!("core-footprint-place-saved-games"),
+        FootprintKind::PublicDocuments => t!("core-footprint-place-public-documents"),
         FootprintKind::InstallDirectory
         | FootprintKind::RegistryReference
         | FootprintKind::Other => return None,
@@ -574,13 +607,13 @@ fn folder_rows(report: &ScanReport) -> Vec<FolderRow> {
         let is_install_folder =
             install.is_some_and(|install| comparable_path(install) == comparable_path(&row.path));
         if is_install_folder {
-            row.locked = Some("These always go with the main program");
+            row.locked = Some(Locked::AppFolder);
         } else if path_is_within(main_program, &row.path) {
-            row.locked = Some("Holds the main program, which always goes in");
+            row.locked = Some(Locked::HoldsTheMainProgram);
         } else if needed_on_rows.contains(&comparable_path(&row.path)) {
-            row.locked = Some("Holds what the main program cannot start without");
+            row.locked = Some(Locked::HoldsWhatItNeeds);
         } else if row.goes_with.is_some() {
-            row.locked = Some("Goes with its font, under what ties it into Windows");
+            row.locked = Some(Locked::GoesWithItsFont);
         }
     }
     rows.sort_by(|left, right| {
@@ -608,35 +641,40 @@ fn row_of(
         if let (Some(first), Some(_)) = (parts.next(), parts.next()) {
             let path = install.join(first.as_os_str());
             let name = name_of(&path);
-            return (path, name, "In the app's folder".to_owned());
+            return (path, name, t!("core-footprint-place-app-folder"));
         }
         return (
             install.to_path_buf(),
-            format!("Files directly in {}", name_of(install)),
-            "In the app's folder".to_owned(),
+            t!(
+                "core-footprint-files-directly-in",
+                folder = name_of(install)
+            ),
+            t!("core-footprint-place-app-folder"),
         );
     }
     if let Some(location) = locations
         .iter()
         .find(|location| path_is_within(logical, &location.path))
     {
-        let place = place_of_kind(&location.kind).map_or_else(
-            || {
-                location
-                    .path
-                    .parent()
-                    .map_or_else(String::new, |parent| format!("In {}", parent.display()))
-            },
-            ToOwned::to_owned,
-        );
+        let place = place_of_kind(&location.kind).unwrap_or_else(|| {
+            location.path.parent().map_or_else(String::new, |parent| {
+                t!(
+                    "core-footprint-place-in",
+                    folder = parent.display().to_string()
+                )
+            })
+        });
         return (location.path.clone(), name_of(&location.path), place);
     }
     let parent = logical
         .parent()
         .map_or_else(|| logical.clone(), Path::to_path_buf);
-    let place = parent
-        .parent()
-        .map_or_else(String::new, |above| format!("In {}", above.display()));
+    let place = parent.parent().map_or_else(String::new, |above| {
+        t!(
+            "core-footprint-place-in",
+            folder = above.display().to_string()
+        )
+    });
     (parent.clone(), name_of(&parent), place)
 }
 
@@ -963,7 +1001,7 @@ fn take_out_what_needs_what_is_out(
                     .display_name
                     .clone()
                     .unwrap_or_else(|| service.service_name.clone()),
-                because: format!("it needs {needed}, which is left out"),
+                because: t!("core-footprint-needs-left-out", service = needed.as_str()),
             });
         }
         needed.is_none()
@@ -1050,7 +1088,7 @@ fn take_out_what_names_a_folder_left_out(
     if folders.left_out.is_empty() {
         return;
     }
-    const WHY: &str = "it is told to use something in a folder you left out";
+    let why = t!("core-footprint-told-to-use-left-out");
     manifest.services_detected.retain(|service| {
         // What some services run is in their settings, and they run nothing without it. Any other
         // setting that names such a folder stays, as one of the app's own does.
@@ -1070,7 +1108,7 @@ fn take_out_what_names_a_folder_left_out(
                     .display_name
                     .clone()
                     .unwrap_or_else(|| service.service_name.clone()),
-                because: WHY.to_owned(),
+                because: why.clone(),
             });
         }
         !names_one
@@ -1081,7 +1119,7 @@ fn take_out_what_names_a_folder_left_out(
             also.push(AlsoLeftOut {
                 id: driver_choice(&driver.service_name),
                 title: driver.service_name.clone(),
-                because: "its file is in a folder you left out".to_owned(),
+                because: t!("core-footprint-file-in-left-out"),
             });
         }
         !is_in_one
@@ -1099,7 +1137,7 @@ fn take_out_what_names_a_folder_left_out(
             also.push(AlsoLeftOut {
                 id: task_choice(&task.task_path, &task.task_name),
                 title: format!("{}{}", task.task_path, task.task_name),
-                because: WHY.to_owned(),
+                because: why.clone(),
             });
         }
         !names_one
@@ -1125,7 +1163,7 @@ fn take_out_what_names_a_folder_left_out(
             also.push(AlsoLeftOut {
                 id: shortcut_choice(&shortcut.original_lnk_path),
                 title: name_of(&shortcut.original_lnk_path),
-                because: WHY.to_owned(),
+                because: why.clone(),
             });
         }
         !names_one
@@ -1137,7 +1175,7 @@ fn take_out_what_names_a_folder_left_out(
                 .as_deref()
                 .is_some_and(|data| folders.are_named_in_a_command(data));
         if names_one {
-            also.push(left_out_value(entry, WHY));
+            also.push(left_out_value(entry, &why));
         }
         !names_one
     });
@@ -1146,7 +1184,7 @@ fn take_out_what_names_a_folder_left_out(
         if is_in_one {
             also.push(firewall_rule_left_out(
                 rule,
-                "the program it is for is in a folder you left out",
+                &t!("core-footprint-program-in-left-out"),
             ));
         }
         !is_in_one
@@ -1169,7 +1207,7 @@ fn take_out_what_names_a_folder_left_out(
             also.push(AlsoLeftOut {
                 id: ChoiceId::Integration(SystemChangeKind::EnvironmentVariable),
                 title: variable.name.clone(),
-                because: "it names a folder you left out".to_owned(),
+                because: t!("core-footprint-names-left-out"),
             });
             false
         });
@@ -1472,7 +1510,7 @@ fn what_was_left_out(
     choices: &FootprintChoices,
     also: &[AlsoLeftOut],
 ) -> Vec<LeftOutItem> {
-    const WHY: &str = "whoever built this installer left it out";
+    let why = t!("core-footprint-builder-left-it-out");
     let mut left_out: Vec<LeftOutItem> = footprint
         .folders_left_out(choices)
         .iter()
@@ -1483,7 +1521,7 @@ fn what_was_left_out(
             } else {
                 row.path.display().to_string()
             },
-            why: WHY.to_owned(),
+            why: why.clone(),
         })
         .collect();
     left_out.extend(
@@ -1491,8 +1529,12 @@ fn what_was_left_out(
             .items()
             .filter(|row| choices.is_left_out(&row.id))
             .map(|row| LeftOutItem {
-                name: format!("{} {}", row.change.kind.label(), row.change.title),
-                why: WHY.to_owned(),
+                name: t!(
+                    "core-footprint-left-out-item",
+                    kind = row.change.kind.label(),
+                    title = row.change.title.as_str()
+                ),
+                why: why.clone(),
             }),
     );
     left_out.extend(
@@ -1502,7 +1544,7 @@ fn what_was_left_out(
             .filter(|row| choices.is_left_out(&row.id))
             .map(|row| LeftOutItem {
                 name: row.kind.label().to_owned(),
-                why: WHY.to_owned(),
+                why: why.clone(),
             }),
     );
     left_out.extend(also.iter().map(|item| LeftOutItem {
@@ -2776,7 +2818,13 @@ mod tests {
             .iter()
             .map(|group| group.title.as_str())
             .collect();
-        assert_eq!(titles, [CREDENTIALS_LEFT_OUT_TEXT, LICENSES_LEFT_OUT_TEXT]);
+        assert_eq!(
+            titles,
+            [
+                CREDENTIALS_LEFT_OUT_TEXT.to_owned(),
+                t!("core-footprint-licenses-left-out")
+            ]
+        );
         assert_eq!(
             footprint.left_out[0].items[0].why,
             "its name says what it holds"

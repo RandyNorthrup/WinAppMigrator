@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use winappmigrator_i18n::t;
 use winappmigrator_link::channel::{SecureChannel, pair_as_builder};
 use winappmigrator_link::discovery::{self, Found};
 use winappmigrator_link::paths::{is_ordinary_name, names_of};
@@ -85,7 +86,7 @@ impl Watch {
         if left.is_zero() {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "the other PC took too long to answer",
+                t!("core-remote-too-slow"),
             ));
         }
         Ok(left)
@@ -136,18 +137,15 @@ impl Write for Timed {
 }
 
 fn closed() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::NotConnected,
-        "the link to the other PC is closed",
-    )
+    io::Error::new(io::ErrorKind::NotConnected, t!("core-remote-closed"))
 }
 
 fn failed() -> io::Error {
-    io::Error::other("the link to the other PC failed")
+    io::Error::other(t!("core-remote-failed"))
 }
 
 fn answered_something_else() -> io::Error {
-    io::Error::other("the client answered something else")
+    io::Error::other(t!("core-remote-answered-something-else"))
 }
 
 fn links() -> &'static Mutex<HashMap<String, Arc<RemotePc>>> {
@@ -204,7 +202,7 @@ pub fn address_of(typed: &str) -> io::Result<SocketAddr> {
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("{typed} was not found on the network"),
+                t!("core-remote-not-found", name = typed),
             )
         })
 }
@@ -238,7 +236,7 @@ fn connect_waiting(
     watch.start(answer_timeout)?;
     let about = match ask(&mut channel, &Request::About)? {
         (Response::About(about), _) => about,
-        _ => return Err(io::Error::other("the client did not say what it is")),
+        _ => return Err(io::Error::other(t!("core-remote-did-not-say-what-it-is"))),
     };
     // With a count, as two links made in the same millisecond would otherwise share a root.
     static LINKS_MADE: AtomicU64 = AtomicU64::new(0);
@@ -326,7 +324,7 @@ impl RemotePc {
         if path_of(request).is_some_and(|path| names_of(path).is_none()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "only a path below the other PC's root, in ordinary names, is asked about",
+                t!("core-remote-ordinary-names-only"),
             ));
         }
         if self.watch.closed.load(Ordering::Relaxed) {
@@ -397,15 +395,16 @@ impl RemotePc {
             if more && entries.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "the other PC said a folder had more in it, and gave none of it",
+                    t!("core-remote-more-but-none"),
                 ));
             }
             from = from.saturating_add(entries.len());
             if from > MAX_ENTRIES_IN_A_FOLDER {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!(
-                        "the other PC listed more than {MAX_ENTRIES_IN_A_FOLDER} things in one folder"
+                    t!(
+                        "core-remote-too-many-listed",
+                        count = MAX_ENTRIES_IN_A_FOLDER
                     ),
                 ));
             }
@@ -450,7 +449,7 @@ impl RemotePc {
             (Response::Read, body) if body.len() <= length as usize => Ok(body),
             (Response::Read, _) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "the other PC sent more of a file than was asked for",
+                t!("core-remote-sent-too-much"),
             )),
             _ => Err(answered_something_else()),
         }
@@ -485,14 +484,14 @@ pub(crate) fn remote_of(path: &Path) -> Option<io::Result<(Arc<RemotePc>, String
                 None => {
                     return Some(Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "a name that is not text cannot be asked about",
+                        t!("core-remote-name-not-text"),
                     )));
                 }
             },
             _ => {
                 return Some(Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "only a path below the other PC's root can be asked about",
+                    t!("core-remote-below-root-only"),
                 )));
             }
         }

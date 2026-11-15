@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use flate2::{Compress, Compression, FlushCompress, Status};
 use sha2::{Digest, Sha256};
+use winappmigrator_i18n::t;
 
 use crate::errors::{Result, WinAppMigratorError, panic_text};
 use crate::hashing::hex_lower;
@@ -293,10 +294,7 @@ impl Packer {
             let item = &shared.items[index];
             let duplicate = !self.names.insert(item.name.to_lowercase());
             outcomes[index] = if duplicate {
-                Err(format!(
-                    "another file has the same place in the package: {}",
-                    item.name
-                ))
+                Err(t!("core-package-same-place", name = item.name.as_str()))
             } else {
                 match finished {
                     Finished::Whole {
@@ -314,7 +312,7 @@ impl Packer {
                             uncompressed_bytes: size,
                             data: &data,
                         })
-                        .map_err(|error| WinAppMigratorError::io("the installer", error))
+                        .map_err(|error| WinAppMigratorError::io(the_installer(), error))
                         .map(|()| {
                             self.bytes_done += size;
                             Ok(PackedFile { sha256, size })
@@ -326,9 +324,9 @@ impl Packer {
             if let (Ok(packed), Some(expected)) = (&outcomes[index], &item.expected_sha256)
                 && !packed.sha256.eq_ignore_ascii_case(expected)
             {
-                return Err(WinAppMigratorError::Archive(format!(
-                    "{} changed in the protected folder while the package was being made",
-                    item.name
+                return Err(WinAppMigratorError::Archive(t!(
+                    "core-package-changed-in-protected-folder",
+                    name = item.name.as_str()
                 )));
             }
             self.files_done += 1;
@@ -373,13 +371,13 @@ impl Packer {
         // Taking a sample moves a file's place in it, whatever came of it. What is read from here on
         // goes in the package, and has to start at the start.
         if let Err(error) = opened.file.seek(SeekFrom::Start(0)) {
-            return Ok(Err(format!("{}: {error}", item.source.display())));
+            return Ok(Err(path_and_error(&item.source, &error)));
         }
         let method = store_or_deflate(&item.name, kept);
         let mut entry = self
             .stream
             .begin(&item.name, method)
-            .map_err(|error| WinAppMigratorError::io("the installer", error))?;
+            .map_err(|error| WinAppMigratorError::io(the_installer(), error))?;
         let started_at = self.bytes_done;
         let mut hasher = Sha256::new();
         let mut crc = crc32fast::Hasher::new();
@@ -401,7 +399,7 @@ impl Packer {
             let read = match read {
                 Ok(read) => read,
                 Err(error) => {
-                    failure = Some(format!("{}: {error}", item.source.display()));
+                    failure = Some(path_and_error(&item.source, &error));
                     break;
                 }
             };
@@ -416,7 +414,7 @@ impl Packer {
             if method == ZipMethod::Stored {
                 self.stream
                     .write_data(&mut entry, &chunk)
-                    .map_err(|error| WinAppMigratorError::io("the installer", error))?;
+                    .map_err(|error| WinAppMigratorError::io(the_installer(), error))?;
             } else {
                 let sequence = self.next_chunk;
                 self.next_chunk += 1;
@@ -444,11 +442,11 @@ impl Packer {
             let Some(result) = self.next_chunk_result(shared, next_to_write, true)? else {
                 continue;
             };
-            let bytes = result.map_err(|error| WinAppMigratorError::io("the installer", error))?;
+            let bytes = result.map_err(|error| WinAppMigratorError::io(the_installer(), error))?;
             if failure.is_none() {
                 self.stream
                     .write_data(&mut entry, &bytes)
-                    .map_err(|error| WinAppMigratorError::io("the installer", error))?;
+                    .map_err(|error| WinAppMigratorError::io(the_installer(), error))?;
             }
             next_to_write += 1;
         }
@@ -461,18 +459,18 @@ impl Packer {
         if let Some(reason) = failure {
             self.stream
                 .abandon(entry)
-                .map_err(|error| WinAppMigratorError::io("the installer", error))?;
+                .map_err(|error| WinAppMigratorError::io(the_installer(), error))?;
             self.bytes_done = started_at;
             return Ok(Err(reason));
         }
         if method == ZipMethod::Deflated {
             self.stream
                 .write_data(&mut entry, &DEFLATE_END)
-                .map_err(|error| WinAppMigratorError::io("the installer", error))?;
+                .map_err(|error| WinAppMigratorError::io(the_installer(), error))?;
         }
         self.stream
             .end(entry, crc.finalize(), size)
-            .map_err(|error| WinAppMigratorError::io("the installer", error))?;
+            .map_err(|error| WinAppMigratorError::io(the_installer(), error))?;
         Ok(Ok(PackedFile {
             sha256: hex_lower(&hasher.finalize()),
             size,
@@ -489,10 +487,10 @@ impl Packer {
     ) -> Result<()> {
         let mut must_wait = must_wait;
         while let Some(result) = self.next_chunk_result(shared, *next_to_write, must_wait)? {
-            let bytes = result.map_err(|error| WinAppMigratorError::io("the installer", error))?;
+            let bytes = result.map_err(|error| WinAppMigratorError::io(the_installer(), error))?;
             self.stream
                 .write_data(entry, &bytes)
-                .map_err(|error| WinAppMigratorError::io("the installer", error))?;
+                .map_err(|error| WinAppMigratorError::io(the_installer(), error))?;
             *next_to_write += 1;
             must_wait = false;
         }
@@ -529,14 +527,26 @@ impl Packer {
     pub(crate) fn finish(self) -> Result<FinishedZip> {
         self.stream
             .finish()
-            .map_err(|error| WinAppMigratorError::io("the installer", error))
+            .map_err(|error| WinAppMigratorError::io(the_installer(), error))
     }
 }
 
 fn a_worker_died() -> WinAppMigratorError {
-    WinAppMigratorError::Archive(
-        "a thread compressing files stopped unexpectedly, so no installer was written".to_owned(),
+    WinAppMigratorError::Archive(t!("core-package-worker-died"))
+}
+
+/// What a person reads for a file that could not be read: its path, and why.
+fn path_and_error(path: &Path, error: impl std::fmt::Display) -> String {
+    t!(
+        "core-package-path-error",
+        path = path.display().to_string(),
+        error = error.to_string()
     )
+}
+
+/// What stands for the installer being written, where a path would be.
+fn the_installer() -> String {
+    t!("core-package-the-installer")
 }
 
 enum Job {
@@ -638,9 +648,9 @@ fn open_file(path: &Path, connected_drive: bool) -> io::Result<crate::source_fs:
     }
     let file = options.open(path)?;
     if connected_drive && file.metadata()?.file_type().is_symlink() {
-        return Err(io::Error::other(format!(
-            "{} is a link, so it was not read",
-            path.display()
+        return Err(io::Error::other(t!(
+            "core-package-link-not-read",
+            path = path.display().to_string()
         )));
     }
     Ok(crate::source_fs::File::Local(file))
@@ -735,7 +745,7 @@ fn read_whole(shared: &Shared<'_>, item: &PackItem, compressor: &mut Compress) -
     };
     let buffer = match read {
         Ok(buffer) => buffer,
-        Err(error) => return Finished::Failed(format!("{}: {error}", item.source.display())),
+        Err(error) => return Finished::Failed(path_and_error(&item.source, &error)),
     };
     let read = buffer.len();
     // It grew since the scan saw it. Nothing of this read has gone anywhere yet.
@@ -756,9 +766,10 @@ fn read_whole(shared: &Shared<'_>, item: &PackItem, compressor: &mut Compress) -
             Ok(compressed) if compressed.len() < buffer.len() => (ZipMethod::Deflated, compressed),
             Ok(_) => (ZipMethod::Stored, buffer),
             Err(error) => {
-                return Finished::Failed(format!(
-                    "{} could not be compressed: {error}",
-                    item.source.display()
+                return Finished::Failed(t!(
+                    "core-package-not-compressed",
+                    path = item.source.display().to_string(),
+                    error = error.to_string()
                 ));
             }
         },

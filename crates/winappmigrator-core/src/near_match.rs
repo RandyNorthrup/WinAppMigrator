@@ -14,6 +14,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use winappmigrator_i18n::t;
+
 use crate::app_inventory::{UninstallRecord, read_uninstall_records};
 use crate::file_discovery::{
     DiscoveryRoot, anyone_can_create_in, appdata_bases_of, collect_matching_dirs, first_link_to,
@@ -127,8 +129,44 @@ const GOES_BY_ANOTHER_APPS_NAME: &str = "it goes by another app's name";
 const IS_ANOTHER_APPS: &str = "it is another app's";
 const NAMED_ONLY_FOR_THE_PUBLISHER: &str =
     "it is named only for the publisher, and may hold its other products";
+/// Why else something is not offered, or not taken. Each is said in English here, and by its key
+/// in a warning, which reads it from the catalog in the reader's language: see [`refusal_key`].
+const RECORD_IS_ANOTHER_APPS: &str = "its install record is another app's";
+const MAY_NOT_BE_READ: &str = "it may not be read";
+const GOES_THROUGH_A_LINK: &str = "it goes through a link";
+const NOT_WRITTEN_AS_CALLED: &str = "it is not written the way it is really called";
+const IN_ANOTHER_ACCOUNTS_FOLDERS: &str = "it is in another account's folders";
+const NOT_THAT_ACCOUNTS: &str =
+    "this app was installed for one account, and this is not that account's";
+const SHARED_OR_WINDOWS: &str = "it holds what is shared, or is part of Windows";
+const NAME_SAYS_NOTHING: &str = "its name says nothing of whose it is";
+const HOLDS_THE_APPS_FOLDER: &str = "it holds this app's own folder, and may hold more";
+const NOT_THERE: &str = "it is not there";
+pub(crate) const IN_ANOTHER_APPS_FOLDER: &str = "it is in another app's folder";
+
 const COMMON_FILES: &str = "common files";
 const USERS: &str = "users";
+
+/// The key a warning's words choose a reason by, for a reason a folder was refused. The words are the
+/// catalog's, so that a package's warning says why in the language of the PC it is installed on.
+pub(crate) fn refusal_key(why: &str) -> &'static str {
+    match why {
+        GOES_BY_ANOTHER_APPS_NAME => "another-apps-name",
+        NAMED_ONLY_FOR_THE_PUBLISHER => "publisher",
+        RECORD_IS_ANOTHER_APPS => "another-apps-record",
+        MAY_NOT_BE_READ => "unreadable",
+        GOES_THROUGH_A_LINK => "link",
+        NOT_WRITTEN_AS_CALLED => "short-name",
+        IN_ANOTHER_ACCOUNTS_FOLDERS => "another-account",
+        NOT_THAT_ACCOUNTS => "one-account",
+        SHARED_OR_WINDOWS => "shared",
+        NAME_SAYS_NOTHING => "generic-name",
+        HOLDS_THE_APPS_FOLDER => "holds-the-app",
+        NOT_THERE => "missing",
+        IN_ANOTHER_APPS_FOLDER => "in-another-apps-folder",
+        _ => "another-apps",
+    }
+}
 
 /// What is being scanned, as far as telling what is close to it takes.
 pub(crate) struct AppBeingScanned<'a> {
@@ -279,11 +317,11 @@ impl NearMatchLook {
         }
         for id in ids {
             let Some(offer) = self.offers.iter().find(|offer| offer.near.id == *id) else {
-                picks.warnings.push(Warning::new(
+                picks.warnings.push(Warning::localized(
                     "near_match_no_longer_offered",
+                    "core-warning-build-near-no-longer-offered",
                     WarningSeverity::Warning,
-                    "Something ticked in the list of what might also be this app's is not on that \
-                     list any more, so it was not added. Look at the list again.",
+                    Vec::new(),
                     None,
                 ));
                 continue;
@@ -340,13 +378,14 @@ impl NearMatchLook {
                     picks.also_the_apps.push(system.logical_path(&root));
                     picks.roots.push(root);
                 }
-                Some(why) => picks.warnings.push(Warning::new(
+                Some(why) => picks.warnings.push(Warning::localized(
                     "near_match_part_left_out",
+                    "core-warning-build-near-part-left-out",
                     WarningSeverity::Info,
-                    format!(
-                        "Part of what {} says is its own was left out: {why}.",
-                        record.display_name
-                    ),
+                    vec![
+                        ("app_name", record.display_name.as_str().into()),
+                        ("why", refusal_key(why).into()),
+                    ],
                     Some(root.display().to_string()),
                 )),
             }
@@ -359,14 +398,11 @@ impl NearMatchLook {
                 .filter(|file| self.may_add_loose_file(file, scan, system)),
         );
         if names_another_apps && !source.registry_keys.is_empty() {
-            picks.warnings.push(Warning::new(
+            picks.warnings.push(Warning::localized(
                 "near_match_part_left_out",
+                "core-warning-build-near-keys-left-out",
                 WarningSeverity::Warning,
-                format!(
-                    "The registry keys {}'s install record lists were left out, since that record \
-                     also names what is another app's.",
-                    record.display_name
-                ),
+                vec![("app_name", record.display_name.as_str().into())],
                 None,
             ));
         } else if !scan.installed_for_one_account {
@@ -401,11 +437,11 @@ impl NearMatchLook {
                     .any(|other| other.eq_ignore_ascii_case(&code))
             });
         if says_it_is_another_product {
-            return Some("its install record is another app's");
+            return Some(RECORD_IS_ANOTHER_APPS);
         }
         // Where its uninstaller or icon is, which is where its install record would be read from.
         if self.is_read_from_another_app(record) {
-            return Some("its install record is another app's");
+            return Some(RECORD_IS_ANOTHER_APPS);
         }
         let names = names_of_app(
             None,
@@ -416,7 +452,7 @@ impl NearMatchLook {
         if names.is_named_only_for_publisher(&record.display_name)
             || scan.names.is_named_only_for_publisher(&record.display_name)
         {
-            return Some("it is named only for the publisher, and may hold its other products");
+            return Some(NAMED_ONLY_FOR_THE_PUBLISHER);
         }
         self.folder_refusal(folder, scan, system)
     }
@@ -503,24 +539,24 @@ impl NearMatchLook {
         system: &SystemContext,
     ) -> Option<&'static str> {
         if has_parent_step(path) || !system.may_read(path) {
-            return Some("it may not be read");
+            return Some(MAY_NOT_BE_READ);
         }
         // What it is goes by what its PC calls it. A drive can be mounted on a folder of any name.
         let logical = system.logical_path(path);
         let kind = kind_for_path(&logical);
         if (anyone_can_create_in(&kind) && is_a_link(path)) || first_link_to(path).is_some() {
-            return Some("it goes through a link");
+            return Some(GOES_THROUGH_A_LINK);
         }
         if !is_written_as_it_is_called(path) {
-            return Some("it is not written the way it is really called");
+            return Some(NOT_WRITTEN_AS_CALLED);
         }
         if system.is_in_another_profile(path)
             || (is_of_one_account(&kind) && !system.is_the_accounts_own(path))
         {
-            return Some("it is in another account's folders");
+            return Some(IN_ANOTHER_ACCOUNTS_FOLDERS);
         }
         if scan.installed_for_one_account && !system.is_the_accounts_own(path) {
-            return Some("this app was installed for one account, and this is not that account's");
+            return Some(NOT_THAT_ACCOUNTS);
         }
         let windows_dir = system.windows_dir();
         let known_bases = self.known_bases.get_or_init(|| known_base_dirs(system));
@@ -528,11 +564,11 @@ impl NearMatchLook {
             || is_shared_folder(&logical)
             || is_shared_by_name(&logical)
         {
-            return Some("it holds what is shared, or is part of Windows");
+            return Some(SHARED_OR_WINDOWS);
         }
         let name = file_name_string(path);
         if is_generic_name(&name) || is_volatile_dir(path, true) {
-            return Some("its name says nothing of whose it is");
+            return Some(NAME_SAYS_NOTHING);
         }
         if scan.names.is_named_only_for_publisher(&name) {
             return Some(NAMED_ONLY_FOR_THE_PUBLISHER);
@@ -541,7 +577,7 @@ impl NearMatchLook {
             .install_location
             .is_some_and(|location| path_is_within(location, path))
         {
-            return Some("it holds this app's own folder, and may hold more");
+            return Some(HOLDS_THE_APPS_FOLDER);
         }
         if self.is_another_apps(path, &name) || self.holds_a_file_of_another_app(path) {
             return Some(IS_ANOTHER_APPS);
@@ -563,13 +599,13 @@ impl NearMatchLook {
         system: &SystemContext,
     ) -> Option<&'static str> {
         if has_parent_step(path) || !system.may_read(path) {
-            return Some("it may not be read");
+            return Some(MAY_NOT_BE_READ);
         }
         if !system.is_dir(path) {
-            return Some("it is not there");
+            return Some(NOT_THERE);
         }
         if !is_written_as_it_is_called(path) {
-            return Some("it is not written the way it is really called");
+            return Some(NOT_WRITTEN_AS_CALLED);
         }
         let logical = system.logical_path(path);
         let known_bases = self.known_bases.get_or_init(|| known_base_dirs(system));
@@ -582,7 +618,7 @@ impl NearMatchLook {
             || is_shared_folder(&logical)
             || (!is_where_microsoft_keeps_its_own && is_shared_by_name(&logical))
         {
-            return Some("it holds what is shared, or is part of Windows");
+            return Some(SHARED_OR_WINDOWS);
         }
         // Where a vendor keeps its products is side by side with others'. Further down, as a folder of
         // `Linguistics\Providers\Adobe` is, a name like that is only what the folder is about.
@@ -785,10 +821,10 @@ fn data_bases(scan: &AppBeingScanned<'_>, system: &SystemContext) -> Vec<(PathBu
 
 fn near_name_text(near: &NearName) -> (String, u8) {
     match near {
-        NearName::StartsWithProduct => ("Its name starts with this app's name.".to_owned(), 0),
-        NearName::HasProductInIt => ("Its name has this app's name in it.".to_owned(), 1),
+        NearName::StartsWithProduct => (t!("core-near-starts-with-app-name"), 0),
+        NearName::HasProductInIt => (t!("core-near-has-app-name"), 1),
         NearName::StartsWithPublisher(name) => (
-            format!("Its name starts with the publisher's name, {name}."),
+            t!("core-near-starts-with-publisher", publisher = name.as_str()),
             3,
         ),
     }
@@ -1060,15 +1096,15 @@ fn why_a_part(record: &UninstallRecord, scan: &AppBeingScanned<'_>) -> Option<St
                     && !is_shared_by_name(parent)
             })
     {
-        return Some(format!(
-            "A part hidden from the list of apps, installed beside this app in {}.",
-            file_name_string(beside)
+        return Some(t!(
+            "core-near-hidden-part-beside",
+            folder = file_name_string(beside)
         ));
     }
     let publisher = record.publisher.as_deref()?;
-    scan.names.has_publisher_like(publisher).then(|| {
-        format!("A part hidden from the list of apps, from the same publisher, {publisher}.")
-    })
+    scan.names
+        .has_publisher_like(publisher)
+        .then(|| t!("core-near-hidden-part-publisher", publisher = publisher))
 }
 
 /// The folders to look through for names that are close, each of which can hold programs or data.
@@ -2382,5 +2418,55 @@ mod tests {
         let scan = scan_of(&app, &names);
         let look = look_for_near_matches(&scan, &system, &|| true);
         assert_eq!(offered_names(&look), Vec::<String>::new());
+    }
+
+    /// A warning names a reason by its key, and its words choose the reason by that. In English
+    /// they have to say what the reason itself says.
+    #[test]
+    fn a_warning_gives_each_reason_in_its_own_words() {
+        for why in [
+            GOES_BY_ANOTHER_APPS_NAME,
+            IS_ANOTHER_APPS,
+            NAMED_ONLY_FOR_THE_PUBLISHER,
+            RECORD_IS_ANOTHER_APPS,
+            MAY_NOT_BE_READ,
+            GOES_THROUGH_A_LINK,
+            NOT_WRITTEN_AS_CALLED,
+            IN_ANOTHER_ACCOUNTS_FOLDERS,
+            NOT_THAT_ACCOUNTS,
+            SHARED_OR_WINDOWS,
+            NAME_SAYS_NOTHING,
+            HOLDS_THE_APPS_FOLDER,
+            NOT_THERE,
+            IN_ANOTHER_APPS_FOLDER,
+        ] {
+            let part = Warning::localized(
+                "near_match_part_left_out",
+                "core-warning-build-near-part-left-out",
+                WarningSeverity::Info,
+                vec![
+                    ("app_name", "Acme".into()),
+                    ("why", refusal_key(why).into()),
+                ],
+                None,
+            );
+            assert_eq!(
+                part.message,
+                format!("Part of what Acme says is its own was left out: {why}.")
+            );
+            let recorded = Warning::localized(
+                "folder_left_out_of_the_app",
+                "core-warning-build-recorded-folder-left-out",
+                WarningSeverity::Warning,
+                vec![("why", refusal_key(why).into())],
+                None,
+            );
+            assert_eq!(
+                recorded.message,
+                format!(
+                    "Something on record for this app names a folder that was left out, because {why}."
+                )
+            );
+        }
     }
 }

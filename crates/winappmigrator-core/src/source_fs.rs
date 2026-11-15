@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use winappmigrator_i18n::t;
 use winappmigrator_link::protocol::{Entry, EntryKind, MAX_READ};
 
 use crate::remote::{RemotePc, remote_of};
@@ -80,7 +81,7 @@ impl Metadata {
     }
     pub fn modified(&self) -> io::Result<SystemTime> {
         self.modified
-            .ok_or_else(|| io::Error::other("when it was changed is not known"))
+            .ok_or_else(|| io::Error::other(t!("core-remote-change-time-unknown")))
     }
 }
 
@@ -151,7 +152,7 @@ pub fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
             if metadata.is_symlink() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "a link on another PC is not followed",
+                    t!("core-remote-link-not-followed"),
                 ));
             }
             Ok(metadata)
@@ -190,7 +191,7 @@ impl DirEntry {
     pub fn metadata(&self) -> io::Result<Metadata> {
         self.metadata
             .clone()
-            .ok_or_else(|| io::Error::other("the listing said nothing of it"))
+            .ok_or_else(|| io::Error::other(t!("core-remote-listing-said-nothing")))
     }
     pub fn file_type(&self) -> io::Result<FileType> {
         self.metadata().map(|metadata| metadata.file_type())
@@ -300,7 +301,7 @@ pub fn open(path: impl AsRef<Path>) -> io::Result<File> {
             if entry.kind != EntryKind::File {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "only a file is opened on another PC",
+                    t!("core-remote-only-files-opened"),
                 ));
             }
             Ok(File::Remote(RemoteFile {
@@ -350,15 +351,12 @@ pub fn read_at_most(path: impl AsRef<Path>, limit: u64) -> io::Result<Vec<u8>> {
 fn too_large(size: u64, limit: u64) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("it is {size} bytes, and no more than {limit} were expected"),
+        t!("core-remote-too-large", size = size, limit = limit),
     )
 }
 
 fn more_than_asked_for() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        "the other PC sent more of a file than was asked for",
-    )
+    io::Error::new(io::ErrorKind::InvalidData, t!("core-remote-sent-too-much"))
 }
 
 /// What one read asks for, of `wanted` bytes.
@@ -431,7 +429,7 @@ impl Read for RemoteFile {
                 // file the client could not read to its end.
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
-                    "the other PC's file ended early",
+                    t!("core-remote-file-ended-early"),
                 ));
             }
         }
@@ -451,7 +449,10 @@ impl Seek for RemoteFile {
             SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
         };
         let target = target.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "a seek to before the start")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                t!("core-remote-seek-before-start"),
+            )
         })?;
         self.position = target;
         Ok(target)

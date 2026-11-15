@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
+use winappmigrator_i18n::t;
 use winreg::RegKey;
 use winreg::enums::{HKEY_USERS, KEY_READ};
 
@@ -251,7 +252,6 @@ pub(crate) fn discover_files_unless(
 const VIRTUAL_STORE_FOLDER: &str = r"AppData\Local\VirtualStore";
 const VIRTUAL_STORE_REASON: &str = "This account's own copy of the app's file, which Windows kept \
      aside for it (VirtualStore), in place of the app's";
-const VIRTUAL_STORE_PROGRAM_LEFT_OUT: &str = "virtual_store_program_left_out";
 
 /// The account's own copies of an app's files, which Windows kept in its `VirtualStore`, in place of
 /// the app's. That is what the app read on that PC, as the account it ran as, and it is only there
@@ -327,12 +327,11 @@ fn put_what_windows_kept_aside_in_place(
             };
             let stands_for = folder.join(relative);
             if crate::restore_policy::is_runnable_file(&file.path) {
-                warnings.push(Warning::new(
-                    VIRTUAL_STORE_PROGRAM_LEFT_OUT,
+                warnings.push(Warning::localized(
+                    "virtual_store_program_left_out",
+                    "core-warning-build-virtual-store-program",
                     WarningSeverity::Warning,
-                    "A program was in the folder where Windows keeps what an app wrote for one \
-                     account. Windows never puts one there, so something else did, and it was left \
-                     out.",
+                    Vec::new(),
                     Some(file.path.display().to_string()),
                 ));
                 continue;
@@ -422,28 +421,23 @@ pub fn package_destination_path(
 /// once by [`ensure_target_root`], and an ancestor can legitimately be a mounted volume.
 pub fn ensure_within_root(root: &Path, candidate: &Path) -> Result<()> {
     if !root.is_absolute() {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "the folder to write under must be a full path: {}",
-            root.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-discovery-root-not-full-path",
+            path = root.display().to_string()
         )));
     }
     if !fs::metadata(root)
         .map_err(|source| WinAppMigratorError::io(root, source))?
         .is_dir()
     {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "the folder to write under is not a folder: {}",
-            root.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-discovery-root-not-a-folder",
+            path = root.display().to_string()
         )));
     }
     let relative = strip_prefix_ignore_case(candidate, root)
         .filter(|relative| !relative.as_os_str().is_empty())
-        .ok_or_else(|| {
-            WinAppMigratorError::InvalidInput(format!(
-                "path escapes intended root: {}",
-                candidate.display()
-            ))
-        })?;
+        .ok_or_else(|| escapes_root(candidate))?;
     reject_unsafe_components(&relative)?;
 
     let mut current = root.to_path_buf();
@@ -451,9 +445,9 @@ pub fn ensure_within_root(root: &Path, candidate: &Path) -> Result<()> {
         current.push(component);
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(WinAppMigratorError::InvalidInput(format!(
-                    "refusing to write through a link: {}",
-                    current.display()
+                return Err(WinAppMigratorError::InvalidInput(t!(
+                    "core-discovery-refusing-to-write-through-link",
+                    path = current.display().to_string()
                 )));
             }
             Ok(_) => {}
@@ -474,12 +468,7 @@ pub fn ensure_within_root(root: &Path, candidate: &Path) -> Result<()> {
 pub(crate) fn hold_path_below_root(root: &Path, candidate: &Path) -> Result<Vec<fs::File>> {
     let relative = strip_prefix_ignore_case(candidate, root)
         .filter(|relative| !relative.as_os_str().is_empty())
-        .ok_or_else(|| {
-            WinAppMigratorError::InvalidInput(format!(
-                "path escapes intended root: {}",
-                candidate.display()
-            ))
-        })?;
+        .ok_or_else(|| escapes_root(candidate))?;
     let mut holds = Vec::new();
     let mut current = root.to_path_buf();
     if let Some(folders) = relative.parent() {
@@ -490,10 +479,7 @@ pub(crate) fn hold_path_below_root(root: &Path, candidate: &Path) -> Result<Vec<
                 // Nothing below a missing folder can exist.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
                 Err(_) => {
-                    return Err(WinAppMigratorError::InvalidInput(format!(
-                        "refusing to go through a link: {}",
-                        current.display()
-                    )));
+                    return Err(through_a_link(&current));
                 }
             }
         }
@@ -524,11 +510,26 @@ pub fn first_link_to(path: &Path) -> Option<PathBuf> {
 
 /// What to say about [`first_link_to`].
 pub(crate) fn link_refusal(link: &Path) -> String {
-    format!(
-        "{} is a link to somewhere else, and others may be able to change where it leads. Use \
-         the place it leads to",
-        link.display()
+    t!(
+        "core-discovery-link-to-somewhere-else",
+        path = link.display().to_string()
     )
+}
+
+/// What to say of a path that escapes the folder it has to be in.
+fn escapes_root(candidate: &Path) -> WinAppMigratorError {
+    WinAppMigratorError::InvalidInput(t!(
+        "core-discovery-escapes-root",
+        path = candidate.display().to_string()
+    ))
+}
+
+/// What to say of a folder on the way that is a link.
+fn through_a_link(folder: &Path) -> WinAppMigratorError {
+    WinAppMigratorError::InvalidInput(t!(
+        "core-discovery-refusing-link",
+        path = folder.display().to_string()
+    ))
 }
 
 /// Hold a folder paths are checked against, which must be what has that name and not a link to
@@ -547,7 +548,10 @@ pub(crate) fn hold_root(root: &Path) -> std::io::Result<fs::File> {
 /// be a link, or to have become one. Anything else is only something that went wrong.
 fn refusal_or_io(path: &Path, error: std::io::Error) -> WinAppMigratorError {
     if error.kind() == std::io::ErrorKind::Other {
-        WinAppMigratorError::InvalidInput(format!("refusing to go through a link: {error}"))
+        WinAppMigratorError::InvalidInput(t!(
+            "core-discovery-refusing-link-because",
+            error = error.to_string()
+        ))
     } else {
         WinAppMigratorError::io(path, error)
     }
@@ -557,7 +561,10 @@ fn refusal_or_io(path: &Path, error: std::io::Error) -> WinAppMigratorError {
 /// from being emptied, so until then, that is the pin's job.
 fn make_and_hold_folder(folder: &Path, parent_hold: &fs::File) -> Result<fs::File> {
     let parent = folder.parent().ok_or_else(|| {
-        WinAppMigratorError::InvalidInput(format!("{} has no parent folder", folder.display()))
+        WinAppMigratorError::InvalidInput(t!(
+            "core-discovery-no-parent-folder",
+            path = folder.display().to_string()
+        ))
     })?;
     let pin = pin_held_folder(parent, parent_hold).map_err(|error| refusal_or_io(parent, error))?;
     if let Err(error) = fs::create_dir(folder)
@@ -588,12 +595,7 @@ pub(crate) struct PinnedPath {
 pub(crate) fn pin_path_below_root(root: &Path, candidate: &Path) -> Result<PinnedPath> {
     let relative = strip_prefix_ignore_case(candidate, root)
         .filter(|relative| !relative.as_os_str().is_empty())
-        .ok_or_else(|| {
-            WinAppMigratorError::InvalidInput(format!(
-                "path escapes intended root: {}",
-                candidate.display()
-            ))
-        })?;
+        .ok_or_else(|| escapes_root(candidate))?;
     let mut last_hold = hold_root(root).map_err(|error| refusal_or_io(root, error))?;
     let mut holds = Vec::new();
     let mut current = root.to_path_buf();
@@ -605,10 +607,7 @@ pub(crate) fn pin_path_below_root(root: &Path, candidate: &Path) -> Result<Pinne
                     make_and_hold_folder(&current, &last_hold)?
                 }
                 Err(_) => {
-                    return Err(WinAppMigratorError::InvalidInput(format!(
-                        "refusing to go through a link: {}",
-                        current.display()
-                    )));
+                    return Err(through_a_link(&current));
                 }
                 Ok(held) => held,
             };
@@ -633,18 +632,18 @@ pub(crate) fn pin_path_below_root(root: &Path, candidate: &Path) -> Result<Pinne
 /// [`pin_path_below_root`] refuses, for each file.
 pub fn ensure_target_root(target_root: &Path) -> Result<fs::File> {
     if !target_root.is_absolute() {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "the install location must be a full path: \"{}\"",
-            target_root.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-discovery-install-location-not-full-path",
+            path = target_root.display().to_string()
         )));
     }
     fs::create_dir_all(target_root)
         .map_err(|source| WinAppMigratorError::io(target_root, source))?;
     let hold = hold_root(target_root).map_err(|source| {
         if source.kind() == std::io::ErrorKind::Other {
-            WinAppMigratorError::InvalidInput(format!(
-                "the install location is a link to somewhere else: {}",
-                target_root.display()
+            WinAppMigratorError::InvalidInput(t!(
+                "core-discovery-install-location-a-link",
+                path = target_root.display().to_string()
             ))
         } else {
             WinAppMigratorError::io(target_root, source)
@@ -724,9 +723,9 @@ pub(crate) fn opens_as_device_on(component: &str, windows_build: u32) -> bool {
 
 fn reject_device_names_on(path: &Path, windows_build: u32) -> Result<()> {
     if has_reserved_device_name(path) {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "path uses a name reserved for a Windows device: {}",
-            path.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-discovery-device-name",
+            path = path.display().to_string()
         )));
     }
     let older_windows_device = path.components().any(|component| match component {
@@ -734,10 +733,9 @@ fn reject_device_names_on(path: &Path, windows_build: u32) -> Result<()> {
         _ => false,
     });
     if older_windows_device {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "{} has a name that this version of Windows opens as a device and not as a file, so \
-             nothing was written to it. It can be installed on Windows 11",
-            path.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-discovery-device-name-on-older-windows",
+            path = path.display().to_string()
         )));
     }
     Ok(())
@@ -761,9 +759,9 @@ pub(crate) fn reject_unsafe_components(relative: &Path) -> Result<()> {
             _ => false,
         };
         if !safe {
-            return Err(WinAppMigratorError::InvalidInput(format!(
-                "unsafe path: {}",
-                relative.display()
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-discovery-unsafe-path",
+                path = relative.display().to_string()
             )));
         }
     }
@@ -833,9 +831,9 @@ pub fn restore_destination_for_entry(
     restore_user_data: bool,
 ) -> Result<PathBuf> {
     let relative = entry.package_relative_path.as_ref().ok_or_else(|| {
-        WinAppMigratorError::InvalidInput(format!(
-            "file has no package relative path: {}",
-            entry.original_path.display()
+        WinAppMigratorError::InvalidInput(t!(
+            "core-discovery-no-package-path",
+            path = entry.original_path.display().to_string()
         ))
     })?;
     if restore_user_data
@@ -1093,14 +1091,11 @@ fn expand_user_folder(
 /// A file that is not to be read for this scan, which only says what was left out: what would be
 /// followed on a drive, or what belongs to someone else, at most by a value's say-so.
 fn left_out_warning(path: &Path) -> Warning {
-    Warning::new(
+    Warning::localized(
         "file_discovery_left_out",
+        "core-warning-build-file-left-out",
         WarningSeverity::Warning,
-        format!(
-            "{} was left out: it goes through a link on a connected drive, or it belongs to \
-             another account than the one whose data is being included.",
-            path.display()
-        ),
+        vec![("path", path.display().to_string().into())],
         Some(path.display().to_string()),
     )
 }
@@ -1468,21 +1463,28 @@ pub(crate) fn user_folder_of(
     match folder {
         Some(folder) if system.is_dir(&folder) => Some(folder),
         _ if out_of_reach => {
-            let not_on = if on_a_drive {
-                "this drive"
+            let args = vec![
+                ("user", user.name.as_str().into()),
+                ("folder", default.into()),
+                ("path", recorded.as_str().into()),
+            ];
+            warnings.push(if on_a_drive {
+                Warning::localized(
+                    "user_folder_out_of_reach",
+                    "core-warning-build-user-folder-not-on-drive",
+                    WarningSeverity::Warning,
+                    args,
+                    None,
+                )
             } else {
-                "a disk of this PC"
-            };
-            warnings.push(Warning::new(
-                "user_folder_out_of_reach",
-                WarningSeverity::Warning,
-                format!(
-                    "{}'s {default} folder was at {recorded}, which is not on {not_on}, so what \
-                     is there was not included.",
-                    user.name
-                ),
-                None,
-            ));
+                Warning::localized(
+                    "user_folder_out_of_reach",
+                    "core-warning-build-user-folder-not-on-this-pc",
+                    WarningSeverity::Warning,
+                    args,
+                    None,
+                )
+            });
             None
         }
         _ => Some(default_folder).filter(|folder| system.is_dir(folder)),
@@ -1532,13 +1534,14 @@ pub(crate) fn collect_matching_dirs(
             // look, so real application data here would be silently missed. Record
             // it rather than dropping the whole footprint category.
             if error.kind() != std::io::ErrorKind::NotFound {
-                warnings.push(Warning::new(
+                warnings.push(Warning::localized(
                     "file_discovery_base_unreadable",
+                    "core-warning-build-base-unreadable",
                     WarningSeverity::Warning,
-                    format!(
-                        "Could not read {} ({error}); application data stored there was not included.",
-                        base.display()
-                    ),
+                    vec![
+                        ("path", base.display().to_string().into()),
+                        ("error", error.to_string().into()),
+                    ],
                     Some(base.display().to_string()),
                 ));
             }
@@ -1568,13 +1571,14 @@ pub(crate) fn collect_matching_dirs(
             Err(error) => {
                 let is_legacy_name = link && error.kind() == std::io::ErrorKind::PermissionDenied;
                 if error.kind() != std::io::ErrorKind::NotFound && !is_legacy_name {
-                    warnings.push(Warning::new(
+                    warnings.push(Warning::localized(
                         "file_discovery_dir_unreadable",
+                        "core-warning-build-folder-unreadable",
                         WarningSeverity::Info,
-                        format!(
-                            "Could not read {} ({error}); nested application data there may be missing.",
-                            path.display()
-                        ),
+                        vec![
+                            ("path", path.display().to_string().into()),
+                            ("error", error.to_string().into()),
+                        ],
                         Some(path.display().to_string()),
                     ));
                 }
@@ -1664,10 +1668,11 @@ fn discover_tree(
             Ok(entry) => entry,
             Err(error) => {
                 folders_with_something.insert(comparable_path(&error.path));
-                warnings.push(Warning::new(
+                warnings.push(Warning::localized(
                     "file_discovery_walk_error",
+                    "core-warning-build-entry-unreadable",
                     WarningSeverity::Info,
-                    format!("Could not read a filesystem entry: {error}"),
+                    vec![("error", error.to_string().into())],
                     Some(root.path.display().to_string()),
                 ));
                 continue;
@@ -1720,28 +1725,31 @@ fn discover_tree(
     };
     let links = links.into_inner();
     if !links.is_empty() {
-        warnings.push(Warning::new(
+        let (names, more) = named_in(&links, &root.path);
+        warnings.push(Warning::localized(
             "links_not_followed",
+            "core-warning-build-links-not-followed",
             WarningSeverity::Warning,
-            format!(
-                "{} links, or names that would open something else, were not followed in this \
-                 folder, so what they point at is not in the installer: {}.",
-                links.len(),
-                named_in(&links, &root.path)
-            ),
+            vec![
+                ("count", links.len().into()),
+                ("names", names.into()),
+                ("more", more.into()),
+            ],
             Some(root.path.display().to_string()),
         ));
     }
     if !too_deep.is_empty() {
-        warnings.push(Warning::new(
+        let (names, more) = named_in(&too_deep, &root.path);
+        warnings.push(Warning::localized(
             "folders_too_deep",
+            "core-warning-build-folders-too-deep",
             WarningSeverity::Warning,
-            format!(
-                "{} folders are more than {DEEPEST_WALK} levels down, so what is in them is not in \
-                 the installer: {}.",
-                too_deep.len(),
-                named_in(&too_deep, &root.path)
-            ),
+            vec![
+                ("count", too_deep.len().into()),
+                ("depth", DEEPEST_WALK.into()),
+                ("names", names.into()),
+                ("more", more.into()),
+            ],
             Some(root.path.display().to_string()),
         ));
     }
@@ -1778,9 +1786,10 @@ fn discover_tree(
     }
 }
 
-/// As many of what a walk left out as is worth reading, by where each is in what was walked.
-fn named_in(paths: &[PathBuf], root: &Path) -> String {
-    let mut names: Vec<String> = paths
+/// As many of what a walk left out as is worth reading, by where each is in what was walked, as a
+/// list, and how many more there are.
+fn named_in(paths: &[PathBuf], root: &Path) -> (String, usize) {
+    let names: Vec<String> = paths
         .iter()
         .take(MOST_NAMED_IN_A_WARNING)
         .map(|path| {
@@ -1790,13 +1799,10 @@ fn named_in(paths: &[PathBuf], root: &Path) -> String {
                 .to_string()
         })
         .collect();
-    if paths.len() > MOST_NAMED_IN_A_WARNING {
-        names.push(format!(
-            "and {} more",
-            paths.len() - MOST_NAMED_IN_A_WARNING
-        ));
-    }
-    names.join(", ")
+    (
+        winappmigrator_i18n::join_list(&names),
+        paths.len().saturating_sub(MOST_NAMED_IN_A_WARNING),
+    )
 }
 
 /// True for data folders, where a `Cache` or `Logs` folder is the app's own scratch
@@ -1854,10 +1860,11 @@ fn add_file(
     ) {
         Ok(metadata) => metadata,
         Err(error) => {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "file_metadata_unreadable",
+                "core-warning-build-metadata-unreadable",
                 WarningSeverity::Info,
-                format!("Could not read file metadata: {error}"),
+                vec![("error", error.to_string().into())],
                 Some(path.display().to_string()),
             ));
             return;
@@ -1887,10 +1894,11 @@ fn add_file(
     // package, and restoring refuses a manifest that names one anyway.
     let reserved_name = has_reserved_device_name(path);
     if reserved_name && base_should_copy {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "file_reserved_name_skipped",
+            "core-warning-build-reserved-name",
             WarningSeverity::Warning,
-            "This file's name is reserved for a Windows device, so it was not copied.",
+            Vec::new(),
             Some(path.display().to_string()),
         ));
     }
@@ -1902,10 +1910,11 @@ fn add_file(
         match sha256_file(path) {
             Ok(hash) => Some(hash),
             Err(error) => {
-                warnings.push(Warning::new(
+                warnings.push(Warning::localized(
                     "file_hash_failed",
+                    "core-warning-build-hash-failed",
                     WarningSeverity::Info,
-                    format!("Could not hash file: {error}"),
+                    vec![("error", error.to_string().into())],
                     Some(path.display().to_string()),
                 ));
                 None
@@ -1917,10 +1926,11 @@ fn add_file(
 
     let package_relative_path = should_copy.then(|| package_relative_path(path, install_root));
     let reason = if online_only {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "cloud_placeholder_skipped",
+            "core-warning-build-cloud-placeholder",
             WarningSeverity::Info,
-            "Online-only cloud file (e.g. OneDrive Files On-Demand) has no local data; pin or download it before backup. Reported but not copied.",
+            Vec::new(),
             Some(path.display().to_string()),
         ));
         "Online-only cloud placeholder (data not downloaded); not copied"
@@ -1931,12 +1941,13 @@ fn add_file(
                     .file_name()
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_default();
-                warnings.push(Warning::new(
-                    DRIVER_FILE_NOT_COPIED_CODE,
+                // The code is `DRIVER_FILE_NOT_COPIED_CODE`, written out for what checks the
+                // catalog to find.
+                warnings.push(Warning::localized(
+                    "driver_file_not_copied",
+                    "core-warning-build-driver-file",
                     WarningSeverity::Info,
-                    format!(
-                        "Driver/kernel file '{file_name}' is not copied as a plain file. If it backs a registered driver service for this app, the installer bundles it and re-registers the driver automatically; otherwise reinstall it with the vendor's signed driver package."
-                    ),
+                    vec![("file_name", file_name.into())],
                     Some(path.display().to_string()),
                 ));
                 "Driver/kernel file: bundled and re-registered when app-owned, otherwise vendor reinstall"
@@ -3724,5 +3735,39 @@ mod tests {
 
         assert_eq!(destination, target.join(r"bin\app.exe"));
         Ok(())
+    }
+
+    /// What a walk left out is named in a list, and what is past the most named is counted.
+    #[test]
+    fn what_a_walk_left_out_is_listed_and_counted() {
+        let root = Path::new(r"C:\App");
+        let paths: Vec<PathBuf> = ["a", "b", "c", "d", "e", "f", "g"]
+            .iter()
+            .map(|name| root.join(name))
+            .collect();
+        let words = |count: usize, (names, more): (String, usize)| {
+            Warning::localized(
+                "links_not_followed",
+                "core-warning-build-links-not-followed",
+                WarningSeverity::Warning,
+                vec![
+                    ("count", count.into()),
+                    ("names", names.into()),
+                    ("more", more.into()),
+                ],
+                None,
+            )
+            .message
+        };
+        assert_eq!(
+            words(7, named_in(&paths, root)),
+            "7 links, or names that would open something else, were not followed in this folder, \
+             so what they point at is not in the installer: a, b, c, d, e, and 2 more."
+        );
+        assert_eq!(
+            words(1, named_in(&paths[..1], root)),
+            "1 link, or name that would open something else, was not followed in this folder, so \
+             what it points at is not in the installer: a."
+        );
     }
 }

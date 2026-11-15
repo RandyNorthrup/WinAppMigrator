@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
+use winappmigrator_i18n::t;
 use zip::ZipArchive;
 
 use crate::errors::{Result, WinAppMigratorError, panic_text};
@@ -241,9 +242,10 @@ fn read_every_entry<R: Read + Seek + Clone + Send>(
                         read_one_entry(&mut archive, index, destination, is_cancelled)
                     }))
                     .unwrap_or_else(|panic| {
-                        Err(WinAppMigratorError::Archive(format!(
-                            "entry {index} of the package could not be read: {}",
-                            panic_text(panic.as_ref())
+                        Err(WinAppMigratorError::Archive(t!(
+                            "core-archive-entry-unreadable",
+                            index = index,
+                            reason = panic_text(panic.as_ref())
                         )))
                     });
                     match outcome {
@@ -300,8 +302,9 @@ fn read_one_entry<R: Read + Seek>(
         .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?
         .into_owned();
     if name.contains('\0') {
-        return Err(WinAppMigratorError::Archive(format!(
-            "zip entry has unsafe path: {name}"
+        return Err(WinAppMigratorError::Archive(t!(
+            "core-archive-entry-unsafe-path",
+            name = name.as_str()
         )));
     }
     let relative = Path::new(&name);
@@ -346,14 +349,15 @@ fn read_one_entry<R: Read + Seek>(
         }
         let read = file
             .read(&mut buffer)
-            .map_err(|error| WinAppMigratorError::Archive(format!("{name}: {error}")))?;
+            .map_err(|error| WinAppMigratorError::Archive(name_and_error(&name, &error)))?;
         if read == 0 {
             break;
         }
         size += read as u64;
         if size > declared {
-            return Err(WinAppMigratorError::Archive(format!(
-                "{name} holds more than it says it does"
+            return Err(WinAppMigratorError::Archive(t!(
+                "core-archive-holds-more",
+                name = name.as_str()
             )));
         }
         hasher.update(&buffer[..read]);
@@ -649,11 +653,9 @@ impl PendingInstaller {
                 &|| monitor.is_cancelled(),
             )?;
             if copied != sha256 || copied_len != len {
-                return Err(WinAppMigratorError::Archive(
-                    "the package changed while it was being put after the stub, so no installer \
-                     was written"
-                        .to_owned(),
-                ));
+                return Err(WinAppMigratorError::Archive(t!(
+                    "core-archive-changed-while-copied"
+                )));
             }
             write_footer(&mut exe, &exe_partial, &sha256, len, SFX_MAGIC)?;
             drop(exe);
@@ -797,7 +799,7 @@ impl EmbeddedPackage {
             .as_ref()
             .unwrap_or(&self.file)
             .try_clone()
-            .map_err(|error| WinAppMigratorError::io("installer package", error))?;
+            .map_err(|error| WinAppMigratorError::io(installer_package(), error))?;
         Ok(ArchiveSection::new(
             Arc::new(file),
             self.location.start,
@@ -865,11 +867,11 @@ impl EmbeddedPackage {
         let mut file = self
             .file
             .try_clone()
-            .map_err(|error| WinAppMigratorError::io("installer package", error))?;
+            .map_err(|error| WinAppMigratorError::io(installer_package(), error))?;
         let image = read_stub_image(&mut file, self.location.stub_len)
-            .map_err(|error| WinAppMigratorError::io("installer package", error))?;
+            .map_err(|error| WinAppMigratorError::io(installer_package(), error))?;
         let image = bare_stub_image(image)
-            .map_err(|error| WinAppMigratorError::io("installer package", error))??;
+            .map_err(|error| WinAppMigratorError::io(installer_package(), error))??;
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -887,12 +889,12 @@ impl EmbeddedPackage {
             .map_err(|error| WinAppMigratorError::Archive(error.to_string()))?;
         let entry = archive
             .by_name(name)
-            .map_err(|error| WinAppMigratorError::Archive(format!("{name}: {error}")))?;
+            .map_err(|error| WinAppMigratorError::Archive(name_and_error(name, &error)))?;
         let mut bytes = Vec::new();
         entry
             .take(MAX_EMBEDDED_FILE_BYTES)
             .read_to_end(&mut bytes)
-            .map_err(|error| WinAppMigratorError::Archive(format!("{name}: {error}")))?;
+            .map_err(|error| WinAppMigratorError::Archive(name_and_error(name, &error)))?;
         Ok(bytes)
     }
 }
@@ -922,11 +924,7 @@ fn read_stub_image<F: Read + Seek>(file: &mut F, len: u64) -> io::Result<Vec<u8>
 /// the certificate table is gone, and with it any signature. An image that does not come
 /// out that way is refused, not written.
 fn bare_stub_image(mut image: Vec<u8>) -> io::Result<Result<Vec<u8>>> {
-    let not_a_stub = || {
-        WinAppMigratorError::InvalidInput(
-            "the part of this installer before its package is not a program".to_owned(),
-        )
-    };
+    let not_a_stub = || WinAppMigratorError::InvalidInput(t!("core-archive-stub-not-a-program"));
     let len = image.len() as u64;
     let mut reader = io::Cursor::new(&image);
     let Some(pe_offset) = pe_header(&mut reader, len)? else {
@@ -1009,11 +1007,21 @@ fn check_package_hash<F: Read + Seek>(
 }
 
 fn damaged_installer() -> WinAppMigratorError {
-    WinAppMigratorError::Archive(
-        "this installer is damaged or was changed after it was built, so nothing was read from \
-         its package. Copy it again from where it was built."
-            .to_owned(),
+    WinAppMigratorError::Archive(t!("core-archive-damaged"))
+}
+
+/// A file in the package, or the package itself, and what went wrong with it.
+fn name_and_error(name: &str, error: impl std::fmt::Display) -> String {
+    t!(
+        "core-package-path-error",
+        path = name,
+        error = error.to_string()
     )
+}
+
+/// What stands for the package an installer carries, where a path would be.
+fn installer_package() -> String {
+    t!("core-archive-installer-package")
 }
 
 /// Open a loader's data file and check it against the loader's footer, before anything in it is
@@ -1035,32 +1043,27 @@ fn open_data_file(
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => WinAppMigratorError::Archive(format!(
-                "this installer keeps its package in a file named {name}, in the same folder, and \
-                 that file is not there. The two files have to stay together: copy {name} here \
-                 from where the installer was built, then run this again."
+            io::ErrorKind::NotFound => WinAppMigratorError::Archive(t!(
+                "core-archive-data-file-missing",
+                name = name.as_str()
             )),
-            _ => WinAppMigratorError::Archive(format!(
-                "this installer's data file, {name}, could not be opened: {error}. The two files \
-                 have to stay together, in a folder this PC can read."
+            _ => WinAppMigratorError::Archive(t!(
+                "core-archive-data-file-unopened",
+                name = name.as_str(),
+                error = error.to_string()
             )),
         })?;
     let metadata = file
         .metadata()
         .map_err(|error| WinAppMigratorError::io(path, error))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(WinAppMigratorError::Archive(format!(
-            "{name} is a link or a folder, and this installer's data file has to be a file of its \
-             own, right beside it, so nothing was read from it. Copy the real file here."
+        return Err(WinAppMigratorError::Archive(t!(
+            "core-archive-data-file-a-link",
+            name = name.as_str()
         )));
     }
-    let wrong_file = || {
-        WinAppMigratorError::Archive(format!(
-            "{name} is not this installer's data file, or it is damaged or was changed after it \
-             was built, so nothing was read from it. Copy both files again from where they were \
-             built."
-        ))
-    };
+    let wrong_file =
+        || WinAppMigratorError::Archive(t!("core-archive-data-file-wrong", name = name.as_str()));
     if metadata.len() != location.len {
         return Err(wrong_file());
     }
@@ -1092,15 +1095,13 @@ fn refuse_signed_stub(stub: &InstallerStub) -> Result<()> {
         }
         InstallerStub::Embedded(bytes) => {
             certificate_table(&mut io::Cursor::new(bytes), bytes.len() as u64)
-                .map_err(|error| WinAppMigratorError::io("embedded installer stub", error))?
+                .map_err(|error| WinAppMigratorError::io(t!("core-archive-embedded-stub"), error))?
         }
     };
     if table.is_some() {
-        return Err(WinAppMigratorError::InvalidInput(
-            "the installer stub is signed; it must stay unsigned, so sign the finished \
-             installer instead"
-                .to_owned(),
-        ));
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-archive-stub-signed"
+        )));
     }
     Ok(())
 }
@@ -1128,10 +1129,9 @@ fn refuse_oversized_installer(size: u64) -> Result<()> {
     if fits_in_one_file(size) {
         return Ok(());
     }
-    Err(WinAppMigratorError::InvalidInput(format!(
-        "the installer would be {}, and Windows cannot run an executable of 4 GB or more; \
-         nothing was written",
-        crate::space::size_text(size)
+    Err(WinAppMigratorError::InvalidInput(t!(
+        "core-archive-too-big-to-run",
+        size = winappmigrator_i18n::size(size)
     )))
 }
 
@@ -1168,10 +1168,9 @@ fn locate_embedded_archive<F: Read + Seek>(
         None => file_len,
         Some(table) => {
             if table.offset.saturating_add(table.size) != file_len {
-                return Ok(Err(WinAppMigratorError::Archive(
-                    "installer has data outside its signature and may have been tampered with"
-                        .to_owned(),
-                )));
+                return Ok(Err(WinAppMigratorError::Archive(t!(
+                    "core-archive-outside-signature"
+                ))));
             }
             table.offset - trailing_zero_padding(file, table.offset)?
         }
@@ -1207,9 +1206,9 @@ fn locate_embedded_archive<F: Read + Seek>(
     Ok(Ok(Some(match form {
         PackageForm::InTheInstaller => {
             if len > footer_start {
-                return Ok(Err(WinAppMigratorError::Archive(
-                    "self-extracting archive footer length is invalid".to_owned(),
-                )));
+                return Ok(Err(WinAppMigratorError::Archive(t!(
+                    "core-archive-footer-length"
+                ))));
             }
             ArchiveLocation {
                 start: footer_start - len,
@@ -1395,7 +1394,9 @@ impl Seek for ArchiveSection {
             SeekFrom::Current(delta) => self.position.checked_add_signed(delta),
             SeekFrom::End(delta) => self.len.checked_add_signed(delta),
         }
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek outside the package"))?;
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, t!("core-archive-seek-outside"))
+        })?;
         self.position = position;
         Ok(position)
     }
@@ -1411,17 +1412,17 @@ fn zip_entry_name(root: &Path, path: &Path) -> Result<String> {
             Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
             Component::CurDir => {}
             Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
-                return Err(WinAppMigratorError::Archive(format!(
-                    "unsafe package path: {}",
-                    path.display()
+                return Err(WinAppMigratorError::Archive(t!(
+                    "core-archive-unsafe-package-path",
+                    path = path.display().to_string()
                 )));
             }
         }
     }
     if parts.is_empty() {
-        return Err(WinAppMigratorError::Archive(format!(
-            "empty package path: {}",
-            path.display()
+        return Err(WinAppMigratorError::Archive(t!(
+            "core-archive-empty-package-path",
+            path = path.display().to_string()
         )));
     }
     Ok(parts.join("/"))

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use winappmigrator_i18n::t;
 
 use crate::account_settings::{
     say_no_more_of_licenses_than_the_apps_key, say_no_more_than_the_apps_key, take_account_settings,
@@ -35,7 +36,10 @@ use crate::models::{
     RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport, ScheduledTaskEntry,
     ServiceEntry, ShortcutEntry, SourcePlatform, Warning, WarningSeverity,
 };
-use crate::near_match::{AppBeingScanned, NearMatchLook, Picks, look_for_near_matches};
+use crate::near_match::{
+    AppBeingScanned, IN_ANOTHER_APPS_FOLDER, NearMatchLook, Picks, look_for_near_matches,
+    refusal_key,
+};
 use crate::path_utils::comparable_path;
 use crate::path_utils::{
     is_drive_root, is_really_within, looks_like_executable, path_is_within, resolved_location,
@@ -118,11 +122,11 @@ fn read_program_needs_of(
             .flatten();
         // A helper that is not really a program is nothing to say. What the app cannot do without is.
         if need.is_none() && role != ProgramRole::Other {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "program_needs_unreadable",
+                "core-warning-build-program-needs-unreadable",
                 WarningSeverity::Warning,
-                "What this needs from Windows could not be read, so whether it can run on the other \
-                 PC will not be checked.",
+                Vec::new(),
                 Some(logical.display().to_string()),
             ));
         }
@@ -221,15 +225,12 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         .unwrap_or(executable_path);
     // Whatever led here, on a drive nothing is read through a link or from off the drive.
     if !system.may_read(&executable_path) {
-        let why = if system.is_offline() {
-            "goes through a link or is not on the connected drive"
+        let path = executable_path.display().to_string();
+        return Err(WinAppMigratorError::InvalidInput(if system.is_offline() {
+            t!("core-scan-program-not-on-the-drive", path = path)
         } else {
-            "is not on a disk of this PC, or has a name that would open something else"
-        };
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "{} {why}, so it was not read.",
-            executable_path.display()
-        )));
+            t!("core-scan-program-not-on-this-pc", path = path)
+        }));
     }
     // What an app is allowed to have in another account's folders is what its machine-wide record
     // says. An uninstall entry in an account's own registry can be written with no rights at all,
@@ -261,10 +262,9 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     // Its folder too, all of which is taken with it.
     if is_someone_elses(&executable_path) || executable_path.parent().is_some_and(is_someone_elses)
     {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "{} is in another account's folders or is not this account's, and this app's own \
-             record does not say it belongs there, so it was not read.",
-            executable_path.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-scan-program-someone-elses",
+            path = executable_path.display().to_string()
         )));
     }
     validate_scan_input(&executable_path)?;
@@ -282,10 +282,11 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
 
     let mut pe_scan = scan_pe(&executable_path)?;
     if pe_scan.metadata.external_manifest.is_some() {
-        pe_scan.warnings.push(Warning::new(
+        pe_scan.warnings.push(Warning::localized(
             "external_manifest_detected",
+            "core-warning-build-external-manifest",
             WarningSeverity::Warning,
-            "External application manifest detected; side-by-side dependency interpretation is deferred.",
+            Vec::new(),
             pe_scan
                 .metadata
                 .external_manifest
@@ -294,18 +295,20 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         ));
     }
     if !looks_like_executable(&executable_path) {
-        pe_scan.warnings.push(Warning::new(
+        pe_scan.warnings.push(Warning::localized(
             "non_exe_extension",
+            "core-warning-build-non-exe",
             WarningSeverity::Info,
-            "Selected file does not use the .exe extension; PE scanning will continue.",
+            Vec::new(),
             Some(executable_path.display().to_string()),
         ));
     }
     if source_app.is_some() && !is_usable_main_executable(&executable_path, &system) {
-        pe_scan.warnings.push(Warning::new(
+        pe_scan.warnings.push(Warning::localized(
             "main_executable_not_the_app",
+            "core-warning-build-stand-in-program",
             WarningSeverity::Warning,
-            "No ordinary application executable was found, so this file stands in for it. Architecture and dependency results describe this file, and may not describe the application.",
+            Vec::new(),
             Some(executable_path.display().to_string()),
         ));
     }
@@ -504,20 +507,20 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     }
     let mut folders_left_out = Vec::new();
     if near_look.could_not_read_all_of_what_others_have() {
-        folders_left_out.push(Warning::new(
+        folders_left_out.push(Warning::localized(
             "other_apps_files_unknown",
+            "core-warning-build-other-apps-files-unknown",
             WarningSeverity::Warning,
-            "Not all of what Windows Installer has of other apps could be read, so a folder this app \
-             has on record can hold another app's files with nothing here to say so.",
+            Vec::new(),
             None,
         ));
     }
     if let Some(folder) = app_folder_has_a_file_of_another_app {
-        folders_left_out.push(Warning::new(
+        folders_left_out.push(Warning::localized(
             "app_folder_holds_another_app",
+            "core-warning-build-app-folder-has-another-apps-file",
             WarningSeverity::Warning,
-            "Windows Installer says another app has a file in the folder this app's program is in, and \
-             it comes along, as all of that folder is taken.",
+            Vec::new(),
             Some(folder.display().to_string()),
         ));
     }
@@ -525,20 +528,20 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         .iter()
         .flat_map(|source| &source.folders_left_alone)
     {
-        folders_left_out.push(Warning::new(
+        folders_left_out.push(Warning::localized(
             "folder_left_out_of_the_app",
+            "core-warning-build-app-paths-folder-left-out",
             WarningSeverity::Warning,
-            "This app's App Paths entry says it looks in a folder that is not its own, so that \
-             folder does not come along. It may not start on a PC without what is there.",
+            Vec::new(),
             Some(folder.display().to_string()),
         ));
     }
     if let Some(folder) = uninstallers_folder_left_out {
-        folders_left_out.push(Warning::new(
+        folders_left_out.push(Warning::localized(
             "folder_left_out_of_the_app",
+            "core-warning-build-uninstaller-folder-left-out",
             WarningSeverity::Warning,
-            "The folder this app's uninstaller is in was left out, because Windows Installer says \
-             another app has a file there.",
+            Vec::new(),
             Some(folder.display().to_string()),
         ));
     }
@@ -557,18 +560,18 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
                 near_look
                     .root_refusal(root, &near_names, is_microsofts_own, &system)
                     .or_else(|| {
-                        (is_only_where_an_uninstaller_is && near_look.is_in_another_apps_folder(root))
-                            .then_some("it is in another app's folder")
+                        (is_only_where_an_uninstaller_is
+                            && near_look.is_in_another_apps_folder(root))
+                        .then_some(IN_ANOTHER_APPS_FOLDER)
                     })
             })
             .flatten();
         if let Some(why) = refusal {
-            folders_left_out.push(Warning::new(
+            folders_left_out.push(Warning::localized(
                 "folder_left_out_of_the_app",
+                "core-warning-build-recorded-folder-left-out",
                 WarningSeverity::Warning,
-                format!(
-                    "Something on record for this app names a folder that was left out, because {why}."
-                ),
+                vec![("why", refusal_key(why).into())],
                 Some(root.display().to_string()),
             ));
         }
@@ -579,11 +582,11 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         .as_deref()
         .filter(|location| near_look.holds_another_apps_folder(location))
     {
-        folders_left_out.push(Warning::new(
+        folders_left_out.push(Warning::localized(
             "app_folder_holds_another_app",
+            "core-warning-build-app-folder-holds-another-app",
             WarningSeverity::Warning,
-            "Another app on this PC is on record as being inside this app's folder, and comes along \
-             with it, as all of that folder is taken.",
+            Vec::new(),
             Some(location.display().to_string()),
         ));
     }
@@ -766,7 +769,10 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         environment_variables.retain(|variable| {
             let is_a_license = is_license_env_var(&variable.name);
             if is_a_license {
-                left_out.license(format!("The environment variable {}", variable.name));
+                left_out.license(t!(
+                    "core-scan-environment-variable-item",
+                    name = variable.name.as_str()
+                ));
             }
             !is_a_license
         });
@@ -857,11 +863,11 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
             &mut registry_artifacts.com_registrations,
         );
         lay_out_for_64_bit_windows(&mut license_registry_entries, &mut []);
-        warnings.push(Warning::new(
-            FROM_32_BIT_WINDOWS,
+        warnings.push(Warning::localized(
+            "from_32_bit_windows",
+            "core-warning-build-from-32-bit-windows",
             WarningSeverity::Info,
-            "This app was on 32-bit Windows. Its registry keys are laid out as 64-bit Windows keeps \
-             a 32-bit app's, and the installer offers Program Files (x86) for it.",
+            Vec::new(),
             identity.windows_name(),
         ));
     }
@@ -1047,9 +1053,9 @@ fn selected_executable_path(
             .clone()
             .or_else(|| install_source.and_then(|source| primary_executable(app, source, system)))
             .ok_or_else(|| {
-                WinAppMigratorError::InvalidInput(format!(
-                    "could not find an executable for {}. A driver, runtime, or add-in may have no program of its own to package.",
-                    app.display_name
+                WinAppMigratorError::InvalidInput(t!(
+                    "core-scan-no-executable",
+                    app_name = app.display_name.as_str()
                 ))
             }),
     }
@@ -1059,9 +1065,9 @@ fn validate_scan_input(executable_path: &Path) -> Result<()> {
     let metadata = crate::source_fs::metadata(executable_path)
         .map_err(|source| WinAppMigratorError::io(executable_path, source))?;
     if !metadata.is_file() {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "scan target is not a file: {}",
-            executable_path.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-scan-not-a-file",
+            path = executable_path.display().to_string()
         )));
     }
     Ok(())
@@ -1124,38 +1130,29 @@ fn runtime_prerequisites(
     let mut prerequisites = runtime_prerequisites_from_signals(&signals, runtimes);
     let mut warnings = Vec::new();
     for dll in &runtimes.debug_dlls {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "runtime_is_a_debug_build",
+            "core-warning-build-debug-runtime",
             WarningSeverity::Warning,
-            format!(
-                "A program needs {dll}, a debug build of the Visual C++ runtime. Microsoft has no \
-                 installer for those, and may not let them be passed on, so it will not run on a \
-                 PC without Visual Studio."
-            ),
+            vec![("dll", dll.as_str().into())],
             Some(dll.clone()),
         ));
     }
     for program in &runtimes.single_file_programs {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "runtime_of_a_single_file_program_unknown",
+            "core-warning-build-single-file-program",
             WarningSeverity::Warning,
-            format!(
-                "{program} is a .NET program packed into one file, which says nothing of which .NET \
-                 it needs, so none is planned for it. If it needs one, it will not start on a PC \
-                 without it."
-            ),
+            vec![("program", program.as_str().into())],
             Some(program.clone()),
         ));
     }
     if runtimes.programs_left_out > 0 {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "runtime_inspection_limited",
+            "core-warning-build-programs-not-inspected",
             WarningSeverity::Info,
-            format!(
-                "{} of the app's programs were not looked at for the runtimes they need, as it has \
-                 so many or they are so large.",
-                runtimes.programs_left_out
-            ),
+            vec![("count", runtimes.programs_left_out.into())],
             None,
         ));
     }
@@ -1179,14 +1176,11 @@ fn runtime_prerequisites(
         if prerequisite.install_manually
             && crate::prerequisites::spec(&prerequisite.kind, &architecture).is_none()
         {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "runtime_has_no_installer",
+                "core-warning-build-runtime-no-installer",
                 WarningSeverity::Warning,
-                format!(
-                    "The app needs {}, and there is no installer for it here, so none is run. \
-                     Install it yourself on the other PC.",
-                    prerequisite.name
-                ),
+                vec![("runtime", prerequisite.name.as_str().into())],
                 Some(prerequisite.evidence.clone()),
             ));
         }
@@ -1422,30 +1416,39 @@ fn runtime_prerequisites_from_signals(
 
 /// Each thing left out, for whoever is building to see. Only ever what it is called.
 fn left_out_warnings(left_out: &LeftOut) -> Vec<Warning> {
-    let about = |code: &'static str, item: &crate::models::LeftOutItem| {
-        Warning::new(
-            code,
-            WarningSeverity::Info,
-            format!("Left out of the package: {}.", item.why),
-            Some(item.name.clone()),
-        )
-    };
+    // Each code is written out where it is used, for what checks the catalog to find.
+    let why = |item: &crate::models::LeftOutItem| vec![("why", item.why.as_str().into())];
+    let source = |item: &crate::models::LeftOutItem| Some(item.name.clone());
     left_out
         .secrets
         .iter()
-        .map(|item| about("secret_left_out", item))
-        .chain(
-            left_out
-                .licenses
-                .iter()
-                .map(|item| about("license_left_out", item)),
-        )
-        .chain(
-            left_out
-                .settings
-                .iter()
-                .map(|item| about("settings_left_out", item)),
-        )
+        .map(|item| {
+            Warning::localized(
+                "secret_left_out",
+                "core-warning-build-left-out-of-package",
+                WarningSeverity::Info,
+                why(item),
+                source(item),
+            )
+        })
+        .chain(left_out.licenses.iter().map(|item| {
+            Warning::localized(
+                "license_left_out",
+                "core-warning-build-left-out-of-package",
+                WarningSeverity::Info,
+                why(item),
+                source(item),
+            )
+        }))
+        .chain(left_out.settings.iter().map(|item| {
+            Warning::localized(
+                "settings_left_out",
+                "core-warning-build-left-out-of-package",
+                WarningSeverity::Info,
+                why(item),
+                source(item),
+            )
+        }))
         .collect()
 }
 
@@ -1457,10 +1460,11 @@ fn missing_dependency_warnings(
         .iter()
         .filter_map(|dependency| {
             if dependency.missing {
-                return Some(Warning::new(
+                return Some(Warning::localized(
                     "missing_dependency",
+                    "core-warning-build-missing-dependency",
                     WarningSeverity::Warning,
-                    format!("Dependency could not be resolved: {}", dependency.name),
+                    vec![("name", dependency.name.as_str().into())],
                     None,
                 ));
             }
@@ -1477,14 +1481,11 @@ fn missing_dependency_warnings(
                     DependencySourceCategory::Path | DependencySourceCategory::CurrentDirectory
                 ))
             .then(|| {
-                Warning::new(
+                Warning::localized(
                     "dependency_only_found_on_this_pc",
+                    "core-warning-build-dependency-only-here",
                     WarningSeverity::Warning,
-                    format!(
-                        "{} was only found through this PC's search path, and is not part of the \
-                         app, so it does not come along. The app may not start on a PC without it.",
-                        dependency.name
-                    ),
+                    vec![("name", dependency.name.as_str().into())],
                     None,
                 )
             })
@@ -1520,10 +1521,11 @@ fn driver_component_warnings(drivers: &[DriverEntry]) -> Vec<Warning> {
     drivers
         .iter()
         .map(|driver| {
-            Warning::new(
+            Warning::localized(
                 "driver_kernel_component_detected",
+                "core-warning-build-driver-detected",
                 WarningSeverity::Warning,
-                "Driver or kernel component detected. A driver the app owns is bundled and re-registered; a vendor or inbox driver is not redistributed and must be reinstalled from its signed vendor package.",
+                Vec::new(),
                 Some(format!(
                     "{} -> {}",
                     driver.service_name,

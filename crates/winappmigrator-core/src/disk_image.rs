@@ -17,6 +17,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use tracing::warn;
+use winappmigrator_i18n::t;
 
 use crate::errors::{Result, WinAppMigratorError};
 use crate::journal::machine_state_root;
@@ -174,23 +175,23 @@ impl AttachedImage {
             .iter()
             .any(|extension| path_has_extension(image, extension))
         {
-            return Err(WinAppMigratorError::InvalidInput(format!(
-                "{} is not a disk image Windows can attach (.vhd or .vhdx)",
-                image.display()
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-image-not-attachable",
+                path = image.display().to_string()
             )));
         }
         if !is_elevated() {
-            return Err(WinAppMigratorError::InvalidInput(
-                "attaching a disk image needs administrator rights".to_owned(),
-            ));
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-image-needs-administrator"
+            )));
         }
         let image = fs::canonicalize(image)
             .map(|path| strip_verbatim(&path))
             .map_err(|error| WinAppMigratorError::io(image, error))?;
         if !fs::metadata(&image).is_ok_and(|metadata| metadata.is_file()) {
-            return Err(WinAppMigratorError::InvalidInput(format!(
-                "{} is not a file",
-                image.display()
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-image-not-a-file",
+                path = image.display().to_string()
             )));
         }
         let kind = File::open(&image)
@@ -199,26 +200,21 @@ impl AttachedImage {
         match kind {
             ImageKind::Whole => {}
             ImageKind::Differencing => {
-                return Err(WinAppMigratorError::InvalidInput(format!(
-                    "{} is a differencing disk, which only holds what changed since the disk it \
-                     was made from, and Windows would open that disk too, wherever it says it is. \
-                     Merge it into that disk first, with Hyper-V's Edit Disk, and pick that",
-                    image.display()
+                return Err(WinAppMigratorError::InvalidInput(t!(
+                    "core-image-differencing",
+                    path = image.display().to_string()
                 )));
             }
             ImageKind::Unreadable => {
-                return Err(WinAppMigratorError::InvalidInput(format!(
-                    "{} is not a .vhd or .vhdx that could be read",
-                    image.display()
+                return Err(WinAppMigratorError::InvalidInput(t!(
+                    "core-image-unreadable",
+                    path = image.display().to_string()
                 )));
             }
         }
         sweep_leaked_images();
-        let parent = images_folder().ok_or_else(|| {
-            WinAppMigratorError::InvalidInput(
-                "this PC's ProgramData folder could not be found".to_owned(),
-            )
-        })?;
+        let parent = images_folder()
+            .ok_or_else(|| WinAppMigratorError::InvalidInput(t!("core-image-no-program-data")))?;
         for folder in parent.ancestors().take(2).collect::<Vec<_>>().iter().rev() {
             ensure_protected_folder(folder)
                 .map_err(|error| WinAppMigratorError::io(folder, error))?;
@@ -255,15 +251,14 @@ impl AttachedImage {
         if !output.status.success() {
             let said = String::from_utf8_lossy(&output.stderr);
             let reason = if said.contains(ALREADY_ATTACHED) {
-                "Windows already has it attached, and whatever attached it may be writing to it. \
-                 Detach it first, or pick its drive as a connected drive"
-                    .to_owned()
+                t!("core-image-already-attached")
             } else {
                 first_line(&said)
             };
-            return Err(WinAppMigratorError::InvalidInput(format!(
-                "{} could not be attached: {reason}",
-                attached.image.display()
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-image-could-not-attach",
+                path = attached.image.display().to_string(),
+                reason = reason
             )));
         }
         attached.volumes = listed
@@ -274,10 +269,9 @@ impl AttachedImage {
             .filter(|volume| volume.starts_with(&attached.folder_path))
             .collect();
         if attached.windows_volumes().is_empty() {
-            return Err(WinAppMigratorError::InvalidInput(format!(
-                "{} has no volume with Windows on it that could be read. A volume encrypted \
-                 with BitLocker has to be unlocked first.",
-                attached.image.display()
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-image-no-windows-volume",
+                path = attached.image.display().to_string()
             )));
         }
         Ok(attached)
@@ -409,13 +403,10 @@ fn strip_verbatim(path: &Path) -> PathBuf {
 
 /// What a tool said went wrong, as one line.
 fn first_line(said: &str) -> String {
-    said.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("Windows did not say why")
-        .chars()
-        .take(300)
-        .collect()
+    match said.lines().map(str::trim).find(|line| !line.is_empty()) {
+        Some(line) => line.chars().take(300).collect(),
+        None => t!("core-image-windows-did-not-say"),
+    }
 }
 
 /// What a disk image is, as far as attaching it goes.
