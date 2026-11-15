@@ -17,3 +17,4 @@ temp/
 # Website build output (.github/scripts/build-site.py)
 /_site/
 __pycache__/
+.github/axe/node_modules/

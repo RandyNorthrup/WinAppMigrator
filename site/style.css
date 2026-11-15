@@ -11,7 +11,7 @@
   --accent-text: #ffffff;
   --accent-soft: #e8effd;
   --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 8px 24px rgb(16 24 40 / 8%);
-  --syntax-comment: #6e7781;
+  --syntax-comment: #57606a;
   --syntax-keyword: #cf222e;
   --syntax-string: #0a3069;
   --syntax-entity: #8250df;
@@ -81,11 +81,11 @@ kbd {
 
 .skip {
   position: absolute;
-  left: -9999px;
+  inset-inline-start: -9999px;
 }
 
 .skip:focus {
-  left: var(--gutter);
+  inset-inline-start: var(--gutter);
   top: 8px;
   z-index: 10;
   padding: 6px 10px;
@@ -252,7 +252,7 @@ kbd {
 .markdown-heading .anchor {
   position: absolute;
   top: 50%;
-  left: -1.2em;
+  inset-inline-start: -1.2em;
   width: 1.2em;
   transform: translateY(-50%);
   color: var(--muted);
@@ -323,7 +323,7 @@ kbd {
   padding: 6px 12px;
   border: 1px solid var(--line);
   vertical-align: top;
-  text-align: left;
+  text-align: start;
 }
 
 .markdown th {
@@ -336,7 +336,7 @@ kbd {
 
 .markdown blockquote {
   padding: 0 1em;
-  border-left: 4px solid var(--line);
+  border-inline-start: 4px solid var(--line);
   color: var(--muted);
 }
 
@@ -577,13 +577,13 @@ kbd {
 .checks li {
   position: relative;
   margin: 0 0 12px;
-  padding-left: 28px;
+  padding-inline-start: 28px;
 }
 
 .checks li::before {
   content: "✓";
   position: absolute;
-  left: 4px;
+  inset-inline-start: 4px;
   color: var(--accent);
   font-weight: 700;
 }
@@ -634,5 +634,88 @@ kbd {
 
   .markdown-heading .anchor {
     display: none;
+  }
+}
+
+/* The language menu: a list of links that works without script, each name in its own language */
+
+.languages {
+  position: relative;
+}
+
+.languages summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 500;
+  list-style: none;
+}
+
+.languages summary::-webkit-details-marker {
+  display: none;
+}
+
+.languages summary:hover,
+.languages summary:focus-visible {
+  color: var(--accent);
+}
+
+.languages ul {
+  position: absolute;
+  inset-inline-end: 0;
+  z-index: 10;
+  min-width: 14em;
+  max-height: 70vh;
+  margin: 8px 0 0;
+  padding: 6px 0;
+  overflow: auto;
+  list-style: none;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.languages a {
+  display: block;
+  padding: 8px 14px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.languages a:hover,
+.languages a:focus-visible {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.languages a[aria-current="page"] {
+  font-weight: 650;
+}
+
+/* A page translated by machine says so, and leads to the English */
+
+.mt-notice {
+  margin: 0 0 24px;
+  padding: 10px 14px;
+  color: var(--muted);
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* A code block that scrolls takes the keyboard's focus, and shows it */
+
+.markdown pre:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Diagram labels in the dark scheme, which Mermaid draws on a grey too light for its text */
+
+@media (prefers-color-scheme: dark) {
+  pre.mermaid .labelBkg,
+  pre.mermaid .edgeLabel,
+  pre.mermaid .edgeLabel p {
+    background-color: var(--bg) !important;
   }
 }

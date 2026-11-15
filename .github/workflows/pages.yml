@@ -14,6 +14,7 @@ on:
       - "crates/winappmigrator-ui/assets/**"
       - ".github/scripts/build-site.py"
       - ".github/workflows/pages.yml"
+      - ".github/axe/**"
   gollum:
   # A release's own run is on its tag, which may not deploy to github-pages. This one runs on main once it has finished,
   # so the landing page shows the new version. It checks out main, never what the release ran on.
@@ -104,6 +105,14 @@ jobs:
             if [ -f "${RUNNER_TEMP}/changed.txt" ]; then cat "${RUNNER_TEMP}/changed.txt"; fi
             echo "CHANGED_URLS"
           } >> "${GITHUB_OUTPUT}"
+
+      - name: Check every page against WCAG 2.2 AA with axe-core
+        # In a real browser, in light and dark, every language's pages. Pinned in .github/axe/package-lock.json.
+        working-directory: .github/axe
+        run: |
+          npm ci --ignore-scripts
+          npx --no-install playwright install --with-deps chromium
+          node scan-site.mjs "${GITHUB_WORKSPACE}/_site" "${SITE_URL}"
 
       - name: Upload the site
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

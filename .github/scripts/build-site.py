@@ -18,6 +18,7 @@ import datetime as dt
 import html
 import json
 import os
+import posixpath
 import re
 import shutil
 import string
@@ -48,12 +49,27 @@ ALLOWED_SOURCES = ("https://raw.githubusercontent.com/", MERMAID_URL)
 DESCRIPTION_MAX = 160
 DESCRIPTION_MIN = 80
 
+# Translations, one folder per language in site/i18n: strings.json (the words of the page frame), index.html (the landing
+# page), and these pages of the guide; the rest of the guide is in English. en-US holds only the English strings.
+I18N = "i18n"
+ENGLISH = "en-US"
+TRANSLATED_PAGES = ("Getting-Started", "Installing-on-the-New-PC", "Troubleshooting")
+RIGHT_TO_LEFT = ("ar", "fa", "ur", "he")
+TRANSLATION_ISSUE = (
+    "https://github.com/{repository}/issues/new?template=translation-problem.yml&labels=translation&language={tag}"
+)
+RELATIVE_URL = re.compile(r'(\s(?:href|src|srcset)=")([^"]*)(")')
+SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
+WORD_SLOT = re.compile(r"\{[a-z_]+\}")
+
 MERMAID_FENCE = re.compile(r"^```mermaid[ \t]*\r?\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 MERMAID_PLACEHOLDER = "WAMMERMAIDBLOCK{}"
 MERMAID_PARAGRAPH = re.compile(r"<p[^>]*>WAMMERMAIDBLOCK(\d+)</p>")
 FIRST_H1 = re.compile(r"<h1[^>]*>(.*?)</h1>", re.DOTALL)
 PARAGRAPH = re.compile(r"<p\b[^>]*>(.*?)</p>", re.DOTALL)
 TAG = re.compile(r"<[^>]+>")
+CODE_LANGUAGE = re.compile(r'<pre lang="([^"]*)"')
+CODE_BLOCK = re.compile(r"<pre(?=[\s>])(?![^>]*\btabindex=)")
 
 
 class BuildError(Exception):
@@ -102,6 +118,10 @@ def render_markdown(text: str) -> str:
     # GitHub prefixes every anchor so a page cannot clash with its own; the wiki's links are written without it.
     rendered = rendered.replace('id="user-content-', 'id="').replace('name="user-content-', 'name="')
     rendered = rendered.replace('href="#user-content-', 'href="#')
+    # A code block's language is a programming language, not one a screen reader can speak in, so it is not given as
+    # lang; and a block that scrolls sideways has to take the keyboard's focus to be scrolled without a mouse.
+    rendered = CODE_LANGUAGE.sub(r'<pre data-lang="\1"', rendered)
+    rendered = CODE_BLOCK.sub('<pre tabindex="0"', rendered)
 
     def diagram(match: re.Match[str]) -> str:
         return f'<pre class="mermaid">{html.escape(blocks[int(match.group(1))])}</pre>'
@@ -149,6 +169,97 @@ def iso(moment: dt.datetime) -> str:
     return moment.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
 
+def language_of(tag: str) -> str:
+    return tag.split("-", 1)[0]
+
+
+def direction_of(tag: str) -> str:
+    return "rtl" if language_of(tag) in RIGHT_TO_LEFT else "ltr"
+
+
+def read_strings(source: Path, tag: str, english: dict[str, str] | None) -> dict[str, str]:
+    """A language's words for the page frame, checked against English's: the same keys, the same {slots}."""
+    path = source / I18N / tag / "strings.json"
+    try:
+        strings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise BuildError(f"{path}: {error}") from error
+    if not isinstance(strings, dict) or not all(isinstance(v, str) for v in strings.values()):
+        raise BuildError(f"{path}: must map names to text")
+    if english is not None:
+        if set(strings) != set(english):
+            raise BuildError(f"{path}: {sorted(set(strings) ^ set(english))} differ from {ENGLISH}")
+        for key, value in english.items():
+            if sorted(WORD_SLOT.findall(value)) != sorted(WORD_SLOT.findall(strings[key])):
+                raise BuildError(f"{path}: {key} must keep {WORD_SLOT.findall(value)}")
+    return strings
+
+
+def fill_words(text: str, **values: str) -> str:
+    for name, value in values.items():
+        text = text.replace("{" + name + "}", value)
+    return text
+
+
+def translations(source: Path) -> list[str]:
+    folder = source / I18N
+    if not folder.is_dir():
+        return []
+    return sorted(p.name for p in folder.iterdir() if p.is_dir() and p.name != ENGLISH)
+
+
+def relocate(document: str, kept: set[str]) -> str:
+    """A page one folder down keeps its links to the pages translated beside it; everything else, the English pages, the
+    stylesheet, and the images, is up a folder."""
+
+    def fix(match: re.Match[str]) -> str:
+        url = match.group(2)
+        if not url or url == "./" or url.startswith(("#", "../", "/")) or SCHEME.match(url):
+            return match.group(0)
+        if url.split("#", 1)[0].split("?", 1)[0] in kept:
+            return match.group(0)
+        return f"{match.group(1)}../{url}{match.group(3)}"
+
+    return RELATIVE_URL.sub(fix, document)
+
+
+def page_url(base_url: str, tag: str, page: str | None) -> str:
+    folder = "" if tag == ENGLISH else f"{tag}/"
+    return f"{base_url}/{folder}{'' if page is None else urllib.parse.quote(page)}"
+
+
+def alternate_links(base_url: str, page: str | None, tags: list[str]) -> str:
+    """Where the same page is in each other language, for search engines. Nothing for a page in English alone."""
+    if len(tags) < 2:
+        return ""
+    links = [
+        f'  <link rel="alternate" hreflang="{tag}" href="{html.escape(page_url(base_url, tag, page))}">' for tag in tags
+    ]
+    links.append(f'  <link rel="alternate" hreflang="x-default" href="{html.escape(page_url(base_url, ENGLISH, page))}">')
+    return "\n".join(links)
+
+
+def language_menu(current: str, page: str | None, tags: list[str], names: dict[str, str], label: str) -> str:
+    """Every language the page is in, each named in itself and marked as that language, as links that need no script."""
+    if len(tags) < 2:
+        return ""
+    up = "" if current == ENGLISH else "../"
+    items = []
+    for tag in tags:
+        target = ("" if tag == ENGLISH else f"{tag}/") + ("" if page is None else page)
+        href = up + target if (up + target) else "./"
+        here = ' aria-current="page"' if tag == current else ""
+        items.append(
+            f'          <li><a href="{html.escape(href)}" lang="{language_of(tag)}" hreflang="{tag}"'
+            f' dir="{direction_of(tag)}"{here}>{html.escape(names[tag])}</a></li>'
+        )
+    return (
+        f'        <details class="languages"><summary>{html.escape(label)}</summary><ul>\n'
+        + "\n".join(items)
+        + "\n        </ul></details>"
+    )
+
+
 def fill(template: Path, **values: str) -> str:
     try:
         return string.Template(template.read_text(encoding="utf-8")).substitute(values)
@@ -181,35 +292,44 @@ def check_links(out: Path, base_url: str) -> list[str]:
     # on GitHub Pages, and not only on a case-sensitive disk.
     files = {path.relative_to(out).as_posix() for path in out.rglob("*") if path.is_file()}
     pages: dict[str, LinkCollector] = {}
-    for name in sorted(f for f in files if f.endswith(".html") and "/" not in f):
+    for name in sorted(f for f in files if f.endswith(".html")):
         collector = LinkCollector()
         collector.feed((out / name).read_text(encoding="utf-8"))
         pages[name] = collector
 
     problems: list[str] = []
     for name, collector in pages.items():
+        folder = posixpath.dirname(name)
         for attribute, link in collector.links:
             target = link
+            base = folder
             if target.startswith(base_url + "/") or target == base_url:
                 rest = target[len(base_url) :].lstrip("/")
-                target = rest if rest and not rest.startswith("#") else "index.html" + rest
+                target = rest if rest and not rest.startswith("#") else "./" + rest
+                base = ""
             elif re.match(r"^[a-z][a-z0-9+.-]*:|^//", target, re.IGNORECASE):
                 if attribute != "href" and not target.startswith(ALLOWED_SOURCES):
                     problems.append(f"{name}: {link} is loaded from a host the pages' Content-Security-Policy blocks")
                 continue
             path, _, fragment = target.partition("#")
             path = path.split("?", 1)[0]
-            if path == "./":
-                path = "index.html"
             if not path:
                 page: str | None = name
-            elif f"{path}.html" in files:
-                page = f"{path}.html"
-            elif path in files:
-                page = path if path in pages else None
             else:
-                problems.append(f"{name}: {link} leads to no page or file")
-                continue
+                joined = posixpath.normpath(posixpath.join(base, path))
+                if joined == ".." or joined.startswith("../") or joined.startswith("/"):
+                    problems.append(f"{name}: {link} leads out of the site")
+                    continue
+                folder_index = "index.html" if joined == "." else f"{joined}/index.html"
+                if path.endswith("/") or joined == ".":
+                    candidates = [folder_index]
+                else:
+                    candidates = [f"{joined}.html", joined, folder_index]
+                found = next((candidate for candidate in candidates if candidate in files), None)
+                if found is None:
+                    problems.append(f"{name}: {link} leads to no page or file")
+                    continue
+                page = found if found in pages else None
             if fragment and page is not None and fragment not in pages[page].ids:
                 problems.append(f"{name}: {link} leads to no heading or anchor in {page}")
     return problems
@@ -276,48 +396,152 @@ def build(args: argparse.Namespace) -> None:
         "mermaid_url": MERMAID_URL,
     }
 
+    english_words = read_strings(source, ENGLISH, None)
+    languages = translations(source)
+    words = {ENGLISH: english_words} | {tag: read_strings(source, tag, english_words) for tag in languages}
+    names = {tag: words[tag]["language_name"] for tag in words}
+    for tag in languages:
+        if not (source / I18N / tag / "index.html").is_file():
+            raise BuildError(f"site/{I18N}/{tag} has no index.html, its landing page")
+    # Which languages each translated page is in, English first.
+    page_languages = {
+        page: [ENGLISH] + [tag for tag in languages if (source / I18N / tag / f"{page}.md").is_file()]
+        for page in TRANSLATED_PAGES
+    }
+    landing_languages = [ENGLISH, *languages]
+
+    def frame(tag: str, updated: str, english_page: str) -> dict[str, str]:
+        """The words of a page's frame in a language, with its notice when it is a translation."""
+        said = words[tag]
+        notice = ""
+        if tag != ENGLISH:
+            report = TRANSLATION_ISSUE.format(repository=args.repository, tag=tag)
+            notice = '      <p class="mt-notice">' + fill_words(
+                said["notice"], english=html.escape(english_page), report=html.escape(report)
+            ) + "</p>"
+        return {
+            "lang": language_of(tag),
+            "dir": direction_of(tag),
+            "notice": notice,
+            "s_skip": html.escape(said["s_skip"]),
+            "s_site": html.escape(said["s_site"]),
+            "s_docs": html.escape(said["s_docs"]),
+            "s_download": html.escape(said["s_download"]),
+            "s_all_pages": html.escape(said["s_all_pages"]),
+            "s_documentation": html.escape(said["s_documentation"]),
+            "s_updated": fill_words(html.escape(said["s_updated"]), date=updated, version=html.escape(version)),
+            "s_built": fill_words(
+                said["s_built"],
+                wiki=f"https://github.com/{args.repository}/wiki",
+                license=f"https://github.com/{args.repository}/blob/main/LICENSE",
+            ),
+        }
+
     sitemap: dict[str, str] = {}
     landing_changed = git_date(root, "site/index.html") or dt.datetime.now(dt.timezone.utc)
     sitemap[base_url + "/"] = iso(max(landing_changed, released))
-    (out / "index.html").write_text(fill(source / "index.html", **common), encoding="utf-8")
+    (out / "index.html").write_text(
+        fill(
+            source / "index.html",
+            **common,
+            languages=language_menu(ENGLISH, None, landing_languages, names, english_words["language"]),
+            alternates=alternate_links(base_url, None, landing_languages),
+        ),
+        encoding="utf-8",
+    )
     (out / "404.html").write_text(fill(source / "404.html", **common), encoding="utf-8")
 
-    pages = sorted(p for p in wiki.glob("*.md") if not p.name.startswith("_"))
-    for page in pages:
-        name = page.stem
-        rendered = render_markdown(page.read_text(encoding="utf-8"))
-        heading = FIRST_H1.search(rendered)
-        if heading is None:
-            raise BuildError(f"{page.name} has no # heading to title it")
-        title = plain(heading.group(1))
-        title = "WinAppMigrator Documentation" if title == "WinAppMigrator" else f"{title} – WinAppMigrator"
-        description = describe(rendered)
-        if not description:
-            raise BuildError(f"{page.name} has no paragraph to describe it")
-        changed = git_date(wiki, page.name) or dt.datetime.now(dt.timezone.utc)
-        url = f"{base_url}/{urllib.parse.quote(name)}"
-        current = f'href="{html.escape(name)}"'
-        nav = sidebar.replace(current, f'{current} aria-current="page"')
+    def scripts_for(rendered: str) -> str:
         scripts = '<script defer src="site.js"></script>'
         if 'class="mermaid"' in rendered:
             scripts = (
                 f'<script defer src="{MERMAID_URL}" integrity="{MERMAID_SRI}" crossorigin="anonymous"></script>\n'
                 f"  {scripts}"
             )
+        return scripts
+
+    def titled(rendered: str, where: str) -> tuple[str, str]:
+        heading = FIRST_H1.search(rendered)
+        if heading is None:
+            raise BuildError(f"{where} has no # heading to title it")
+        description = describe(rendered)
+        if not description:
+            raise BuildError(f"{where} has no paragraph to describe it")
+        return plain(heading.group(1)), description
+
+    pages = sorted(p for p in wiki.glob("*.md") if not p.name.startswith("_"))
+    for page in pages:
+        name = page.stem
+        rendered = render_markdown(page.read_text(encoding="utf-8"))
+        heading, description = titled(rendered, page.name)
+        title = "WinAppMigrator Documentation" if heading == "WinAppMigrator" else f"{heading} – WinAppMigrator"
+        changed = git_date(wiki, page.name) or dt.datetime.now(dt.timezone.utc)
+        url = page_url(base_url, ENGLISH, name)
+        current = f'href="{html.escape(name)}"'
+        nav = sidebar.replace(current, f'{current} aria-current="page"')
+        in_languages = page_languages.get(name, [ENGLISH])
         document = fill(
             source / "page.html",
             **common,
+            **frame(ENGLISH, changed.date().isoformat(), name),
             title=html.escape(title),
             description=html.escape(description),
             canonical=html.escape(url),
+            alternates=alternate_links(base_url, name, in_languages),
+            languages=language_menu(ENGLISH, name, in_languages, names, english_words["language"]),
             content=rendered,
             sidebar=nav,
             footer=footer,
-            scripts=scripts,
-            updated=changed.date().isoformat(),
+            scripts=scripts_for(rendered),
         )
         (out / f"{name}.html").write_text(document, encoding="utf-8")
         sitemap[url] = iso(changed)
+
+    for tag in languages:
+        folder = out / tag
+        folder.mkdir()
+        here = source / I18N / tag
+        translated = [page for page in TRANSLATED_PAGES if (here / f"{page}.md").is_file()]
+        kept = set(translated)
+        said = words[tag]
+        landing = fill(
+            here / "index.html",
+            **common,
+            languages=language_menu(tag, None, landing_languages, names, said["language"]),
+            alternates=alternate_links(base_url, None, landing_languages),
+        )
+        (folder / "index.html").write_text(relocate(landing, kept), encoding="utf-8")
+        landing_changed = git_date(root, f"site/{I18N}/{tag}/index.html") or dt.datetime.now(dt.timezone.utc)
+        sitemap[page_url(base_url, tag, None)] = iso(max(landing_changed, released))
+
+        rendered_pages = {page: render_markdown((here / f"{page}.md").read_text(encoding="utf-8")) for page in translated}
+        titles = {page: titled(rendered, f"site/{I18N}/{tag}/{page}.md") for page, rendered in rendered_pages.items()}
+        for page, rendered in rendered_pages.items():
+            heading, description = titles[page]
+            changed = git_date(root, f"site/{I18N}/{tag}/{page}.md") or dt.datetime.now(dt.timezone.utc)
+            nav = "\n".join(
+                f'        <a href="{html.escape(other)}"'
+                + (' aria-current="page"' if other == page else "")
+                + f">{html.escape(titles[other][0])}</a>"
+                for other in translated
+            )
+            nav += f'\n        <a href="../Home" lang="en" hreflang="en">{html.escape(said["full_guide"])}</a>'
+            document = fill(
+                source / "page.html",
+                **common,
+                **frame(tag, changed.date().isoformat(), f"../{page}"),
+                title=html.escape(f"{heading} – WinAppMigrator"),
+                description=html.escape(description),
+                canonical=html.escape(page_url(base_url, tag, page)),
+                alternates=alternate_links(base_url, page, page_languages[page]),
+                languages=language_menu(tag, page, page_languages[page], names, said["language"]),
+                content=rendered,
+                sidebar=nav,
+                footer=footer,
+                scripts=scripts_for(rendered),
+            )
+            (folder / f"{page}.html").write_text(relocate(document, kept), encoding="utf-8")
+            sitemap[page_url(base_url, tag, page)] = iso(changed)
 
     write_sitemap(out / "sitemap.xml", sitemap)
 
@@ -330,7 +554,10 @@ def build(args: argparse.Namespace) -> None:
         args.changed_out.write_text("".join(f"{url}\n" for url in changed_urls), encoding="utf-8")
         print(f"{len(changed_urls)} of {len(sitemap)} pages are new or changed since the live site")
 
-    print(f"Built {len(pages)} wiki pages and the landing page for v{version} into {out}")
+    print(
+        f"Built {len(pages)} wiki pages and the landing page for v{version} into {out}, with {len(languages)} "
+        "translations of the landing page and its key pages"
+    )
 
 
 def main() -> int:
