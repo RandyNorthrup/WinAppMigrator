@@ -268,6 +268,15 @@ fn asked_for(text: &str) -> Vec<(String, Option<String>)> {
             rest = &rest[end..];
         }
     }
+    // `Warning::localized(code, "message", ...)`: the message is its second string.
+    let mut rest = text;
+    while let Some(start) = rest.find("Warning::localized(") {
+        rest = &rest[start + "Warning::localized(".len()..];
+        let mut quoted = rest.split('"').skip(1).step_by(2);
+        if let (Some(_code), Some(id)) = (quoted.next(), quoted.next()) {
+            found.push((id.to_owned(), None));
+        }
+    }
     found
 }
 

@@ -189,14 +189,11 @@ fn read_shortcuts_on_a_drive(
         Vec::new()
     } else {
         // An MSI's "advertised" shortcut names no path, and so says nothing about whose it is.
-        vec![Warning::new(
+        vec![Warning::localized(
             "shortcuts_unreadable",
+            "core-warning-shortcuts-unreadable",
             WarningSeverity::Info,
-            format!(
-                "{} shortcuts on this drive name no file, so whether they open this app could not \
-                 be told.",
-                unreadable.len()
-            ),
+            vec![("count", unreadable.len().into())],
             None,
         )]
     };

@@ -1089,11 +1089,62 @@ pub struct PrerequisiteRegistryProbe {
 pub struct Warning {
     pub code: String,
     pub severity: WarningSeverity,
+    /// In English, as recorded: what logs show, and what is shown of a warning not in the catalog, such as one from a
+    /// package made before 0.7.0.
     pub message: String,
     pub source: Option<String>,
+    /// Its words by name in the catalog, with what they were given, when they are there, so that it is shown in the
+    /// language of whoever reads it, wherever that is. A package records warnings on the PC it is built on, and an
+    /// installer shows them on another, so the words are kept by name, not only as text. Absent from packages made
+    /// before 0.7.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub localized: Option<Box<LocalizedWords>>,
+}
+
+/// A warning's words by name in the catalog. A code can have more than one message, so the name is not worked out
+/// from it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LocalizedWords {
+    pub message_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<(String, WarningArg)>,
+}
+
+/// A value a warning's words are given.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum WarningArg {
+    /// A count or size, which a language may write differently or choose a plural form by.
+    Number(f64),
+    Text(String),
+}
+
+impl From<&str> for WarningArg {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_owned())
+    }
+}
+
+impl From<String> for WarningArg {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<u64> for WarningArg {
+    fn from(count: u64) -> Self {
+        Self::Number(count as f64)
+    }
+}
+
+impl From<usize> for WarningArg {
+    fn from(count: usize) -> Self {
+        Self::Number(count as f64)
+    }
 }
 
 impl Warning {
+    /// A warning whose words are not in the catalog, shown as `message` in every language.
     pub fn new(
         code: impl Into<String>,
         severity: WarningSeverity,
@@ -1105,8 +1156,57 @@ impl Warning {
             severity,
             message: message.into(),
             source,
+            localized: None,
         }
     }
+
+    /// A warning whose words are the catalog's `message_id`, given `args`. Its English is recorded as its `message`
+    /// too, for logs and for a program from before 0.7.0 reading the package.
+    pub fn localized(
+        code: impl Into<String>,
+        message_id: &str,
+        severity: WarningSeverity,
+        args: Vec<(&str, WarningArg)>,
+        source: Option<String>,
+    ) -> Self {
+        let args: Vec<(String, WarningArg)> = args
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect();
+        let message = winappmigrator_i18n::tr_english(message_id, Some(&fluent_args(&args)));
+        Self {
+            code: code.into(),
+            severity,
+            message,
+            source,
+            localized: Some(Box::new(LocalizedWords {
+                message_id: message_id.to_owned(),
+                args,
+            })),
+        }
+    }
+
+    /// What a person reads: in the language in use when its words are in the catalog, else as recorded. A package can
+    /// come from a newer version, whose message this version's catalog does not have; it is shown as recorded.
+    pub fn text(&self) -> String {
+        match self.localized.as_deref() {
+            Some(words) if winappmigrator_i18n::has_message(&words.message_id) => {
+                winappmigrator_i18n::tr(&words.message_id, Some(&fluent_args(&words.args)))
+            }
+            _ => self.message.clone(),
+        }
+    }
+}
+
+fn fluent_args(args: &[(String, WarningArg)]) -> winappmigrator_i18n::FluentArgs<'_> {
+    let mut fluent = winappmigrator_i18n::FluentArgs::new();
+    for (name, value) in args {
+        match value {
+            WarningArg::Number(number) => fluent.set(name.as_str(), *number),
+            WarningArg::Text(text) => fluent.set(name.as_str(), text.as_str()),
+        }
+    }
+    fluent
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1260,4 +1360,65 @@ pub enum VerificationStatus {
     Warning,
     Failed,
     Skipped,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unreadable(count: usize) -> Warning {
+        Warning::localized(
+            "shortcuts_unreadable",
+            "core-warning-shortcuts-unreadable",
+            WarningSeverity::Info,
+            vec![("count", count.into())],
+            None,
+        )
+    }
+
+    /// AC-I18N-PACKAGE: a package records its warnings on one PC, and they are read on another, in its language.
+    #[test]
+    fn a_recorded_warning_is_read_in_the_language_of_whoever_reads_it() -> serde_json::Result<()> {
+        let english =
+            winappmigrator_i18n::with_language(&winappmigrator_i18n::PSEUDO_LONG, || unreadable(5));
+        assert_eq!(
+            english.message,
+            "5 shortcuts on this drive name no file, so whether they open this app could not be told.",
+            "recorded in English whatever the language it was made in"
+        );
+        let carried: Warning = serde_json::from_str(&serde_json::to_string(&english)?)?;
+        let read = winappmigrator_i18n::with_language(&winappmigrator_i18n::PSEUDO_LONG, || {
+            carried.text()
+        });
+        assert!(winappmigrator_i18n::is_marked(&read), "{read}");
+        assert!(read.contains('5'), "{read}");
+        assert_eq!(
+            winappmigrator_i18n::with_language(winappmigrator_i18n::ENGLISH, || unreadable(1)
+                .text()),
+            "1 shortcut on this drive names no file, so whether it opens this app could not be told."
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_warning_from_before_0_7_is_read_as_recorded() -> serde_json::Result<()> {
+        let old: Warning = serde_json::from_str(
+            r#"{"code":"shortcuts_unreadable","severity":"info","message":"Recorded words.","source":null}"#,
+        )?;
+        assert!(old.localized.is_none());
+        let read =
+            winappmigrator_i18n::with_language(&winappmigrator_i18n::PSEUDO_LONG, || old.text());
+        assert_eq!(read, "Recorded words.");
+        Ok(())
+    }
+
+    #[test]
+    fn a_warning_whose_words_this_version_lacks_is_read_as_recorded() {
+        let mut newer = unreadable(2);
+        if let Some(words) = newer.localized.as_mut() {
+            words.message_id = "core-warning-from-a-later-version".to_owned();
+        }
+        newer.message = "Recorded words.".to_owned();
+        assert_eq!(newer.text(), "Recorded words.");
+    }
 }
