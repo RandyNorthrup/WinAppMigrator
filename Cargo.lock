@@ -4516,6 +4516,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "walkdir",
+ "winappmigrator-i18n",
  "winappmigrator-link",
  "winreg",
  "zip",
@@ -4588,7 +4589,9 @@ name = "winappmigrator-ui"
 version = "0.6.2"
 dependencies = [
  "eframe",
+ "egui_kittest",
  "wgpu",
+ "winappmigrator-i18n",
 ]
 
 [[package]]
