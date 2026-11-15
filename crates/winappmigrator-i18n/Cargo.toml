@@ -1,0 +1,27 @@
+[package]
+name = "winappmigrator-i18n"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "The words WinAppMigrator shows, in every language it ships, and how numbers and sizes are written in each."
+build = "build.rs"
+
+[lib]
+doctest = false
+
+[dependencies]
+fluent-bundle.workspace = true
+fluent-syntax.workspace = true
+intl-memoizer.workspace = true
+unic-langid.workspace = true
+flate2.workspace = true
+winreg.workspace = true
+
+[build-dependencies]
+flate2.workspace = true
+
+[lints]
+workspace = true
