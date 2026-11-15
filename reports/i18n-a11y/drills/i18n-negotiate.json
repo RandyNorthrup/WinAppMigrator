@@ -1,0 +1,16 @@
+{
+  "name": "i18n-negotiate",
+  "file": "crates/winappmigrator-i18n/src/languages.rs",
+  "mutation": "return language(if traditional { \"zh-TW\" } else { \"zh-CN\" }); -> return language(if traditional { \"zh-CN\" } else { \"zh-TW\" });",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target';  cargo test -j 4 -p winappmigrator-i18n --lib -- a_regional_variant_gets_its_language",
+  "expected_diagnostic": "left: \"zh-TW\"",
+  "before": "c123a939af70ed3b14e772008e33d940c851669b2d6d7bed8840d93b806a8d11",
+  "mutated": "74c986d87568c8b0dd824ef55e3152c5a2a4922e4dc610436447e58ad612a5a7",
+  "after": "c123a939af70ed3b14e772008e33d940c851669b2d6d7bed8840d93b806a8d11",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "left: \"zh-TW\"",
+  "failure": null,
+  "passed": true
+}

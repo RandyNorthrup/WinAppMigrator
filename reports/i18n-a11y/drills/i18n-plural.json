@@ -1,0 +1,16 @@
+{
+  "name": "i18n-plural",
+  "file": "crates/winappmigrator-i18n/src/lib.rs",
+  "mutation": "let id: LanguageIdentifier = language.tag.parse().ok()?; -> let id: LanguageIdentifier = \"en-US\".parse().ok()?;",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target';  cargo test -j 4 -p winappmigrator-i18n --lib -- each_language_picks_its_own_plural_form",
+  "expected_diagnostic": "right: [\"many\", \"one\", \"few\", \"many\", \"few\", \"many\"]",
+  "before": "eb368f56564ba17c6c0725b183cc9da2bc25c53dc74b04b40589e8c9a7c359f2",
+  "mutated": "87572c58d76fa7232679a674712dd09d5105545931d29d7d6ae472fb8e7917a2",
+  "after": "eb368f56564ba17c6c0725b183cc9da2bc25c53dc74b04b40589e8c9a7c359f2",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "right: [\"many\", \"one\", \"few\", \"many\", \"few\", \"many\"]",
+  "failure": null,
+  "passed": true
+}
