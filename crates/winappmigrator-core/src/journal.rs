@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use winappmigrator_i18n::t;
 use winreg::RegValue;
 use winreg::enums::RegType;
 
@@ -127,8 +128,12 @@ impl StoredValue {
     }
 
     pub(crate) fn to_reg(&self) -> std::result::Result<RegValue<'static>, String> {
-        let vtype = reg_type_from_number(self.kind)
-            .ok_or_else(|| format!("unknown registry value type {}", self.kind))?;
+        let vtype = reg_type_from_number(self.kind).ok_or_else(|| {
+            t!(
+                "core-journal-unknown-value-type",
+                kind = self.kind.to_string()
+            )
+        })?;
         let bytes = hex_decode(&self.data_hex).map_err(str::to_owned)?;
         Ok(RegValue {
             bytes: bytes.into(),
@@ -374,7 +379,7 @@ pub(crate) fn real_path(path: &Path) -> io::Result<String> {
 /// elevated. Without elevation there is no boundary to keep, and nowhere safe to make this.
 pub fn admin_only_staging_root(state_root: &Path) -> io::Result<PathBuf> {
     if !is_elevated() {
-        return Err(io::Error::other("not elevated"));
+        return Err(io::Error::other(t!("core-journal-not-elevated")));
     }
     let staging = staging_root_in(state_root);
     ensure_protected_folder(state_root)?;
@@ -400,11 +405,9 @@ fn prepare_state_folders(state_root: &Path) -> Result<PathBuf> {
     if !is_elevated()
         && machine_state_root().is_some_and(|machine| paths_equal(&machine, state_root))
     {
-        return Err(WinAppMigratorError::InvalidInput(
-            "installing needs administrator rights, to keep its record where others cannot \
-             change it"
-                .to_owned(),
-        ));
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-journal-needs-admin"
+        )));
     }
     let installs = state_root.join(INSTALLS_FOLDER);
     for folder in [state_root, installs.as_path()] {
@@ -449,9 +452,9 @@ impl Journal {
             .map(|name| name.to_string_lossy().into_owned())
             .filter(|id| is_valid_install_id(id))
             .ok_or_else(|| {
-                WinAppMigratorError::InvalidInput(format!(
-                    "this is not an install's folder: {}",
-                    folder.display()
+                WinAppMigratorError::InvalidInput(t!(
+                    "core-journal-not-an-install-folder",
+                    path = folder.display().to_string()
                 ))
             })?;
         let path = folder.join(JOURNAL_FILE);
@@ -519,9 +522,9 @@ impl Journal {
     fn write(&mut self, record: &Record, durability: Durability) -> Result<()> {
         let path = self.folder.join(JOURNAL_FILE);
         if self.broken {
-            return Err(WinAppMigratorError::InvalidInput(format!(
-                "the record of this install could not be written: {}",
-                path.display()
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-journal-not-written",
+                path = path.display().to_string()
             )));
         }
         let mut line = serde_json::to_vec(record)?;
@@ -588,9 +591,9 @@ impl Journal {
     ) -> Result<()> {
         self.note_root(root)?;
         let relative = strip_prefix_ignore_case(folder, root).ok_or_else(|| {
-            WinAppMigratorError::InvalidInput(format!(
-                "path escapes intended root: {}",
-                folder.display()
+            WinAppMigratorError::InvalidInput(t!(
+                "core-journal-path-escapes-root",
+                path = folder.display().to_string()
             ))
         })?;
         let mut current = root.to_path_buf();
@@ -620,9 +623,9 @@ impl Journal {
             .ancestors()
             .find(|ancestor| fs::symlink_metadata(ancestor).is_ok())
             .ok_or_else(|| {
-                WinAppMigratorError::InvalidInput(format!(
-                    "none of this exists on this PC: {}",
-                    folder.display()
+                WinAppMigratorError::InvalidInput(t!(
+                    "core-journal-nothing-exists",
+                    path = folder.display().to_string()
                 ))
             })?;
         self.note_new_folders(existing, folder, item)
@@ -791,11 +794,7 @@ pub(crate) fn lock_state(state_root: &Path) -> Result<BusyLock> {
         .open(&path)
         .map_err(|error| {
             if is_in_use(&error) {
-                WinAppMigratorError::InvalidInput(
-                    "another install or uninstall is running. Wait for it to finish, then try \
-                     again"
-                        .to_owned(),
-                )
+                WinAppMigratorError::InvalidInput(t!("core-journal-busy"))
             } else {
                 WinAppMigratorError::io(&path, error)
             }
@@ -865,10 +864,10 @@ pub(crate) fn forget_permissions_of(backup: &Path) {
 
 fn put_saved_permissions_on(saved: &Path, bytes: &[u8], file: &Path) -> io::Result<()> {
     let (Some(parent), Some(name)) = (file.parent(), file.file_name()) else {
-        return Err(io::Error::other("it has no folder"));
+        return Err(io::Error::other(t!("core-journal-no-folder")));
     };
     let for_this_name = saved_permissions_for(bytes, &name.to_string_lossy())
-        .ok_or_else(|| io::Error::other("what was kept could not be read"))?;
+        .ok_or_else(|| io::Error::other(t!("core-journal-permissions-unreadable")))?;
     let renamed = saved.with_extension(RENAMED_PERMISSIONS_SUFFIX);
     fs::write(&renamed, for_this_name)?;
     let output = hidden_command(ICACLS)
@@ -932,23 +931,32 @@ pub(crate) fn read_journal(folder: &Path) -> Result<ReadJournal> {
 /// everything else in the record is still read. Above all whether the install finished: to take
 /// a finished install for one that never did would undo it.
 fn parse_journal(text: &str, folder_name: &str, folder: &Path) -> Result<ReadJournal> {
-    let unreadable = |detail: &str| {
-        WinAppMigratorError::InvalidInput(format!(
-            "the record of the install in {} cannot be used: {detail}",
-            folder.display()
-        ))
-    };
+    let shown = folder.display().to_string();
+    let unreadable = WinAppMigratorError::InvalidInput;
     let mut lines = text.split_inclusive('\n');
-    let first = lines.next().ok_or_else(|| unreadable("it is empty"))?;
+    let first = lines
+        .next()
+        .ok_or_else(|| unreadable(t!("core-journal-unreadable-empty", folder = &shown)))?;
     let header = match serde_json::from_str::<Record>(first) {
         Ok(Record::Header(header)) => header,
-        _ => return Err(unreadable("it does not start with what it is about")),
+        _ => {
+            return Err(unreadable(t!(
+                "core-journal-unreadable-no-header",
+                folder = &shown
+            )));
+        }
     };
     if header.schema != SCHEMA_VERSION {
-        return Err(unreadable("a different version of this program wrote it"));
+        return Err(unreadable(t!(
+            "core-journal-unreadable-other-version",
+            folder = &shown
+        )));
     }
     if header.id != folder_name || !is_valid_install_id(&header.id) {
-        return Err(unreadable("it says it belongs to a different install"));
+        return Err(unreadable(t!(
+            "core-journal-unreadable-other-install",
+            folder = &shown
+        )));
     }
     let mut changes = Vec::new();
     let mut committed = false;
@@ -1161,8 +1169,9 @@ pub(crate) fn is_in_use(error: &io::Error) -> bool {
 /// not to be trusted.
 pub(crate) fn checked_install_folder(state_root: &Path, id: &str) -> Result<PathBuf> {
     if !is_valid_install_id(id) {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "this is not an install's id: {id}"
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-journal-not-an-install-id",
+            id = id
         )));
     }
     let installs = state_root.join(INSTALLS_FOLDER);

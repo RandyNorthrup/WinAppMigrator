@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use filetime::{FileTime, set_file_times};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
+use winappmigrator_i18n::t;
 use winreg::RegValue;
 use winreg::enums::{REG_DWORD, REG_NONE, REG_SZ};
 
@@ -79,7 +80,6 @@ use crate::verify::{PackageFiles, verify_prepared_package, without_what_was_refu
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 /// What `sc start` exits with for a service that is already running.
 const ERROR_SERVICE_ALREADY_RUNNING: i32 = 1056;
-const SERVICE_NOT_STARTED_CODE: &str = "service_did_not_start";
 /// How long a service gets to say it is running, which Windows gives it about this long to do anyway.
 const SERVICE_START_WAIT: Duration = Duration::from_secs(30);
 const SERVICE_START_POLL: Duration = Duration::from_millis(250);
@@ -120,7 +120,6 @@ const REFUSALS_FOUND_WHEN_INSTALLING: [&str; 7] = [
 const FILE_EXISTS_ELSEWHERE_CODE: &str = "file_exists_elsewhere";
 const COM_CLASS_EXISTS_CODE: &str = "registry_com_class_exists";
 const REGISTRATION_EXISTS_CODE: &str = "registration_exists_elsewhere";
-const CLASS_IS_SOMEONES: &str = "this COM class is already on this PC, as something else's";
 const SERVICES_LEFT_ALONE_CODES: [&str; 2] =
     ["service_exists_elsewhere", "driver_exists_elsewhere"];
 /// How far down to look for what says a unit on this PC is the app's: a type library's file is
@@ -145,9 +144,6 @@ const NOT_TYPES: &[&str] = &[
 ];
 const OPEN_VERB: &str = "open";
 const EVENT_LOG_KEY: &str = r"SYSTEM\CurrentControlSet\Services\EventLog";
-const EXISTING_IS_SOMETHING_ELSE: &str =
-    "this PC already has this, set to something else, which an install does not take over";
-const CANCELLED_CODE: &str = "install_cancelled";
 const JOURNAL_WRITE_FAILED_CODE: &str = "journal_write_failed";
 /// What PowerShell says can quote its script, on any language of Windows, and a script can hold
 /// what must not be logged, such as a shortcut's arguments.
@@ -209,27 +205,29 @@ pub fn restore_package_monitored(
     installer: Option<&EmbeddedPackage>,
 ) -> Result<RestoreResult> {
     if options.apply && options.dry_run {
-        return Err(WinAppMigratorError::InvalidInput(
-            "--apply and --dry-run cannot both be supplied".to_owned(),
-        ));
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-restore-apply-and-dry-run"
+        )));
     }
     // A relative or empty location would resolve against the working directory.
     if !options.target_root.is_absolute() {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "the install location must be a full path: \"{}\"",
-            options.target_root.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-restore-location-not-full-path",
+            path = options.target_root.display().to_string()
         )));
     }
     if let Some(problem) = install_location_problem(&options.target_root) {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "that install location cannot be used: {problem}: \"{}\"",
-            options.target_root.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-restore-location-unusable",
+            problem = problem,
+            path = options.target_root.display().to_string()
         )));
     }
     if overlaps_state_root(&options.target_root, &options.state_root) {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "that install location cannot be used: {STATE_ROOT_REFUSAL}: \"{}\"",
-            options.target_root.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-restore-location-unusable",
+            problem = STATE_ROOT_REFUSAL,
+            path = options.target_root.display().to_string()
         )));
     }
 
@@ -276,24 +274,23 @@ pub fn restore_package_monitored(
         // finished left there is not to be taken for anything.
         let recovery = recover_interrupted_installs(&options.state_root, monitor)?;
         for folder in &recovery.not_trusted {
-            recovered_warnings.push(Warning::new(
+            recovered_warnings.push(Warning::localized(
                 "earlier_install_not_trusted",
+                "core-warning-restore-earlier-not-trusted",
                 WarningSeverity::Warning,
-                "A record of an install that never finished was left alone, because others can \
-                 change it. Whatever that install changed is still there.",
+                Vec::new(),
                 Some(folder.display().to_string()),
             ));
         }
         for earlier in recovery.recovered {
-            recovered_warnings.push(Warning::new(
+            recovered_warnings.push(Warning::localized(
                 "earlier_install_undone",
+                "core-warning-restore-earlier-undone",
                 WarningSeverity::Warning,
-                format!(
-                    "An earlier install of {} never finished, so it was undone first. {} changes \
-                     were put back.",
-                    earlier.app_name,
-                    earlier.report.undone.len()
-                ),
+                vec![
+                    ("app_name", earlier.app_name.as_str().into()),
+                    ("count", earlier.report.undone.len().into()),
+                ],
                 None,
             ));
             recovered_warnings.extend(
@@ -314,12 +311,11 @@ pub fn restore_package_monitored(
         }
     } else {
         for app_name in interrupted_installs(&options.state_root) {
-            recovered_warnings.push(Warning::new(
+            recovered_warnings.push(Warning::localized(
                 "earlier_install_never_finished",
+                "core-warning-restore-earlier-never-finished",
                 WarningSeverity::Warning,
-                format!(
-                    "An earlier install of {app_name} never finished. Installing undoes it first."
-                ),
+                vec![("app_name", app_name.into())],
                 None,
             ));
         }
@@ -342,15 +338,14 @@ pub fn restore_package_monitored(
         }
     }
     if options.apply && restore_requires_admin(&review) && !is_elevated() {
-        return Err(WinAppMigratorError::InvalidInput(
-            "restore plan includes admin-only registry, service, scheduled task, shortcut, or protected target changes"
-                .to_owned(),
-        ));
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-restore-needs-admin-plan"
+        )));
     }
     if options.apply && target_requires_admin(&options.target_root) && !is_elevated() {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "target root requires elevated privileges: {}",
-            options.target_root.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-restore-needs-admin-target",
+            path = options.target_root.display().to_string()
         )));
     }
     if options.apply
@@ -358,10 +353,9 @@ pub fn restore_package_monitored(
         && !is_elevated()
         && user_data_restore_requires_admin(&review)
     {
-        return Err(WinAppMigratorError::InvalidInput(
-            "restoring user data into ProgramData or other protected locations requires elevated privileges"
-                .to_owned(),
-        ));
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-restore-needs-admin-user-data"
+        )));
     }
     if options.apply && !options.force {
         refuse_replacing_anything(&review)?;
@@ -383,9 +377,10 @@ pub fn restore_package_monitored(
                     info!(rollback = %line);
                 }
                 if !report.failed.is_empty() {
-                    return Err(WinAppMigratorError::InvalidInput(format!(
-                        "{error}. What had been done could not all be put back: {}",
-                        report.failed.join(" ")
+                    return Err(WinAppMigratorError::InvalidInput(t!(
+                        "core-restore-not-all-put-back",
+                        error = error.to_string(),
+                        failed = report.failed.join(" ")
                     )));
                 }
                 return Err(error);
@@ -411,10 +406,11 @@ pub fn restore_package_monitored(
             .iter()
             .any(|file| split_user_data_relative(&file.original_path).is_some())
     {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "restore_user_data_real_locations",
+            "core-warning-restore-user-data-real-locations",
             WarningSeverity::Info,
-            "User data is restored to this machine's real %AppData%/%ProgramData% locations instead of the target root.",
+            Vec::new(),
             None,
         ));
     }
@@ -461,10 +457,10 @@ pub fn restore_package_monitored(
     } = run;
     let mut changes_logged = changes.in_order();
     if let Some(report) = verification.as_ref() {
-        changes_logged.push(format!(
-            "post-restore verification package_valid={} restore_valid={}",
-            report.package_valid,
-            report
+        changes_logged.push(t!(
+            "core-restore-verification-result",
+            package_valid = report.package_valid.to_string(),
+            restore_valid = report
                 .restore_valid
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "not_run".to_owned())
@@ -480,10 +476,11 @@ pub fn restore_package_monitored(
         // The install location has to be let go of before it can be taken back.
         drop(target_hold);
         if let Err(error) = committed {
-            errors.push(Warning::new(
+            errors.push(Warning::localized(
                 "journal_commit_failed",
+                "core-warning-restore-commit-failed",
                 WarningSeverity::Error,
-                format!("The record of this install could not be finished: {error}"),
+                vec![("error", error.to_string().into())],
                 None,
             ));
         }
@@ -563,9 +560,42 @@ fn path_after_an_option(text: &str) -> Option<&str> {
     text.get(drive..)
 }
 
+/// What a package sets up that runs or relies on a file, by its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Runner {
+    Service(String),
+    Task(String),
+    FirewallRule(String),
+    Shortcut(String),
+    RegistryValue(String),
+}
+
+impl Runner {
+    /// What it is, which its message chooses its words by.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Service(_) => "service",
+            Self::Task(_) => "task",
+            Self::FirewallRule(_) => "firewall",
+            Self::Shortcut(_) => "shortcut",
+            Self::RegistryValue(_) => "registry",
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            Self::Service(name)
+            | Self::Task(name)
+            | Self::FirewallRule(name)
+            | Self::Shortcut(name)
+            | Self::RegistryValue(name) => name,
+        }
+    }
+}
+
 /// What a package sets up that would run or rely on this file, if anything. Going by what it says as
 /// it will be read here, by whoever reads it, which is where a path in a command's arguments is too.
-fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
+fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<Runner> {
     let is_it = |path: &Path| {
         paths_equal(
             Path::new(&path_as_read_here(
@@ -591,7 +621,7 @@ fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
                 .filter_map(|entry| entry.value_data.as_deref())
                 .any(names_it)
     }) {
-        return Some(format!("the service {}", service.entry.service_name));
+        return Some(Runner::Service(service.entry.service_name.clone()));
     }
     if let Some(task) = review.tasks.iter().find(|task| {
         task.commands
@@ -599,21 +629,20 @@ fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
             .any(|command| is_it(Path::new(command)))
             || task.arguments.iter().any(|arguments| names_it(arguments))
     }) {
-        return Some(format!("the scheduled task {}", task.entry.task_name));
+        return Some(Runner::Task(task.entry.task_name.clone()));
     }
     if let Some(rule) = review
         .firewall_rules
         .iter()
         .find(|rule| is_it(&rule.program))
     {
-        return Some(format!("the firewall rule {}", rule.entry.name));
+        return Some(Runner::FirewallRule(rule.entry.name.clone()));
     }
     if let Some(shortcut) = review.shortcuts.iter().find(|shortcut| {
         is_it(&shortcut.target) || shortcut.arguments.as_deref().is_some_and(names_it)
     }) {
-        return Some(format!(
-            "the shortcut {}",
-            shortcut.original_lnk_path.display()
+        return Some(Runner::Shortcut(
+            shortcut.original_lnk_path.display().to_string(),
         ));
     }
     review
@@ -621,7 +650,7 @@ fn what_would_run(review: &ReviewedPackage<'_>, file: &Path) -> Option<String> {
         .iter()
         .filter(|entry| is_autostart_entry(entry) || change_kind_of(entry).is_some())
         .find(|entry| entry.value_data.as_deref().is_some_and(names_it))
-        .map(|entry| format!("the registry value {}", registry_item(entry)))
+        .map(|entry| Runner::RegistryValue(registry_item(entry)))
 }
 
 /// What came of starting what was installed to start by itself.
@@ -713,23 +742,21 @@ fn start_what_starts_by_itself(
         monitor.report(InstallStep::new(InstallPhase::Services, done, order.len()));
         let name = &service.entry.service_name;
         match start(name) {
-            StartAnswer::Running => result.started.push(format!("started service {name}")),
-            StartAnswer::StillStarting => result.warnings.push(Warning::new(
-                SERVICE_NOT_STARTED_CODE,
+            StartAnswer::Running => result
+                .started
+                .push(t!("core-restore-started-service", name = name)),
+            StartAnswer::StillStarting => result.warnings.push(Warning::localized(
+                "service_did_not_start",
+                "core-warning-restore-service-still-starting",
                 WarningSeverity::Warning,
-                format!(
-                    "The service {name} was asked to start and has not finished starting. It may \
-                     yet. It also starts by itself when this PC next starts."
-                ),
+                vec![("name", name.as_str().into())],
                 Some(name.clone()),
             )),
-            StartAnswer::Failed(reason) => result.warnings.push(Warning::new(
-                SERVICE_NOT_STARTED_CODE,
+            StartAnswer::Failed(reason) => result.warnings.push(Warning::localized(
+                "service_did_not_start",
+                "core-warning-restore-service-not-started",
                 WarningSeverity::Warning,
-                format!(
-                    "The service {name} is installed and did not start: {reason}. The app may not \
-                     work until it does. Windows tries again when this PC next starts."
-                ),
+                vec![("name", name.as_str().into()), ("reason", reason.into())],
                 Some(name.clone()),
             )),
         }
@@ -767,7 +794,7 @@ pub(crate) fn run_sc_start(name: &str) -> StartAnswer {
                     return StartAnswer::Running;
                 }
                 if query_shows_stopped(&text) {
-                    return StartAnswer::Failed("it stopped again by itself".to_owned());
+                    return StartAnswer::Failed(t!("core-restore-service-stopped-by-itself"));
                 }
             }
             Ok(output) => {
@@ -784,13 +811,14 @@ pub(crate) fn run_sc_start(name: &str) -> StartAnswer {
 
 fn nowhere_to_keep_a_record(error: WinAppMigratorError) -> WinAppMigratorError {
     match error {
-        // Someone else's install, not a problem with where records are kept.
-        WinAppMigratorError::InvalidInput(message) if message.contains("another install") => {
+        // Someone else's install, not a problem with where records are kept. Said a moment ago on this
+        // thread, so in the same language.
+        WinAppMigratorError::InvalidInput(message) if message == t!("core-journal-busy") => {
             WinAppMigratorError::InvalidInput(message)
         }
-        error => WinAppMigratorError::InvalidInput(format!(
-            "there is nowhere safe to keep the record that would let this install be undone, so \
-             nothing was installed: {error}"
+        error => WinAppMigratorError::InvalidInput(t!(
+            "core-restore-nowhere-to-keep-record",
+            error = error.to_string()
         )),
     }
 }
@@ -831,9 +859,10 @@ fn prepare_target(journal: &mut Journal, target_root: &Path, state_root: &Path) 
         overlaps_state_root(target_root, state_root).then(|| STATE_ROOT_REFUSAL.to_owned())
     });
     if let Some(problem) = problem {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "that install location cannot be used: {problem}: \"{}\"",
-            target_root.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-restore-location-unusable",
+            problem = problem,
+            path = target_root.display().to_string()
         )));
     }
     Ok(hold)
@@ -962,9 +991,9 @@ fn refuse_replacing_anything(review: &ReviewedPackage<'_>) -> Result<()> {
         .filter_map(|file| review.map.destination_of(&file.original_path))
         .find(|destination| destination.exists());
     match existing {
-        Some(destination) => Err(WinAppMigratorError::InvalidInput(format!(
-            "{} already exists, so nothing was installed. Use --force to replace it",
-            destination.display()
+        Some(destination) => Err(WinAppMigratorError::InvalidInput(t!(
+            "core-restore-already-exists",
+            path = destination.display().to_string()
         ))),
         None => Ok(()),
     }
@@ -1009,13 +1038,10 @@ fn refuse_roots_under_links(roots: &[PathBuf], target_root: &Path) -> Result<()>
         .filter(|root| !path_is_within(root, target_root))
     {
         if let Some(link) = first_link_to(root) {
-            return Err(WinAppMigratorError::InvalidInput(format!(
-                "this app has things to restore to {}, and {} is a link to somewhere else, which \
-                 others may be able to change, so nothing was installed. If what goes there is \
-                 user data or license data, install it without its user data and license data. \
-                 If it is a shortcut in a Startup folder, put that folder back where it was",
-                root.display(),
-                link.display()
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-restore-root-under-link",
+                root = root.display().to_string(),
+                link = link.display().to_string()
             )));
         }
     }
@@ -1127,13 +1153,11 @@ impl Run<'_, '_> {
             match stop_service(name) {
                 Ok(true) => self.stopped_services.push(name.clone()),
                 Ok(false) => {}
-                Err(reason) => self.warnings.push(Warning::new(
+                Err(reason) => self.warnings.push(Warning::localized(
                     "service_not_stopped",
+                    "core-warning-restore-service-not-stopped",
                     WarningSeverity::Warning,
-                    format!(
-                        "The service {name} could not be stopped first: {reason}. It may go on \
-                         running the old program until this PC next starts."
-                    ),
+                    vec![("name", name.as_str().into()), ("reason", reason.into())],
                     Some(name.clone()),
                 )),
             }
@@ -1179,17 +1203,23 @@ impl Run<'_, '_> {
         if self.monitor.is_cancelled() {
             if !self.cancelled {
                 self.cancelled = true;
-                let what = if self.journal.is_some() {
-                    "The install was cancelled."
+                self.errors.push(if self.journal.is_some() {
+                    Warning::localized(
+                        "install_cancelled",
+                        "core-warning-restore-install-cancelled",
+                        WarningSeverity::Warning,
+                        Vec::new(),
+                        None,
+                    )
                 } else {
-                    "The preview was cancelled."
-                };
-                self.errors.push(Warning::new(
-                    CANCELLED_CODE,
-                    WarningSeverity::Warning,
-                    what,
-                    None,
-                ));
+                    Warning::localized(
+                        "install_cancelled",
+                        "core-warning-restore-preview-cancelled",
+                        WarningSeverity::Warning,
+                        Vec::new(),
+                        None,
+                    )
+                });
             }
             return true;
         }
@@ -1205,10 +1235,17 @@ impl Run<'_, '_> {
     fn record_failure(&mut self, failure: Warning) {
         if REFUSALS_FOUND_WHEN_INSTALLING.contains(&failure.code.as_str()) {
             let item = failure.source.clone().unwrap_or_default();
+            // It goes under the code of what was refused, and why is in the words it was given, so it is
+            // said in the language in use.
+            let message = t!(
+                "core-warning-restore-left-out",
+                item = item.as_str(),
+                reason = failure.text()
+            );
             self.refused.push(Warning::new(
                 failure.code,
                 WarningSeverity::Warning,
-                format!("{item} was left out: {}.", failure.message),
+                message,
                 Some(item),
             ));
         } else {
@@ -1254,10 +1291,11 @@ impl Run<'_, '_> {
                 None
             }
             Err(error) => {
-                self.errors.push(Warning::new(
+                self.errors.push(Warning::localized(
                     "post_restore_verification_failed",
+                    "core-warning-restore-verification-failed",
                     WarningSeverity::Error,
-                    format!("Post-restore verification could not run: {error}"),
+                    vec![("error", error.to_string().into())],
                     None,
                 ));
                 None
@@ -1301,14 +1339,16 @@ impl Run<'_, '_> {
                 // Whatever is there is not this package's. Set up to run all the same, it would run
                 // what may have been left there for that, as whatever this was going to run it as.
                 if let Some(runner) = what_would_run(review, destination) {
-                    self.errors.push(Warning::new(
+                    self.errors.push(Warning::localized(
                         "program_left_alone_would_run",
+                        "core-warning-restore-program-would-run",
                         WarningSeverity::Error,
-                        format!(
-                            "{} is not this package's to replace, and {runner} relies on it, so \
-                             nothing was installed: {refusal}",
-                            destination.display()
-                        ),
+                        vec![
+                            ("runner", runner.kind().into()),
+                            ("name", runner.name().into()),
+                            ("path", destination.display().to_string().into()),
+                            ("refusal", refusal.into()),
+                        ],
                         Some(destination.display().to_string()),
                     ));
                     return;
@@ -1322,10 +1362,11 @@ impl Run<'_, '_> {
                 continue;
             }
             if destination.exists() && !self.options.force {
-                let warning = Warning::new(
+                let warning = Warning::localized(
                     "restore_destination_exists",
+                    "core-warning-restore-destination-exists",
                     WarningSeverity::Warning,
-                    "Destination exists; use --force to overwrite.",
+                    Vec::new(),
                     Some(destination.display().to_string()),
                 );
                 if self.journal.is_some() {
@@ -1337,10 +1378,10 @@ impl Run<'_, '_> {
             }
 
             let Some(journal) = self.journal.as_mut() else {
-                self.changes.files.push(format!(
-                    "would copy {} -> {}",
-                    source.display(),
-                    destination.display()
+                self.changes.files.push(t!(
+                    "core-restore-would-copy",
+                    source = source.display().to_string(),
+                    destination = destination.display().to_string()
                 ));
                 continue;
             };
@@ -1353,16 +1394,20 @@ impl Run<'_, '_> {
                 file.hash_sha256.as_deref(),
             );
             match copied {
-                Ok(()) => self.changes.files.push(format!(
-                    "copied {} -> {}",
-                    source.display(),
-                    destination.display()
+                Ok(()) => self.changes.files.push(t!(
+                    "core-restore-copied",
+                    source = source.display().to_string(),
+                    destination = destination.display().to_string()
                 )),
                 Err(error) => {
-                    self.errors.push(Warning::new(
+                    self.errors.push(Warning::localized(
                         "restore_file_failed",
+                        "core-warning-restore-file-not-written",
                         WarningSeverity::Error,
-                        format!("Could not write {}: {error}", destination.display()),
+                        vec![
+                            ("path", destination.display().to_string().into()),
+                            ("error", error.to_string().into()),
+                        ],
                         Some(destination.display().to_string()),
                     ));
                     return;
@@ -1385,10 +1430,11 @@ impl Run<'_, '_> {
             match fs::symlink_metadata(destination) {
                 Ok(found) if found.is_dir() => continue,
                 Ok(_) => {
-                    let warning = Warning::new(
+                    let warning = Warning::localized(
                         "restore_destination_exists",
+                        "core-warning-restore-not-a-folder",
                         WarningSeverity::Warning,
-                        "Something other than a folder is where this empty folder goes.",
+                        Vec::new(),
                         Some(destination.display().to_string()),
                     );
                     if self.journal.is_some() {
@@ -1400,19 +1446,23 @@ impl Run<'_, '_> {
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    self.errors.push(Warning::new(
+                    self.errors.push(Warning::localized(
                         "restore_file_failed",
+                        "core-warning-restore-not-looked-at",
                         WarningSeverity::Error,
-                        format!("Could not look at {}: {error}", destination.display()),
+                        vec![
+                            ("path", destination.display().to_string().into()),
+                            ("error", error.to_string().into()),
+                        ],
                         Some(destination.display().to_string()),
                     ));
                     return;
                 }
             }
             let Some(journal) = self.journal.as_mut() else {
-                self.changes.files.push(format!(
-                    "would create the empty folder {}",
-                    destination.display()
+                self.changes.files.push(t!(
+                    "core-restore-would-create-empty-folder",
+                    path = destination.display().to_string()
                 ));
                 continue;
             };
@@ -1422,15 +1472,19 @@ impl Run<'_, '_> {
                 &self.options.target_root,
                 file_item_kind(folder),
             ) {
-                Ok(()) => self.changes.files.push(format!(
-                    "created the empty folder {}",
-                    destination.display()
+                Ok(()) => self.changes.files.push(t!(
+                    "core-restore-created-empty-folder",
+                    path = destination.display().to_string()
                 )),
                 Err(error) => {
-                    self.errors.push(Warning::new(
+                    self.errors.push(Warning::localized(
                         "restore_file_failed",
+                        "core-warning-restore-folder-not-made",
                         WarningSeverity::Error,
-                        format!("Could not make {}: {error}", destination.display()),
+                        vec![
+                            ("path", destination.display().to_string().into()),
+                            ("error", error.to_string().into()),
+                        ],
                         Some(destination.display().to_string()),
                     ));
                     return;
@@ -1447,10 +1501,12 @@ impl Run<'_, '_> {
             .iter()
             .any(|left_alone| left_alone.covers(entry))
         {
-            self.record_failure(registry_warning(
-                REGISTRATION_EXISTS_CODE,
-                entry,
-                EXISTING_IS_SOMETHING_ELSE,
+            self.record_failure(Warning::localized(
+                "registration_exists_elsewhere",
+                "core-warning-restore-registration-exists",
+                WarningSeverity::Error,
+                Vec::new(),
+                registry_value_source(entry),
             ));
             return true;
         }
@@ -1526,12 +1582,15 @@ impl Run<'_, '_> {
             let autostart = is_autostart_entry(entry);
             let registers = registration_of(entry).is_some();
             let Some(journal) = self.journal.as_mut() else {
-                let message = format!(
-                    "would restore registry {}\\{} {}",
-                    registry_hive_name(&entry.hive),
-                    entry.key_path,
-                    entry.value_name.as_deref().unwrap_or("(key)")
-                );
+                let key = format!("{}\\{}", registry_hive_name(&entry.hive), entry.key_path);
+                let message = match entry.value_name.as_deref() {
+                    Some(value) => t!(
+                        "core-restore-would-restore-registry-value",
+                        key = key,
+                        value = value
+                    ),
+                    None => t!("core-restore-would-restore-registry-key", key = key),
+                };
                 if autostart {
                     self.changes.autostart.push(message);
                 } else if registers {
@@ -1554,10 +1613,11 @@ impl Run<'_, '_> {
             }
         }
         if !review.registry.is_empty() {
-            self.warnings.push(Warning::new(
+            self.warnings.push(Warning::localized(
                 "registry_restore_review_required",
+                "core-warning-restore-registry-review",
                 WarningSeverity::Info,
-                "Registry values were restored from the archived structured data with known app paths rewritten to the target root.",
+                Vec::new(),
                 None,
             ));
         }
@@ -1574,10 +1634,10 @@ impl Run<'_, '_> {
             }
             let rule = reviewed.entry;
             let Some(journal) = self.journal.as_mut() else {
-                self.changes.firewall.push(format!(
-                    "would add firewall rule {} for {}",
-                    rule.name,
-                    reviewed.program.display()
+                self.changes.firewall.push(t!(
+                    "core-restore-would-add-firewall-rule",
+                    name = &rule.name,
+                    program = reviewed.program.display().to_string()
                 ));
                 continue;
             };
@@ -1593,9 +1653,12 @@ impl Run<'_, '_> {
                 Ok(stored) => stored,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
                 Err(error) => {
-                    self.errors.push(failed(
+                    self.errors.push(Warning::localized(
                         "firewall_rules_unreadable",
-                        format!("Windows Firewall's rules could not be read: {error}"),
+                        "core-warning-restore-firewall-unreadable",
+                        WarningSeverity::Error,
+                        vec![("error", error.to_string().into())],
+                        Some(firewall_rule_item(&rule.name)),
                     ));
                     return;
                 }
@@ -1629,17 +1692,19 @@ impl Run<'_, '_> {
                 .iter()
                 .any(|known| firewall_fingerprint(known) == fingerprint)
             {
-                self.changes
-                    .firewall
-                    .push(format!("firewall rule {} is already there", rule.name));
+                self.changes.firewall.push(t!(
+                    "core-restore-firewall-rule-already-there",
+                    name = &rule.name
+                ));
                 continue;
             }
             if !existing.is_empty() {
-                self.record_failure(failed(
-                    FIREWALL_RULE_EXISTS_CODE,
-                    "a rule of this name for this program is already there, set to something \
-                     else, which an install does not change"
-                        .to_owned(),
+                self.record_failure(Warning::localized(
+                    "firewall_rule_exists",
+                    "core-warning-restore-firewall-rule-exists",
+                    WarningSeverity::Error,
+                    Vec::new(),
+                    Some(firewall_rule_item(&rule.name)),
                 ));
                 continue;
             }
@@ -1663,10 +1728,10 @@ impl Run<'_, '_> {
                 &firewall_rule_item(&rule.name),
             );
             match added {
-                Ok(()) => self.changes.firewall.push(format!(
-                    "added firewall rule {} for {}",
-                    rule.name,
-                    reviewed.program.display()
+                Ok(()) => self.changes.firewall.push(t!(
+                    "core-restore-added-firewall-rule",
+                    name = &rule.name,
+                    program = reviewed.program.display().to_string()
                 )),
                 Err(warning) => {
                     self.errors.push(warning);
@@ -1689,11 +1754,12 @@ impl Run<'_, '_> {
                     .push(custom_account_warning(service.entry, original));
             }
             let Some(journal) = self.journal.as_mut() else {
-                self.changes.services.push(format!(
-                    "would restore service {} -> {} (runs as {})",
-                    service.entry.service_name,
-                    service_image_path_value(&service.binary, service.arguments.as_deref()),
-                    service.account.label()
+                self.changes.services.push(t!(
+                    "core-restore-would-restore-service",
+                    name = &service.entry.service_name,
+                    command =
+                        service_image_path_value(&service.binary, service.arguments.as_deref()),
+                    account = service.account.label()
                 ));
                 continue;
             };
@@ -1746,13 +1812,11 @@ impl Run<'_, '_> {
             // Everything about how this installs comes from the compiled spec, not the
             // manifest. A kind with no spec has nothing that could run.
             let Some(spec) = spec_for_bundle(&prerequisite.kind, bundle) else {
-                self.warnings.push(Warning::new(
+                self.warnings.push(Warning::localized(
                     "prerequisite_skipped",
+                    "core-warning-restore-prerequisite-unknown",
                     WarningSeverity::Info,
-                    format!(
-                        "{}: there is no known installer for this runtime.",
-                        prerequisite.name
-                    ),
+                    vec![("name", prerequisite.name.as_str().into())],
                     None,
                 ));
                 continue;
@@ -1760,34 +1824,40 @@ impl Run<'_, '_> {
             if spec.probe.as_ref().is_some_and(is_present)
                 && !bundled_installer_is_newer(&spec, bundle, &self.options.package_root)
             {
-                self.changes.prerequisites.push(format!(
-                    "prerequisite already present: {}",
-                    prerequisite.name
+                self.changes.prerequisites.push(t!(
+                    "core-restore-prerequisite-present",
+                    name = &prerequisite.name
                 ));
                 continue;
             }
             if self.journal.is_none() {
-                let via = if spec.windows_feature.is_some() {
-                    "Windows feature"
-                } else if spec.bundleable && bundle.package_relative_path.is_some() {
-                    "bundled installer"
-                } else {
-                    "winget"
-                };
-                self.changes.prerequisites.push(format!(
-                    "would install prerequisite {} ({via})",
-                    prerequisite.name
-                ));
+                let name = &prerequisite.name;
+                self.changes
+                    .prerequisites
+                    .push(if spec.windows_feature.is_some() {
+                        t!(
+                            "core-restore-would-install-prerequisite-feature",
+                            name = name
+                        )
+                    } else if spec.bundleable && bundle.package_relative_path.is_some() {
+                        t!(
+                            "core-restore-would-install-prerequisite-bundled",
+                            name = name
+                        )
+                    } else {
+                        t!(
+                            "core-restore-would-install-prerequisite-winget",
+                            name = name
+                        )
+                    });
                 continue;
             }
             if spec.requires_admin && !is_elevated() {
-                self.errors.push(Warning::new(
+                self.errors.push(Warning::localized(
                     "prerequisite_requires_admin",
+                    "core-warning-restore-prerequisite-needs-admin",
                     WarningSeverity::Error,
-                    format!(
-                        "Installing {} requires elevation; re-run the installer as administrator.",
-                        prerequisite.name
-                    ),
+                    vec![("name", prerequisite.name.as_str().into())],
                     None,
                 ));
                 return;
@@ -1800,9 +1870,10 @@ impl Run<'_, '_> {
             }
             match install_bundle(&prerequisite.kind, bundle, &self.options.package_root) {
                 PrerequisiteInstallOutcome::Installed => {
-                    self.changes
-                        .prerequisites
-                        .push(format!("installed prerequisite {}", prerequisite.name));
+                    self.changes.prerequisites.push(t!(
+                        "core-restore-installed-prerequisite",
+                        name = &prerequisite.name
+                    ));
                     confirm_prerequisite(
                         prerequisite,
                         &spec,
@@ -1812,17 +1883,15 @@ impl Run<'_, '_> {
                     );
                 }
                 PrerequisiteInstallOutcome::InstalledNeedsReboot => {
-                    self.changes.prerequisites.push(format!(
-                        "installed prerequisite {} (reboot required)",
-                        prerequisite.name
+                    self.changes.prerequisites.push(t!(
+                        "core-restore-installed-prerequisite-reboot",
+                        name = &prerequisite.name
                     ));
-                    self.warnings.push(Warning::new(
+                    self.warnings.push(Warning::localized(
                         "prerequisite_reboot_required",
+                        "core-warning-restore-prerequisite-reboot",
                         WarningSeverity::Warning,
-                        format!(
-                            "{} was installed but a reboot is required to complete it.",
-                            prerequisite.name
-                        ),
+                        vec![("name", prerequisite.name.as_str().into())],
                         None,
                     ));
                     confirm_prerequisite(
@@ -1840,28 +1909,35 @@ impl Run<'_, '_> {
                         })
                     });
                     if let Some(Err(error)) = noted {
-                        self.errors.push(Warning::new(
-                            JOURNAL_WRITE_FAILED_CODE,
+                        self.errors.push(Warning::localized(
+                            "journal_write_failed",
+                            "core-warning-restore-skipped-not-recorded",
                             WarningSeverity::Error,
-                            format!("Could not record a runtime that was skipped: {error}"),
+                            vec![("error", error.to_string().into())],
                             None,
                         ));
                     }
-                    self.warnings.push(Warning::new(
+                    self.warnings.push(Warning::localized(
                         "prerequisite_skipped",
+                        "core-warning-restore-prerequisite-skipped",
                         WarningSeverity::Info,
-                        format!("{}: {reason}", prerequisite.name),
+                        vec![
+                            ("name", prerequisite.name.as_str().into()),
+                            ("reason", reason.into()),
+                        ],
                         None,
                     ));
                 }
                 PrerequisiteInstallOutcome::Failed(reason) => {
-                    self.errors.push(Warning::new(
+                    self.errors.push(Warning::localized(
                         "prerequisite_install_failed",
+                        "core-warning-restore-prerequisite-failed",
                         WarningSeverity::Error,
-                        format!(
-                            "Could not install {}: {reason}. Acquire it from {}.",
-                            prerequisite.name, spec.download_url
-                        ),
+                        vec![
+                            ("name", prerequisite.name.as_str().into()),
+                            ("reason", reason.into()),
+                            ("url", spec.download_url.as_str().into()),
+                        ],
                         None,
                     ));
                 }
@@ -1876,10 +1952,11 @@ impl Run<'_, '_> {
             })
         });
         if let Some(Err(error)) = noted {
-            self.errors.push(Warning::new(
+            self.errors.push(Warning::localized(
                 "journal_write_failed",
+                "core-warning-restore-runtime-not-recorded",
                 WarningSeverity::Error,
-                format!("Could not record an installed runtime: {error}"),
+                vec![("error", error.to_string().into())],
                 None,
             ));
         }
@@ -1902,10 +1979,11 @@ impl Run<'_, '_> {
             ) {
                 Ok(path) => path,
                 Err(error) => {
-                    self.errors.push(Warning::new(
+                    self.errors.push(Warning::localized(
                         "license_source_invalid",
+                        "core-warning-restore-license-source-invalid",
                         WarningSeverity::Error,
-                        format!("Packaged license path is invalid: {error}"),
+                        vec![("error", error.to_string().into())],
                         Some(license.package_relative_path.display().to_string()),
                     ));
                     continue;
@@ -1913,18 +1991,19 @@ impl Run<'_, '_> {
             };
 
             let Some(journal) = self.journal.as_mut() else {
-                self.changes.license.push(format!(
-                    "would restore license {} -> {}",
-                    source.display(),
-                    destination.display()
+                self.changes.license.push(t!(
+                    "core-restore-would-restore-license",
+                    source = source.display().to_string(),
+                    destination = destination.display().to_string()
                 ));
                 continue;
             };
             if destination_requires_admin(destination) && !is_elevated() {
-                self.errors.push(Warning::new(
+                self.errors.push(Warning::localized(
                     "license_requires_admin",
+                    "core-warning-restore-license-needs-admin",
                     WarningSeverity::Error,
-                    "Restoring license data to a protected location requires elevation.",
+                    Vec::new(),
                     Some(destination.display().to_string()),
                 ));
                 continue;
@@ -1946,10 +2025,11 @@ impl Run<'_, '_> {
             // Honor --force for both files and framework-store directories: never
             // overwrite an existing license/store on the target without it.
             if destination.exists() && !self.options.force {
-                self.errors.push(Warning::new(
+                self.errors.push(Warning::localized(
                     "license_destination_exists",
+                    "core-warning-restore-license-exists",
                     WarningSeverity::Warning,
-                    "License destination exists; use --force to overwrite.",
+                    Vec::new(),
                     Some(destination.display().to_string()),
                 ));
                 continue;
@@ -2002,15 +2082,16 @@ impl Run<'_, '_> {
                 ));
             }
             match result {
-                Ok(()) => self.changes.license.push(format!(
-                    "restored license {} -> {}",
-                    source.display(),
-                    destination.display()
+                Ok(()) => self.changes.license.push(t!(
+                    "core-restore-restored-license",
+                    source = source.display().to_string(),
+                    destination = destination.display().to_string()
                 )),
-                Err(error) => self.errors.push(Warning::new(
+                Err(error) => self.errors.push(Warning::localized(
                     "license_restore_failed",
+                    "core-warning-restore-license-failed",
                     WarningSeverity::Error,
-                    format!("Could not restore license data: {error}"),
+                    vec![("error", error.to_string().into())],
                     Some(destination.display().to_string()),
                 )),
             }
@@ -2025,10 +2106,9 @@ impl Run<'_, '_> {
                 continue;
             }
             let Some(journal) = self.journal.as_mut() else {
-                self.changes.license.push(format!(
-                    "would restore license registry {}\\{}",
-                    registry_hive_name(&entry.hive),
-                    entry.key_path
+                self.changes.license.push(t!(
+                    "core-restore-would-restore-license-registry",
+                    key = format!("{}\\{}", registry_hive_name(&entry.hive), entry.key_path)
                 ));
                 continue;
             };
@@ -2052,9 +2132,10 @@ impl Run<'_, '_> {
         let review = self.review;
         for driver in &review.manual_drivers {
             // Not bundled (inbox/vendor driver): precise, actionable guidance.
-            self.changes
-                .drivers
-                .push(format!("driver not auto-restored: {}", driver.service_name));
+            self.changes.drivers.push(t!(
+                "core-restore-driver-not-restored",
+                name = &driver.service_name
+            ));
             self.warnings.push(Warning::new(
                 "driver_manual_reinstall",
                 WarningSeverity::Warning,
@@ -2070,17 +2151,19 @@ impl Run<'_, '_> {
             self.progress(InstallPhase::Drivers, done, total);
             let name = &driver.entry.service_name;
             let Some(journal) = self.journal.as_mut() else {
-                self.changes.drivers.push(format!(
-                    "would install driver {name} -> {}",
-                    driver.destination.display()
+                self.changes.drivers.push(t!(
+                    "core-restore-would-install-driver",
+                    name = name,
+                    destination = driver.destination.display().to_string()
                 ));
                 continue;
             };
             if !is_elevated() {
-                self.errors.push(Warning::new(
+                self.errors.push(Warning::localized(
                     "driver_requires_admin",
+                    "core-warning-restore-driver-needs-admin",
                     WarningSeverity::Error,
-                    "Driver registration requires elevation; re-run the installer as administrator.",
+                    Vec::new(),
                     Some(name.clone()),
                 ));
                 continue;
@@ -2104,19 +2187,18 @@ impl Run<'_, '_> {
             self.progress(InstallPhase::ScheduledTasks, done, total);
             let name = format!("{}{}", task.entry.task_path, task.entry.task_name);
             if task.runs_as_system {
-                self.warnings.push(Warning::new(
+                self.warnings.push(Warning::localized(
                     "scheduled_task_runs_as_system",
+                    "core-warning-restore-task-runs-as-system",
                     WarningSeverity::Warning,
-                    format!(
-                        "The scheduled task {name} runs as SYSTEM, with full rights over this PC."
-                    ),
+                    vec![("name", name.as_str().into())],
                     Some(name.clone()),
                 ));
             }
             let Some(journal) = self.journal.as_mut() else {
                 self.changes
                     .tasks
-                    .push(format!("would restore scheduled task {name}"));
+                    .push(t!("core-restore-would-restore-task", name = name));
                 continue;
             };
             let earlier_place =
@@ -2138,29 +2220,32 @@ impl Run<'_, '_> {
             self.progress(InstallPhase::Shortcuts, done, total);
             let destination = &shortcut.placement.destination;
             let autostart = shortcut.placement.autostart;
-            let kind = if autostart {
-                "startup shortcut"
-            } else {
-                "shortcut"
-            };
             let Some(journal) = self.journal.as_mut() else {
-                let message = format!(
-                    "would restore {kind} {} -> {}",
-                    destination.display(),
-                    shortcut.target.display()
+                let (place, target) = (
+                    destination.display().to_string(),
+                    shortcut.target.display().to_string(),
                 );
                 if autostart {
-                    self.changes.autostart.push(message);
+                    self.changes.autostart.push(t!(
+                        "core-restore-would-restore-startup-shortcut",
+                        shortcut = place,
+                        target = target
+                    ));
                 } else {
-                    self.changes.shortcuts.push(message);
+                    self.changes.shortcuts.push(t!(
+                        "core-restore-would-restore-shortcut",
+                        shortcut = place,
+                        target = target
+                    ));
                 }
                 continue;
             };
             let outcome = if destination.exists() && !self.options.force {
-                Err(Warning::new(
+                Err(Warning::localized(
                     "shortcut_destination_exists",
+                    "core-warning-restore-shortcut-exists",
                     WarningSeverity::Warning,
-                    "Shortcut exists; use --force to overwrite.",
+                    Vec::new(),
                     Some(destination.display().to_string()),
                 ))
             } else {
@@ -2183,10 +2268,11 @@ impl Run<'_, '_> {
             .iter()
             .any(|shortcut| shortcut.placement.for_all_users)
         {
-            self.warnings.push(Warning::new(
+            self.warnings.push(Warning::localized(
                 "shortcut_admin_scope",
+                "core-warning-restore-shortcut-all-users",
                 WarningSeverity::Info,
-                "One or more restored shortcuts target a public desktop or common Start Menu location.",
+                Vec::new(),
                 None,
             ));
         }
@@ -2201,9 +2287,10 @@ impl Run<'_, '_> {
             }
             self.progress(InstallPhase::Environment, done, total);
             let Some(journal) = self.journal.as_mut() else {
-                self.changes.environment.push(format!(
-                    "would restore {:?} environment variable {}",
-                    variable.scope, variable.name
+                self.changes.environment.push(t!(
+                    "core-restore-would-restore-variable",
+                    scope = scope_key(&variable.scope),
+                    name = &variable.name
                 ));
                 continue;
             };
@@ -2219,10 +2306,11 @@ impl Run<'_, '_> {
             }
         }
         if !review.environment.is_empty() {
-            self.warnings.push(Warning::new(
+            self.warnings.push(Warning::localized(
                 "environment_restore_session_refresh_required",
+                "core-warning-restore-environment-refresh",
                 WarningSeverity::Info,
-                "Environment variable changes may require a new process, shell, or sign-in session to be observed.",
+                Vec::new(),
                 None,
             ));
         }
@@ -2295,10 +2383,9 @@ impl Run<'_, '_> {
                     return;
                 }
             }
-            self.changes.registry.push(format!(
-                "set the uninstaller for {}\\{}",
-                registry_hive_name(&key.hive),
-                key.key_path
+            self.changes.registry.push(t!(
+                "core-restore-set-uninstaller",
+                key = format!("{}\\{}", registry_hive_name(&key.hive), key.key_path)
             ));
         }
     }
@@ -2361,15 +2448,14 @@ fn uninstall_entry_values(
 }
 
 fn custom_account_warning(service: &ServiceEntry, account: &str) -> Warning {
-    Warning::new(
+    Warning::localized(
         "service_account_not_restored",
+        "core-warning-restore-service-account",
         WarningSeverity::Warning,
-        format!(
-            "The service {} ran as {account} on the source. Its password is not in the installer, \
-             so the service is set up as LocalService. If it does not work, set its account and \
-             password in Services.",
-            service.service_name
-        ),
+        vec![
+            ("name", service.service_name.as_str().into()),
+            ("account", account.into()),
+        ],
         Some(service.service_name.clone()),
     )
 }
@@ -2390,23 +2476,19 @@ fn confirm_prerequisite(
         return;
     }
     if reboot_pending {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "prerequisite_pending_reboot",
+            "core-warning-restore-prerequisite-pending-reboot",
             WarningSeverity::Warning,
-            format!(
-                "{} is not yet registered; it should be active after a reboot.",
-                prerequisite.name
-            ),
+            vec![("name", prerequisite.name.as_str().into())],
             None,
         ));
     } else {
-        errors.push(Warning::new(
+        errors.push(Warning::localized(
             "prerequisite_not_verified",
+            "core-warning-restore-prerequisite-not-verified",
             WarningSeverity::Error,
-            format!(
-                "{} reported success but did not register; the install may have failed.",
-                prerequisite.name
-            ),
+            vec![("name", prerequisite.name.as_str().into())],
             None,
         ));
     }
@@ -2492,24 +2574,32 @@ fn place_and_register_driver(
     };
     let source = package_destination_path(&options.package_root, reviewed.package_relative_path)
         .map_err(|error| {
-            problem(
+            Warning::localized(
                 "driver_source_invalid",
-                format!("Bundled driver path is invalid: {error}"),
+                "core-warning-restore-driver-source-invalid",
+                WarningSeverity::Error,
+                vec![("error", error.to_string().into())],
+                Some(name.to_owned()),
             )
         })?;
     let source = source.as_path();
-    let current = service_image_path(name).map_err(|error| {
-        problem(
+    let not_read = |error: io::Error| {
+        Warning::localized(
             "driver_query_failed",
-            format!("Could not read the driver's current settings: {error}"),
+            "core-warning-restore-driver-not-read",
+            WarningSeverity::Error,
+            vec![("error", error.to_string().into())],
+            Some(name.to_owned()),
         )
-    })?;
+    };
+    let current = service_image_path(name).map_err(not_read)?;
     if let Some(current) = current.as_deref() {
         if !options.force {
-            return Err(Warning::new(
+            return Err(Warning::localized(
                 "driver_exists",
+                "core-warning-restore-driver-exists",
                 WarningSeverity::Warning,
-                "Driver service exists; use --force to reconfigure it.",
+                Vec::new(),
                 Some(name.to_owned()),
             ));
         }
@@ -2519,10 +2609,11 @@ fn place_and_register_driver(
         }
     }
     if destination.exists() && !options.force {
-        return Err(Warning::new(
+        return Err(Warning::localized(
             "driver_image_exists",
+            "core-warning-restore-driver-image-exists",
             WarningSeverity::Warning,
-            "Driver image exists; use --force to overwrite.",
+            Vec::new(),
             Some(destination.display().to_string()),
         ));
     }
@@ -2533,10 +2624,12 @@ fn place_and_register_driver(
         None => false,
     };
     if !matches_manifest(source) {
-        return Err(problem(
+        return Err(Warning::localized(
             "driver_hash_failed",
-            "The bundled driver image does not match its recorded hash, so it was not installed."
-                .to_owned(),
+            "core-warning-restore-driver-hash-bundled",
+            WarningSeverity::Error,
+            Vec::new(),
+            Some(name.to_owned()),
         ));
     }
     copy_restore_file(
@@ -2548,28 +2641,29 @@ fn place_and_register_driver(
         driver.hash_sha256.as_deref(),
     )
     .map_err(|error| {
-        problem(
+        Warning::localized(
             "driver_copy_failed",
-            format!("Could not place driver image: {error}"),
+            "core-warning-restore-driver-not-placed",
+            WarningSeverity::Error,
+            vec![("error", error.to_string().into())],
+            Some(name.to_owned()),
         )
     })?;
     if !matches_manifest(destination) {
-        return Err(problem(
+        return Err(Warning::localized(
             "driver_hash_failed",
-            "The driver image changed after it was placed, so it was not registered.".to_owned(),
+            "core-warning-restore-driver-hash-placed",
+            WarningSeverity::Error,
+            Vec::new(),
+            Some(name.to_owned()),
         ));
     }
-    let mut messages = vec![format!(
-        "placed driver image {} -> {}",
-        source.display(),
-        destination.display()
+    let mut messages = vec![t!(
+        "core-restore-placed-driver-image",
+        source = source.display().to_string(),
+        destination = destination.display().to_string()
     )];
-    let prior = read_service_config(name).map_err(|error| {
-        problem(
-            "driver_query_failed",
-            format!("Could not read the driver's current settings: {error}"),
-        )
-    })?;
+    let prior = read_service_config(name).map_err(not_read)?;
     journal
         .note(Change::Service {
             name: name.to_owned(),
@@ -2607,13 +2701,18 @@ fn apply_driver(
 ) -> std::result::Result<String, Warning> {
     let mut command = hidden_command(SC_EXE);
     command.args(sc_driver_arguments(driver, image_path, exists));
-    let (code, done) = if exists {
-        ("driver_config_failed", "configured")
+    let code = if exists {
+        "driver_config_failed"
     } else {
-        ("driver_create_failed", "created")
+        "driver_create_failed"
     };
     run_checked(&mut command, code, &driver.service_name)?;
-    Ok(format!("{done} driver {}", driver.service_name))
+    let name = &driver.service_name;
+    Ok(if exists {
+        t!("core-restore-configured-driver", name = name)
+    } else {
+        t!("core-restore-created-driver", name = name)
+    })
 }
 
 fn driver_sc_type(kind: &DriverKind) -> &'static str {
@@ -2647,13 +2746,15 @@ fn refuse_damaged_package(
     if report.package_valid {
         return Ok(());
     }
-    let detail = report
-        .errors
-        .first()
-        .map_or_else(String::new, |error| format!(": {}", error.message));
-    Err(WinAppMigratorError::InvalidInput(format!(
-        "the package failed its hash check and nothing was installed{detail}"
-    )))
+    Err(WinAppMigratorError::InvalidInput(
+        match report.errors.first() {
+            Some(error) => t!(
+                "core-restore-hash-check-failed-because",
+                detail = error.text()
+            ),
+            None => t!("core-restore-hash-check-failed"),
+        },
+    ))
 }
 
 /// Write a registry value through the journal, keeping what it replaces.
@@ -2681,15 +2782,21 @@ fn set_journaled_value(
     let (key, _) = registry_root(hive)
         .and_then(|root| root.create_subkey(key_path))
         .map_err(|error| {
-            failed(
+            Warning::localized(
                 "registry_key_create_failed",
-                format!("Could not create registry key: {error}"),
+                "core-warning-restore-key-not-created",
+                WarningSeverity::Error,
+                vec![("error", error.to_string().into())],
+                Some(source()),
             )
         })?;
     let prior = read_prior_value(&key, name).map_err(|error| {
-        failed(
+        Warning::localized(
             "registry_value_read_failed",
-            format!("Could not read the value this would replace: {error}"),
+            "core-warning-restore-value-not-read",
+            WarningSeverity::Error,
+            vec![("error", error.to_string().into())],
+            Some(source()),
         )
     })?;
     journal
@@ -2703,9 +2810,12 @@ fn set_journaled_value(
         })
         .map_err(|error| failed("journal_write_failed", error.to_string()))?;
     key.set_raw_value(name, value).map_err(|error| {
-        failed(
+        Warning::localized(
             "registry_value_write_failed",
-            format!("Could not write registry value: {error}"),
+            "core-warning-restore-value-not-written",
+            WarningSeverity::Error,
+            vec![("error", error.to_string().into())],
+            Some(source()),
         )
     })
 }
@@ -2741,35 +2851,28 @@ fn apply_registry_entry(
     let (key, _) = registry_root(&entry.hive)
         .and_then(|root| root.create_subkey(&entry.key_path))
         .map_err(|error| {
-            Warning::new(
+            Warning::localized(
                 "registry_key_create_failed",
+                "core-warning-restore-key-not-created",
                 WarningSeverity::Error,
-                format!("Could not create registry key: {error}"),
+                vec![("error", error.to_string().into())],
                 Some(key_source()),
             )
         })?;
 
     if entry.value_name.is_none() && entry.value_kind == Some(RegistryValueKind::None) {
-        return Ok(format!(
-            "ensured registry key {}\\{}",
-            registry_hive_name(&entry.hive),
-            entry.key_path
-        ));
+        return Ok(t!("core-restore-ensured-registry-key", key = key_source()));
     }
 
     let value_name = restored_value_name(entry, map);
     let value_name = value_name.as_ref();
     if !force && key.get_raw_value(value_name).is_ok() {
-        return Err(Warning::new(
+        return Err(Warning::localized(
             "registry_value_exists",
+            "core-warning-restore-value-exists",
             WarningSeverity::Warning,
-            "Registry value exists; use --force to overwrite.",
-            Some(format!(
-                "{}\\{}\\{}",
-                registry_hive_name(&entry.hive),
-                entry.key_path,
-                entry.value_name.as_deref().unwrap_or("(Default)")
-            )),
+            Vec::new(),
+            registry_value_source(entry),
         ));
     }
 
@@ -2782,12 +2885,14 @@ fn apply_registry_entry(
         &value,
         item,
     )?;
-    Ok(format!(
-        "restored registry {}\\{} {}",
-        registry_hive_name(&entry.hive),
-        entry.key_path,
-        entry.value_name.as_deref().unwrap_or("(Default)")
-    ))
+    Ok(match entry.value_name.as_deref() {
+        Some(value) => t!(
+            "core-restore-restored-registry-value",
+            key = key_source(),
+            value = value
+        ),
+        None => t!("core-restore-restored-registry-default", key = key_source()),
+    })
 }
 
 /// What is on this PC goes by what the package would write, and by whether what names the install
@@ -2882,7 +2987,7 @@ fn com_classes_to_leave_alone(
                         })
                         .or_else(|| {
                             (!names_an_earlier_install(&live, on_this_pc, DEEPEST_LOOK_IN_A_UNIT))
-                                .then(|| CLASS_IS_SOMEONES.to_owned())
+                                .then(|| t!("core-restore-com-class-someone-elses"))
                         })
                 })
             });
@@ -3307,36 +3412,36 @@ fn apply_environment_variable(
     target_root: &Path,
     map: &RestoreMap,
 ) -> std::result::Result<String, Warning> {
-    let failed = |code: &'static str, message: String| {
-        Warning::new(
-            code,
-            WarningSeverity::Error,
-            message,
-            Some(format!("{:?}\\{}", variable.scope, variable.name)),
-        )
-    };
+    let source = || Some(format!("{:?}\\{}", variable.scope, variable.name));
     let (key, _) = environment_registry_target(&variable.scope)
         .and_then(|(root, key_path)| root.create_subkey(key_path))
         .map_err(|error| {
-            failed(
+            Warning::localized(
                 "environment_key_create_failed",
-                format!("Could not create environment registry key: {error}"),
+                "core-warning-restore-environment-key-not-created",
+                WarningSeverity::Error,
+                vec![("error", error.to_string().into())],
+                source(),
             )
         })?;
     let existing = key.get_raw_value(&variable.name).ok();
     let is_path = is_path_variable(&variable.name);
     if existing.is_some() && !is_path && !force {
-        return Err(Warning::new(
+        return Err(Warning::localized(
             "environment_value_exists",
+            "core-warning-restore-variable-exists",
             WarningSeverity::Warning,
-            "Environment variable exists; use --force to overwrite.",
-            Some(format!("{:?}\\{}", variable.scope, variable.name)),
+            Vec::new(),
+            source(),
         ));
     }
     let prior = read_prior_value(&key, &variable.name).map_err(|error| {
-        failed(
+        Warning::localized(
             "environment_value_read_failed",
-            format!("Could not read the value this would replace: {error}"),
+            "core-warning-restore-value-not-read",
+            WarningSeverity::Error,
+            vec![("error", error.to_string().into())],
+            source(),
         )
     })?;
 
@@ -3347,9 +3452,10 @@ fn apply_environment_variable(
             .unwrap_or_default();
         let entries = app_path_entries(&rewritten, target_root);
         if entries.is_empty() {
-            return Ok(format!(
-                "left {:?} environment variable {} as it is: none of it belongs to this app",
-                variable.scope, variable.name
+            return Ok(t!(
+                "core-restore-left-variable",
+                scope = scope_key(&variable.scope),
+                name = &variable.name
             ));
         }
         let vtype = existing.map_or_else(
@@ -3390,19 +3496,36 @@ fn apply_environment_variable(
             value,
         )
     };
-    journal
-        .note(change)
-        .map_err(|error| failed("journal_write_failed", error.to_string()))?;
-    key.set_raw_value(&variable.name, &value).map_err(|error| {
-        failed(
-            "environment_value_write_failed",
-            format!("Could not write environment variable: {error}"),
+    journal.note(change).map_err(|error| {
+        Warning::new(
+            "journal_write_failed",
+            WarningSeverity::Error,
+            error.to_string(),
+            source(),
         )
     })?;
-    Ok(format!(
-        "restored {:?} environment variable {}",
-        variable.scope, variable.name
+    key.set_raw_value(&variable.name, &value).map_err(|error| {
+        Warning::localized(
+            "environment_value_write_failed",
+            "core-warning-restore-variable-not-written",
+            WarningSeverity::Error,
+            vec![("error", error.to_string().into())],
+            source(),
+        )
+    })?;
+    Ok(t!(
+        "core-restore-restored-variable",
+        scope = scope_key(&variable.scope),
+        name = &variable.name
     ))
+}
+
+/// Whose an environment variable is, which its messages choose their words by.
+fn scope_key(scope: &EnvironmentScope) -> &'static str {
+    match scope {
+        EnvironmentScope::User => "user",
+        EnvironmentScope::Machine => "machine",
+    }
 }
 
 fn registry_value_from_entry(
@@ -3410,10 +3533,12 @@ fn registry_value_from_entry(
     map: &RestoreMap,
 ) -> std::result::Result<RegValue<'static>, Warning> {
     let kind = entry.value_kind.as_ref().ok_or_else(|| {
-        registry_warning(
+        Warning::localized(
             "registry_value_kind_missing",
-            entry,
-            "Registry value kind is missing.",
+            "core-warning-restore-value-kind-missing",
+            WarningSeverity::Error,
+            Vec::new(),
+            registry_value_source(entry),
         )
     })?;
     match kind {
@@ -3475,19 +3600,22 @@ fn apply_service(
 ) -> std::result::Result<Vec<String>, Warning> {
     let service = reviewed.entry;
     let name = service.service_name.as_str();
-    let current = service_image_path(name).map_err(|error| {
-        Warning::new(
+    let not_read = |error: io::Error| {
+        Warning::localized(
             "service_query_failed",
+            "core-warning-restore-service-not-read",
             WarningSeverity::Error,
-            format!("Could not read the service's current settings: {error}"),
+            vec![("error", error.to_string().into())],
             Some(name.to_owned()),
         )
-    })?;
+    };
+    let current = service_image_path(name).map_err(not_read)?;
     if current.is_some() && !force {
-        return Err(Warning::new(
+        return Err(Warning::localized(
             "service_exists",
+            "core-warning-restore-service-exists",
             WarningSeverity::Warning,
-            "Service exists; use --force to reconfigure it.",
+            Vec::new(),
             Some(name.to_owned()),
         ));
     }
@@ -3505,12 +3633,7 @@ fn apply_service(
     let problem = |code: &'static str, message: String| {
         Warning::new(code, WarningSeverity::Error, message, Some(name.to_owned()))
     };
-    let prior = read_service_config(name).map_err(|error| {
-        problem(
-            "service_query_failed",
-            format!("Could not read the service's current settings: {error}"),
-        )
-    })?;
+    let prior = read_service_config(name).map_err(not_read)?;
     journal
         .note(Change::Service {
             name: name.to_owned(),
@@ -3521,10 +3644,10 @@ fn apply_service(
         })
         .map_err(|error| problem("journal_write_failed", error.to_string()))?;
 
-    let (verb, error_code, done) = if current.is_some() {
-        ("config", "service_config_failed", "configured")
+    let (verb, error_code) = if current.is_some() {
+        ("config", "service_config_failed")
     } else {
-        ("create", "service_create_failed", "created")
+        ("create", "service_create_failed")
     };
     let mut command = hidden_command(SC_EXE);
     command.args(sc_service_arguments(
@@ -3535,10 +3658,20 @@ fn apply_service(
         &reviewed.account,
     ));
     run_checked(&mut command, error_code, name)?;
-    let messages = vec![format!(
-        "{done} service {name} (runs as {})",
-        reviewed.account.label()
-    )];
+    let account = reviewed.account.label();
+    let messages = vec![if current.is_some() {
+        t!(
+            "core-restore-configured-service",
+            name = name,
+            account = &account
+        )
+    } else {
+        t!(
+            "core-restore-created-service",
+            name = name,
+            account = &account
+        )
+    }];
 
     if let Some(description) = service.description.as_deref() {
         let mut command = hidden_command(SC_EXE);
@@ -3626,19 +3759,21 @@ fn apply_scheduled_task(
     let name = format!("{}{}", task.entry.task_path, task.entry.task_name);
     let existing =
         live_task_xml(&task.entry.task_path, &task.entry.task_name).map_err(|error| {
-            Warning::new(
+            Warning::localized(
                 "scheduled_task_query_failed",
+                "core-warning-restore-task-not-queried",
                 WarningSeverity::Error,
-                format!("Failed to query scheduled task: {error}"),
+                vec![("error", error.to_string().into())],
                 Some(name.clone()),
             )
         })?;
     if let Some(existing) = existing.as_deref() {
         if !options.force {
-            return Err(Warning::new(
+            return Err(Warning::localized(
                 "scheduled_task_exists",
+                "core-warning-restore-task-exists",
                 WarningSeverity::Warning,
-                "Scheduled task exists; use --force to overwrite.",
+                Vec::new(),
                 Some(name),
             ));
         }
@@ -3663,9 +3798,12 @@ fn apply_scheduled_task(
     if journal.first_look_at_task_folder(&task.entry.task_path) {
         let missing =
             missing_task_folders(&task_folder_levels(&task.entry.task_path)).map_err(|error| {
-                problem(
+                Warning::localized(
                     "scheduled_task_query_failed",
-                    format!("Could not look at the task's folder: {error}"),
+                    "core-warning-restore-task-folder-not-looked-at",
+                    WarningSeverity::Error,
+                    vec![("error", error.to_string().into())],
+                    Some(name.clone()),
                 )
             })?;
         for path in missing {
@@ -3709,7 +3847,7 @@ fn apply_scheduled_task(
             })
             .map_err(|error| problem("journal_write_failed", error.to_string()))?;
     }
-    Ok(format!("restored scheduled task {name}"))
+    Ok(t!("core-restore-restored-task", name = name))
 }
 
 /// Write a task's definition into `folder` under a new name, failing rather than opening
@@ -3805,13 +3943,11 @@ fn apply_shortcut(
         if let Some(found) = backup.and_then(|number| find_backup(journal.folder(), number))
             && let Err(error) = put_back_backup(&found, destination)
         {
-            return Err(Warning::new(
+            return Err(Warning::localized(
                 "shortcut_put_back_failed",
+                "core-warning-restore-shortcut-not-put-back",
                 WarningSeverity::Error,
-                format!(
-                    "The shortcut could not be made, and the one it replaced could not be put \
-                     back: {error}"
-                ),
+                vec![("error", error.to_string().into())],
                 Some(destination.display().to_string()),
             ));
         }
@@ -3829,7 +3965,10 @@ fn apply_shortcut(
             sha256,
         })
         .map_err(journal_failed)?;
-    Ok(format!("restored shortcut {}", destination.display()))
+    Ok(t!(
+        "core-restore-restored-shortcut",
+        path = destination.display().to_string()
+    ))
 }
 
 fn shortcut_script(shortcut: &ReviewedShortcut) -> String {
@@ -3878,15 +4017,15 @@ fn copy_restore_file(
         .state_root()
         .is_some_and(|state_root| path_is_within(destination, state_root))
     {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "refusing to write where installs keep their records: {}",
-            destination.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-restore-refuse-records-folder",
+            path = destination.display().to_string()
         )));
     }
     let root = write_root_for(destination, target_root).ok_or_else(|| {
-        WinAppMigratorError::InvalidInput(format!(
-            "refusing to write outside the install location and the known data folders: {}",
-            destination.display()
+        WinAppMigratorError::InvalidInput(t!(
+            "core-restore-refuse-outside",
+            path = destination.display().to_string()
         ))
     })?;
     // A known data folder need not be there yet, unlike the install location.
@@ -3896,9 +4035,9 @@ fn copy_restore_file(
     }
     ensure_within_root(&root, destination)?;
     let parent = destination.parent().ok_or_else(|| {
-        WinAppMigratorError::InvalidInput(format!(
-            "destination has no parent folder: {}",
-            destination.display()
+        WinAppMigratorError::InvalidInput(t!(
+            "core-restore-no-parent-folder",
+            path = destination.display().to_string()
         ))
     })?;
     journal.note_new_folders(&root, parent, item)?;
@@ -3906,9 +4045,9 @@ fn copy_restore_file(
 
     let replaces = match fs::symlink_metadata(destination) {
         Ok(metadata) if metadata.is_dir() => {
-            return Err(WinAppMigratorError::InvalidInput(format!(
-                "a folder is where this file has to go: {}",
-                destination.display()
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-restore-folder-in-the-way",
+                path = destination.display().to_string()
             )));
         }
         Ok(_) => true,
@@ -3946,15 +4085,15 @@ fn create_restored_folder(
         .state_root()
         .is_some_and(|state_root| path_is_within(destination, state_root))
     {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "refusing to write where installs keep their records: {}",
-            destination.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-restore-refuse-records-folder",
+            path = destination.display().to_string()
         )));
     }
     let root = write_root_for(destination, target_root).ok_or_else(|| {
-        WinAppMigratorError::InvalidInput(format!(
-            "refusing to write outside the install location and the known data folders: {}",
-            destination.display()
+        WinAppMigratorError::InvalidInput(t!(
+            "core-restore-refuse-outside",
+            path = destination.display().to_string()
         ))
     })?;
     if fs::symlink_metadata(&root).is_err() {
@@ -4039,9 +4178,9 @@ fn write_partial_copy_of(
     if let (Some(expected), Some(hasher)) = (sha256, hasher) {
         let copied = crate::hashing::hex_lower(&hasher.finalize());
         if !copied.eq_ignore_ascii_case(expected) {
-            return Err(WinAppMigratorError::InvalidInput(format!(
-                "{} is not what the package holds any more, so it was not installed",
-                source.display()
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-restore-file-changed",
+                path = source.display().to_string()
             )));
         }
     }
@@ -4076,9 +4215,9 @@ fn open_without_following(path: &Path) -> io::Result<File> {
         .open(path)?;
     let metadata = file.metadata()?;
     if metadata.file_type().is_symlink() {
-        return Err(io::Error::other(format!(
-            "{} is a link, and it is not to be followed",
-            path.display()
+        return Err(io::Error::other(t!(
+            "core-restore-source-is-link",
+            path = path.display().to_string()
         )));
     }
     if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
@@ -4087,9 +4226,9 @@ fn open_without_following(path: &Path) -> io::Result<File> {
     drop(file);
     let file = File::open(path)?;
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
-        return Err(io::Error::other(format!(
-            "{} became a link while it was being opened",
-            path.display()
+        return Err(io::Error::other(t!(
+            "core-restore-source-became-link",
+            path = path.display().to_string()
         )));
     }
     Ok(file)
@@ -4135,6 +4274,8 @@ pub(crate) fn encode_utf16_nul(value: &str) -> Vec<u8> {
         .collect()
 }
 
+/// A warning about a registry value, in words that are already in the language in use, such as why the rules
+/// left it out.
 fn registry_warning(
     code: &'static str,
     entry: &RegistryEntry,
@@ -4144,13 +4285,19 @@ fn registry_warning(
         code,
         WarningSeverity::Error,
         message,
-        Some(format!(
-            "{}\\{}\\{}",
-            registry_hive_name(&entry.hive),
-            entry.key_path,
-            entry.value_name.as_deref().unwrap_or("(Default)")
-        )),
+        registry_value_source(entry),
     )
+}
+
+/// What a warning about a registry value is about: its key and its name. It names a value the way the rest
+/// of the program does, so is not in any language.
+fn registry_value_source(entry: &RegistryEntry) -> Option<String> {
+    Some(format!(
+        "{}\\{}\\{}",
+        registry_hive_name(&entry.hive),
+        entry.key_path,
+        entry.value_name.as_deref().unwrap_or("(Default)")
+    ))
 }
 
 fn warning_io(code: &'static str, path: &Path, error: std::io::Error) -> Warning {
@@ -4179,11 +4326,15 @@ pub(crate) fn run_checked(
     code: &'static str,
     source: &str,
 ) -> std::result::Result<(), Warning> {
+    // The caller names the code, so these are in the words of the language in use and not kept by name.
     let output = command.output().map_err(|error| {
         Warning::new(
             code,
             WarningSeverity::Error,
-            format!("Failed to start command: {error}"),
+            t!(
+                "core-warning-restore-command-not-started",
+                error = error.to_string()
+            ),
             Some(source.to_owned()),
         )
     })?;
@@ -4195,7 +4346,10 @@ pub(crate) fn run_checked(
     Err(Warning::new(
         code,
         WarningSeverity::Error,
-        format!("Command failed: {}{}", stdout, stderr),
+        t!(
+            "core-warning-restore-command-failed",
+            output = format!("{stdout}{stderr}")
+        ),
         Some(source.to_owned()),
     ))
 }
@@ -4212,10 +4366,11 @@ fn powershell_error_summary(text: &str) -> String {
 
 pub(crate) fn run_powershell_script(script: &str) -> std::result::Result<(), Warning> {
     let output = powershell_command(script).output().map_err(|error| {
-        Warning::new(
+        Warning::localized(
             "powershell_start_failed",
+            "core-warning-restore-powershell-not-started",
             WarningSeverity::Error,
-            format!("Failed to start PowerShell: {error}"),
+            vec![("error", error.to_string().into())],
             None,
         )
     })?;
@@ -5310,7 +5465,7 @@ mod tests {
 
         assert_eq!(
             result.errors.first().map(|error| error.code.as_str()),
-            Some(CANCELLED_CODE)
+            Some("install_cancelled")
         );
         assert_eq!(result.install_id, None);
         assert!(result.rollback.is_some());
@@ -5333,7 +5488,7 @@ mod tests {
         assert!(result.rollback.is_none());
         assert_eq!(
             result.errors.first().map(|error| error.code.as_str()),
-            Some(CANCELLED_CODE)
+            Some("install_cancelled")
         );
         assert!(!options.state_root.exists());
         assert!(!options.target_root.exists());
@@ -5574,7 +5729,7 @@ mod tests {
         assert!(review.refused.is_empty(), "{:?}", review.refused);
         assert_eq!(
             what_would_run(&review, file),
-            Some("the service Acme".to_owned())
+            Some(Runner::Service("Acme".to_owned()))
         );
 
         // A task's arguments, read as Windows reads them, and what only describes it is not that.
@@ -5602,7 +5757,7 @@ mod tests {
         assert!(review.refused.is_empty(), "{:?}", review.refused);
         assert_eq!(
             what_would_run(&review, file),
-            Some("the scheduled task Acme".to_owned())
+            Some(Runner::Task("Acme".to_owned()))
         );
 
         let described = task_with(&format!("Tracks {data}"), "--quiet")?;
@@ -5759,8 +5914,8 @@ mod tests {
             let review = ReviewedPackage::new(&manifest, Path::new(r"D:\Apps\Acme"), true, false)?;
             assert_eq!(review.tasks.len(), 1, "{command}: {:?}", review.refused);
             assert_eq!(
-                what_would_run(&review, file).as_deref(),
-                Some("the scheduled task Helper"),
+                what_would_run(&review, file),
+                Some(Runner::Task("Helper".to_owned())),
                 "{command}"
             );
         }
@@ -5848,7 +6003,7 @@ mod tests {
         assert_eq!(result.warnings.len(), 2);
         assert!(result.warnings[0].message.contains("Bad"));
         assert!(result.warnings[0].message.contains("it would not"));
-        assert_eq!(result.warnings[0].code, SERVICE_NOT_STARTED_CODE);
+        assert_eq!(result.warnings[0].code, "service_did_not_start");
         assert!(result.warnings[1].message.contains("Slow"));
     }
 

@@ -1,44 +1,70 @@
+use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
 use thiserror::Error;
+use winappmigrator_i18n::t;
 
 pub type Result<T> = std::result::Result<T, WinAppMigratorError>;
 
+/// What went wrong. Its words are in the catalog, so it reads in the language in use, which is why [`fmt::Display`] is
+/// written out below and not made from attributes.
 #[derive(Debug, Error)]
 pub enum WinAppMigratorError {
     /// What an install would do is not what the person agreed to, so nothing was done.
-    #[error(
-        "what this install would do has changed since it was agreed to, so nothing was installed"
-    )]
     ListChanged(Box<crate::restore_review::SystemChanges>),
 
-    #[error("I/O failed for {path}: {source}")]
-    Io { path: PathBuf, source: io::Error },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
 
-    #[error("registry read failed: {0}")]
     Registry(String),
 
-    #[error("PE parse failed for {path}: {detail}")]
-    Pe { path: PathBuf, detail: String },
+    Pe {
+        path: PathBuf,
+        detail: String,
+    },
 
-    #[error("invalid input: {0}")]
     InvalidInput(String),
 
-    #[error("report serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
 
-    #[error("archive operation failed: {0}")]
     Archive(String),
 
-    #[error("network operation failed: {0}")]
     Network(String),
 
-    #[error("time formatting failed: {0}")]
     TimeFormat(#[from] time::error::Format),
 
-    #[error("it was cancelled")]
     Cancelled,
+}
+
+impl fmt::Display for WinAppMigratorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            Self::ListChanged(_) => t!("core-error-list-changed"),
+            Self::Io { path, source } => t!(
+                "core-error-io",
+                path = path.display().to_string(),
+                error = source.to_string()
+            ),
+            Self::Registry(detail) => t!("core-error-registry", detail = detail),
+            Self::Pe { path, detail } => t!(
+                "core-error-pe",
+                path = path.display().to_string(),
+                detail = detail
+            ),
+            Self::InvalidInput(detail) => t!("core-error-invalid-input", detail = detail),
+            Self::Serialization(error) => {
+                t!("core-error-serialization", detail = error.to_string())
+            }
+            Self::Archive(detail) => t!("core-error-archive", detail = detail),
+            Self::Network(detail) => t!("core-error-network", detail = detail),
+            Self::TimeFormat(error) => t!("core-error-time-format", detail = error.to_string()),
+            Self::Cancelled => t!("core-error-cancelled"),
+        };
+        formatter.write_str(&text)
+    }
 }
 
 impl WinAppMigratorError {
@@ -64,7 +90,7 @@ pub fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
         .downcast_ref::<&str>()
         .map(|text| (*text).to_owned())
         .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "no reason was given".to_owned())
+        .unwrap_or_else(|| t!("core-error-panic-no-reason"))
 }
 
 #[cfg(test)]
@@ -76,5 +102,25 @@ mod tests {
         assert_eq!(panic_text(&"plain"), "plain");
         assert_eq!(panic_text(&"built".to_owned()), "built");
         assert_eq!(panic_text(&7_u32), "no reason was given");
+    }
+
+    #[test]
+    fn an_error_reads_in_english_as_it_always_has() {
+        assert_eq!(
+            WinAppMigratorError::Cancelled.to_string(),
+            "it was cancelled"
+        );
+        assert_eq!(
+            WinAppMigratorError::io(r"C:\App\a.dll", io::Error::other("busy")).to_string(),
+            r"I/O failed for C:\App\a.dll: busy"
+        );
+        assert_eq!(
+            WinAppMigratorError::InvalidInput("no such app".to_owned()).to_string(),
+            "invalid input: no such app"
+        );
+        assert_eq!(
+            WinAppMigratorError::pe(r"C:\App\a.exe", "too short").to_string(),
+            r"PE parse failed for C:\App\a.exe: too short"
+        );
     }
 }
