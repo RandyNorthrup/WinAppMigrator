@@ -8,7 +8,9 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
+use winappmigrator_i18n::t;
 use winreg::RegKey;
 use winreg::enums::{HKEY_USERS, KEY_READ};
 
@@ -50,26 +52,100 @@ use crate::space::{
 };
 use crate::system_context::SystemContext;
 
-/// What a task that ran as a person is said to run as here.
-const THE_PERSON_INSTALLING: &str = "you, whoever is signed in";
 const DESKTOP_FOLDER: &str = "Desktop";
 const START_MENU_SUBFOLDER: &str = r"Microsoft\Windows\Start Menu";
-const NO_USER_ACCOUNT_REFUSAL: &str =
-    "it belongs to one account's settings, and who is signed in could not be told";
 /// What a person installing is told about whose folders and settings these are, or where they
 /// went instead. Shown before they install.
 const USER_ACCOUNT_NOTE_CODE: &str = "user_account_note";
 const USER_FOLDER_ELSEWHERE_CODE: &str = "user_folder_elsewhere";
 const PARAMETERS_SUBKEY: &str = "parameters";
-const REFUSED_CODE: &str = "restore_refused";
 const DISPLAY_NAME_VALUE: &str = "DisplayName";
+/// [`state_root_refusal`] in English, for what has not yet moved to the catalog.
 pub(crate) const STATE_ROOT_REFUSAL: &str = "it is where installs keep their records";
+
+/// Why an install location cannot be where installs keep their records, in the language in use.
+pub(crate) fn state_root_refusal() -> String {
+    t!("core-review-location-state-root")
+}
+
 /// A stand-in target, for describing a package that suggests no location anything could go to. No
 /// install goes here, and what is said for it is said again for the location really chosen.
 const NO_TARGET_YET: &str = r"C:\WinAppMigrator install location";
 
 /// How to look up a service already on this PC by name.
 type ExistingService<'a> = &'a dyn Fn(&str) -> std::io::Result<Option<String>>;
+
+/// What a review left out, by what kind of thing it is.
+enum Refused {
+    File(PathBuf),
+    Folder(PathBuf),
+    Service(String),
+    Driver(String),
+    FirewallRule(String),
+    /// A registry value, by its full path.
+    Value(String),
+    LicenseData(PathBuf),
+    LicenseValue(String),
+    /// A scheduled task, by its folder and name together.
+    Task(String),
+    Shortcut(PathBuf),
+    Variable(String),
+}
+
+impl Refused {
+    /// Which of the sentences for a refusal it takes.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::File(_) => "file",
+            Self::Folder(_) => "folder",
+            Self::Service(_) => "service",
+            Self::Driver(_) => "driver",
+            Self::FirewallRule(_) => "firewall-rule",
+            Self::Value(_) => "value",
+            Self::LicenseData(_) => "license-data",
+            Self::LicenseValue(_) => "license-value",
+            Self::Task(_) => "scheduled-task",
+            Self::Shortcut(_) => "shortcut",
+            Self::Variable(_) => "environment-variable",
+        }
+    }
+
+    /// What it is called in that sentence.
+    fn name(&self) -> String {
+        match self {
+            Self::File(path)
+            | Self::Folder(path)
+            | Self::LicenseData(path)
+            | Self::Shortcut(path) => path.display().to_string(),
+            Self::Service(name)
+            | Self::Driver(name)
+            | Self::FirewallRule(name)
+            | Self::Value(name)
+            | Self::LicenseValue(name)
+            | Self::Task(name)
+            | Self::Variable(name) => name.clone(),
+        }
+    }
+
+    /// What a refusal is about, as what reads a review, a check of an install, and the list of what
+    /// is left out look it up by. It is a key, in English whatever the language in use, and the same
+    /// as each of those writes it.
+    fn source(&self) -> String {
+        match self {
+            Self::File(path) => format!("The file {}", path.display()),
+            Self::Folder(path) => format!("The folder {}", path.display()),
+            Self::Service(name) => format!("The service {name}"),
+            Self::Driver(name) => format!("The driver {name}"),
+            Self::FirewallRule(name) => format!("The firewall rule {name}"),
+            Self::Value(name) => name.clone(),
+            Self::LicenseData(path) => format!("The license data at {}", path.display()),
+            Self::LicenseValue(name) => format!("The license value {name}"),
+            Self::Task(name) => format!("The scheduled task {name}"),
+            Self::Shortcut(path) => format!("The shortcut {}", path.display()),
+            Self::Variable(name) => format!("The environment variable {name}"),
+        }
+    }
+}
 
 /// A service that is allowed, with what it will run.
 pub(crate) struct ReviewedService<'a> {
@@ -275,20 +351,27 @@ impl<'a> ReviewedPackage<'a> {
         Ok(review)
     }
 
-    fn refuse(&mut self, item: impl Into<String>, reason: impl std::fmt::Display) {
-        let item = item.into();
-        self.refused.push(Warning::new(
-            REFUSED_CODE,
+    /// Leave something out, saying why. The reason is the second half of a sentence, in the language
+    /// in use, as the rules give it.
+    fn refuse(&mut self, item: Refused, reason: impl std::fmt::Display) {
+        let source = item.source();
+        self.refused.push(Warning::localized(
+            "restore_refused",
+            "core-warning-review-left-out",
             WarningSeverity::Warning,
-            format!("{item} was left out: {reason}."),
-            Some(item),
+            vec![
+                ("kind", item.kind().into()),
+                ("item", item.name().into()),
+                ("reason", reason.to_string().into()),
+            ],
+            Some(source),
         ));
     }
 
     fn review_files(&mut self, manifest: &'a PackageManifest) {
         let refused: Vec<(PathBuf, String)> = self.map.refused_files().to_vec();
         for (path, reason) in refused {
-            self.refuse(format!("The file {}", path.display()), reason);
+            self.refuse(Refused::File(path), reason);
         }
         for file in manifest
             .file_inventory
@@ -296,10 +379,11 @@ impl<'a> ReviewedPackage<'a> {
             .filter(|entry| entry.should_copy)
         {
             if file.package_relative_path.is_none() {
-                self.warnings.push(Warning::new(
+                self.warnings.push(Warning::localized(
                     "restore_package_path_missing",
+                    "core-warning-review-package-path-missing",
                     WarningSeverity::Warning,
-                    "A copyable file has no package relative path.",
+                    Vec::new(),
                     Some(file.original_path.display().to_string()),
                 ));
             } else if self.map.destination_of(&file.original_path).is_some() {
@@ -311,13 +395,14 @@ impl<'a> ReviewedPackage<'a> {
     fn review_empty_folders(&mut self, manifest: &'a PackageManifest) {
         let refused: Vec<(PathBuf, String)> = self.map.refused_folders().to_vec();
         for (path, reason) in refused {
-            self.refuse(format!("The folder {}", path.display()), reason);
+            self.refuse(Refused::Folder(path), reason);
         }
         if manifest.empty_folders.len() > MAX_EMPTY_FOLDERS {
-            self.warnings.push(Warning::new(
+            self.warnings.push(Warning::localized(
                 "restore_too_many_empty_folders",
+                "core-warning-review-too-many-empty-folders",
                 WarningSeverity::Warning,
-                format!("This package lists more than {MAX_EMPTY_FOLDERS} empty folders, and only that many are made."),
+                vec![("count", MAX_EMPTY_FOLDERS.into())],
                 None,
             ));
         }
@@ -342,10 +427,7 @@ impl<'a> ReviewedPackage<'a> {
         target_root: &Path,
         place_of: &dyn Fn(UserDataAnchor) -> UserFolderPlace,
     ) {
-        for (anchor, label) in [
-            (UserDataAnchor::Documents, "Documents"),
-            (UserDataAnchor::SavedGames, "Saved Games"),
-        ] {
+        for anchor in [UserDataAnchor::Documents, UserDataAnchor::SavedGames] {
             let count = self
                 .files
                 .iter()
@@ -357,34 +439,57 @@ impl<'a> ReviewedPackage<'a> {
             if count == 0 {
                 continue;
             }
-            let why = match place_of(anchor) {
-                UserFolderPlace::Usable(_) => continue,
-                UserFolderPlace::Elsewhere(folder) => format!(
-                    "this PC's {label} folder is at {}, and only a folder inside your profile is \
-                     written to",
-                    folder.display()
-                ),
-                UserFolderPlace::Unknown => {
-                    format!("where this PC's {label} folder is could not be told")
+            let target = target_root.display().to_string();
+            let severity = WarningSeverity::Warning;
+            let warning = match (anchor, place_of(anchor)) {
+                (_, UserFolderPlace::Usable(_)) => continue,
+                (UserDataAnchor::SavedGames, UserFolderPlace::Elsewhere(folder)) => {
+                    Warning::localized(
+                        "user_folder_elsewhere",
+                        "core-warning-review-saved-games-elsewhere",
+                        severity,
+                        vec![
+                            ("count", count.into()),
+                            ("target", target.into()),
+                            ("folder", folder.display().to_string().into()),
+                        ],
+                        None,
+                    )
                 }
-            };
-            self.warnings.push(Warning::new(
-                USER_FOLDER_ELSEWHERE_CODE,
-                WarningSeverity::Warning,
-                format!(
-                    "{count} files from {label} go under {} instead, in a folder named _external, \
-                     because {why}. To use them, move them to your {label} folder yourself.",
-                    target_root.display()
+                (UserDataAnchor::SavedGames, UserFolderPlace::Unknown) => Warning::localized(
+                    "user_folder_elsewhere",
+                    "core-warning-review-saved-games-unknown",
+                    severity,
+                    vec![("count", count.into()), ("target", target.into())],
+                    None,
                 ),
-                None,
-            ));
+                (_, UserFolderPlace::Elsewhere(folder)) => Warning::localized(
+                    "user_folder_elsewhere",
+                    "core-warning-review-documents-elsewhere",
+                    severity,
+                    vec![
+                        ("count", count.into()),
+                        ("target", target.into()),
+                        ("folder", folder.display().to_string().into()),
+                    ],
+                    None,
+                ),
+                (_, UserFolderPlace::Unknown) => Warning::localized(
+                    "user_folder_elsewhere",
+                    "core-warning-review-documents-unknown",
+                    severity,
+                    vec![("count", count.into()), ("target", target.into())],
+                    None,
+                ),
+            };
+            self.warnings.push(warning);
         }
     }
 
     /// Whether this is to be left out for going to an account that could not be told, saying so.
-    fn left_out_for_no_account(&mut self, is_per_user: bool, item: impl Into<String>) -> bool {
+    fn left_out_for_no_account(&mut self, is_per_user: bool, item: Refused) -> bool {
         if is_per_user && !self.user_account_known {
-            self.refuse(item, NO_USER_ACCOUNT_REFUSAL);
+            self.refuse(item, t!("core-review-no-account"));
             return true;
         }
         false
@@ -402,7 +507,10 @@ impl<'a> ReviewedPackage<'a> {
             Ok(Some(current)) => {
                 existing_service_refusal(name, &current, self.map.target_root(), system_root())
             }
-            Err(error) => Some(format!("its current settings could not be read: {error}")),
+            Err(error) => Some(t!(
+                "core-review-service-unreadable",
+                error = error.to_string()
+            )),
         }
     }
 
@@ -413,9 +521,9 @@ impl<'a> ReviewedPackage<'a> {
         existing_service: ExistingService<'_>,
     ) {
         for service in &manifest.services_detected {
-            let item = format!("The service {}", service.service_name);
+            let item = Refused::Service(service.service_name.clone());
             if !is_valid_service_name(&service.service_name) {
-                self.refuse(item, "Windows would not accept its name");
+                self.refuse(item, t!("core-review-name-not-accepted"));
                 continue;
             }
             if let Some(problem) =
@@ -429,7 +537,7 @@ impl<'a> ReviewedPackage<'a> {
                 .iter()
                 .all(|name| is_valid_service_name(name))
             {
-                self.refuse(item, "it depends on a service with an invalid name");
+                self.refuse(item, t!("core-review-service-dependency"));
                 continue;
             }
             // With no fallback to the manifest's own path: a service runs elevated, and the
@@ -437,9 +545,9 @@ impl<'a> ReviewedPackage<'a> {
             let Some(binary) = self.map.runnable_destination_of(&service.binary_path) else {
                 self.refuse(
                     item,
-                    format!(
-                        "it runs {}, which this package does not install",
-                        service.binary_path.display()
+                    t!(
+                        "core-review-service-runs-other",
+                        path = service.binary_path.display().to_string()
                     ),
                 );
                 continue;
@@ -476,11 +584,7 @@ impl<'a> ReviewedPackage<'a> {
         for name in bad {
             self.services
                 .retain(|service| service.entry.service_name != name);
-            self.refuse(
-                format!("The service {name}"),
-                "its settings name something this package does not install, or a key that is not \
-                 its own",
-            );
+            self.refuse(Refused::Service(name), t!("core-review-service-settings"));
         }
     }
 
@@ -494,13 +598,13 @@ impl<'a> ReviewedPackage<'a> {
                 self.manual_drivers.push(driver);
                 continue;
             };
-            let item = format!("The driver {}", driver.service_name);
+            let item = Refused::Driver(driver.service_name.clone());
             if !is_valid_service_name(&driver.service_name) {
-                self.refuse(item, "Windows would not accept its name");
+                self.refuse(item, t!("core-review-name-not-accepted"));
                 continue;
             }
             if driver.hash_sha256.is_none() {
-                self.refuse(item, "it has no hash to check it by");
+                self.refuse(item, t!("core-review-driver-no-hash"));
                 continue;
             }
             if let Some(problem) =
@@ -600,7 +704,7 @@ impl<'a> ReviewedPackage<'a> {
         restored_services: &HashSet<String>,
     ) {
         for rule in &manifest.firewall_rules_detected {
-            let item = format!("The firewall rule {}", rule.name);
+            let item = Refused::FirewallRule(rule.name.clone());
             if let Some(reason) = firewall_refusal(rule, &self.map, restored_services) {
                 self.refuse(item, reason);
                 continue;
@@ -626,7 +730,7 @@ impl<'a> ReviewedPackage<'a> {
         for entry in &manifest.registry_keys_exported {
             if self.left_out_for_no_account(
                 entry.hive == RegistryHive::CurrentUser,
-                registry_item(entry),
+                Refused::Value(registry_item(entry)),
             ) {
                 continue;
             }
@@ -638,7 +742,7 @@ impl<'a> ReviewedPackage<'a> {
                         self.registry.push(entry);
                     }
                 }
-                Some(reason) => self.refuse(registry_item(entry), reason),
+                Some(reason) => self.refuse(Refused::Value(registry_item(entry)), reason),
             }
         }
     }
@@ -697,47 +801,44 @@ impl<'a> ReviewedPackage<'a> {
                     package_relative_path: relative,
                     destination,
                 }),
-                Err(reason) => self.refuse(
-                    format!("The license data at {}", original.display()),
-                    reason,
-                ),
+                Err(reason) => self.refuse(Refused::LicenseData(original.to_path_buf()), reason),
             }
         }
         for entry in &manifest.license_registry_entries {
             // License values for the whole machine are only ever reported.
             if entry.hive == RegistryHive::LocalMachine {
                 self.refuse(
-                    format!("The license value {}", registry_item(entry)),
-                    "a license stored for the whole machine is only reported",
+                    Refused::LicenseValue(registry_item(entry)),
+                    t!("core-review-license-for-the-machine"),
                 );
                 continue;
             }
             if is_autostart_entry(entry) {
                 self.refuse(
-                    format!("The license value {}", registry_item(entry)),
-                    "a license has no reason to start anything",
+                    Refused::LicenseValue(registry_item(entry)),
+                    t!("core-review-license-starts-something"),
                 );
                 continue;
             }
             if self.left_out_for_no_account(
                 entry.hive == RegistryHive::CurrentUser,
-                registry_item(entry),
+                Refused::Value(registry_item(entry)),
             ) {
                 continue;
             }
             match self.registry_problem(entry, restored_services, refused_registrations, expand) {
                 None if is_source_uninstall_value(entry) => {}
                 None => self.license_registry.push(entry),
-                Some(reason) => self.refuse(registry_item(entry), reason),
+                Some(reason) => self.refuse(Refused::Value(registry_item(entry)), reason),
             }
         }
     }
 
     fn review_tasks(&mut self, manifest: &'a PackageManifest, expand: &dyn Fn(&str) -> String) {
         for task in &manifest.scheduled_tasks_detected {
-            let item = format!("The scheduled task {}{}", task.task_path, task.task_name);
+            let item = Refused::Task(format!("{}{}", task.task_path, task.task_name));
             let Some(xml) = task.definition_xml.as_deref() else {
-                self.refuse(item, "its definition was not captured");
+                self.refuse(item, t!("core-review-task-not-captured"));
                 continue;
             };
             let rewritten = self.map.rewrite_xml(xml).and_then(|rewritten| {
@@ -746,16 +847,13 @@ impl<'a> ReviewedPackage<'a> {
             let (xml, mut definition) = match rewritten {
                 Ok(parsed) => parsed,
                 Err(error) => {
-                    self.refuse(item, format!("its definition could not be read: {error}"));
+                    self.refuse(item, t!("core-review-task-unreadable", error = error));
                     continue;
                 }
             };
             let xml = if xml.contains(WHOEVER_INSTALLS_IT) {
                 let Some(account) = signed_in_user().account() else {
-                    self.refuse(
-                        item,
-                        "it runs as whoever installs it, and who is signed in here could not be told",
-                    );
+                    self.refuse(item, t!("core-review-task-no-account"));
                     continue;
                 };
                 let runs_as_whoever_installs_it =
@@ -766,12 +864,12 @@ impl<'a> ReviewedPackage<'a> {
                 definition = match read_task_definition(&xml) {
                     Ok(definition) => definition,
                     Err(error) => {
-                        self.refuse(item, format!("its definition could not be read: {error}"));
+                        self.refuse(item, t!("core-review-task-unreadable", error = error));
                         continue;
                     }
                 };
                 if runs_as_whoever_installs_it {
-                    definition.account = Some(THE_PERSON_INSTALLING.to_owned());
+                    definition.account = Some(t!("core-review-task-runs-as-you"));
                 }
                 xml
             } else {
@@ -801,7 +899,7 @@ impl<'a> ReviewedPackage<'a> {
 
     fn review_shortcuts(&mut self, manifest: &'a PackageManifest, folders: &KnownFolders) {
         for shortcut in &manifest.shortcuts_detected {
-            let item = format!("The shortcut {}", shortcut.original_lnk_path.display());
+            let item = Refused::Shortcut(shortcut.original_lnk_path.clone());
             let placement = match shortcut_placement(&shortcut.original_lnk_path, folders) {
                 Ok(placement) => placement,
                 Err(reason) => {
@@ -812,9 +910,9 @@ impl<'a> ReviewedPackage<'a> {
             let Some(target) = self.map.runnable_destination_of(&shortcut.target_path) else {
                 self.refuse(
                     item,
-                    format!(
-                        "it opens {}, which this package does not install",
-                        shortcut.target_path.display()
+                    t!(
+                        "core-review-shortcut-opens-other",
+                        path = shortcut.target_path.display().to_string()
                     ),
                 );
                 continue;
@@ -851,18 +949,13 @@ impl<'a> ReviewedPackage<'a> {
             }
             if self.left_out_for_no_account(
                 variable.scope == EnvironmentScope::User,
-                format!("The environment variable {}", variable.name),
+                Refused::Variable(variable.name.clone()),
             ) {
                 continue;
             }
             match environment_refusal(&variable.name) {
                 None => self.environment.push(variable),
-                Some(reason) => {
-                    self.refuse(
-                        format!("The environment variable {}", variable.name),
-                        reason,
-                    );
-                }
+                Some(reason) => self.refuse(Refused::Variable(variable.name.clone()), reason),
             }
         }
     }
@@ -965,20 +1058,17 @@ fn current_known_folders() -> KnownFolders {
 fn user_account_note(signed_in: &SignedInUser, running_as: Option<&str>) -> Option<String> {
     match signed_in {
         SignedInUser::Desktop(account) if running_as == Some(account.sid.as_str()) => None,
-        SignedInUser::Desktop(account) => Some(format!(
-            "User data and per-user settings go to {}, who is signed in here, and not to the \
-             administrator this is running as.",
-            account.name()
+        SignedInUser::Desktop(account) => Some(t!(
+            "core-review-account-signed-in",
+            account = account.name()
         )),
-        SignedInUser::NoDesktop(account) => Some(format!(
-            "No one is signed in to this session, so user data and per-user settings go to {}, \
-             the account this is running as.",
-            account.name()
+        SignedInUser::NoDesktop(account) => Some(t!(
+            "core-review-account-no-desktop",
+            account = account.name()
         )),
-        SignedInUser::Unknown(reason) => Some(format!(
-            "Could not tell who is signed in ({reason}), so per-user settings are left out, and \
-             user data goes under the install location."
-        )),
+        SignedInUser::Unknown(reason) => {
+            Some(t!("core-review-account-not-told", reason = reason.as_str()))
+        }
     }
 }
 
@@ -1032,31 +1122,53 @@ pub enum SystemChangeKind {
     OtherSettings,
 }
 
+/// Each kind's label in each language it has been asked for in, made once.
+type Labels = Vec<(&'static str, SystemChangeKind, &'static str)>;
+static LABELS: Mutex<Labels> = Mutex::new(Vec::new());
+
 impl SystemChangeKind {
-    /// What to call this kind of change in a list.
+    /// What to call this kind of change in a list, in the language in use. A window asks for it
+    /// every time it draws, so each label is made once for each language, and kept.
     pub fn label(self) -> &'static str {
+        let language = winappmigrator_i18n::current().tag;
+        let mut labels = match LABELS.lock() {
+            Ok(labels) => labels,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some((_, _, label)) = labels
+            .iter()
+            .find(|(tag, kind, _)| *tag == language && *kind == self)
+        {
+            return label;
+        }
+        let label: &'static str = Box::leak(self.label_text().into_boxed_str());
+        labels.push((language, self, label));
+        label
+    }
+
+    fn label_text(self) -> String {
         match self {
-            Self::Service => "Service",
-            Self::Driver => "Driver",
-            Self::ScheduledTask => "Scheduled Task",
-            Self::Autostart => "Starts Automatically",
-            Self::Shortcut => "Shortcut",
-            Self::PathEntry => "PATH",
-            Self::EnvironmentVariable => "Environment Variable",
-            Self::ShellExtension => "Shell Extension",
-            Self::ShellCommand => "Menu Command",
-            Self::UrlProtocol => "Link Type",
-            Self::FileType => "File Type",
-            Self::ComServer => "COM",
-            Self::FirewallRule => "Firewall Rule",
-            Self::EventLogSource => "Event Log Source",
-            Self::Font => "Font",
-            Self::OdbcDriver => "ODBC Driver",
-            Self::OdbcSource => "ODBC Data Source",
-            Self::CompatibilitySetting => "Compatibility Setting",
-            Self::DefaultApps => "Default Apps",
-            Self::ProgramName => "Program Name",
-            Self::OtherSettings => "Other Settings",
+            Self::Service => t!("core-review-kind-service"),
+            Self::Driver => t!("core-review-kind-driver"),
+            Self::ScheduledTask => t!("core-review-kind-scheduled-task"),
+            Self::Autostart => t!("core-review-kind-autostart"),
+            Self::Shortcut => t!("core-review-kind-shortcut"),
+            Self::PathEntry => t!("core-review-kind-path"),
+            Self::EnvironmentVariable => t!("core-review-kind-environment-variable"),
+            Self::ShellExtension => t!("core-review-kind-shell-extension"),
+            Self::ShellCommand => t!("core-review-kind-menu-command"),
+            Self::UrlProtocol => t!("core-review-kind-link-type"),
+            Self::FileType => t!("core-review-kind-file-type"),
+            Self::ComServer => t!("core-review-kind-com"),
+            Self::FirewallRule => t!("core-review-kind-firewall-rule"),
+            Self::EventLogSource => t!("core-review-kind-event-log-source"),
+            Self::Font => t!("core-review-kind-font"),
+            Self::OdbcDriver => t!("core-review-kind-odbc-driver"),
+            Self::OdbcSource => t!("core-review-kind-odbc-source"),
+            Self::CompatibilitySetting => t!("core-review-kind-compatibility-setting"),
+            Self::DefaultApps => t!("core-review-kind-default-apps"),
+            Self::ProgramName => t!("core-review-kind-program-name"),
+            Self::OtherSettings => t!("core-review-kind-other-settings"),
         }
     }
 }
@@ -1150,8 +1262,9 @@ pub fn refuse_what_cannot_run_here(manifest: &PackageManifest) -> Result<Platfor
         &windows_here(),
     );
     match fit.refusal.as_deref() {
-        Some(refusal) => Err(WinAppMigratorError::InvalidInput(format!(
-            "this app cannot run on this PC, so nothing was changed: {refusal}"
+        Some(refusal) => Err(WinAppMigratorError::InvalidInput(t!(
+            "core-review-cannot-run-here",
+            reason = refusal
         ))),
         None => Ok(fit),
     }
@@ -1247,10 +1360,9 @@ pub fn refuse_without_room_to_install(needs: &[PlaceNeed]) -> Result<RoomCheck> 
     if shortfalls.is_empty() {
         return Ok(room);
     }
-    Err(WinAppMigratorError::InvalidInput(format!(
-        "there is not enough room for this, so nothing was changed. {}. Free up some space there, \
-         or choose an install location on another drive.",
-        shortfalls.join(". ")
+    Err(WinAppMigratorError::InvalidInput(t!(
+        "core-review-no-room",
+        shortfalls = shortfalls.join(&t!("core-review-sentence-joiner"))
     )))
 }
 
@@ -1261,9 +1373,7 @@ pub fn refuse_without_room_to_install(needs: &[PlaceNeed]) -> Result<RoomCheck> 
 pub fn files_no_install_put_there(folder: &Path, state_root: Option<&Path>) -> Option<String> {
     let on_record =
         state_root.is_some_and(|state_root| install_on_record_at(state_root, folder, None));
-    (folder_has_files(folder) && !on_record).then(|| {
-        "it already has files, and no install is on record here, so use an empty folder".to_owned()
-    })
+    (folder_has_files(folder) && !on_record).then(|| t!("core-review-location-has-files"))
 }
 
 /// Whether anything is in a folder. One that is there and will not say is not taken to be empty.
@@ -1281,7 +1391,7 @@ pub fn install_location_problem(target_root: &Path) -> Option<String> {
         .as_deref()
         .is_some_and(|state_root| overlaps_by_how_written(target_root, state_root))
     {
-        return Some(STATE_ROOT_REFUSAL.to_owned());
+        return Some(state_root_refusal());
     }
     // What can be told from how it is written comes first, so that a path on a share is not sent
     // to the network, which a window would have to wait for.
@@ -1290,7 +1400,7 @@ pub fn install_location_problem(target_root: &Path) -> Option<String> {
         return Some(refusal);
     }
     if state_root.is_some_and(|state_root| overlaps_state_root(target_root, &state_root)) {
-        return Some(STATE_ROOT_REFUSAL.to_owned());
+        return Some(state_root_refusal());
     }
     // And where it really is, past any link or short name.
     install_placement_refusal(
@@ -1321,11 +1431,7 @@ fn describe(review: &ReviewedPackage<'_>) -> SystemChanges {
             .into_iter()
             .map(|row| row.change)
             .collect(),
-        refused: review
-            .refused
-            .iter()
-            .map(|warning| warning.message.clone())
-            .collect(),
+        refused: review.refused.iter().map(Warning::text).collect(),
         notes: notes_of(review),
     }
 }
@@ -1338,7 +1444,7 @@ pub(crate) fn notes_of(review: &ReviewedPackage<'_>) -> Vec<String> {
         .filter(|warning| {
             warning.code == USER_ACCOUNT_NOTE_CODE || warning.code == USER_FOLDER_ELSEWHERE_CODE
         })
-        .map(|warning| warning.message.clone())
+        .map(Warning::text)
         .collect();
     notes.extend(notes_on_what_is_left_out(review.manifest));
     notes
@@ -1377,13 +1483,7 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
     let target_root = review.map.target_root();
     let mut changes = Vec::new();
     for service in &review.services {
-        let starts = service
-            .entry
-            .start_type
-            .as_deref()
-            .map(service_start_text)
-            .unwrap_or_default();
-        let runs_as = service.account.label();
+        let start = service.entry.start_type.as_deref();
         changes.push(ChangeRow {
             id: service_choice(&service.entry.service_name),
             change: SystemChange {
@@ -1393,9 +1493,12 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
                     .display_name
                     .clone()
                     .unwrap_or_else(|| service.entry.service_name.clone()),
-                detail: format!(
-                    "Runs {} as {runs_as}{starts}",
-                    file_name_text(&service.binary)
+                detail: t!(
+                    "core-review-service-detail",
+                    file = file_name_text(&service.binary),
+                    account = service.account.label(),
+                    starts = service_start_key(start),
+                    start = start.unwrap_or_default(),
                 ),
                 high_rights: matches!(
                     service.account,
@@ -1405,21 +1508,22 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
         });
     }
     for driver in &review.drivers {
-        let starts = driver
-            .entry
-            .start_type
-            .as_deref()
-            .map(|start| format!(", starts {start}"))
-            .unwrap_or_default();
+        let file = file_name_text(&driver.destination);
         changes.push(ChangeRow {
             id: driver_choice(&driver.entry.service_name),
             change: SystemChange {
                 kind: SystemChangeKind::Driver,
                 title: driver.entry.service_name.clone(),
-                detail: format!(
-                    "Loads {} into Windows itself{starts}",
-                    file_name_text(&driver.destination)
-                ),
+                detail: match driver.entry.start_type.as_deref() {
+                    Some(start) => {
+                        t!(
+                            "core-review-driver-detail-starts",
+                            file = file,
+                            start = start
+                        )
+                    }
+                    None => t!("core-review-driver-detail", file = file),
+                },
                 high_rights: true,
             },
         });
@@ -1430,7 +1534,7 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
         } else {
             task.account
                 .clone()
-                .unwrap_or_else(|| "the user who created it".to_owned())
+                .unwrap_or_else(|| t!("core-review-task-runs-as-creator"))
         };
         changes.push(ChangeRow {
             id: task_choice(&task.entry.task_path, &task.entry.task_name),
@@ -1438,9 +1542,9 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
                 kind: SystemChangeKind::ScheduledTask,
                 title: format!("{}{}", task.entry.task_path, task.entry.task_name),
                 detail: if task.highest_available {
-                    format!("Runs as {runs_as}, with the highest rights it can have")
+                    t!("core-review-task-detail-highest", account = runs_as)
                 } else {
-                    format!("Runs as {runs_as}")
+                    t!("core-review-task-detail", account = runs_as)
                 },
                 high_rights: task.runs_as_system || task.highest_available,
             },
@@ -1451,10 +1555,7 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
         .iter()
         .filter(|entry| is_autostart_entry(entry))
     {
-        let scope = match entry.hive {
-            RegistryHive::LocalMachine => "for everyone who signs in",
-            RegistryHive::CurrentUser => "when you sign in",
-        };
+        let scope = scope_of(entry);
         changes.push(ChangeRow {
             id: autostart_choice(entry),
             change: SystemChange {
@@ -1463,7 +1564,7 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
                     .value_name
                     .clone()
                     .unwrap_or_else(|| entry.key_path.clone()),
-                detail: format!("Runs {scope}"),
+                detail: t!("core-review-autostart-detail", scope = scope),
                 high_rights: false,
             },
         });
@@ -1474,10 +1575,10 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
             .destination
             .file_stem()
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        let place = if shortcut.placement.for_all_users {
-            "for everyone on this PC"
+        let scope = if shortcut.placement.for_all_users {
+            EVERYONE
         } else {
-            "for you"
+            YOU
         };
         let id = shortcut_choice(&shortcut.original_lnk_path);
         if shortcut.placement.autostart {
@@ -1486,7 +1587,7 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
                 change: SystemChange {
                     kind: SystemChangeKind::Autostart,
                     title: name,
-                    detail: format!("A shortcut in the Startup folder, {place}"),
+                    detail: t!("core-review-shortcut-startup-detail", scope = scope),
                     high_rights: false,
                 },
             });
@@ -1496,7 +1597,11 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
                 change: SystemChange {
                     kind: SystemChangeKind::Shortcut,
                     title: name,
-                    detail: format!("Opens {}, {place}", file_name_text(&shortcut.target)),
+                    detail: t!(
+                        "core-review-shortcut-detail",
+                        file = file_name_text(&shortcut.target),
+                        scope = scope
+                    ),
                     high_rights: false,
                 },
             });
@@ -1510,16 +1615,16 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
                     id: ChoiceId::Integration(SystemChangeKind::PathEntry),
                     change: SystemChange {
                         kind: SystemChangeKind::PathEntry,
-                        title: format!("Adds to {}", variable.name),
+                        title: t!("core-review-path-title", name = variable.name.as_str()),
                         detail: strip_prefix_ignore_case(Path::new(&entry), target_root)
+                            .filter(|relative| !relative.as_os_str().is_empty())
                             .map_or_else(
-                                || "The install folder".to_owned(),
+                                || t!("core-review-path-install-folder"),
                                 |relative| {
-                                    if relative.as_os_str().is_empty() {
-                                        "The install folder".to_owned()
-                                    } else {
-                                        format!(r"The install folder\{}", relative.display())
-                                    }
+                                    t!(
+                                        "core-review-path-below-install-folder",
+                                        path = relative.display().to_string()
+                                    )
                                 },
                             ),
                         high_rights: false,
@@ -1532,7 +1637,10 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
                 change: SystemChange {
                     kind: SystemChangeKind::EnvironmentVariable,
                     title: variable.name.clone(),
-                    detail: format!("Set to {}", variable.value),
+                    detail: t!(
+                        "core-review-variable-detail",
+                        value = variable.value.as_str()
+                    ),
                     high_rights: false,
                 },
             });
@@ -1581,17 +1689,18 @@ fn describe_other_settings(review: &ReviewedPackage<'_>) -> Option<SystemChange>
         .collect();
     let more = keys.len().saturating_sub(OTHER_SETTINGS_KEYS_NAMED);
     let named: Vec<String> = keys.into_iter().take(OTHER_SETTINGS_KEYS_NAMED).collect();
-    let values = entries.len();
+    let named = winappmigrator_i18n::join_list(&named);
     Some(SystemChange {
         kind: SystemChangeKind::OtherSettings,
-        title: format!(
-            "{values} {} outside the app's own keys",
-            if values == 1 { "setting" } else { "settings" }
-        ),
+        title: t!("core-review-other-settings-title", count = entries.len()),
         detail: if more > 0 {
-            format!("In {}, and {more} more", named.join(", "))
+            t!(
+                "core-review-other-settings-detail-more",
+                keys = named,
+                count = more
+            )
         } else {
-            format!("In {}", named.join(", "))
+            t!("core-review-other-settings-detail", keys = named)
         },
         high_rights: entries.iter().any(|entry| is_a_windows_key(entry)),
     })
@@ -1680,17 +1789,28 @@ fn is_a_windows_key(entry: &RegistryEntry) -> bool {
     normalized_key(&entry.key_path).starts_with(r"software\microsoft\")
 }
 
-/// What a service's row says of when it runs. One that starts by itself is started as soon as the
-/// install has checked what it installed, as well as at each boot.
-fn service_start_text(start: &str) -> String {
+/// Which of a service row's sentences says when it runs, by what the package records of how it
+/// starts. One that starts by itself is started as soon as the install has checked what it
+/// installed, as well as at each boot.
+fn service_start_key(start: Option<&str>) -> &'static str {
     match start {
-        "automatic" => ", starts now and each time this PC starts".to_owned(),
-        crate::service_scan::DELAYED_AUTOMATIC_START_LABEL => {
-            ", starts now and soon after each time this PC starts".to_owned()
-        }
-        "manual" => ", starts only when something asks it to".to_owned(),
-        "disabled" => ", is disabled".to_owned(),
-        other => format!(", starts {other}"),
+        None => "unknown",
+        Some("automatic") => "automatic",
+        Some(crate::service_scan::DELAYED_AUTOMATIC_START_LABEL) => "delayed",
+        Some("manual") => "manual",
+        Some("disabled") => "disabled",
+        Some(_) => "other",
+    }
+}
+
+/// Whom something is set up for, which a row's sentence chooses its words by.
+const EVERYONE: &str = "everyone";
+const YOU: &str = "you";
+
+fn scope_of(entry: &RegistryEntry) -> &'static str {
+    match entry.hive {
+        RegistryHive::LocalMachine => EVERYONE,
+        RegistryHive::CurrentUser => YOU,
     }
 }
 
@@ -1728,24 +1848,23 @@ fn describe_firewall_rules(rules: &[ReviewedFirewallRule<'_>]) -> Vec<SystemChan
             let entry = rule.entry;
             let is_in = entry.direction.eq_ignore_ascii_case("in");
             let allows = entry.action.eq_ignore_ascii_case("allow");
-            let verb = if allows { "Allows" } else { "Blocks" };
-            let way = if is_in { "incoming" } else { "outgoing" };
-            let ports = if entry.local_ports.is_empty() {
-                "connections".to_owned()
-            } else {
-                format!("connections on {}", entry.local_ports.join(", "))
-            };
-            let profiles = if entry.profiles.is_empty() {
-                "every network".to_owned()
-            } else {
-                format!("{} networks", entry.profiles.join(", "))
+            let way = match (allows, is_in) {
+                (true, true) => "allow-in",
+                (true, false) => "allow-out",
+                (false, true) => "block-in",
+                (false, false) => "block-out",
             };
             SystemChange {
                 kind: SystemChangeKind::FirewallRule,
                 title: entry.name.clone(),
-                detail: format!(
-                    "{verb} {way} {ports} for {}, on {profiles}",
-                    file_name_text(&rule.program)
+                detail: t!(
+                    "core-review-firewall-detail",
+                    way = way,
+                    port_count = entry.local_ports.len(),
+                    ports = winappmigrator_i18n::join_list(&entry.local_ports),
+                    program = file_name_text(&rule.program),
+                    network_count = entry.profiles.len(),
+                    networks = winappmigrator_i18n::join_list(&entry.profiles),
                 ),
                 high_rights: is_in && allows,
             }
@@ -1757,18 +1876,15 @@ fn describe_firewall_rules(rules: &[ReviewedFirewallRule<'_>]) -> Vec<SystemChan
 /// classes it takes.
 fn describe_registrations(review: &ReviewedPackage<'_>) -> Vec<SystemChange> {
     let mut changes = Vec::new();
-    let mut listed: BTreeSet<(String, String, String)> = BTreeSet::new();
-    let mut classes_by_server: BTreeMap<String, usize> = BTreeMap::new();
+    let mut listed: BTreeSet<(SystemChangeKind, String, String)> = BTreeSet::new();
+    // By the file that serves them, or by none for a class whose file could not be named.
+    let mut classes_by_server: BTreeMap<Option<String>, usize> = BTreeMap::new();
     let mut support = (0_usize, 0_usize, 0_usize);
     let mut settings = 0_usize;
     let server_of = |class: Option<&str>| {
         class
             .and_then(|class| review.registrations.server_of_class(class))
-            .map_or_else(|| "a file it installs".to_owned(), str::to_owned)
-    };
-    let everyone_or_you = |entry: &RegistryEntry| match entry.hive {
-        RegistryHive::LocalMachine => "for everyone on this PC",
-        RegistryHive::CurrentUser => "for you",
+            .map(str::to_owned)
     };
     for entry in review.registry.iter().chain(&review.license_registry) {
         let Some(registration) = registration_of(entry) else {
@@ -1778,59 +1894,57 @@ fn describe_registrations(review: &ReviewedPackage<'_>) -> Vec<SystemChange> {
             Registration::ShellExtension { name, class } => (
                 SystemChangeKind::ShellExtension,
                 name,
-                format!(
-                    "Loads {} into Explorer, {}",
-                    server_of(class.as_deref()),
-                    everyone_or_you(entry)
-                ),
+                match server_of(class.as_deref()) {
+                    Some(server) => t!(
+                        "core-review-shell-extension-detail",
+                        server = server,
+                        scope = scope_of(entry)
+                    ),
+                    None => t!(
+                        "core-review-shell-extension-detail-own-file",
+                        scope = scope_of(entry)
+                    ),
+                },
                 true,
             ),
             Registration::ShellCommand { on, verb } => (
                 SystemChangeKind::ShellCommand,
                 verb,
-                format!(
-                    "Adds a command to the menu of {on}, {}",
-                    everyone_or_you(entry)
+                t!(
+                    "core-review-menu-command-detail",
+                    on = on,
+                    scope = scope_of(entry)
                 ),
                 false,
             ),
             Registration::DefaultVerb { of } => (
                 SystemChangeKind::ShellCommand,
                 of,
-                format!(
-                    "Changes what opening one of these does, {}",
-                    everyone_or_you(entry)
-                ),
+                t!("core-review-default-verb-detail", scope = scope_of(entry)),
                 true,
             ),
             Registration::ClientEntry { name } => (
                 SystemChangeKind::DefaultApps,
                 name,
-                "Can be chosen as the program for this. Nothing is changed to it".to_owned(),
+                t!("core-review-client-entry-detail"),
                 false,
             ),
             Registration::AppIdAccess => (
                 SystemChangeKind::ComServer,
-                "COM permissions".to_owned(),
-                "Says who may start its COM classes, or what they run as".to_owned(),
+                t!("core-review-com-permissions-title"),
+                t!("core-review-com-permissions-detail"),
                 true,
             ),
             Registration::UrlProtocol { name } => (
                 SystemChangeKind::UrlProtocol,
                 format!("{name}:"),
-                format!(
-                    "Links of this kind open with the app, {}",
-                    everyone_or_you(entry)
-                ),
+                t!("core-review-link-type-detail", scope = scope_of(entry)),
                 false,
             ),
             Registration::FileType { extension } => (
                 SystemChangeKind::FileType,
                 extension,
-                format!(
-                    "Files of this type open with the app, {}",
-                    everyone_or_you(entry)
-                ),
+                t!("core-review-file-type-detail", scope = scope_of(entry)),
                 false,
             ),
             Registration::ComClass { class } => {
@@ -1854,28 +1968,25 @@ fn describe_registrations(review: &ReviewedPackage<'_>) -> Vec<SystemChange> {
             Registration::EventLogSource { log, source } => (
                 SystemChangeKind::EventLogSource,
                 source,
-                format!("Can write to the {log} log, with messages from its own files"),
+                t!("core-review-event-log-source-detail", log = log),
                 false,
             ),
             Registration::Font { name } => (
                 SystemChangeKind::Font,
                 name,
-                format!(
-                    "Loads from the install folder when you sign in, {}",
-                    everyone_or_you(entry)
-                ),
+                t!("core-review-font-detail", scope = scope_of(entry)),
                 false,
             ),
             Registration::OdbcDriver { name } => (
                 SystemChangeKind::OdbcDriver,
                 name,
-                "Loads into programs that use ODBC to reach a database".to_owned(),
+                t!("core-review-odbc-driver-detail"),
                 true,
             ),
             Registration::OdbcSource { name } => (
                 SystemChangeKind::OdbcSource,
                 name,
-                format!("A database connection, {}", everyone_or_you(entry)),
+                t!("core-review-odbc-source-detail", scope = scope_of(entry)),
                 false,
             ),
             Registration::CompatibilitySetting => {
@@ -1885,25 +1996,18 @@ fn describe_registrations(review: &ReviewedPackage<'_>) -> Vec<SystemChange> {
             Registration::DefaultAppsEntry { name } => (
                 SystemChangeKind::DefaultApps,
                 name,
-                "Can be chosen in Default apps. Nothing is changed to it".to_owned(),
+                t!("core-review-default-apps-detail"),
                 false,
             ),
             Registration::ProgramName { name } => (
                 SystemChangeKind::ProgramName,
                 name,
-                format!(
-                    "Run and other programs can find it by this name, {}",
-                    everyone_or_you(entry)
-                ),
+                t!("core-review-program-name-detail", scope = scope_of(entry)),
                 false,
             ),
         };
         // A verb called `open` on two types is two lines, and how a name is written is not.
-        if listed.insert((
-            kind.label().to_owned(),
-            title.to_lowercase(),
-            detail.to_lowercase(),
-        )) {
+        if listed.insert((kind, title.to_lowercase(), detail.to_lowercase())) {
             changes.push(SystemChange {
                 kind,
                 title,
@@ -1915,8 +2019,11 @@ fn describe_registrations(review: &ReviewedPackage<'_>) -> Vec<SystemChange> {
     for (server, count) in classes_by_server {
         changes.push(SystemChange {
             kind: SystemChangeKind::ComServer,
-            title: format!("COM in {server}"),
-            detail: format!("{count} settings of the classes other programs can start"),
+            title: match server {
+                Some(server) => t!("core-review-com-title", server = server),
+                None => t!("core-review-com-title-own-file"),
+            },
+            detail: t!("core-review-com-detail", count = count),
             high_rights: false,
         });
     }
@@ -1924,9 +2031,12 @@ fn describe_registrations(review: &ReviewedPackage<'_>) -> Vec<SystemChange> {
     if libraries + interfaces + app_ids > 0 {
         changes.push(SystemChange {
             kind: SystemChangeKind::ComServer,
-            title: "COM type libraries, interfaces, and AppIDs".to_owned(),
-            detail: format!(
-                "{libraries} and {interfaces} and {app_ids} settings of each, which go with its classes"
+            title: t!("core-review-com-support-title"),
+            detail: t!(
+                "core-review-com-support-detail",
+                libraries = libraries,
+                interfaces = interfaces,
+                app_ids = app_ids
             ),
             high_rights: false,
         });
@@ -1934,8 +2044,8 @@ fn describe_registrations(review: &ReviewedPackage<'_>) -> Vec<SystemChange> {
     if settings > 0 {
         changes.push(SystemChange {
             kind: SystemChangeKind::CompatibilitySetting,
-            title: "How its programs start".to_owned(),
-            detail: format!("{settings} compatibility settings for programs it installs"),
+            title: t!("core-review-compatibility-title"),
+            detail: t!("core-review-compatibility-detail", count = settings),
             high_rights: false,
         });
     }
@@ -1947,18 +2057,38 @@ const MOST_NAMES_IN_A_NOTE: usize = 8;
 
 fn some_names(names: Vec<String>) -> String {
     let total = names.len();
-    let mut shown: Vec<String> = names.into_iter().take(MOST_NAMES_IN_A_NOTE).collect();
-    if total > shown.len() {
-        shown.push(format!("and {} more", total - shown.len()));
+    let shown: Vec<String> = names.into_iter().take(MOST_NAMES_IN_A_NOTE).collect();
+    let named = winappmigrator_i18n::join_list(&shown);
+    match total - shown.len() {
+        0 => named,
+        more => t!("core-review-names-and-more", names = named, count = more),
     }
-    shown.join(", ")
 }
 
 fn names_of_left_out(items: &[LeftOutItem]) -> String {
     some_names(items.iter().map(|item| item.name.clone()).collect())
 }
 
-/// What the app and an installer both call what is left out, so that the two screens agree.
+/// What the app and an installer both call what is left out, so that the two screens agree, in the
+/// language in use.
+pub fn credentials_left_out_text() -> String {
+    t!("core-review-left-out-credentials")
+}
+
+pub fn settings_left_out_text() -> String {
+    t!("core-review-left-out-settings")
+}
+
+pub fn certificates_left_out_text() -> String {
+    t!("core-review-left-out-certificates")
+}
+
+pub fn fonts_left_out_text() -> String {
+    t!("core-review-left-out-fonts")
+}
+
+/// The English of [`credentials_left_out_text`] and the others, for what has not yet moved to the
+/// catalog.
 pub const CREDENTIALS_LEFT_OUT_TEXT: &str =
     "Not in this installer, because they look like credentials";
 pub const SETTINGS_LEFT_OUT_TEXT: &str =
@@ -1966,39 +2096,33 @@ pub const SETTINGS_LEFT_OUT_TEXT: &str =
 pub const CERTIFICATES_LEFT_OUT_TEXT: &str =
     "The app seems to rely on certificates that were trusted on its PC, and they are not installed";
 pub const FONTS_LEFT_OUT_TEXT: &str = "These fonts go by the app's name, and nothing says they are its own, so they are not installed";
-const LEFT_OUT_BY_CHOICE_TEXT: &str = "Left out by whoever built this installer";
-const ADDED_BY_CHOICE_TEXT: &str =
-    "Added by whoever built this installer, because they took it to be part of the app";
 
 /// What a person ought to know is not coming, and why. Certificates are only ever this: which to
 /// trust is for them to decide.
 fn notes_on_what_is_left_out(manifest: &PackageManifest) -> Vec<String> {
     let mut notes = Vec::new();
     if !manifest.secrets_left_out.is_empty() {
-        notes.push(format!(
-            "{CREDENTIALS_LEFT_OUT_TEXT}: {}. What is on this PC of them stays as it is, and you may \
-             have to enter them again.",
-            names_of_left_out(&manifest.secrets_left_out)
+        notes.push(t!(
+            "core-review-note-credentials",
+            names = names_of_left_out(&manifest.secrets_left_out)
         ));
     }
     if !manifest.licenses_left_out.is_empty() {
-        notes.push(format!(
-            "Not in this installer, because the License option was off when it was built: {}.",
-            names_of_left_out(&manifest.licenses_left_out)
+        notes.push(t!(
+            "core-review-note-licenses",
+            names = names_of_left_out(&manifest.licenses_left_out)
         ));
     }
     if !manifest.settings_left_out.is_empty() {
-        notes.push(format!(
-            "Not in this installer, because the User Data option was off when it was built: the \
-             settings and history an account keeps for the app, in {}. The app starts here as it \
-             would for someone new to it.",
-            names_of_left_out(&manifest.settings_left_out)
+        notes.push(t!(
+            "core-review-note-settings",
+            names = names_of_left_out(&manifest.settings_left_out)
         ));
     }
     if !manifest.certificates_reported.is_empty() {
-        notes.push(format!(
-            "{CERTIFICATES_LEFT_OUT_TEXT}: {}. Whether to trust them here is for you to decide.",
-            some_names(
+        notes.push(t!(
+            "core-review-note-certificates",
+            names = some_names(
                 manifest
                     .certificates_reported
                     .iter()
@@ -2008,21 +2132,21 @@ fn notes_on_what_is_left_out(manifest: &PackageManifest) -> Vec<String> {
         ));
     }
     if !manifest.fonts_reported.is_empty() {
-        notes.push(format!(
-            "{FONTS_LEFT_OUT_TEXT}: {}.",
-            some_names(manifest.fonts_reported.clone())
+        notes.push(t!(
+            "core-review-note-fonts",
+            names = some_names(manifest.fonts_reported.clone())
         ));
     }
     if !manifest.left_out_by_choice.is_empty() {
-        notes.push(format!(
-            "{LEFT_OUT_BY_CHOICE_TEXT}: {}.",
-            names_of_left_out(&manifest.left_out_by_choice)
+        notes.push(t!(
+            "core-review-note-left-out-by-choice",
+            names = names_of_left_out(&manifest.left_out_by_choice)
         ));
     }
     if !manifest.added_by_choice.is_empty() {
-        notes.push(format!(
-            "{ADDED_BY_CHOICE_TEXT}: {}.",
-            some_names(manifest.added_by_choice.clone())
+        notes.push(t!(
+            "core-review-note-added-by-choice",
+            names = some_names(manifest.added_by_choice.clone())
         ));
     }
     notes
@@ -2034,7 +2158,11 @@ pub(crate) fn certificate_label(certificate: &CertificateEntry) -> String {
     } else {
         &certificate.subject
     };
-    format!("{name} in {}", certificate.store)
+    t!(
+        "core-review-certificate",
+        name = name.as_str(),
+        store = certificate.store.as_str()
+    )
 }
 
 fn file_name_text(path: &Path) -> String {
@@ -2312,7 +2440,10 @@ mod tests {
         let message = &review.warnings[0].message;
         assert!(message.contains(r"D:\Docs"), "{message}");
         assert!(message.contains(TARGET), "{message}");
-        assert!(message.contains("1 files from Documents"), "{message}");
+        assert!(
+            message.contains("1 file from Documents goes under"),
+            "{message}"
+        );
         review.warnings.clear();
         review.review_user_folders(Path::new(TARGET), &|_| {
             UserFolderPlace::Usable(PathBuf::from(r"C:\Users\alice\Documents"))
@@ -2404,6 +2535,88 @@ mod tests {
             confidence: MatchConfidence::High,
             requires_admin: false,
         }
+    }
+
+    /// The words come from the catalog, and say in English what they always have.
+    #[test]
+    fn what_is_left_out_and_what_is_set_up_are_said_whole() -> Result<()> {
+        let mut manifest = acme_manifest();
+        manifest.services_detected = vec![
+            service("AcmeSync", r"C:\Program Files\Acme\bin\svc.exe"),
+            service("Evil", r"C:\Windows\System32\cmd.exe"),
+        ];
+        let reviewed = review(&manifest)?;
+        let [refused] = reviewed.refused.as_slice() else {
+            panic!("{:?}", reviewed.refused);
+        };
+        assert_eq!(
+            refused.message,
+            r"The service Evil was left out: it runs C:\Windows\System32\cmd.exe, which this package does not install."
+        );
+        assert_eq!(refused.source.as_deref(), Some("The service Evil"));
+        let shown = winappmigrator_i18n::with_language(&winappmigrator_i18n::PSEUDO_LONG, || {
+            refused.text()
+        });
+        assert!(winappmigrator_i18n::is_marked(&shown), "{shown}");
+        let changes = describe(&reviewed);
+        assert_eq!(
+            changes.changes[0].detail,
+            r"Runs svc.exe as NT AUTHORITY\LocalService, starts now and each time this PC starts"
+        );
+        assert_eq!(changes.changes[0].kind.label(), "Service");
+        let label = winappmigrator_i18n::with_language(&winappmigrator_i18n::PSEUDO_LONG, || {
+            SystemChangeKind::Service.label()
+        });
+        assert!(winappmigrator_i18n::is_marked(label), "{label}");
+        assert_eq!(SystemChangeKind::Service.label(), "Service");
+        Ok(())
+    }
+
+    #[test]
+    fn a_firewall_rule_is_said_in_one_sentence() {
+        let rule =
+            |direction: &str, action: &str, ports: &[&str], profiles: &[&str]| FirewallRuleEntry {
+                name: "Acme".to_owned(),
+                description: None,
+                direction: direction.to_owned(),
+                action: action.to_owned(),
+                enabled: true,
+                program: PathBuf::from(r"C:\Program Files\Acme\acme.exe"),
+                service: None,
+                protocol: None,
+                local_ports: ports.iter().map(|port| (*port).to_owned()).collect(),
+                remote_ports: Vec::new(),
+                local_addresses: Vec::new(),
+                remote_addresses: Vec::new(),
+                profiles: profiles
+                    .iter()
+                    .map(|profile| (*profile).to_owned())
+                    .collect(),
+                not_carried: Vec::new(),
+            };
+        let open = rule("In", "Allow", &["80", "443"], &["Private", "Public"]);
+        let closed = rule("Out", "Block", &[], &[]);
+        let program = PathBuf::from(r"D:\Apps\Acme\acme.exe");
+        let details: Vec<String> = describe_firewall_rules(&[
+            ReviewedFirewallRule {
+                entry: &open,
+                program: program.clone(),
+            },
+            ReviewedFirewallRule {
+                entry: &closed,
+                program,
+            },
+        ])
+        .into_iter()
+        .map(|change| change.detail)
+        .collect();
+        assert_eq!(
+            details,
+            [
+                "Allows incoming connections on 80, 443 for acme.exe, on Private, Public networks",
+                "Blocks outgoing connections for acme.exe, on every network",
+            ]
+        );
     }
 
     #[test]
@@ -2989,7 +3202,9 @@ mod tests {
         );
         let changes = describe(&reviewed);
         assert!(
-            changes.changes[0].detail.contains(THE_PERSON_INSTALLING),
+            changes.changes[0]
+                .detail
+                .contains(&t!("core-review-task-runs-as-you")),
             "{:?}",
             changes.changes
         );

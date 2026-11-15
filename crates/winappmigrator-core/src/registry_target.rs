@@ -13,6 +13,7 @@
 
 use std::path::Path;
 
+use winappmigrator_i18n::t;
 use winreg::RegKey;
 use winreg::enums::{
     HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WRITE, REG_BINARY, REG_DWORD,
@@ -41,8 +42,9 @@ pub(crate) fn registry_root(hive: &RegistryHive) -> std::io::Result<RegKey> {
                 RegKey::predef(HKEY_USERS)
                     .open_subkey_with_flags(&account.sid, KEY_READ | KEY_WRITE)
             }
-            SignedInUser::Unknown(reason) => Err(std::io::Error::other(format!(
-                "could not tell who is signed in: {reason}"
+            SignedInUser::Unknown(reason) => Err(std::io::Error::other(t!(
+                "core-review-signed-in-unknown",
+                reason = reason.as_str()
             ))),
         },
     }

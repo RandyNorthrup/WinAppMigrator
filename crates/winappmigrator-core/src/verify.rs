@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use winappmigrator_i18n::t;
 use winreg::RegValue;
 
 use crate::archive::{EmbeddedPackage, PackageDigests};
@@ -75,7 +76,7 @@ impl PackageFiles<'_> {
                     return Ok(failed_item(
                         category,
                         name,
-                        "Packaged file is missing.",
+                        t!("core-verify-packaged-file-missing"),
                         Some(path.display().to_string()),
                     ));
                 };
@@ -111,7 +112,10 @@ pub fn verify_package(options: &VerificationOptions) -> Result<VerificationRepor
 pub fn verify_installer(installer: &Path, monitor: &BuildMonitor) -> Result<VerificationReport> {
     let package =
         EmbeddedPackage::open_unless(installer, &|| monitor.is_cancelled())?.ok_or_else(|| {
-            WinAppMigratorError::Archive(format!("{} has no package in it", installer.display()))
+            WinAppMigratorError::Archive(t!(
+                "core-verify-no-package",
+                path = installer.display().to_string()
+            ))
         })?;
     monitor.checkpoint()?;
     let manifest = read_embedded_manifest(&package)?;
@@ -141,9 +145,9 @@ pub fn verify_unpacked_package(
     let digests = package
         .digests_of_unpacked(&options.package_root)
         .ok_or_else(|| {
-            WinAppMigratorError::InvalidInput(format!(
-                "this installer's package was not unpacked to {}",
-                options.package_root.display()
+            WinAppMigratorError::InvalidInput(t!(
+                "core-verify-not-unpacked",
+                path = options.package_root.display().to_string()
             ))
         })?;
     verify_prepared_package(
@@ -277,23 +281,25 @@ fn verify_manifest(
         items.push(passed_item(
             VerificationCategory::Manifest,
             "manifest schema",
-            "Package manifest schema is supported.",
+            t!("core-verify-schema-supported"),
             None,
         ));
     } else {
         let source = Some(manifest.schema_version.clone());
+        let unsupported = Warning::localized(
+            "verification_manifest_schema_unsupported",
+            "core-warning-verify-schema-unsupported",
+            WarningSeverity::Error,
+            Vec::new(),
+            source.clone(),
+        );
         items.push(failed_item(
             VerificationCategory::Manifest,
             "manifest schema",
-            "Package manifest schema is unsupported.",
-            source.clone(),
-        ));
-        errors.push(Warning::new(
-            "verification_manifest_schema_unsupported",
-            WarningSeverity::Error,
-            "Package manifest schema is unsupported.",
+            unsupported.text(),
             source,
         ));
+        errors.push(unsupported);
     }
 }
 
@@ -323,18 +329,20 @@ fn verify_package_files(
             }
             Err(error) => {
                 let source = Some(file.original_path.display().to_string());
+                let failed = Warning::localized(
+                    "verification_package_file_failed",
+                    "core-warning-verify-package-file-failed",
+                    WarningSeverity::Error,
+                    vec![("error", error.to_string().into())],
+                    source.clone(),
+                );
                 items.push(failed_item(
                     VerificationCategory::PackageFile,
                     file.original_path.display().to_string(),
-                    format!("Package file verification failed: {error}"),
-                    source.clone(),
-                ));
-                errors.push(Warning::new(
-                    "verification_package_file_failed",
-                    WarningSeverity::Error,
-                    format!("Package file verification failed: {error}"),
+                    failed.text(),
                     source,
                 ));
+                errors.push(failed);
             }
         }
     }
@@ -349,7 +357,7 @@ fn verify_one_package_file(
         return Ok(failed_item(
             VerificationCategory::PackageFile,
             file.original_path.display().to_string(),
-            "Copyable file has no package relative path.",
+            t!("core-verify-no-package-path"),
             Some(file.original_path.display().to_string()),
         ));
     };
@@ -358,7 +366,7 @@ fn verify_one_package_file(
         return Ok(failed_item(
             VerificationCategory::PackageFile,
             relative.display().to_string(),
-            "Packaged file is missing.",
+            t!("core-verify-packaged-file-missing"),
             Some(packaged.display().to_string()),
         ));
     }
@@ -389,7 +397,7 @@ fn verify_restored_target(
             category: VerificationCategory::Refused,
             name: refused.source.clone().unwrap_or_default(),
             status: VerificationStatus::Skipped,
-            message: refused.message.clone(),
+            message: refused.text(),
             source: None,
         });
     }
@@ -429,23 +437,24 @@ fn verify_restored_folders(
                 category: VerificationCategory::RestoredFile,
                 name,
                 status: VerificationStatus::Passed,
-                message: "Empty folder is there.".to_owned(),
+                message: t!("core-verify-folder-there"),
                 source: Some(destination.display().to_string()),
             });
         } else {
-            let message = "Empty folder is missing.";
+            let missing = Warning::localized(
+                "verification_restored_file_failed",
+                "core-warning-verify-folder-missing",
+                WarningSeverity::Error,
+                Vec::new(),
+                Some(name.clone()),
+            );
             items.push(failed_item(
                 VerificationCategory::RestoredFile,
                 name.clone(),
-                message,
-                Some(name.clone()),
-            ));
-            errors.push(Warning::new(
-                "verification_restored_file_failed",
-                WarningSeverity::Error,
-                message,
+                missing.text(),
                 Some(name),
             ));
+            errors.push(missing);
         }
     }
 }
@@ -491,13 +500,13 @@ fn verify_restored_files(
             Some(Err(error)) => failed_item(
                 VerificationCategory::RestoredFile,
                 relative.display().to_string(),
-                format!("It could not be read to check it: {error}"),
+                t!("core-verify-unreadable", error = error.to_string()),
                 Some(destination.display().to_string()),
             ),
             None => failed_item(
                 VerificationCategory::RestoredFile,
                 relative.display().to_string(),
-                "Restored file is missing.",
+                t!("core-verify-restored-file-missing"),
                 Some(destination.display().to_string()),
             ),
         };
@@ -558,8 +567,10 @@ fn compare_with_expected(
         return failed_item(
             category,
             name,
-            format!(
-                "File size mismatch. Expected {expected_size} bytes, found {actual_size} bytes."
+            t!(
+                "core-verify-size-mismatch",
+                expected = expected_size,
+                actual = actual_size
             ),
             Some(path.display().to_string()),
         );
@@ -571,7 +582,7 @@ fn compare_with_expected(
         return failed_item(
             category,
             name,
-            "The manifest records no hash for this file, so it cannot be checked.",
+            t!("core-verify-no-hash"),
             Some(path.display().to_string()),
         );
     };
@@ -579,14 +590,14 @@ fn compare_with_expected(
         return failed_item(
             category,
             name,
-            "SHA-256 hash mismatch.",
+            t!("core-verify-hash-mismatch"),
             Some(path.display().to_string()),
         );
     }
     passed_item(
         category,
         name,
-        "File size and hash match manifest.",
+        t!("core-verify-file-matches"),
         Some(path.display().to_string()),
     )
 }
@@ -624,7 +635,10 @@ fn verify_packaged_license(
                         failed_item(
                             VerificationCategory::PackageFile,
                             relative.display().to_string(),
-                            format!("License payload verification failed: {error}"),
+                            t!(
+                                "core-verify-license-payload-failed",
+                                error = error.to_string()
+                            ),
                             Some(packaged.display().to_string()),
                         )
                     })
@@ -632,7 +646,7 @@ fn verify_packaged_license(
                 failed_item(
                     VerificationCategory::PackageFile,
                     relative.display().to_string(),
-                    "Packaged license payload is missing.",
+                    t!("core-verify-license-payload-missing"),
                     Some(packaged.display().to_string()),
                 )
             };
@@ -655,20 +669,26 @@ fn verify_packaged_license(
                         failed_item(
                             VerificationCategory::PackageFile,
                             name,
-                            format!("License store verification failed: {error}"),
+                            t!(
+                                "core-verify-license-store-failed",
+                                error = error.to_string()
+                            ),
                             None,
                         )
                     }),
                 Ok(path) => failed_item(
                     VerificationCategory::PackageFile,
                     name,
-                    "Packaged license store file is missing.",
+                    t!("core-verify-license-store-file-missing"),
                     Some(path.display().to_string()),
                 ),
                 Err(error) => failed_item(
                     VerificationCategory::PackageFile,
                     name,
-                    format!("Packaged license store path is invalid: {error}"),
+                    t!(
+                        "core-verify-license-store-path-invalid",
+                        error = error.to_string()
+                    ),
                     None,
                 ),
             };
@@ -725,7 +745,7 @@ fn verify_packaged_prerequisites(
                     failed_item(
                         VerificationCategory::PackageFile,
                         relative.display().to_string(),
-                        format!("Prerequisite payload verification failed: {error}"),
+                        t!("core-verify-prerequisite-failed", error = error.to_string()),
                         Some(packaged.display().to_string()),
                     )
                 })
@@ -733,7 +753,7 @@ fn verify_packaged_prerequisites(
             failed_item(
                 VerificationCategory::PackageFile,
                 relative.display().to_string(),
-                "Bundled prerequisite payload is missing.",
+                t!("core-verify-prerequisite-missing"),
                 Some(packaged.display().to_string()),
             )
         };
@@ -775,20 +795,20 @@ fn verify_packaged_drivers(
                     failed_item(
                         VerificationCategory::PackageFile,
                         relative.display().to_string(),
-                        format!("Driver image verification failed: {error}"),
+                        t!("core-verify-driver-image-failed", error = error.to_string()),
                         Some(packaged.display().to_string()),
                     )
                 }),
             Ok(packaged) => failed_item(
                 VerificationCategory::PackageFile,
                 relative.display().to_string(),
-                "Bundled driver image is missing.",
+                t!("core-verify-bundled-driver-missing"),
                 Some(packaged.display().to_string()),
             ),
             Err(error) => failed_item(
                 VerificationCategory::PackageFile,
                 relative.display().to_string(),
-                format!("Bundled driver path is invalid: {error}"),
+                t!("core-verify-driver-path-invalid", error = error.to_string()),
                 None,
             ),
         };
@@ -821,24 +841,21 @@ fn verify_prerequisites(manifest: &PackageManifest, items: &mut Vec<Verification
             Some(probe) if is_present(probe) => passed_item(
                 VerificationCategory::Prerequisite,
                 prerequisite.name.clone(),
-                "Runtime prerequisite is present on the target.",
+                t!("core-verify-prerequisite-present"),
                 None,
             ),
             Some(_) => VerificationItem {
                 category: VerificationCategory::Prerequisite,
                 name: prerequisite.name.clone(),
                 status: VerificationStatus::Skipped,
-                message:
-                    "Runtime prerequisite not detected; it may require a reboot or manual completion (see the restore log for the authoritative outcome)."
-                        .to_owned(),
+                message: t!("core-verify-prerequisite-not-detected"),
                 source: None,
             },
             None => VerificationItem {
                 category: VerificationCategory::Prerequisite,
                 name: prerequisite.name.clone(),
                 status: VerificationStatus::Skipped,
-                message: "Prerequisite presence is not registry-probable; install was best-effort."
-                    .to_owned(),
+                message: t!("core-verify-prerequisite-not-probed"),
                 source: None,
             },
         };
@@ -870,7 +887,7 @@ fn verify_license_restored(
                 failed_item(
                     VerificationCategory::License,
                     name,
-                    "Restored license file is missing.",
+                    t!("core-verify-license-file-missing"),
                     Some(destination.display().to_string()),
                 )
             };
@@ -892,7 +909,7 @@ fn verify_license_restored(
                 failed_item(
                     VerificationCategory::License,
                     name,
-                    "Restored license store file is missing.",
+                    t!("core-verify-license-store-restored-missing"),
                     Some(path.display().to_string()),
                 )
             };
@@ -937,7 +954,7 @@ fn verify_registry_entries<'a>(
                 failed_item(
                     VerificationCategory::Registry,
                     registry_entry_name(entry),
-                    warning.message,
+                    warning.text(),
                     warning.source,
                 )
             }
@@ -961,41 +978,45 @@ fn verify_registry_entry(
     let key = registry_root(&entry.hive)
         .and_then(|root| root.open_subkey(&entry.key_path))
         .map_err(|error| {
-            registry_warning(
+            Warning::localized(
                 "verification_registry_key_missing",
-                entry,
-                format!("Registry key is missing or unreadable: {error}"),
+                "core-warning-verify-registry-key-missing",
+                WarningSeverity::Error,
+                vec![("error", error.to_string().into())],
+                Some(registry_entry_name(entry)),
             )
         })?;
     if entry.value_name.is_none() && entry.value_kind == Some(RegistryValueKind::None) {
         return Ok(passed_item(
             VerificationCategory::Registry,
             registry_entry_name(entry),
-            "Registry key exists.",
+            t!("core-verify-registry-key-there"),
             Some(registry_entry_name(entry)),
         ));
     }
 
     let value_name = restored_value_name(entry, map);
     let actual = key.get_raw_value(value_name.as_ref()).map_err(|error| {
-        registry_warning(
+        Warning::localized(
             "verification_registry_value_missing",
-            entry,
-            format!("Registry value is missing or unreadable: {error}"),
+            "core-warning-verify-registry-value-missing",
+            WarningSeverity::Error,
+            vec![("error", error.to_string().into())],
+            Some(registry_entry_name(entry)),
         )
     })?;
     if registry_value_matches(entry, &actual, map)? {
         Ok(passed_item(
             VerificationCategory::Registry,
             registry_entry_name(entry),
-            "Registry value matches archived data.",
+            t!("core-verify-registry-value-matches"),
             Some(registry_entry_name(entry)),
         ))
     } else {
         Ok(failed_item(
             VerificationCategory::Registry,
             registry_entry_name(entry),
-            "Registry value does not match archived data.",
+            t!("core-verify-registry-value-differs"),
             Some(registry_entry_name(entry)),
         ))
     }
@@ -1021,23 +1042,24 @@ fn verify_firewall_rules(
             items.push(passed_item(
                 VerificationCategory::FirewallRule,
                 name.clone(),
-                "Windows Firewall has this rule.",
+                t!("core-verify-firewall-rule-there"),
                 Some(name),
             ));
         } else {
-            let message = "Windows Firewall does not have this rule.";
-            errors.push(Warning::new(
+            let missing = Warning::localized(
                 "verification_firewall_rule_missing",
+                "core-warning-verify-firewall-rule-missing",
                 WarningSeverity::Error,
-                message,
+                Vec::new(),
                 Some(name.clone()),
-            ));
+            );
             items.push(failed_item(
                 VerificationCategory::FirewallRule,
                 name.clone(),
-                message,
+                missing.text(),
                 Some(name),
             ));
+            errors.push(missing);
         }
     }
 }
@@ -1069,14 +1091,14 @@ fn verify_environment_variables(
                     passed_item(
                         VerificationCategory::Environment,
                         name,
-                        "Environment variable value matches archived data.",
+                        t!("core-verify-variable-matches"),
                         Some(variable.name.clone()),
                     )
                 } else {
                     failed_item(
                         VerificationCategory::Environment,
                         name,
-                        "Environment variable value does not match archived data.",
+                        t!("core-verify-variable-differs"),
                         Some(variable.name.clone()),
                     )
                 }
@@ -1084,7 +1106,7 @@ fn verify_environment_variables(
             Err(error) => failed_item(
                 VerificationCategory::Environment,
                 name,
-                format!("Environment variable is missing or unreadable: {error}"),
+                t!("core-verify-variable-unreadable", error = error.to_string()),
                 Some(variable.name.clone()),
             ),
         };
@@ -1120,21 +1142,21 @@ fn verify_services(
                     failed_item(
                         VerificationCategory::Service,
                         name(),
-                        "Service exists but does not run the restored binary with its arguments.",
+                        t!("core-verify-service-runs-other"),
                         Some(name()),
                     )
                 } else if !service_account_matches(service) {
                     failed_item(
                         VerificationCategory::Service,
                         name(),
-                        "Service exists but does not run as the expected account.",
+                        t!("core-verify-service-other-account"),
                         service_object_name(&service.entry.service_name),
                     )
                 } else {
                     passed_item(
                         VerificationCategory::Service,
                         name(),
-                        "Service exists, and runs the restored binary with its arguments and account.",
+                        t!("core-verify-service-matches"),
                         Some(actual),
                     )
                 }
@@ -1142,13 +1164,13 @@ fn verify_services(
             Ok(None) => failed_item(
                 VerificationCategory::Service,
                 name(),
-                "Service is missing.",
+                t!("core-verify-service-missing"),
                 Some(name()),
             ),
             Err(error) => failed_item(
                 VerificationCategory::Service,
                 name(),
-                format!("Service is unreadable: {error}"),
+                t!("core-verify-service-unreadable", error = error.to_string()),
                 Some(name()),
             ),
         };
@@ -1164,10 +1186,11 @@ fn verify_services(
         verify_registry_entries(&service.entry.parameters, map, items, errors);
     }
     if !services.is_empty() {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "verification_service_scope",
+            "core-warning-verify-service-scope",
             WarningSeverity::Info,
-            "Service verification reads HKLM service configuration and does not start services.",
+            Vec::new(),
             None,
         ));
     }
@@ -1212,10 +1235,11 @@ fn verify_drivers(
         items.push(item);
     }
     if !review.manual_drivers.is_empty() {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "verification_driver_manual",
+            "core-warning-verify-driver-manual",
             WarningSeverity::Warning,
-            "One or more vendor/inbox drivers are not redistributed by WinAppMigrator; reinstall them with the vendor's signed driver package on the target.",
+            Vec::new(),
             None,
         ));
     }
@@ -1234,7 +1258,7 @@ fn verify_one_driver(reviewed: &ReviewedDriver<'_>) -> VerificationItem {
             return failed_item(
                 VerificationCategory::Driver,
                 name(),
-                "Driver service does not point at the restored image.",
+                t!("core-verify-driver-other-image"),
                 source,
             );
         }
@@ -1242,7 +1266,7 @@ fn verify_one_driver(reviewed: &ReviewedDriver<'_>) -> VerificationItem {
             return failed_item(
                 VerificationCategory::Driver,
                 name(),
-                "Bundled driver service is not registered after restore.",
+                t!("core-verify-driver-not-registered"),
                 source,
             );
         }
@@ -1250,7 +1274,7 @@ fn verify_one_driver(reviewed: &ReviewedDriver<'_>) -> VerificationItem {
             return failed_item(
                 VerificationCategory::Driver,
                 name(),
-                format!("Driver service is unreadable: {error}"),
+                t!("core-verify-driver-unreadable", error = error.to_string()),
                 source,
             );
         }
@@ -1259,7 +1283,7 @@ fn verify_one_driver(reviewed: &ReviewedDriver<'_>) -> VerificationItem {
         return failed_item(
             VerificationCategory::Driver,
             name(),
-            "Driver image is missing.",
+            t!("core-verify-driver-image-missing"),
             source,
         );
     }
@@ -1274,7 +1298,10 @@ fn verify_one_driver(reviewed: &ReviewedDriver<'_>) -> VerificationItem {
         failed_item(
             VerificationCategory::Driver,
             name(),
-            format!("Driver image could not be checked: {error}"),
+            t!(
+                "core-verify-driver-image-unchecked",
+                error = error.to_string()
+            ),
             source,
         )
     })
@@ -1294,14 +1321,14 @@ fn verify_scheduled_tasks(
                     passed_item(
                         VerificationCategory::ScheduledTask,
                         name.clone(),
-                        "Scheduled task exists and runs the restored programs.",
+                        t!("core-verify-task-matches"),
                         Some(name),
                     )
                 } else {
                     failed_item(
                         VerificationCategory::ScheduledTask,
                         name.clone(),
-                        "Scheduled task exists but does not run the restored programs.",
+                        t!("core-verify-task-runs-other"),
                         Some(name),
                     )
                 }
@@ -1309,13 +1336,13 @@ fn verify_scheduled_tasks(
             Ok(None) => failed_item(
                 VerificationCategory::ScheduledTask,
                 name.clone(),
-                "Scheduled task is missing.",
+                t!("core-verify-task-missing"),
                 Some(name),
             ),
             Err(error) => failed_item(
                 VerificationCategory::ScheduledTask,
                 name.clone(),
-                format!("Scheduled task query failed: {error}"),
+                t!("core-verify-task-unreadable", error = error.to_string()),
                 Some(name),
             ),
         };
@@ -1330,10 +1357,11 @@ fn verify_scheduled_tasks(
         items.push(item);
     }
     if !tasks.is_empty() {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "verification_scheduled_task_scope",
+            "core-warning-verify-task-scope",
             WarningSeverity::Info,
-            "Scheduled task verification checks registration and command reference only.",
+            Vec::new(),
             None,
         ));
     }
@@ -1375,14 +1403,14 @@ fn verify_shortcuts(
                     passed_item(
                         VerificationCategory::Shortcut,
                         name(),
-                        "Shortcut exists and target path matches restored target.",
+                        t!("core-verify-shortcut-matches"),
                         Some(actual),
                     )
                 } else {
                     failed_item(
                         VerificationCategory::Shortcut,
                         name(),
-                        "Shortcut exists but target path does not match restored target.",
+                        t!("core-verify-shortcut-opens-other"),
                         Some(actual),
                     )
                 }
@@ -1390,13 +1418,13 @@ fn verify_shortcuts(
             Ok(None) => failed_item(
                 VerificationCategory::Shortcut,
                 name(),
-                "Shortcut is missing.",
+                t!("core-verify-shortcut-missing"),
                 Some(name()),
             ),
             Err(error) => failed_item(
                 VerificationCategory::Shortcut,
                 name(),
-                format!("Shortcut query failed: {error}"),
+                t!("core-verify-shortcut-unreadable", error = error.to_string()),
                 Some(name()),
             ),
         };
@@ -1424,10 +1452,12 @@ fn registry_value_matches(
     map: &RestoreMap,
 ) -> std::result::Result<bool, Warning> {
     let kind = entry.value_kind.as_ref().ok_or_else(|| {
-        registry_warning(
+        Warning::localized(
             "verification_registry_value_kind_missing",
-            entry,
-            "Registry value kind is missing.",
+            "core-warning-verify-registry-kind-missing",
+            WarningSeverity::Error,
+            Vec::new(),
+            Some(registry_entry_name(entry)),
         )
     })?;
     if actual.vtype != registry_raw_type(kind) {
@@ -1439,8 +1469,15 @@ fn registry_value_matches(
         }
         RegistryValueKind::None => Ok(actual.bytes.is_empty()),
         _ => {
+            // What is wrong with what a package recorded of it is said as the reading of it says it,
+            // in English.
             let expected = restored_value_bytes(entry, map).map_err(|message| {
-                registry_warning("verification_registry_hex_failed", entry, message)
+                Warning::new(
+                    "verification_registry_hex_failed",
+                    WarningSeverity::Error,
+                    message,
+                    Some(registry_entry_name(entry)),
+                )
             })?;
             Ok(actual.bytes.as_ref() == expected.as_slice())
         }
@@ -1473,19 +1510,6 @@ fn registry_entry_name(entry: &RegistryEntry) -> String {
         registry_hive_name(&entry.hive),
         entry.key_path,
         entry.value_name.as_deref().unwrap_or("(Default)")
-    )
-}
-
-fn registry_warning(
-    code: &'static str,
-    entry: &RegistryEntry,
-    message: impl Into<String>,
-) -> Warning {
-    Warning::new(
-        code,
-        WarningSeverity::Error,
-        message,
-        Some(registry_entry_name(entry)),
     )
 }
 
@@ -1554,51 +1578,74 @@ fn write_verification_reports(
     Ok(())
 }
 
+/// The report a person reads, in the language in use. Statuses, categories, and codes are as the
+/// report's JSON has them.
 fn render_verification_markdown(report: &VerificationReport) -> String {
     let mut output = String::new();
-    output.push_str("# WinAppMigrator Verification Report\n\n");
-    output.push_str(&format!("- Verified UTC: {}\n", report.verified_at_utc));
-    output.push_str(&format!("- Package valid: {}\n", report.package_valid));
+    output.push_str(&format!("# {}\n\n", t!("core-verify-report-title")));
     output.push_str(&format!(
-        "- Restore valid: {}\n",
-        report
-            .restore_valid
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "not run".to_owned())
+        "- {}\n",
+        t!(
+            "core-verify-report-verified",
+            time = report.verified_at_utc.as_str()
+        )
     ));
-    output.push_str("\n## Items\n");
+    output.push_str(&format!(
+        "- {}\n",
+        t!(
+            "core-verify-report-package-valid",
+            valid = report.package_valid.to_string()
+        )
+    ));
+    output.push_str(&format!(
+        "- {}\n",
+        match report.restore_valid {
+            Some(valid) => t!(
+                "core-verify-report-restore-valid",
+                valid = valid.to_string()
+            ),
+            None => t!("core-verify-report-restore-not-run"),
+        }
+    ));
+    output.push_str(&format!("\n## {}\n", t!("core-verify-report-items")));
     for item in &report.items {
+        let line = match item.source.as_ref() {
+            Some(source) => t!(
+                "core-verify-report-item-from",
+                message = item.message.as_str(),
+                source = source.as_str()
+            ),
+            None => item.message.clone(),
+        };
         output.push_str(&format!(
-            "- {:?} {:?} `{}`: {}{}\n",
-            item.status,
-            item.category,
-            item.name,
-            item.message,
-            item.source
-                .as_ref()
-                .map(|source| format!(" Source: {source}"))
-                .unwrap_or_default()
+            "- {:?} {:?} `{}`: {line}\n",
+            item.status, item.category, item.name,
         ));
     }
-    output.push_str("\n## Warnings\n");
+    let none = t!("core-verify-report-none");
+    output.push_str(&format!("\n## {}\n", t!("core-verify-report-warnings")));
     if report.warnings.is_empty() {
-        output.push_str("- None.\n");
+        output.push_str(&format!("- {none}\n"));
     } else {
         for warning in &report.warnings {
             output.push_str(&format!(
                 "- {:?} `{}`: {}\n",
-                warning.severity, warning.code, warning.message
+                warning.severity,
+                warning.code,
+                warning.text()
             ));
         }
     }
-    output.push_str("\n## Errors\n");
+    output.push_str(&format!("\n## {}\n", t!("core-verify-report-errors")));
     if report.errors.is_empty() {
-        output.push_str("- None.\n");
+        output.push_str(&format!("- {none}\n"));
     } else {
         for error in &report.errors {
             output.push_str(&format!(
                 "- {:?} `{}`: {}\n",
-                error.severity, error.code, error.message
+                error.severity,
+                error.code,
+                error.text()
             ));
         }
     }

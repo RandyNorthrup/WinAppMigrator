@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf, Prefix};
 
+use winappmigrator_i18n::t;
+
 use crate::zip_stream::ENTRY_OVERHEAD_BYTES;
 
 const KIB: u64 = 1024;
@@ -115,7 +117,24 @@ pub struct PlannedFile {
 pub struct PlaceNeed {
     pub place: PathBuf,
     pub bytes: u64,
+    /// What the room is for, by its name in the catalog, such as [`FOR_UNPACKING`]. Text that is no
+    /// name there is shown as it is.
     pub what: &'static str,
+}
+
+/// What room can be for, by name in the catalog. Each ends a sentence about a drive without the room:
+/// `C: needs up to 2.0 GB free for unpacking the package`.
+pub const FOR_UNPACKING: &str = "core-space-for-unpacking";
+pub const FOR_INSTALL_RECORD: &str = "core-space-for-install-record";
+pub const FOR_APP_FILES: &str = "core-space-for-app-files";
+pub const FOR_WHAT_IS_REPLACED: &str = "core-space-for-what-is-replaced";
+pub const FOR_BUILD_WORK: &str = "core-space-for-build-work";
+pub const FOR_INSTALLER: &str = "core-space-for-installer";
+pub const FOR_PACKAGE: &str = "core-space-for-package";
+
+/// What room is for, in the language in use.
+fn purpose_text(what: &str) -> String {
+    winappmigrator_i18n::tr(what, None)
 }
 
 /// What an install needs, by where it goes. Unpacking takes the whole package in the staging folder,
@@ -135,25 +154,25 @@ pub fn install_needs(
         PlaceNeed {
             place: staging.to_path_buf(),
             bytes: unpacked_bytes,
-            what: "unpacking the package",
+            what: FOR_UNPACKING,
         },
         PlaceNeed {
             place: state_root.to_path_buf(),
             bytes: INSTALL_RECORD_BYTES.saturating_add(stub_bytes),
-            what: "the record of the install",
+            what: FOR_INSTALL_RECORD,
         },
     ];
     for file in files {
         needs.push(PlaceNeed {
             place: file.destination.clone(),
             bytes: file.new_bytes,
-            what: "the app's files",
+            what: FOR_APP_FILES,
         });
         if file.replaced_bytes > 0 && !on_records_volume(&file.destination) {
             needs.push(PlaceNeed {
                 place: state_root.to_path_buf(),
                 bytes: file.replaced_bytes,
-                what: "keeping what it replaces",
+                what: FOR_WHAT_IS_REPLACED,
             });
         }
     }
@@ -165,7 +184,7 @@ pub fn preview_needs(staging: &Path, unpacked_bytes: u64) -> Vec<PlaceNeed> {
     vec![PlaceNeed {
         place: staging.to_path_buf(),
         bytes: unpacked_bytes,
-        what: "unpacking the package",
+        what: FOR_UNPACKING,
     }]
 }
 
@@ -213,19 +232,19 @@ pub fn build_places(
             PlaceNeed {
                 place: staging.to_path_buf(),
                 bytes: needs.staging_bytes,
-                what: "what a build works with",
+                what: FOR_BUILD_WORK,
             },
             PlaceNeed {
                 place: installer.to_path_buf(),
                 bytes: needs.output_bytes,
-                what: "the installer",
+                what: FOR_INSTALLER,
             },
         ],
         // A package that stays a folder is all in that folder, and is the size of what is read.
         None => vec![PlaceNeed {
             place: staging.to_path_buf(),
             bytes: needs.staging_bytes.saturating_add(inputs.payload_bytes),
-            what: "the package",
+            what: FOR_PACKAGE,
         }],
     }
 }
@@ -276,7 +295,7 @@ pub struct DriveRoom {
     pub needed_bytes: u64,
     /// `None` if the drive would not say.
     pub free_bytes: Option<u64>,
-    /// What the room is for, in the order it came up.
+    /// What the room is for, in the order it came up, each as [`PlaceNeed::what`] says it.
     pub what_for: Vec<&'static str>,
 }
 
@@ -344,12 +363,17 @@ impl RoomCheck {
             .filter_map(|drive| {
                 let free = drive.free_bytes?;
                 (free < drive.needed_bytes).then(|| {
-                    format!(
-                        "{} needs up to {} free for {}, and has {}",
-                        drive.drive,
-                        size_text(drive.needed_bytes),
-                        drive.what_for.join(" and "),
-                        size_text(free),
+                    let purposes: Vec<String> = drive
+                        .what_for
+                        .iter()
+                        .map(|what| purpose_text(what))
+                        .collect();
+                    t!(
+                        "core-space-shortfall",
+                        drive = drive.drive.as_str(),
+                        needed = size_text(drive.needed_bytes),
+                        purposes = purposes.join(&t!("core-space-purposes-joiner")),
+                        free = size_text(free),
                     )
                 })
             })
@@ -362,11 +386,10 @@ impl RoomCheck {
             .iter()
             .filter(|drive| drive.free_bytes.is_none())
             .map(|drive| {
-                format!(
-                    "{} would not say how much room it has, so whether the {} it needs fits was \
-                     not checked",
-                    drive.drive,
-                    size_text(drive.needed_bytes),
+                t!(
+                    "core-space-not-told",
+                    drive = drive.drive.as_str(),
+                    needed = size_text(drive.needed_bytes),
                 )
             })
             .collect()
@@ -374,36 +397,31 @@ impl RoomCheck {
 
     /// What it needs where, for showing: `up to 1.2 GB on C: (356 GB free)`.
     pub fn summary(&self) -> String {
-        self.drives
+        let drives: Vec<String> = self
+            .drives
             .iter()
             .map(|drive| match drive.free_bytes {
-                Some(free) => format!(
-                    "up to {} on {} ({} free)",
-                    size_text(drive.needed_bytes),
-                    drive.drive,
-                    size_text(free)
+                Some(free) => t!(
+                    "core-space-summary",
+                    needed = size_text(drive.needed_bytes),
+                    drive = drive.drive.as_str(),
+                    free = size_text(free),
                 ),
-                None => format!(
-                    "up to {} on {} (how much is free could not be told)",
-                    size_text(drive.needed_bytes),
-                    drive.drive
+                None => t!(
+                    "core-space-summary-not-told",
+                    needed = size_text(drive.needed_bytes),
+                    drive = drive.drive.as_str(),
                 ),
             })
-            .collect::<Vec<_>>()
-            .join(", ")
+            .collect();
+        winappmigrator_i18n::join_list(&drives)
     }
 }
 
 /// A size in the units a person would say it in, as Windows Explorer shows them: by 1024, and called
-/// KB, MB, and GB.
+/// KB, MB, GB, and TB, in the language in use.
 pub fn size_text(bytes: u64) -> String {
-    const UNITS: [(u64, &str); 3] = [(GIB, "GB"), (MIB, "MB"), (KIB, "KB")];
-    for (size, unit) in UNITS {
-        if bytes >= size {
-            return format!("{:.1} {unit}", bytes as f64 / size as f64);
-        }
-    }
-    format!("{bytes} bytes")
+    winappmigrator_i18n::size(bytes)
 }
 
 #[cfg(test)]
@@ -715,5 +733,36 @@ mod tests {
         assert_eq!(size_text(2 * KIB), "2.0 KB");
         assert_eq!(size_text(MIB + MIB / 2), "1.5 MB");
         assert_eq!(size_text(3 * GIB), "3.0 GB");
+    }
+
+    #[test]
+    fn what_room_is_for_is_in_the_catalog_and_said_whole() {
+        for what in [
+            FOR_UNPACKING,
+            FOR_INSTALL_RECORD,
+            FOR_APP_FILES,
+            FOR_WHAT_IS_REPLACED,
+            FOR_BUILD_WORK,
+            FOR_INSTALLER,
+            FOR_PACKAGE,
+        ] {
+            assert!(winappmigrator_i18n::has_message(what), "{what}");
+        }
+        let check = RoomCheck {
+            drives: vec![DriveRoom {
+                drive: "C:".to_owned(),
+                needed_bytes: 2 * GIB,
+                free_bytes: Some(GIB),
+                what_for: vec![FOR_UNPACKING, FOR_APP_FILES],
+            }],
+        };
+        assert_eq!(
+            check.shortfalls(),
+            [
+                "C: needs up to 2.0 GB free for unpacking the package and the app's files, and has \
+                 1.0 GB"
+            ]
+        );
+        assert_eq!(check.summary(), "up to 2.0 GB on C: (1.0 GB free)");
     }
 }

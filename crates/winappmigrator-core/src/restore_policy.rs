@@ -12,6 +12,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf, Prefix};
 
+use winappmigrator_i18n::t;
+
 use crate::errors::Result;
 use crate::file_discovery::{
     has_reserved_device_name, is_reserved_device_name, restore_destination, safe_relative_path,
@@ -131,7 +133,10 @@ impl ServiceAccount {
             Self::LocalService => LOCAL_SERVICE_ACCOUNT.to_owned(),
             Self::NetworkService => NETWORK_SERVICE_ACCOUNT.to_owned(),
             Self::Virtual(name) => name.clone(),
-            Self::Custom(_) => format!("{LOCAL_SERVICE_ACCOUNT} (custom account not restored)"),
+            Self::Custom(_) => t!(
+                "core-policy-account-custom",
+                account = LOCAL_SERVICE_ACCOUNT
+            ),
         }
     }
 }
@@ -161,13 +166,13 @@ pub fn install_location_refusal(
     shared_folders: &[PathBuf],
 ) -> Option<String> {
     if !target_root.is_absolute() {
-        return Some("it must be a full path".to_owned());
+        return Some(t!("core-policy-location-not-full-path"));
     }
     if target_root
         .components()
         .any(|component| matches!(component, Component::ParentDir))
     {
-        return Some("it must not contain \"..\"".to_owned());
+        return Some(t!("core-policy-location-parent-step"));
     }
     // Windows would read these as something other than what they say, and so what they say
     // cannot be compared with anything.
@@ -181,7 +186,7 @@ pub fn install_location_refusal(
         _ => false,
     });
     if reads_as_something_else {
-        return Some("it has to be a plain path on a drive of this PC".to_owned());
+        return Some(t!("core-policy-location-not-plain"));
     }
     install_placement_refusal(target_root, windows_dir, shared_folders)
 }
@@ -193,10 +198,10 @@ pub(crate) fn install_placement_refusal(
     shared_folders: &[PathBuf],
 ) -> Option<String> {
     if is_drive_root(target_root) {
-        return Some("it cannot be a whole drive".to_owned());
+        return Some(t!("core-policy-location-whole-drive"));
     }
     if path_is_within(target_root, windows_dir) || path_is_within(windows_dir, target_root) {
-        return Some("it cannot be the Windows folder".to_owned());
+        return Some(t!("core-policy-location-windows"));
     }
     let lower = format!(
         "{}\\",
@@ -211,17 +216,12 @@ pub(crate) fn install_placement_refusal(
             .filter(|folder| !FINE_FOR_AN_INSTALL_LOCATION.contains(folder))
             .any(|folder| lower.contains(&format!("\\{folder}")));
     if runs_by_itself {
-        return Some(
-            "it is a folder that belongs to Windows, or whose contents run or load by themselves"
-                .to_owned(),
-        );
+        return Some(t!("core-policy-location-runs-by-itself"));
     }
     shared_folders
         .iter()
         .any(|folder| paths_equal(folder, target_root))
-        .then(|| {
-            "it holds other things side by side, so the app needs a folder inside it".to_owned()
-        })
+        .then(|| t!("core-policy-location-shared"))
 }
 
 /// Why a service already on this PC must not be taken over, if so. `--force` does not
@@ -236,10 +236,10 @@ pub fn existing_service_refusal(
 ) -> Option<String> {
     let current = parse_image_path(current_image_path, windows_dir);
     (!path_is_strictly_inside(&current.path, target_root)).then(|| {
-        format!(
-            "{service_name} already exists on this PC and runs {}, which is not from an earlier \
-             install here. If it is an older copy of this app, uninstall that first",
-            current.path.display()
+        t!(
+            "core-policy-service-exists",
+            service = service_name,
+            path = current.path.display().to_string()
         )
     })
 }
@@ -853,7 +853,7 @@ pub fn registry_refusal(
     expand: &dyn Fn(&str) -> String,
 ) -> Option<String> {
     if entry.key_path.chars().any(char::is_control) {
-        return Some("its key name holds control characters".to_owned());
+        return Some(t!("core-policy-key-control-characters"));
     }
     // The registry ends a name at a NUL, so this would go by one name and be written as another.
     if entry
@@ -861,11 +861,11 @@ pub fn registry_refusal(
         .as_deref()
         .is_some_and(|name| name.chars().any(char::is_control))
     {
-        return Some("its value's name holds control characters".to_owned());
+        return Some(t!("core-policy-value-control-characters"));
     }
     // A link value would redirect the key to any other key on the machine.
     if entry.value_kind == Some(RegistryValueKind::Link) {
-        return Some("it is a registry link".to_owned());
+        return Some(t!("core-policy-registry-link"));
     }
     let key = normalized_key(&entry.key_path);
     // What Windows shows a 32-bit program with no manifest in place of a key of the PC's, for the
@@ -879,7 +879,7 @@ pub fn registry_refusal(
             ..entry.clone()
         };
         return registry_refusal(&machine, map, restored_services, expand)
-            .map(|refusal| format!("it stands for a key of the PC's, and {refusal}"));
+            .map(|refusal| t!("core-policy-virtual-store", reason = refusal));
     }
     let first = key.split('\\').next().unwrap_or_default();
     match entry.hive {
@@ -887,14 +887,14 @@ pub fn registry_refusal(
             return system_key_refusal(&key, entry, map, restored_services, expand);
         }
         RegistryHive::LocalMachine if first != "software" => {
-            return Some("no app install should write to this part of the registry".to_owned());
+            return Some(t!("core-policy-registry-part"));
         }
         RegistryHive::CurrentUser
             if REFUSED_USER_KEYS
                 .iter()
                 .any(|refused| key_is_within(&key, refused)) =>
         {
-            return Some("no app install should change this key".to_owned());
+            return Some(t!("core-policy-key-refused"));
         }
         _ => {}
     }
@@ -902,7 +902,7 @@ pub fn registry_refusal(
         .iter()
         .any(|refused| key_is_within(&key, refused))
     {
-        return Some("no app install should change this key".to_owned());
+        return Some(t!("core-policy-key-refused"));
     }
     if key == NET_DEBUGGER_KEY
         && entry
@@ -910,7 +910,7 @@ pub fn registry_refusal(
             .as_deref()
             .is_some_and(|name| NET_DEBUGGER_VALUES.contains(&name.to_ascii_lowercase().as_str()))
     {
-        return Some("it would name a debugger for every .NET program".to_owned());
+        return Some(t!("core-policy-net-debugger"));
     }
     if key == NET_DEBUGGER_KEY
         && entry
@@ -918,11 +918,11 @@ pub fn registry_refusal(
             .as_deref()
             .is_some_and(|name| name.eq_ignore_ascii_case(NET_INSTALL_ROOT_VALUE))
     {
-        return Some("it would change where every .NET program loads .NET from".to_owned());
+        return Some(t!("core-policy-net-install-root"));
     }
     if let Some(class) = key.strip_prefix(CLASSES_PREFIX) {
         if class_key_redirects_programs(class) {
-            return Some("it would change how a kind of program or folder is opened".to_owned());
+            return Some(t!("core-policy-class-redirects"));
         }
         if let Some(refusal) = shared_class_refusal(class, entry, map, expand) {
             return Some(refusal);
@@ -936,16 +936,15 @@ pub fn registry_refusal(
         .strip_prefix(APP_PATHS_PREFIX)
         .is_some_and(|rest| rest.contains(['/', ':']))
     {
-        return Some("it names a program by something other than a file's name".to_owned());
+        return Some(t!("core-policy-app-path-name"));
     }
     if key_is_within(&key, APP_PATHS_KEY)
         && key.len() > APP_PATHS_KEY.len()
         && is_default_value(entry.value_name.as_deref())
         && entry.value_kind != Some(RegistryValueKind::None)
     {
-        return autostart_refusal(entry, map, expand).map(|_| {
-            "it would register a program name for a file this package does not install".to_owned()
-        });
+        return autostart_refusal(entry, map, expand)
+            .map(|_| t!("core-policy-app-path-not-installed"));
     }
     None
 }
@@ -980,13 +979,13 @@ fn shared_class_refusal(
         .iter()
         .find_map(|shared| class.strip_prefix(shared)?.strip_prefix(r"\shell"))?;
     if shell.is_empty() {
-        return Some("it would change what opening every file or folder of a kind does".to_owned());
+        return Some(t!("core-policy-shared-default-verb"));
     }
     shell
         .strip_prefix('\\')?
         .strip_suffix(r"\command")
         .and_then(|_| autostart_refusal(entry, map, expand))
-        .map(|_| "it adds a command that runs something this package does not install".to_owned())
+        .map(|_| t!("core-policy-command-runs-other"))
 }
 
 /// True for text whose path starts with a variable, which could be hiding the app's own path.
@@ -1093,12 +1092,10 @@ fn autostart_refusal(
         entry.value_kind,
         Some(RegistryValueKind::String | RegistryValueKind::ExpandString)
     ) {
-        return Some("it starts automatically, and its value is not a command".to_owned());
+        return Some(t!("core-policy-autostart-not-command"));
     }
     let command = expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default()));
-    (!command_runs_restored_file(&command, map)).then(|| {
-        "it starts automatically, and runs something this package does not install".to_owned()
-    })
+    (!command_runs_restored_file(&command, map)).then(|| t!("core-policy-autostart-runs-other"))
 }
 
 /// Under `SYSTEM`, only what belongs to a service this package restores.
@@ -1110,22 +1107,22 @@ fn system_key_refusal(
     expand: &dyn Fn(&str) -> String,
 ) -> Option<String> {
     if key_is_within(key, ENVIRONMENT_KEY) {
-        return Some("environment variables are restored by their own rules".to_owned());
+        return Some(t!("core-policy-environment-own-rules"));
     }
     if let Some(rest) = key.strip_prefix(EVENT_LOG_PREFIX) {
         return event_log_value_refusal(rest, entry, map, expand);
     }
     let Some(rest) = key.strip_prefix(SERVICES_PREFIX) else {
-        return Some("no app install should change this key".to_owned());
+        return Some(t!("core-policy-key-refused"));
     };
     let mut parts = rest.splitn(3, '\\');
     let service = parts.next().unwrap_or_default();
     let subkey = parts.next().unwrap_or_default();
     if !restored_services.contains(service) {
-        return Some("it belongs to a service this package does not restore".to_owned());
+        return Some(t!("core-policy-service-not-restored"));
     }
     if !SERVICE_SUBKEYS.contains(&subkey) {
-        return Some("a service's own settings are only restored through its rules".to_owned());
+        return Some(t!("core-policy-service-own-rules"));
     }
     let names_dll = entry
         .value_name
@@ -1134,7 +1131,7 @@ fn system_key_refusal(
     if names_dll {
         let dll = expand(&map.rewrite(entry.value_data.as_deref().unwrap_or_default()));
         if !map.is_restored_file(Path::new(dll.trim().trim_matches('"'))) {
-            return Some("its ServiceDll is not a file this package installs".to_owned());
+            return Some(t!("core-policy-service-dll"));
         }
     }
     None
@@ -1152,10 +1149,10 @@ fn event_log_value_refusal(
 ) -> Option<String> {
     let mut parts = rest.split('\\');
     let (Some(log), Some(_source), None) = (parts.next(), parts.next(), parts.next()) else {
-        return Some("only an event log source's own values can be restored".to_owned());
+        return Some(t!("core-policy-event-log-source-only"));
     };
     if log == SECURITY_LOG {
-        return Some("no app writes to the Security log".to_owned());
+        return Some(t!("core-policy-security-log"));
     }
     let name = entry
         .value_name
@@ -1171,14 +1168,12 @@ fn event_log_value_refusal(
             .split(';')
             .map(str::trim)
             .any(|file| !map.is_restored_file(Path::new(file)))
-            .then(|| {
-                "its messages would come from a file this package does not install".to_owned()
-            });
+            .then(|| t!("core-policy-event-log-messages"));
     }
     (!EVENT_LOG_OTHER_VALUES
         .iter()
         .any(|known| known.eq_ignore_ascii_case(&name)))
-    .then(|| "only an event log source's own values can be restored".to_owned())
+    .then(|| t!("core-policy-event-log-source-only"))
 }
 
 /// What a whole package says about what it registers, for what one entry has to go by.
@@ -1538,7 +1533,7 @@ pub fn registration_refusal(
             let parts: Vec<&str> = rest.split('\\').collect();
             let names_a_file = parts.len() == 4 && TYPE_LIBRARY_BUILDS.contains(&parts[3]);
             (names_a_file && !restored_type_library_file(rest, entry, map, expand))
-                .then(|| "its type library is not a file this package installs".to_owned())
+                .then(|| t!("core-policy-type-library"))
         });
     }
     if let Some(name) = of_unit(APP_ID_PREFIX) {
@@ -1547,9 +1542,7 @@ pub fn registration_refusal(
     if let Some(name) = of_unit(APPLICATIONS_PREFIX)
         && !known.file_names.contains(&name)
     {
-        return Some(format!(
-            "it would change how {name} is opened, which this package does not install"
-        ));
+        return Some(t!("core-policy-application-opened", name = name));
     }
     if of_unit(EVENT_LOG_PREFIX).is_some() {
         let message_files: Vec<&&RegistryEntry> = entries
@@ -1561,7 +1554,7 @@ pub fn registration_refusal(
             })
             .collect();
         if message_files.is_empty() {
-            return Some("an event log source has to take its messages from a file".to_owned());
+            return Some(t!("core-policy-event-log-no-file"));
         }
         return message_files
             .iter()
@@ -1602,16 +1595,15 @@ fn com_class_refusal(
                 class_server_says(rest, entry, map, expand, windows_dir),
                 ClassServerSays::SomethingElse
             )
-            .then(|| "it runs something that is not a file this package installs".to_owned());
+            .then(|| t!("core-policy-com-runs-other"));
         }
         if !is_default_value(entry.value_name.as_deref()) {
             return None;
         }
         let text = text_on_target(entry.value_data.as_deref().unwrap_or_default(), map, expand);
         if COM_REDIRECT_KEYS.contains(&subkey) {
-            return (!known.classes.contains(&class_named_by(&text))).then(|| {
-                "it would make this class something this package does not install".to_owned()
-            });
+            return (!known.classes.contains(&class_named_by(&text)))
+                .then(|| t!("core-policy-com-redirect"));
         }
         if !COM_SERVER_KEYS.contains(&subkey) || text.trim().is_empty() {
             return None;
@@ -1619,10 +1611,7 @@ fn com_class_refusal(
         let restored = command_runs_restored_file(&text, map);
         let windows_own =
             subkey != COM_LOCAL_SERVER_KEY && is_a_com_host_of_windows(&text, windows_dir);
-        (!restored && !windows_own).then(|| {
-            "it runs something that is neither a file this package installs nor part of Windows"
-                .to_owned()
-        })
+        (!restored && !windows_own).then(|| t!("core-policy-com-server"))
     })
 }
 
@@ -1659,11 +1648,7 @@ fn interface_refusal(
         && stubs.iter().all(|stub| {
             known.classes.contains(stub) || (by_marshaler(stub) && library_is_restored)
         });
-    (!every_stub_is_fine && !interface.is_empty()).then(|| {
-        "it would decide how calls to an interface are made, with something this package does not \
-         install"
-            .to_owned()
-    })
+    (!every_stub_is_fine && !interface.is_empty()).then(|| t!("core-policy-interface"))
 }
 
 /// An AppID is how a class is started and who may ask. It can name a surrogate and a service to
@@ -1679,9 +1664,7 @@ fn app_id_refusal(
     expand: &dyn Fn(&str) -> String,
 ) -> Option<String> {
     if !is_braced_id(name) && !known.file_names.contains(name) {
-        return Some(format!(
-            "it would change how {name} is started, which this package does not install"
-        ));
+        return Some(t!("core-policy-app-id-started", name = name));
     }
     entries.iter().find_map(|entry| {
         let value = entry
@@ -1695,17 +1678,13 @@ fn app_id_refusal(
                 && !map.is_restored_file(Path::new(
                     text_on_target(text, map, expand).trim_matches('"'),
                 )))
-            .then(|| "it would be hosted by a program this package does not install".to_owned()),
+            .then(|| t!("core-policy-app-id-surrogate")),
             APP_ID_SERVICE_VALUE => (!restored_services.contains(&text.to_ascii_lowercase()))
-                .then(|| "it would run in a service this package does not restore".to_owned()),
+                .then(|| t!("core-policy-app-id-service")),
             APP_ID_RUN_AS_VALUE => (!text.eq_ignore_ascii_case(INTERACTIVE_USER))
-                .then(|| "it would run as an account of its own".to_owned()),
-            APP_ID_LINK_VALUE => {
-                (!is_braced_id(text)).then(|| "it does not name an AppID".to_owned())
-            }
-            other if APP_ID_REMOTE_VALUES.contains(&other) => {
-                Some("it would run somewhere other than this PC".to_owned())
-            }
+                .then(|| t!("core-policy-app-id-run-as")),
+            APP_ID_LINK_VALUE => (!is_braced_id(text)).then(|| t!("core-policy-app-id-link")),
+            other if APP_ID_REMOTE_VALUES.contains(&other) => Some(t!("core-policy-app-id-remote")),
             _ => None,
         }
     })
@@ -1721,17 +1700,17 @@ fn odbc_driver_refusal(
     expand: &dyn Fn(&str) -> String,
 ) -> Option<String> {
     if ODBC_RESERVED_NAMES.contains(&name) {
-        return Some("that is ODBC's own setting and not a driver".to_owned());
+        return Some(t!("core-policy-odbc-own-driver"));
     }
     if !known.odbc_drivers.contains(name) {
-        return Some("its driver is not a file this package installs".to_owned());
+        return Some(t!("core-policy-odbc-driver-not-installed"));
     }
     entries.iter().find_map(|entry| {
         let is_a_file = entry.value_name.as_deref().is_some_and(|value| {
             ODBC_DRIVER_FILE_VALUES.contains(&value.to_ascii_lowercase().as_str())
         }) && normalized_key(&entry.key_path).ends_with(&format!("\\{name}"));
         (is_a_file && !odbc_file_is_restored(entry, map, expand))
-            .then(|| "it would load a file this package does not install".to_owned())
+            .then(|| t!("core-policy-loads-other-file"))
     })
 }
 
@@ -1746,10 +1725,10 @@ fn odbc_source_refusal(
     windows_dir: &Path,
 ) -> Option<String> {
     if ODBC_RESERVED_NAMES.contains(&name) {
-        return Some("that is ODBC's own setting and not a data source".to_owned());
+        return Some(t!("core-policy-odbc-own-source"));
     }
     if !known.odbc_sources.contains(name) {
-        return Some("it lists a data source this package does not have".to_owned());
+        return Some(t!("core-policy-odbc-source-missing"));
     }
     entries.iter().find_map(|entry| {
         let key = normalized_key(&entry.key_path);
@@ -1769,12 +1748,10 @@ fn odbc_source_refusal(
                 || known
                     .odbc_drivers
                     .contains(&text.trim().to_ascii_lowercase());
-            return (!fine).then(|| {
-                "its driver is neither a file this package installs nor part of Windows".to_owned()
-            });
+            return (!fine).then(|| t!("core-policy-odbc-source-driver"));
         }
         (ODBC_SOURCE_FILE_VALUES.contains(&value.as_str()) && !map.is_restored_file(path))
-            .then(|| "it would load a file this package does not install".to_owned())
+            .then(|| t!("core-policy-loads-other-file"))
     })
 }
 
@@ -1792,10 +1769,7 @@ pub fn registered_value_refusal(
         || text_on_target(entry.value_data.as_deref().unwrap_or_default(), map, expand);
     let is_default = is_default_value(entry.value_name.as_deref());
     let holds_something = entry.value_kind != Some(RegistryValueKind::None);
-    let extension_refusal = || {
-        "it would load a shell extension that is not a file this package installs into Explorer"
-            .to_owned()
-    };
+    let extension_refusal = || t!("core-policy-shell-extension");
     let is_about_how_things_start = key.starts_with(CLASSES_PREFIX)
         || key.starts_with(&format!("{CLIENTS_KEY}\\"))
         || key.starts_with(EVENT_LOG_PREFIX)
@@ -1824,11 +1798,11 @@ pub fn registered_value_refusal(
             None | Some(RegistryValueKind::String | RegistryValueKind::ExpandString)
         );
         if is_read_as_text && holds_something && !is_text {
-            return Some("what it holds is not the text it would be read as".to_owned());
+            return Some(t!("core-policy-not-text"));
         }
         // Windows opens an icon just by showing it, which hands a server who is looking.
         if is_text && is_network_path(&default_text()) {
-            return Some("it names a place on the network".to_owned());
+            return Some(t!("core-policy-network-place"));
         }
     }
 
@@ -1868,28 +1842,24 @@ pub fn registered_value_refusal(
         }
     }
     if key == FONTS_KEY {
-        return (!map.is_restored_file(Path::new(default_text().trim()))).then(|| {
-            "it would register a font this package does not install, or one in the Windows folder"
-                .to_owned()
-        });
+        return (!map.is_restored_file(Path::new(default_text().trim())))
+            .then(|| t!("core-policy-font"));
     }
     if key == COMPATIBILITY_LAYERS_KEY {
         let program = text_on_target(entry.value_name.as_deref().unwrap_or_default(), map, expand);
-        return (!map.is_restored_file(Path::new(program.trim()))).then(|| {
-            "it would change how a program runs that this package does not install".to_owned()
-        });
+        return (!map.is_restored_file(Path::new(program.trim())))
+            .then(|| t!("core-policy-compatibility"));
     }
     if key == REGISTERED_APPLICATIONS_KEY {
         let capabilities = normalized_key(entry.value_data.as_deref().unwrap_or_default());
-        return (!known.keys.contains(&capabilities))
-            .then(|| "it lists an app whose details are not in this package".to_owned());
+        return (!known.keys.contains(&capabilities)).then(|| t!("core-policy-capabilities"));
     }
     if let Some(rest) = key.strip_prefix(&format!("{CLIENTS_KEY}\\"))
         && !rest.contains('\\')
         && is_default
         && holds_something
     {
-        return Some("it would change which program opens things by default".to_owned());
+        return Some(t!("core-policy-default-program"));
     }
     if let Some(class) = key.strip_prefix(CLASSES_PREFIX)
         && !class.contains('\\')
@@ -1898,9 +1868,8 @@ pub fn registered_value_refusal(
             .as_deref()
             .is_some_and(|name| name.eq_ignore_ascii_case(URL_PROTOCOL_VALUE))
     {
-        return (!known.classes_that_run_it.contains(class)).then(|| {
-            "it says it is a link type, and opens with nothing this package installs".to_owned()
-        });
+        return (!known.classes_that_run_it.contains(class))
+            .then(|| t!("core-policy-url-protocol"));
     }
     if key.starts_with(CLASSES_PREFIX) || key.starts_with(&format!("{CLIENTS_KEY}\\")) {
         return class_command_refusal(&key, entry, map, known, expand);
@@ -1927,18 +1896,16 @@ fn class_command_refusal(
         .unwrap_or_default()
         .to_ascii_lowercase();
     if key.contains(SHELL_SEGMENT) && VERB_HANDLER_VALUES.contains(&name.as_str()) {
-        return (!known.classes.contains(&class_named_by(&text))).then(|| {
-            "it adds a command handled by something this package does not install".to_owned()
-        });
+        return (!known.classes.contains(&class_named_by(&text)))
+            .then(|| t!("core-policy-command-handler"));
     }
     if key.contains(SHELL_SEGMENT) && key.ends_with(OPEN_COMMAND_TAIL) {
         if name == ELEVATED_COMMAND_VALUE {
-            return (!command_runs_restored_file(&text, map)).then(|| {
-                "it adds a command that runs something this package does not install".to_owned()
-            });
+            return (!command_runs_restored_file(&text, map))
+                .then(|| t!("core-policy-command-runs-other"));
         }
         if name == INSTALLER_COMMAND_VALUE {
-            return Some("it would run what only Windows Installer can read".to_owned());
+            return Some(t!("core-policy-installer-command"));
         }
     }
     let class = key.strip_prefix(CLASSES_PREFIX).unwrap_or_default();
@@ -1949,7 +1916,7 @@ fn class_command_refusal(
         && entry.value_kind != Some(RegistryValueKind::None)
     {
         return (!known.classes.contains(&class_named_by(&text)))
-            .then(|| "it would create a class this package does not install".to_owned());
+            .then(|| t!("core-policy-creates-class"));
     }
     if !key.contains(SHELL_SEGMENT)
         || !key.ends_with(OPEN_COMMAND_TAIL)
@@ -1964,10 +1931,10 @@ fn class_command_refusal(
         return None;
     }
     if must_run_it {
-        return Some("it opens links with something this package does not install".to_owned());
+        return Some(t!("core-policy-opens-links"));
     }
     (!command_gives_a_restored_file_to_windows(&text, map, &known.windows_dir))
-        .then(|| "it opens files with something this package does not install".to_owned())
+        .then(|| t!("core-policy-opens-files"))
 }
 
 /// Whether a command is a program of Windows' given a file this package installs, straight after
@@ -2197,7 +2164,11 @@ pub fn registration_of(entry: &RegistryEntry) -> Option<Registration> {
     if let Some(at) = class.find(SHELL_EXTENSIONS_SEGMENT) {
         let by_value = class_named_by(entry.value_data.as_deref().unwrap_or_default());
         return Some(Registration::ShellExtension {
-            name: format!("{} on {}", leaf, &original_class[..at]),
+            name: t!(
+                "core-policy-shell-extension-name",
+                handler = leaf.as_str(),
+                class = &original_class[..at]
+            ),
             class: Some(if is_braced_id(&by_value) {
                 by_value
             } else {
@@ -2262,7 +2233,7 @@ pub fn firewall_refusal(
             .chars()
             .any(|character| character.is_control() || character == '"')
     {
-        return Some("its name is not one this can pass on".to_owned());
+        return Some(t!("core-policy-firewall-name"));
     }
     if rule.description.as_deref().is_some_and(|text| {
         text.len() > FIREWALL_DESCRIPTION_LIMIT
@@ -2270,27 +2241,27 @@ pub fn firewall_refusal(
                 .chars()
                 .any(|character| character.is_control() || character == '"')
     }) {
-        return Some("its description is not one this can pass on".to_owned());
+        return Some(t!("core-policy-firewall-description"));
     }
     if rule.program.as_os_str().is_empty() {
-        return Some("it applies to every program, and a rule can only be for one".to_owned());
+        return Some(t!("core-policy-firewall-every-program"));
     }
     if map.runnable_destination_of(&rule.program).is_none() {
-        return Some(format!(
-            "it is for {}, which this package does not install",
-            rule.program.display()
+        return Some(t!(
+            "core-policy-firewall-program",
+            path = rule.program.display().to_string()
         ));
     }
     if !FIREWALL_DIRECTIONS.contains(&rule.direction.to_ascii_lowercase().as_str()) {
-        return Some("it does not say a direction this can set".to_owned());
+        return Some(t!("core-policy-firewall-direction"));
     }
     if !FIREWALL_ACTIONS.contains(&rule.action.to_ascii_lowercase().as_str()) {
-        return Some("it would override other rules, which no app's rule should".to_owned());
+        return Some(t!("core-policy-firewall-action"));
     }
     if let Some(reach) = rule.not_carried.first() {
-        return Some(format!(
-            "it says {reach}, which could not be set as it was, or would weaken what other rules \
-             do"
+        return Some(t!(
+            "core-policy-firewall-not-carried",
+            setting = reach.as_str()
         ));
     }
     if rule
@@ -2298,7 +2269,7 @@ pub fn firewall_refusal(
         .as_deref()
         .is_some_and(|service| !restored_services.contains(&service.to_ascii_lowercase()))
     {
-        return Some("it is for a service this package does not restore".to_owned());
+        return Some(t!("core-policy-firewall-service"));
     }
     let is_word = |text: &str| {
         !text.is_empty()
@@ -2318,7 +2289,7 @@ pub fn firewall_refusal(
             .profiles
             .iter()
             .all(|profile| FIREWALL_PROFILES.contains(&profile.to_ascii_lowercase().as_str()));
-    (!parts_fine).then(|| "part of it is not what a firewall rule can say".to_owned())
+    (!parts_fine).then(|| t!("core-policy-firewall-parts"))
 }
 
 /// What tells rules of one name, way, and program apart: an app can have one for TCP and one for
@@ -2568,24 +2539,20 @@ pub fn program_placement_refusal(
         && !earlier_install_here
         && is_runnable_file(destination)
         && !path_is_strictly_inside(destination, target_root))
-    .then(|| {
-        "that folder was already there, outside the install location, and nothing says it is this \
-         app's, so no program goes in it"
-            .to_owned()
-    })
+    .then(|| t!("core-policy-folder-already-there"))
 }
 
 /// Why an environment variable must not be restored, if so.
 pub fn environment_refusal(name: &str) -> Option<String> {
     if name.is_empty() || name.contains('=') || name.chars().any(char::is_control) {
-        return Some("its name is not a valid variable name".to_owned());
+        return Some(t!("core-policy-variable-name"));
     }
     let lower = name.to_ascii_lowercase();
     (REFUSED_ENVIRONMENT_VARIABLES.contains(&lower.as_str())
         || REFUSED_ENVIRONMENT_PREFIXES
             .iter()
             .any(|prefix| lower.starts_with(prefix)))
-    .then(|| "Windows and other programs rely on this variable".to_owned())
+    .then(|| t!("core-policy-variable-relied-on"))
 }
 
 /// What a package says a task runs as when it ran as a person. They are nobody on another PC, and
@@ -2709,30 +2676,30 @@ pub fn task_refusal(
                 )
         })
     {
-        return Some("its name is not one Windows accepts".to_owned());
+        return Some(t!("core-policy-task-name"));
     }
     if !task_path.starts_with('\\')
         || !task_path.ends_with('\\')
         || task_path.split('\\').any(|part| part == "..")
     {
-        return Some("its folder is not one Windows accepts".to_owned());
+        return Some(t!("core-policy-task-folder"));
     }
     if task_path
         .to_ascii_lowercase()
         .starts_with(WINDOWS_TASK_FOLDER)
     {
-        return Some("it would replace one of Windows' own tasks".to_owned());
+        return Some(t!("core-policy-task-windows"));
     }
     if definition.has_other_actions {
-        return Some("it does something other than run a program".to_owned());
+        return Some(t!("core-policy-task-other-action"));
     }
     if definition.commands.is_empty() {
-        return Some("it names no program to run".to_owned());
+        return Some(t!("core-policy-task-no-program"));
     }
     definition.commands.iter().find_map(|command| {
         let path = path_as_read_here(command, expand);
         (!map.is_restored_file(Path::new(&path)))
-            .then(|| format!("it runs something this package does not install: {path}"))
+            .then(|| t!("core-policy-task-runs-other", path = path.as_str()))
     })
 }
 
@@ -2758,19 +2725,15 @@ pub(crate) fn path_as_read_here(text: &str, expand: &dyn Fn(&str) -> String) -> 
 /// outside the install location. `--force` does not change this.
 pub fn existing_task_refusal(existing_xml: &str, target_root: &Path) -> Option<String> {
     let Ok(definition) = read_task_definition(existing_xml) else {
-        return Some("a task with this name already exists and could not be read".to_owned());
+        return Some(t!("core-policy-task-exists-unreadable"));
     };
     if definition.has_other_actions || definition.commands.is_empty() {
-        return Some("a task with this name already exists and does not run the app".to_owned());
+        return Some(t!("core-policy-task-exists-other"));
     }
     definition.commands.iter().find_map(|command| {
         let path = command.trim().trim_matches('"');
-        (!path_is_strictly_inside(Path::new(path), target_root)).then(|| {
-            format!(
-                "a task with this name already exists and runs {path}, which is not from an \
-                 earlier install here"
-            )
-        })
+        (!path_is_strictly_inside(Path::new(path), target_root))
+            .then(|| t!("core-policy-task-exists-runs", path = path))
     })
 }
 
@@ -2809,7 +2772,7 @@ pub fn shortcut_placement(
     folders: &KnownFolders,
 ) -> std::result::Result<ShortcutPlacement, String> {
     if !path_has_extension(original, SHORTCUT_EXTENSION) {
-        return Err("it is not a .lnk shortcut".to_owned());
+        return Err(t!("core-policy-shortcut-not-lnk"));
     }
     let text = original.to_string_lossy().replace('/', "\\");
     let lower = text.to_ascii_lowercase();
@@ -2818,11 +2781,11 @@ pub fn shortcut_placement(
     let (marker_at, marker_len, is_start_menu) = match (in_start_menu, on_desktop) {
         (Some(position), _) => (position, START_MENU_MARKER.len(), true),
         (None, Some(position)) => (position, DESKTOP_MARKER.len(), false),
-        (None, None) => return Err("it is not in a Start Menu or on a Desktop".to_owned()),
+        (None, None) => return Err(t!("core-policy-shortcut-place")),
     };
     let tail = safe_relative_path(Path::new(&text[marker_at + marker_len..]));
     if has_reserved_device_name(&tail) || has_short_name_alias(&tail) {
-        return Err("its path uses a name that cannot be checked".to_owned());
+        return Err(t!("core-policy-short-name"));
     }
     let for_all_users = if is_start_menu {
         lower[..marker_at].contains(r"\programdata\")
@@ -2835,7 +2798,7 @@ pub fn shortcut_placement(
         (false, true) => folders.common_desktop.as_ref(),
         (false, false) => folders.user_desktop.as_ref(),
     }
-    .ok_or_else(|| "this PC has no such folder for it".to_owned())?;
+    .ok_or_else(|| t!("core-policy-shortcut-no-folder"))?;
     let tail_text = tail.to_string_lossy().to_ascii_lowercase();
     Ok(ShortcutPlacement {
         root: root.clone(),
@@ -2873,7 +2836,7 @@ fn has_short_name_alias(path: &Path) -> bool {
 /// location the same relative path is harmless, and this does not apply.
 pub fn data_location_refusal(tail: &Path) -> Option<String> {
     if has_short_name_alias(tail) {
-        return Some("its path uses a name that cannot be checked".to_owned());
+        return Some(t!("core-policy-short-name"));
     }
     let lower = format!(
         "{}\\",
@@ -2882,18 +2845,18 @@ pub fn data_location_refusal(tail: &Path) -> Option<String> {
             .replace('/', "\\")
     );
     if lower.contains(STARTUP_FOLDER) {
-        return Some("it would go in a Startup folder, and run at every sign-in".to_owned());
+        return Some(t!("core-policy-data-startup"));
     }
     if REFUSED_DOCUMENTS_FOLDERS
         .iter()
         .any(|folder| lower.starts_with(folder))
     {
-        return Some("it would go where PowerShell runs what it finds when it starts".to_owned());
+        return Some(t!("core-policy-data-powershell"));
     }
     REFUSED_DATA_FOLDERS
         .iter()
         .any(|folder| lower.starts_with(folder))
-        .then(|| "it would go in a folder that belongs to Windows".to_owned())
+        .then(|| t!("core-policy-data-windows"))
 }
 
 /// Where a license file or store goes. Under the install location when its path maps there,
@@ -2919,9 +2882,7 @@ pub fn license_destination(
     if path_is_strictly_inside(&rewritten, map.target_root()) {
         return Ok(rewritten);
     }
-    real().unwrap_or_else(|| {
-        Err("it is outside the install location and every known data folder".to_owned())
-    })
+    real().unwrap_or_else(|| Err(t!("core-policy-license-outside")))
 }
 
 /// What a program is to Windows, by the machine its headers name.
@@ -2969,22 +2930,22 @@ pub fn architecture_from_name(name: &str) -> AppArchitecture {
     }
 }
 
-fn architecture_text(architecture: &AppArchitecture) -> &'static str {
+fn architecture_text(architecture: &AppArchitecture) -> String {
     match architecture {
-        AppArchitecture::X86 => "32-bit x86",
-        AppArchitecture::X64 => "x64",
-        AppArchitecture::Arm64 => "Arm64",
-        AppArchitecture::Unknown => "an unknown architecture",
+        AppArchitecture::X86 => t!("core-policy-architecture-x86"),
+        AppArchitecture::X64 => t!("core-policy-architecture-x64"),
+        AppArchitecture::Arm64 => t!("core-policy-architecture-arm64"),
+        AppArchitecture::Unknown => t!("core-policy-architecture-unknown"),
     }
 }
 
 fn machine_text(machine: u16) -> String {
     match machine {
-        MACHINE_X86 => "32-bit x86".to_owned(),
-        MACHINE_X64 => "x64".to_owned(),
-        MACHINE_ARM64 => "Arm64".to_owned(),
-        MACHINE_ARM32 => "32-bit Arm".to_owned(),
-        other => format!("machine type {other:#06x}"),
+        MACHINE_X86 => t!("core-policy-architecture-x86"),
+        MACHINE_X64 => t!("core-policy-architecture-x64"),
+        MACHINE_ARM64 => t!("core-policy-architecture-arm64"),
+        MACHINE_ARM32 => t!("core-policy-architecture-arm32"),
+        other => t!("core-policy-machine-type", code = format!("{other:#06x}")),
     }
 }
 
@@ -3052,15 +3013,16 @@ fn leaf_name(path: &Path) -> String {
 }
 
 fn some_programs(programs: &[&ProgramNeed]) -> String {
-    let mut names: Vec<String> = programs
+    let names: Vec<String> = programs
         .iter()
         .take(MOST_PROGRAMS_NAMED)
         .map(|program| leaf_name(&program.path))
         .collect();
-    if programs.len() > names.len() {
-        names.push(format!("and {} more", programs.len() - names.len()));
+    let named = winappmigrator_i18n::join_list(&names);
+    match programs.len() - names.len() {
+        0 => named,
+        more => t!("core-policy-names-and-more", names = named, count = more),
     }
-    names.join(", ")
 }
 
 /// What an app needs to run, whatever else it has: its main program, its services, and its drivers.
@@ -3090,29 +3052,18 @@ pub fn platform_fit(
     let mut fit = PlatformFit::default();
     let here = architecture_text(&windows.architecture);
     if programs.is_empty() {
-        fit.warnings.push(
-            "This installer does not say what its programs need, so whether they can run on this \
-             PC was not checked."
-                .to_owned(),
-        );
+        fit.warnings.push(t!("core-policy-fit-programs-not-said"));
     }
     if windows.architecture == AppArchitecture::Unknown && !programs.is_empty() {
-        fit.warnings.push(
-            "Which architecture this PC is could not be told, so whether this app's programs can \
-             run on it was not checked."
-                .to_owned(),
-        );
+        fit.warnings
+            .push(t!("core-policy-fit-architecture-not-told"));
     }
     if !programs.is_empty()
         && !programs
             .iter()
             .any(|program| program.role == ProgramRole::Main)
     {
-        fit.warnings.push(
-            "This installer does not say what its main program needs, so what is said here goes \
-             by the rest of what it has."
-                .to_owned(),
-        );
+        fit.warnings.push(t!("core-policy-fit-main-not-said"));
     }
     let starts_of = |program: &ProgramNeed| {
         if program.role == ProgramRole::Driver {
@@ -3126,11 +3077,11 @@ pub fn platform_fit(
         .iter()
         .find(|program| program.role == ProgramRole::Driver && starts_of(program) == Starts::Not)
     {
-        fit.refusal = Some(format!(
-            "its driver {} is built for {}, and this PC is {here}. A driver has to match Windows \
-             exactly, so this app cannot run here",
-            leaf_name(&driver.path),
-            machine_text(driver.machine),
+        fit.refusal = Some(t!(
+            "core-policy-fit-driver",
+            driver = leaf_name(&driver.path),
+            built_for = machine_text(driver.machine),
+            here = here.as_str(),
         ));
         return fit;
     }
@@ -3139,26 +3090,28 @@ pub fn platform_fit(
         .filter(|program| starts_of(program) == Starts::Not)
         .collect();
     if let Some(program) = cannot_start.iter().find(|program| is_essential(program)) {
-        fit.refusal = Some(format!(
-            "{} is built for {}, and this PC is {here}, so Windows would not start it",
-            leaf_name(&program.path),
-            machine_text(program.machine),
+        fit.refusal = Some(t!(
+            "core-policy-fit-program",
+            program = leaf_name(&program.path),
+            built_for = machine_text(program.machine),
+            here = here.as_str(),
         ));
         return fit;
     }
     let has_main = programs.iter().any(is_essential);
     if !programs.is_empty() && !has_main && cannot_start.len() == programs.len() {
-        fit.refusal = Some(format!(
-            "none of its programs can start on this PC, which is {here}: {}",
-            some_programs(&cannot_start),
+        fit.refusal = Some(t!(
+            "core-policy-fit-none-start",
+            here = here.as_str(),
+            programs = some_programs(&cannot_start),
         ));
         return fit;
     }
     if !cannot_start.is_empty() {
-        fit.warnings.push(format!(
-            "Some of this app's programs are built for another architecture and will not start on \
-             this PC, which is {here}: {}. The rest of the app can, so this may not matter.",
-            some_programs(&cannot_start),
+        fit.warnings.push(t!(
+            "core-policy-fit-some-other-architecture",
+            here = here.as_str(),
+            programs = some_programs(&cannot_start),
         ));
     }
     let emulated: Vec<&ProgramNeed> = programs
@@ -3166,10 +3119,10 @@ pub fn platform_fit(
         .filter(|program| starts_of(program) == Starts::Emulated)
         .collect();
     if !emulated.is_empty() {
-        fit.warnings.push(format!(
-            "This PC is {here}, so Windows would run these through an emulator: {}. Most programs \
-             are fine that way, and some are not.",
-            some_programs(&emulated),
+        fit.warnings.push(t!(
+            "core-policy-fit-emulated",
+            here = here.as_str(),
+            programs = some_programs(&emulated),
         ));
     }
     if let Some(version) = windows.version {
@@ -3178,22 +3131,22 @@ pub fn platform_fit(
             .filter(|program| (program.min_windows_major, program.min_windows_minor) > version)
             .collect();
         if let Some(program) = too_new.iter().find(|program| is_essential(program)) {
-            fit.refusal = Some(format!(
-                "{} says it needs Windows {}.{} or newer, and this PC runs {}.{}, so Windows would \
-                 not start it",
-                leaf_name(&program.path),
-                program.min_windows_major,
-                program.min_windows_minor,
-                version.0,
-                version.1,
+            // Versions are names, such as 6.1, and not amounts, so they are given as written.
+            fit.refusal = Some(t!(
+                "core-policy-fit-needs-newer",
+                program = leaf_name(&program.path),
+                needs = format!(
+                    "{}.{}",
+                    program.min_windows_major, program.min_windows_minor
+                ),
+                runs = format!("{}.{}", version.0, version.1),
             ));
             return fit;
         }
         if !too_new.is_empty() {
-            fit.warnings.push(format!(
-                "Some of this app's programs say they need a newer Windows than this and will not \
-                 start here: {}.",
-                some_programs(&too_new),
+            fit.warnings.push(t!(
+                "core-policy-fit-some-need-newer",
+                programs = some_programs(&too_new),
             ));
         }
     }
@@ -3201,16 +3154,13 @@ pub fn platform_fit(
         source.and_then(|source| source.windows_build),
         windows.build,
     ) {
-        (Some(from), Some(here)) if here < from => fit.warnings.push(format!(
-            "This app was on Windows build {from}, and this PC runs build {here}. Its programs say \
-             they can start on this Windows, so it may work, but what it relied on there may not \
-             be here."
+        // A build is a name, such as 22631, and is given as written, without a thousands mark.
+        (Some(from), Some(here)) if here < from => fit.warnings.push(t!(
+            "core-policy-fit-older-build",
+            from_build = from.to_string(),
+            this_build = here.to_string(),
         )),
-        (_, None) => fit.warnings.push(
-            "Which build of Windows this is could not be told, so it was not compared with the \
-             one this app was on."
-                .to_owned(),
-        ),
+        (_, None) => fit.warnings.push(t!("core-policy-fit-build-not-told")),
         _ => {}
     }
     fit

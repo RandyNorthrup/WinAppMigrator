@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use tempfile::TempDir;
+use winappmigrator_i18n::t;
 
 use crate::journal::machine_state_root;
 use crate::path_utils::{
@@ -204,9 +205,9 @@ pub fn hold_real_folder(folder: &Path) -> io::Result<File> {
     if hold.metadata()?.is_dir() {
         return Ok(hold);
     }
-    Err(io::Error::other(format!(
-        "{} is a link or a file, not a folder",
-        folder.display()
+    Err(io::Error::other(t!(
+        "core-privilege-not-a-folder",
+        path = folder.display().to_string()
     )))
 }
 
@@ -239,10 +240,10 @@ pub fn ensure_protected_folder(folder: &Path) -> io::Result<()> {
         return Ok(());
     }
     fs::remove_dir(folder).map_err(|error| {
-        io::Error::other(format!(
-            "{} was not made by WinAppMigrator, and others can change what is in it. An \
-             administrator should check it and remove it: {error}",
-            folder.display()
+        io::Error::other(t!(
+            "core-privilege-not-made-here",
+            path = folder.display().to_string(),
+            error = error.to_string()
         ))
     })?;
     fs::create_dir(folder)?;
@@ -274,10 +275,9 @@ pub fn refuse_what_others_put_in(folder: &Path) -> io::Result<()> {
     if only_administrators_made_what_is_in(folder) {
         return Ok(());
     }
-    Err(io::Error::other(format!(
-        "{} has something in it that was not made by WinAppMigrator, and others can change it. An \
-         administrator should check it and remove it",
-        folder.display()
+    Err(io::Error::other(t!(
+        "core-privilege-others-put-something-in",
+        path = folder.display().to_string()
     )))
 }
 
@@ -363,9 +363,9 @@ pub(crate) fn pin_held_folder(folder: &Path, hold: &File) -> io::Result<File> {
     if in_place {
         return Ok(pin);
     }
-    Err(io::Error::other(format!(
-        "{} became a link while it was being used",
-        folder.display()
+    Err(io::Error::other(t!(
+        "core-privilege-became-a-link-in-use",
+        path = folder.display().to_string()
     )))
 }
 
@@ -385,9 +385,9 @@ fn read_with_folder_pinned(folder: &Path, hold: &File) -> io::Result<()> {
     let pin = pin_held_folder(folder, hold)?;
     let result = confirm_administrators_only(folder);
     if !hold.metadata()?.is_dir() {
-        return Err(io::Error::other(format!(
-            "{} became a link while it was being looked at",
-            folder.display()
+        return Err(io::Error::other(t!(
+            "core-privilege-became-a-link-looked-at",
+            path = folder.display().to_string()
         )));
     }
     drop(pin);
@@ -408,16 +408,24 @@ pub fn allow_users_to_start(file: &Path) -> io::Result<()> {
     if output.status.success() {
         return Ok(());
     }
-    Err(io::Error::other(format!(
-        "could not let users start {}: {}{}",
-        file.display(),
-        String::from_utf8_lossy(&output.stdout).trim(),
-        String::from_utf8_lossy(&output.stderr).trim()
+    Err(io::Error::other(t!(
+        "core-privilege-users-cannot-start",
+        path = file.display().to_string(),
+        said = what_a_tool_said(&output)
     )))
 }
 
 fn unknown_elevation() -> io::Error {
-    io::Error::other("could not tell whether this process is elevated")
+    io::Error::other(t!("core-privilege-elevation-unknown"))
+}
+
+/// What a tool printed, as it printed it, to go with saying it failed.
+fn what_a_tool_said(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
 }
 
 /// Make a freshly created staging folder writable only by administrators, so a process
@@ -473,11 +481,10 @@ fn run_icacls(folder: &Path, arguments: Vec<OsString>) -> io::Result<()> {
     if output.status.success() {
         return Ok(());
     }
-    Err(io::Error::other(format!(
-        "could not restrict {} to administrators: {}{}",
-        folder.display(),
-        String::from_utf8_lossy(&output.stdout).trim(),
-        String::from_utf8_lossy(&output.stderr).trim()
+    Err(io::Error::other(t!(
+        "core-privilege-cannot-restrict",
+        path = folder.display().to_string(),
+        said = what_a_tool_said(&output)
     )))
 }
 
@@ -504,12 +511,14 @@ fn confirm_administrators_only(folder: &Path) -> io::Result<()> {
     if output.status.success() && sddl_is_administrators_only(sddl.trim()) {
         return Ok(());
     }
-    Err(io::Error::other(format!(
-        "{} could not be restricted to administrators, and its drive may not keep permissions: \
-         {}{}",
-        folder.display(),
-        sddl.trim(),
-        String::from_utf8_lossy(&output.stderr).trim()
+    Err(io::Error::other(t!(
+        "core-privilege-not-restricted",
+        path = folder.display().to_string(),
+        said = format!(
+            "{}{}",
+            sddl.trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
     )))
 }
 
@@ -539,9 +548,9 @@ fn sddl_is_administrators_only(sddl: &str) -> bool {
 /// before the permissions changed, and its own permissions may still be open.
 fn refuse_anything_already_inside(folder: &Path) -> io::Result<()> {
     if fs::read_dir(folder)?.next().is_some() {
-        return Err(io::Error::other(format!(
-            "another process wrote to {} before it could be protected",
-            folder.display()
+        return Err(io::Error::other(t!(
+            "core-privilege-written-to-first",
+            path = folder.display().to_string()
         )));
     }
     Ok(())
@@ -628,7 +637,7 @@ pub(crate) fn protected_temp_for_a_tool() -> io::Result<Option<ProtectedFolder>>
         return Ok(None);
     }
     let root = machine_state_root()
-        .ok_or_else(|| io::Error::other("Windows does not say where ProgramData is"))?;
+        .ok_or_else(|| io::Error::other(t!("core-privilege-no-program-data")))?;
     ensure_protected_folder(&root)?;
     let temp = tool_temp_root_in(&root);
     ensure_protected_folder(&temp)?;

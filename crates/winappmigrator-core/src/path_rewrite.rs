@@ -13,6 +13,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use winappmigrator_i18n::t;
+
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{
     MAX_EMPTY_FOLDERS, data_location_of, is_external_package_path, restore_destination_for_entry,
@@ -45,8 +47,6 @@ fn folded_path(path: &Path) -> String {
 const MOST_BYTES_LOOKED_AT_IN_A_VALUE: usize = 32 * 1024 * 1024;
 /// The same for all the values of a package together.
 const MOST_BYTES_LOOKED_AT: u64 = 2 * 1024 * 1024 * 1024;
-const TOO_MUCH_TO_LOOK_THROUGH: &str =
-    "this package holds too much in its settings for what they name to be checked";
 
 /// What it would take to look through what a package holds.
 #[derive(Default)]
@@ -218,9 +218,9 @@ impl RestoreMap {
             }
         }
         if cost.too_much() {
-            return Err(WinAppMigratorError::InvalidInput(
-                TOO_MUCH_TO_LOOK_THROUGH.to_owned(),
-            ));
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-rewrite-too-much-to-look-through"
+            )));
         }
         Ok(())
     }
@@ -398,7 +398,7 @@ impl RestoreMap {
     /// to one place in the document. Windows does not write it in a task's definition.
     pub fn rewrite_xml(&self, xml: &str) -> std::result::Result<String, String> {
         if xml.contains("<![CDATA[") {
-            return Err("it holds a CDATA section".to_owned());
+            return Err(t!("core-rewrite-cdata"));
         }
         let document = roxmltree::Document::parse(xml).map_err(|error| error.to_string())?;
         let mut output = String::with_capacity(xml.len());
