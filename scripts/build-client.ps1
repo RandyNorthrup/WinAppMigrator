@@ -11,6 +11,8 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 
 rustup component add rust-src | Out-Null
 $env:RUSTC_BOOTSTRAP = '1'
+# Only the client's own words and the shared ones go into it, in every language (see crates/winappmigrator-i18n/build.rs).
+$env:WINAPPMIGRATOR_CATALOG_PARTS = 'winappmigrator,client'
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
 cargo build --release --locked -p winappmigrator-client `
     '-Zbuild-std=std,panic_abort' --target i686-win7-windows-msvc --target-dir target/win7
