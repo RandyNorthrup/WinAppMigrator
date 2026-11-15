@@ -1,0 +1,41 @@
+name: Accessibility Problem
+description: Something you cannot reach, read, or use with the way you use your PC.
+title: "[accessibility] "
+labels: ["accessibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        WinAppMigrator aims to be usable by everyone, with a keyboard, a screen reader, a contrast theme, larger text,
+        or anything else. Tell us what got in your way, and we will fix it. See docs/ACCESSIBILITY.md for what has
+        been checked.
+  - type: textarea
+    id: what
+    attributes:
+      label: What Happened
+      description: What you were trying to do, and what stopped you.
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: The app, the installer, the uninstaller, WinAppMigrator Client, or the website, and which part.
+    validations:
+      required: true
+  - type: input
+    id: tools
+    attributes:
+      label: How You Use Your PC
+      description: Screen reader and version, keyboard only, magnifier, contrast theme, Text size, speech, or anything else.
+      placeholder: NVDA 2025.3, keyboard only
+  - type: input
+    id: windows
+    attributes:
+      label: Windows Version
+      placeholder: Windows 11 24H2
+  - type: input
+    id: version
+    attributes:
+      label: WinAppMigrator Version
+      placeholder: "0.7.0"
