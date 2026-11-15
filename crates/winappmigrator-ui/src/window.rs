@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use eframe::egui::{self, Rect, Vec2, ViewportCommand, vec2};
 
+use crate::system_settings::{self, SystemSettings};
 use crate::theme::{Theme, ThemeMode};
 use crate::widgets;
 
@@ -174,15 +175,37 @@ pub struct Opening {
     sizes: WindowSizes,
     fitted: bool,
     follows_windows: bool,
+    /// What a person chose in Windows' accessibility settings, which every window follows.
+    settings: SystemSettings,
+    settings_applied: bool,
 }
 
 impl Opening {
     /// How a window opens on this account, with the theme to start it in.
     pub fn on_this_account(sizes: WindowSizes) -> (Self, Theme) {
-        match chosen_mode() {
-            Some(mode) => (Self::in_a_chosen_mode(sizes), Theme::new(mode)),
-            None => (Self::new(sizes), Theme::new(ThemeMode::Dark)),
-        }
+        Self::with_settings(sizes, SystemSettings::read())
+    }
+
+    /// How a window opens with these accessibility settings. A contrast theme is drawn in its own colors, whatever
+    /// mode was chosen in the app.
+    pub fn with_settings(sizes: WindowSizes, settings: SystemSettings) -> (Self, Theme) {
+        let (opening, theme) = match (settings.contrast, chosen_mode()) {
+            (Some(colors), _) => (Self::in_a_chosen_mode(sizes), Theme::contrast(colors)),
+            (None, Some(mode)) => (Self::in_a_chosen_mode(sizes), Theme::new(mode)),
+            (None, None) => (Self::new(sizes), Theme::new(ThemeMode::Dark)),
+        };
+        (
+            Self {
+                settings,
+                ..opening
+            },
+            theme,
+        )
+    }
+
+    /// Whether the window is in a Windows contrast theme, in which a person's light or dark choice does not apply.
+    pub fn in_contrast_theme(&self) -> bool {
+        self.settings.contrast.is_some()
     }
 
     /// A window in the mode Windows is in, until a person chooses.
@@ -191,6 +214,8 @@ impl Opening {
             sizes,
             fitted: false,
             follows_windows: true,
+            settings: SystemSettings::default(),
+            settings_applied: false,
         }
     }
 
@@ -208,8 +233,22 @@ impl Opening {
 
     /// Call at the start of each frame, before anything is drawn.
     pub fn settle(&mut self, ctx: &egui::Context, theme: &mut Theme) {
+        self.apply_the_settings(ctx);
         self.take_up_the_mode_of_windows(ctx, theme);
         self.fit_the_screen(ctx);
+    }
+
+    /// Text size makes everything larger by its factor, as zooming does, so nothing outgrows what holds it, and what no
+    /// longer fits scrolls. With Animation effects off, nothing moves on its own.
+    fn apply_the_settings(&mut self, ctx: &egui::Context) {
+        if self.settings_applied {
+            return;
+        }
+        self.settings_applied = true;
+        if self.settings.text_scale > 1.0 {
+            ctx.set_zoom_factor(self.settings.text_scale);
+        }
+        system_settings::allow_animations(ctx, self.settings.animations);
     }
 
     fn take_up_the_mode_of_windows(&mut self, ctx: &egui::Context, theme: &mut Theme) {

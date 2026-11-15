@@ -1061,6 +1061,11 @@ pub fn progress_bar(ui: &mut Ui, theme: &Theme, fraction: Option<f32>) {
     let painter = ui.painter();
     let radius = CornerRadius::same(HEIGHT as u8 / 2);
     painter.rect_filled(rect, radius, theme.border);
+    // With Animation effects off, a step of unknown length shows the whole bar, softer, rather than a sweep.
+    if fraction.is_none() && !crate::system_settings::animations_allowed(ui.ctx()) {
+        painter.rect_filled(rect, radius, theme::alpha(theme.accent_fill, STILL_ALPHA));
+        return;
+    }
     let (start, end) = match fraction {
         Some(fraction) => (0.0, fraction.clamp(0.0, 1.0)),
         None => {
@@ -1077,6 +1082,9 @@ pub fn progress_bar(ui: &mut Ui, theme: &Theme, fraction: Option<f32>) {
         painter.rect_filled(fill, radius, theme.accent_fill);
     }
 }
+
+/// How strong the still bar is, for a step whose length is unknown while nothing may move.
+const STILL_ALPHA: u8 = 110;
 
 /// The application icon for a window's title bar.
 pub fn window_icon() -> Option<std::sync::Arc<egui::IconData>> {
@@ -1279,6 +1287,37 @@ pub fn section_gap(ui: &mut Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shapes a progress bar of unknown length paints at a moment, in a window that may or may not animate.
+    fn sweep_at(time: f64, animations: bool) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        crate::system_settings::allow_animations(&ctx, animations);
+        let input = egui::RawInput {
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            progress_bar(ui, &Theme::new(theme::ThemeMode::Dark), None);
+        });
+        output.textures_delta.clear();
+        output.shapes
+    }
+
+    /// AC-A11Y-MOTION: with Animation effects off, a step of unknown length is shown still.
+    #[test]
+    fn a_progress_bar_of_unknown_length_holds_still_when_nothing_may_move() {
+        let as_text = |shapes: &[egui::epaint::ClippedShape]| format!("{shapes:?}");
+        assert_ne!(
+            as_text(&sweep_at(0.2, true)),
+            as_text(&sweep_at(0.9, true)),
+            "it sweeps"
+        );
+        assert_eq!(
+            as_text(&sweep_at(0.2, false)),
+            as_text(&sweep_at(0.9, false)),
+            "it holds still"
+        );
+    }
 
     #[test]
     fn bytes_read_in_the_largest_whole_unit() {

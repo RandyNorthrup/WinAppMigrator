@@ -3,7 +3,7 @@
 //! They are read from Windows' own UI settings, which say what a person chose in Settings, Accessibility, and which a
 //! desktop program can ask without anything of its own running unsafe code.
 
-use eframe::egui::Color32;
+use eframe::egui::{self, Color32};
 use windows::UI::ViewManagement::{AccessibilitySettings, UIElementType, UISettings};
 
 /// What a person chose in Windows for how windows look and move.
@@ -95,6 +95,28 @@ fn contrast_colors(ui: &UISettings) -> Option<ContrastColors> {
     })
 }
 
+/// Whether things may move on their own in this window, as Animation effects says.
+#[derive(Clone, Copy)]
+struct AnimationsAllowed(bool);
+
+fn animations_id() -> egui::Id {
+    egui::Id::unique("winappmigrator-animations-allowed")
+}
+
+/// Let things in this window move on their own, or not: egui's own animations and this crate's widgets both follow it.
+pub fn allow_animations(ctx: &egui::Context, allowed: bool) {
+    ctx.data_mut(|data| data.insert_temp(animations_id(), AnimationsAllowed(allowed)));
+    if !allowed {
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+    }
+}
+
+/// Whether things may move on their own in this window. They may unless Animation effects was found off.
+pub fn animations_allowed(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<AnimationsAllowed>(animations_id()))
+        .is_none_or(|allowed| allowed.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +127,18 @@ mod tests {
         assert_eq!(clamp_text_scale(0.5), 1.0);
         assert_eq!(clamp_text_scale(9.0), MOST_TEXT_SCALE);
         assert_eq!(clamp_text_scale(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn a_window_remembers_whether_things_may_move() {
+        let ctx = egui::Context::default();
+        assert!(
+            animations_allowed(&ctx),
+            "until Windows is found to say otherwise"
+        );
+        allow_animations(&ctx, false);
+        assert!(!animations_allowed(&ctx));
+        assert_eq!(ctx.global_style().animation_time, 0.0);
     }
 
     /// Whatever this PC is set to, reading it works and gives something within range.
