@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 use winreg::RegKey;
-use winreg::enums::{KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
+use winreg::enums::{
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
+};
 
 use crate::errors::{Result, WinAppMigratorError};
 use crate::file_discovery::{holds_a_known_base_dir, known_base_dirs};
@@ -13,11 +15,12 @@ use crate::install_source::{
 };
 use crate::models::{AppArchitecture, InstallScope, InstalledApp};
 use crate::path_utils::{
-    is_auxiliary_executable, is_drive_root, looks_like_executable, normalize_name_for_match,
-    path_is_within, split_command_executable_path,
+    expand_env_vars, is_auxiliary_executable, is_drive_root, looks_like_executable,
+    normalize_name_for_match, path_is_within, split_command_executable_path,
 };
 use crate::pe_scan::read_pe_architecture;
 use crate::product_match::ProductNames;
+use crate::restore_policy::paths_equal;
 use crate::system_context::{SystemContext, UserHive};
 
 const HKLM_UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
@@ -350,6 +353,51 @@ fn collect_uninstall_entries(
     apps
 }
 
+/// The names of what Windows lists as installed in `folder` on this PC, by where each entry of the
+/// Uninstall key says it is installed. That is compared as written, so nothing on disk or on the
+/// network is looked at. An entry marked as a part of something else is left out, as Settings
+/// leaves it out.
+pub fn apps_listed_as_installed_in(folder: &Path) -> Vec<String> {
+    let mut entries = Vec::new();
+    let machine = RegKey::predef(HKEY_LOCAL_MACHINE);
+    for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+        if let Ok(key) = machine.open_subkey_with_flags(HKLM_UNINSTALL, KEY_READ | view) {
+            read_raw_entries(&key, KEY_READ | view, &mut entries);
+        }
+    }
+    if let Ok(key) =
+        RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(HKCU_UNINSTALL, KEY_READ)
+    {
+        read_raw_entries(&key, KEY_READ, &mut entries);
+    }
+    names_listed_in(&entries, folder)
+}
+
+fn read_raw_entries(uninstall_key: &RegKey, flags: u32, entries: &mut Vec<RawUninstallEntry>) {
+    for key_name in uninstall_key.enum_keys().flatten() {
+        if let Ok(child) = uninstall_key.open_subkey_with_flags(&key_name, flags) {
+            entries.push(read_raw_entry(&child));
+        }
+    }
+}
+
+fn names_listed_in(entries: &[RawUninstallEntry], folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries.iter().filter(|entry| !entry.system_component) {
+        let (Some(name), Some(location)) = (&entry.display_name, &entry.install_location) else {
+            continue;
+        };
+        let location = expand_env_vars(location.trim_matches('"'));
+        if !location.is_empty()
+            && paths_equal(Path::new(&location), folder)
+            && !names.contains(name)
+        {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
 fn read_raw_entry(key: &RegKey) -> RawUninstallEntry {
     RawUninstallEntry {
         display_name: read_optional_string(key, DISPLAY_NAME_VALUE),
@@ -564,6 +612,60 @@ fn find_executable_in_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #2: Office was already installed where its installer suggested, and its main program
+    /// is in Common Files, so only its entry in the list says it is there.
+    #[test]
+    fn what_is_listed_as_installed_in_a_folder_is_found_by_name() {
+        let entry = |name: &str, location: Option<&str>, part: bool| RawUninstallEntry {
+            display_name: Some(name.to_owned()),
+            install_location: location.map(ToOwned::to_owned),
+            system_component: part,
+            ..RawUninstallEntry::default()
+        };
+        let entries = [
+            entry(
+                "Microsoft Office Professional Plus 2019 - en-us",
+                Some(r"C:\Program Files (x86)\Microsoft Office"),
+                false,
+            ),
+            entry(
+                "Office 16 Click-to-Run Licensing Component",
+                Some(r"C:\Program Files (x86)\Microsoft Office"),
+                true,
+            ),
+            entry(
+                "VLC media player",
+                Some(r#""c:\program files\videolan\vlc\""#),
+                false,
+            ),
+            entry(
+                "VLC media player",
+                Some(r"C:\Program Files\VideoLAN\VLC"),
+                false,
+            ),
+            entry("No Location", None, false),
+            entry(
+                "Inside It",
+                Some(r"C:\Program Files\VideoLAN\VLC\plugins"),
+                false,
+            ),
+            entry("Beside It", Some(r"C:\Program Files\VideoLAN\VLC2"), false),
+        ];
+        assert_eq!(
+            names_listed_in(
+                &entries,
+                Path::new(r"C:\Program Files (x86)\Microsoft Office")
+            ),
+            ["Microsoft Office Professional Plus 2019 - en-us"]
+        );
+        assert_eq!(
+            names_listed_in(&entries, Path::new(r"C:\Program Files\VideoLAN\VLC")),
+            ["VLC media player"]
+        );
+        assert!(names_listed_in(&entries, Path::new(r"C:\Program Files\VideoLAN")).is_empty());
+        assert!(names_listed_in(&entries, Path::new(r"D:\Elsewhere")).is_empty());
+    }
 
     #[test]
     fn parses_registry_uninstall_entry() -> std::result::Result<(), Box<dyn std::error::Error>> {

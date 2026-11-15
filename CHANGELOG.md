@@ -2,6 +2,23 @@
 
 All notable project changes are tracked here.
 
+## 0.6.2 — 2026-11-15
+
+The installer now says why it cannot install an app, instead of leaving its buttons greyed out with no clear reason. Most
+often the app, or another, is already installed in the folder it suggests, as VLC, Firefox, or Office often is on a new
+PC. The installer now says so in red, names what is there, and says what to do: uninstall that copy first, or choose a new,
+empty folder.
+
+### Installer
+
+- **The installer says plainly why it cannot install to a folder** (issue #2). When the suggested install location already had
+  files in it, **Install** and **Preview Changes** were greyed out, and all that said why was a grey line under the box that
+  read like help text. It is now a red notice under the box, and a line beside the buttons points to it. When the app is
+  already installed in that folder, as VLC, Firefox, or Office often is on a new PC, it says so, and to uninstall that copy
+  first, in Settings under Apps, or to choose a new, empty folder. It tells by the app's main program being there, or by
+  Windows' list of installed apps naming the app in that folder. When that list names another app there, the notice names
+  it. What a folder must be to be used has not changed.
+
 ## 0.6.1 — 2026-11-11
 
 Moving an app off another PC over the network is safer. WinAppMigrator Client, on the old PC, now stops anyone on the

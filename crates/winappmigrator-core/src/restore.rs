@@ -859,16 +859,7 @@ fn app_display_name(manifest: &PackageManifest) -> String {
 /// `Program Files`, and 64-bit Windows keeps a 32-bit app in `Program Files (x86)`, which is
 /// where that app's own `%ProgramFiles%` leads there.
 pub fn default_install_location(manifest: &PackageManifest) -> Option<PathBuf> {
-    let recorded = manifest
-        .application_metadata
-        .as_ref()
-        .and_then(|app| app.install_location.clone())
-        .or_else(|| {
-            manifest
-                .main_executable_path
-                .parent()
-                .map(Path::to_path_buf)
-        })?;
+    let recorded = recorded_install_location(manifest)?;
     let from_32_bit_windows = manifest
         .source_platform
         .as_ref()
@@ -878,6 +869,35 @@ pub fn default_install_location(manifest: &PackageManifest) -> Option<PathBuf> {
     } else {
         recorded
     })
+}
+
+/// Where the app was on the PC it came from, as the package records it.
+fn recorded_install_location(manifest: &PackageManifest) -> Option<PathBuf> {
+    manifest
+        .application_metadata
+        .as_ref()
+        .and_then(|app| app.install_location.clone())
+        .or_else(|| {
+            manifest
+                .main_executable_path
+                .parent()
+                .map(Path::to_path_buf)
+        })
+}
+
+/// Whether a program of the name and place this package's main program has is already in `folder`,
+/// which is how the app, or another copy of it, looks when it is already installed there. It is for
+/// saying so to whoever chose the folder; nothing is decided by it. Nothing is followed to find out,
+/// and only what is inside `folder` is looked at.
+pub fn main_program_already_in(manifest: &PackageManifest, folder: &Path) -> bool {
+    let Some(relative) = recorded_install_location(manifest)
+        .and_then(|recorded| strip_prefix_ignore_case(&manifest.main_executable_path, &recorded))
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(|relative| safe_relative_path(&relative))
+    else {
+        return false;
+    };
+    fs::symlink_metadata(folder.join(relative)).is_ok_and(|metadata| metadata.is_file())
 }
 
 const PROGRAM_FILES: &str = "Program Files";
@@ -4253,6 +4273,67 @@ mod tests {
                 "{before}"
             );
         }
+    }
+
+    /// Issue #2: VLC, Firefox and Office were already installed where their installers suggested,
+    /// and nothing said so.
+    #[test]
+    fn a_folder_the_apps_main_program_is_already_in_is_told_apart() -> std::io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        let mut manifest = bare_manifest();
+        assert!(!main_program_already_in(&manifest, folder.path()), "empty");
+        fs::write(folder.path().join("readme.txt"), b"theirs")?;
+        assert!(
+            !main_program_already_in(&manifest, folder.path()),
+            "other files"
+        );
+        fs::write(folder.path().join("ACME.EXE"), b"MZ")?;
+        assert!(main_program_already_in(&manifest, folder.path()));
+
+        // Where the package says the app was, in whatever case, says where its program goes.
+        manifest.main_executable_path = PathBuf::from(r"C:\Program Files\Acme\bin\acme.exe");
+        manifest.application_metadata = Some(crate::models::InstalledApp {
+            display_name: "Acme".to_owned(),
+            publisher: None,
+            version: None,
+            install_location: Some(PathBuf::from(r"c:\program files\acme")),
+            uninstall_string: None,
+            main_executable: None,
+            registry_source_path: String::new(),
+            architecture: AppArchitecture::X64,
+            install_scope: crate::models::InstallScope::PerMachine,
+            owner_profile: None,
+        });
+        assert!(
+            !main_program_already_in(&manifest, folder.path()),
+            "not where it goes"
+        );
+        fs::create_dir(folder.path().join("bin"))?;
+        fs::write(folder.path().join("bin").join("acme.exe"), b"MZ")?;
+        assert!(main_program_already_in(&manifest, folder.path()));
+
+        // A folder of that name is not a program, and a package cannot send the look outside.
+        fs::remove_file(folder.path().join("bin").join("acme.exe"))?;
+        fs::create_dir(folder.path().join("bin").join("acme.exe"))?;
+        assert!(
+            !main_program_already_in(&manifest, folder.path()),
+            "a folder"
+        );
+        let inside = folder.path().join("inside");
+        fs::create_dir(&inside)?;
+        manifest.main_executable_path = PathBuf::from(r"C:\Program Files\Acme\..\..\ACME.EXE");
+        assert!(!main_program_already_in(&manifest, &inside), "outside");
+        manifest.main_executable_path = PathBuf::from(r"C:\Program Files\Acme");
+        assert!(
+            !main_program_already_in(&manifest, folder.path()),
+            "the folder itself"
+        );
+        manifest.main_executable_path = PathBuf::from(r"D:\Elsewhere\acme.exe");
+        assert!(
+            !main_program_already_in(&manifest, folder.path()),
+            "not under it"
+        );
+        Ok(())
     }
 
     #[test]

@@ -22,7 +22,7 @@ use winappmigrator_core::archive::has_certificate_table;
 use winappmigrator_core::authenticode::read_signature;
 use winappmigrator_core::journal::{machine_state_root, remove_staging_root_if_unused};
 use winappmigrator_core::logging;
-use winappmigrator_core::path_utils::{is_network_path, system_root};
+use winappmigrator_core::path_utils::{is_network_path, normalize_name_for_match, system_root};
 use winappmigrator_core::prerequisites::spec_for_bundle;
 use winappmigrator_core::rollback::interrupted_installs;
 use winappmigrator_core::space::PlaceNeed;
@@ -30,8 +30,9 @@ use winappmigrator_core::{
     EmbeddedPackage, InstallMonitor, InstallPhase, InstallStep, PackageManifest, RestoreOptions,
     RestoreResult, RoomCheck, RuntimePrerequisite, RuntimePrerequisiteKind, SystemChange,
     SystemChanges, UndoReport, Warning, WarningSeverity, WinAppMigratorError,
-    default_install_location, files_no_install_put_there, folder_has_files, hidden_command,
-    install_location_problem, install_places, location_a_list_is_for, panic_text, preview_needs,
+    apps_listed_as_installed_in, default_install_location, files_no_install_put_there,
+    folder_has_files, hidden_command, install_location_problem, install_places,
+    location_a_list_is_for, main_program_already_in, panic_text, preview_needs,
     read_embedded_manifest, refuse_without_room_to_install, restore_package_monitored,
     system_changes_restoring,
 };
@@ -66,6 +67,53 @@ const BEYOND_FILES_TEXT: &str = "All of this is done with administrator rights. 
                                  runtimes it installs stay.";
 /// Said when what would be done at this location is not known yet, and so cannot be agreed to.
 const WORKING_OUT_TEXT: &str = "Working out what this would set up at this location…";
+/// Said beside the buttons when the install location is why they are off.
+const LOCATION_BLOCKS_TEXT: &str = "Install and Preview Changes are off until the Install \
+                                    Location can be used. The reason is above, under it.";
+/// Said beside the buttons when the package cannot go to the chosen location.
+const PACKAGE_BLOCKS_TEXT: &str = "Install is off because this package cannot go to this \
+                                   location. The reason is above.";
+
+/// Why the install location cannot be used. Install and Preview Changes stay off while there is one,
+/// so it is said where it cannot be missed, with what to do about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LocationProblem {
+    /// A program of the name and place of this package's main one is already there, or Windows lists
+    /// an app of this name as installed there: the app, installed on this PC some other way.
+    AppAlreadyThere,
+    /// Windows lists another app, of this name, as installed there.
+    OtherAppThere(String),
+    /// It has files in it that no install on record put there.
+    HasFiles,
+    /// It cannot be used for this reason, whatever is in it.
+    Refused(String),
+}
+
+impl LocationProblem {
+    /// What the window says, for an app of this name.
+    fn explained(&self, app: &str) -> String {
+        match self {
+            Self::AppAlreadyThere => format!(
+                "{app} is already installed in this folder, so this copy cannot go here. To \
+                 install it here, first uninstall the copy on this PC, in Windows Settings under \
+                 Apps, and then open this installer again. Or enter a new, empty folder above."
+            ),
+            Self::OtherAppThere(other) => format!(
+                "{other} is installed in this folder, so {app} cannot go here. Enter a new, empty \
+                 folder above. Or, if you no longer need {other}, uninstall it first, in Windows \
+                 Settings under Apps, and then open this installer again."
+            ),
+            Self::HasFiles => "This folder already has files in it that were not installed by \
+                               WinAppMigrator. They may belong to another app, so nothing is \
+                               installed over them. Enter a new, empty folder above."
+                .to_owned(),
+            Self::Refused(reason) => {
+                format!("This folder cannot be used: {reason}. Enter another folder above.")
+            }
+        }
+    }
+}
+
 /// Said when the list was out of date by the time Install was clicked.
 const LIST_CHANGED_TEXT: &str = "What this would do here has changed, so nothing was installed. Look \
                                  over the list below, and click Install again if it is what you want.";
@@ -168,7 +216,7 @@ enum Msg {
 }
 
 struct InstallerApp {
-    checked_target: std::cell::RefCell<Option<(String, Option<String>)>>,
+    checked_target: std::cell::RefCell<Option<(String, Option<LocationProblem>)>>,
     /// What the install location was last looked at for, and how much room there is.
     checked_room: std::cell::RefCell<Option<(String, RoomCheck)>>,
     /// How much room the package takes unpacked, and what goes to the install location.
@@ -449,7 +497,7 @@ impl InstallerApp {
 
     /// Asked on every frame, and it looks at the disk, so it is only asked again once the text
     /// has changed. What is really done with it is checked again then.
-    fn target_problem(&self) -> Option<String> {
+    fn target_problem(&self) -> Option<LocationProblem> {
         let text = self.target_root.trim();
         let mut checked = self.checked_target.borrow_mut();
         if let Some((checked_text, problem)) = checked.as_ref()
@@ -457,11 +505,38 @@ impl InstallerApp {
         {
             return problem.clone();
         }
-        let problem = install_location_problem(Path::new(text)).or_else(|| {
-            files_no_install_put_there(Path::new(text), machine_state_root().as_deref())
-        });
+        let folder = Path::new(text);
+        // Only a folder that may be used at all is looked into, and so never one on a share.
+        let problem = match install_location_problem(folder) {
+            Some(reason) => Some(LocationProblem::Refused(reason)),
+            None => files_no_install_put_there(folder, machine_state_root().as_deref())
+                .map(|_| self.whose_files(folder)),
+        };
         *checked = Some((text.to_owned(), problem.clone()));
         problem
+    }
+
+    /// What the files already in a folder look like, for saying why it is not used: this app, as
+    /// its main program is there or Windows lists it there, another app Windows lists there, or
+    /// something no list names.
+    fn whose_files(&self, folder: &Path) -> LocationProblem {
+        let program_is_there = self
+            .manifest
+            .as_deref()
+            .is_some_and(|manifest| main_program_already_in(manifest, folder));
+        let listed = apps_listed_as_installed_in(folder);
+        let this_app = normalize_name_for_match(&self.title);
+        let listed_as_this_app = !this_app.is_empty()
+            && listed
+                .iter()
+                .any(|name| normalize_name_for_match(name) == this_app);
+        if program_is_there || listed_as_this_app {
+            LocationProblem::AppAlreadyThere
+        } else if let Some(other) = listed.into_iter().next() {
+            LocationProblem::OtherAppThere(other)
+        } else {
+            LocationProblem::HasFiles
+        }
     }
 
     /// How much room an install to this location would need, for showing while it is chosen. What
@@ -1024,12 +1099,8 @@ impl InstallerApp {
                 },
             );
             if let Some(problem) = self.target_problem() {
-                ui.add_space(SPACE_XS);
-                widgets::hint(
-                    ui,
-                    theme,
-                    &format!(r"Enter another folder, such as C:\Program Files\App: {problem}."),
-                );
+                ui.add_space(SPACE_SM);
+                widgets::notice(ui, theme, Role::Danger, &problem.explained(&title));
             } else if folder_has_files(Path::new(self.target_root.trim())) {
                 ui.add_space(SPACE_SM);
                 widgets::notice(
@@ -1189,6 +1260,20 @@ impl InstallerApp {
             .as_ref()
             .is_some_and(Outcome::installed_cleanly);
         let ctx = ui.ctx().clone();
+        // Beside the buttons too, as that is where a person looks when one will not click.
+        if !installed {
+            let why = if !self.target_is_valid() {
+                Some(LOCATION_BLOCKS_TEXT)
+            } else if self.list_problem.is_some() {
+                Some(PACKAGE_BLOCKS_TEXT)
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                widgets::hint(ui, theme, why);
+                ui.add_space(SPACE_SM);
+            }
+        }
         widgets::control_row(ui, |ui| {
             if installed {
                 if widgets::button(ui, theme, ButtonKind::Primary, "Close", true).clicked() {
@@ -2379,6 +2464,150 @@ mod tests {
                 .query_by_label_contains("cannot be the Windows folder")
                 .is_some()
         );
+    }
+
+    fn location_harness(
+        folder: &Path,
+        manifest: Option<PackageManifest>,
+    ) -> Harness<'static, InstallerApp> {
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.target_root = folder.display().to_string();
+        app.manifest = manifest.map(Arc::new);
+        app.listed_for = app.target_root.clone();
+        harness_for(app)
+    }
+
+    /// A package of Fabrikam Data Sync, whose main program was `Fabrikam.exe` in its folder.
+    fn fabrikam_manifest() -> std::io::Result<PackageManifest> {
+        serde_json::from_str(
+            r#"{
+                "schema_version": "",
+                "source_computer_name": null,
+                "source_windows_version": null,
+                "scan_timestamp_utc": "",
+                "main_executable_path": "C:\\Program Files\\Fabrikam Data Sync\\Fabrikam.exe",
+                "application_metadata": null,
+                "file_inventory": [],
+                "registry_keys_exported": [],
+                "services_detected": [],
+                "scheduled_tasks_detected": [],
+                "shortcuts_detected": [],
+                "environment_variables_detected": [],
+                "runtime_prerequisites": [],
+                "warnings": [],
+                "items_intentionally_excluded": []
+            }"#,
+        )
+        .map_err(std::io::Error::other)
+    }
+
+    fn both_buttons_are_off(harness: &Harness<'_, InstallerApp>) {
+        for label in ["Install", "Preview Changes"] {
+            assert!(
+                harness.get_by_label(label).accesskit_node().is_disabled(),
+                "{label}"
+            );
+        }
+        assert!(harness.query_by_label(LOCATION_BLOCKS_TEXT).is_some());
+    }
+
+    /// Issue #2: the buttons were off, and all that said why was a grey line that read like help.
+    #[test]
+    fn a_folder_with_files_says_plainly_why_nothing_can_be_installed() -> std::io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        std::fs::write(folder.path().join("theirs.dll"), b"theirs")?;
+        let mut harness = location_harness(folder.path(), None);
+        both_buttons_are_off(&harness);
+        assert!(
+            harness
+                .query_by_label(&LocationProblem::HasFiles.explained("Fabrikam Data Sync"))
+                .is_some()
+        );
+        assert!(
+            harness
+                .query_by_label_contains("is already installed")
+                .is_none()
+        );
+        preview(&mut harness, "location-has-files-dark");
+        Ok(())
+    }
+
+    /// Issue #2: VLC, Firefox and Office were already installed where their installers suggested.
+    #[test]
+    fn a_folder_the_app_is_already_installed_in_says_so_and_what_to_do() -> std::io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        std::fs::write(folder.path().join("Fabrikam.exe"), b"MZ")?;
+        let mut harness = location_harness(folder.path(), Some(fabrikam_manifest()?));
+        both_buttons_are_off(&harness);
+        let said = LocationProblem::AppAlreadyThere.explained("Fabrikam Data Sync");
+        assert!(said.starts_with("Fabrikam Data Sync is already installed in this folder"));
+        assert!(said.contains("uninstall"), "{said}");
+        assert!(harness.query_by_label(&said).is_some());
+        preview(&mut harness, "location-app-already-there-dark");
+
+        // Once that copy is gone, so is what was said, and the folder is one like any other.
+        std::fs::remove_file(folder.path().join("Fabrikam.exe"))?;
+        std::fs::write(folder.path().join("left-over.log"), b"x")?;
+        let manifest = harness.state().manifest.as_deref().cloned();
+        let harness = location_harness(folder.path(), manifest);
+        assert!(harness.query_by_label(&said).is_none());
+        assert!(
+            harness
+                .query_by_label(&LocationProblem::HasFiles.explained("Fabrikam Data Sync"))
+                .is_some()
+        );
+        Ok(())
+    }
+
+    /// An app Windows lists in the folder is named, so a person knows what is in the way.
+    #[test]
+    fn another_app_in_the_folder_is_named_with_what_to_do() {
+        let said = LocationProblem::OtherAppThere("Microsoft 365 - it-it".to_owned())
+            .explained("Microsoft Office Professional Plus 2019 - en-us");
+        assert!(
+            said.starts_with(
+                "Microsoft 365 - it-it is installed in this folder, so Microsoft Office \
+                 Professional Plus 2019 - en-us cannot go here."
+            ),
+            "{said}"
+        );
+        assert!(said.contains("Enter a new, empty folder above."), "{said}");
+        assert!(said.contains("uninstall it first"), "{said}");
+    }
+
+    #[test]
+    fn a_folder_that_can_be_used_says_nothing_beside_the_buttons() -> std::io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        let harness = location_harness(folder.path(), None);
+        assert!(
+            !harness
+                .get_by_label("Preview Changes")
+                .accesskit_node()
+                .is_disabled()
+        );
+        assert!(harness.query_by_label(LOCATION_BLOCKS_TEXT).is_none());
+        assert!(harness.query_by_label(PACKAGE_BLOCKS_TEXT).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_package_that_cannot_go_there_says_so_beside_the_buttons() -> std::io::Result<()> {
+        let folder = tempfile::tempdir()?;
+        let mut app = sample_installer(ThemeMode::Dark);
+        app.target_root = folder.path().display().to_string();
+        app.manifest = Some(Arc::new(fabrikam_manifest()?));
+        app.listed_for = app.target_root.clone();
+        app.list_problem = Some("this app cannot run on this PC".to_owned());
+        let harness = harness_for(app);
+        assert!(
+            harness
+                .get_by_label("Install")
+                .accesskit_node()
+                .is_disabled()
+        );
+        assert!(harness.query_by_label(PACKAGE_BLOCKS_TEXT).is_some());
+        assert!(harness.query_by_label(LOCATION_BLOCKS_TEXT).is_none());
+        Ok(())
     }
 
     #[test]

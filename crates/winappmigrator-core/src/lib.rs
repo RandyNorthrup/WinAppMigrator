@@ -47,7 +47,7 @@ pub mod task_scan;
 pub mod verify;
 mod zip_stream;
 
-pub use app_inventory::list_installed_apps_from;
+pub use app_inventory::{apps_listed_as_installed_in, list_installed_apps_from};
 pub use archive::{
     DATA_FILE_EXTENSION, EmbeddedPackage, create_installer_with_data_file,
     create_self_extracting_archive, data_file_beside, has_embedded_self_archive,
@@ -70,7 +70,9 @@ pub use progress::{
     BuildMonitor, BuildStep, InstallMonitor, InstallPhase, InstallStep, Monitor, ScanMonitor,
     ScanStep,
 };
-pub use restore::{default_install_location, restore_package, restore_package_monitored};
+pub use restore::{
+    default_install_location, main_program_already_in, restore_package, restore_package_monitored,
+};
 pub use restore_review::{
     CERTIFICATES_LEFT_OUT_TEXT, CREDENTIALS_LEFT_OUT_TEXT, FONTS_LEFT_OUT_TEXT,
     SETTINGS_LEFT_OUT_TEXT, SystemChange, SystemChangeKind, SystemChanges,
