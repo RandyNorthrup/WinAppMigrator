@@ -1455,23 +1455,10 @@ pub(crate) fn open_folder(path: &Path) -> std::io::Result<()> {
         .map(|_child| ())
 }
 
-/// Sanitize an application's display name into a safe, human-readable label:
-/// keep letters, digits, spaces, hyphens, and underscores; replace anything else
-/// with `_`; trim surrounding whitespace. Spaces are kept so the default output
-/// folder reads naturally (e.g. `YAMAHA DIAGNOSTIC SYSTEM2`).
+/// An application's display name as a folder name that reads as it does, in any script, with
+/// spaces kept (`YAMAHA DIAGNOSTIC SYSTEM2`, `Über 日本 Café`).
 fn sanitized_app_label(app_name: &str) -> String {
-    app_name
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-        .trim()
-        .to_owned()
+    winappmigrator_core::readable_file_name(app_name)
 }
 
 /// A sensible default installer output directory for an application, so the

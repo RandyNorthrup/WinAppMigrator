@@ -64,7 +64,7 @@ pub use package::{
     create_package, create_package_from_scan, create_package_monitored, read_embedded_manifest,
     scan_options_for,
 };
-pub use path_utils::hidden_command;
+pub use path_utils::{hidden_command, readable_file_name};
 pub use profile_survey::{ProfilePicker, ProfileRow, ProfileSurvey, survey_of, survey_profiles};
 pub use progress::{
     BuildMonitor, BuildStep, InstallMonitor, InstallPhase, InstallStep, Monitor, ScanMonitor,

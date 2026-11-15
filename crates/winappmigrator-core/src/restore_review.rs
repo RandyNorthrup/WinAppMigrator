@@ -1498,7 +1498,7 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
                     file = file_name_text(&service.binary),
                     account = service.account.label(),
                     starts = service_start_key(start),
-                    start = start.unwrap_or_default(),
+                    start = start.map(start_words).unwrap_or_default(),
                 ),
                 high_rights: matches!(
                     service.account,
@@ -1519,7 +1519,7 @@ pub(crate) fn described_rows(review: &ReviewedPackage<'_>) -> Vec<ChangeRow> {
                         t!(
                             "core-review-driver-detail-starts",
                             file = file,
-                            start = start
+                            start = start_words(start)
                         )
                     }
                     None => t!("core-review-driver-detail", file = file),
@@ -1792,6 +1792,30 @@ fn is_a_windows_key(entry: &RegistryEntry) -> bool {
 /// Which of a service row's sentences says when it runs, by what the package records of how it
 /// starts. One that starts by itself is started as soon as the install has checked what it
 /// installed, as well as at each boot.
+/// When a service or driver starts, in words, from how the scan names it.
+fn start_words(start: &str) -> String {
+    match start {
+        "boot" => t!("core-review-start-boot"),
+        "system" => t!("core-review-start-system"),
+        "automatic" => t!("core-review-start-automatic"),
+        crate::service_scan::DELAYED_AUTOMATIC_START_LABEL => t!("core-review-start-delayed"),
+        "manual" => t!("core-review-start-manual"),
+        "disabled" => t!("core-review-start-disabled"),
+        _ => t!("core-review-start-unknown"),
+    }
+}
+
+/// A kind of network a firewall rule is for, as Windows Defender Firewall names its profiles in the
+/// language in use. One it does not have is shown as the rule names it.
+fn network_words(profile: &str) -> String {
+    match profile.to_ascii_lowercase().as_str() {
+        "domain" => t!("core-review-network-domain"),
+        "private" => t!("core-review-network-private"),
+        "public" => t!("core-review-network-public"),
+        _ => profile.to_owned(),
+    }
+}
+
 fn service_start_key(start: Option<&str>) -> &'static str {
     match start {
         None => "unknown",
@@ -1864,7 +1888,13 @@ fn describe_firewall_rules(rules: &[ReviewedFirewallRule<'_>]) -> Vec<SystemChan
                     ports = winappmigrator_i18n::join_list(&entry.local_ports),
                     program = file_name_text(&rule.program),
                     network_count = entry.profiles.len(),
-                    networks = winappmigrator_i18n::join_list(&entry.profiles),
+                    networks = winappmigrator_i18n::join_list(
+                        &entry
+                            .profiles
+                            .iter()
+                            .map(|profile| network_words(profile))
+                            .collect::<Vec<_>>()
+                    ),
                 ),
                 high_rights: is_in && allows,
             }
@@ -2603,7 +2633,7 @@ mod tests {
         assert_eq!(
             details,
             [
-                "Allows incoming connections on 80, 443 for acme.exe, on Private, Public networks",
+                "Allows incoming connections on 80, 443 for acme.exe, on private, public networks",
                 "Blocks outgoing connections for acme.exe, on every network",
             ]
         );

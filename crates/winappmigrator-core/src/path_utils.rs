@@ -646,6 +646,62 @@ pub fn sanitize_filename(value: &str) -> String {
         .collect()
 }
 
+/// Names Windows keeps for devices, which no file or folder can have, whatever follows the dot.
+const DEVICE_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+/// The most letters a name made by [`readable_file_name`] keeps, so a path built on it stays short.
+const MOST_LETTERS_IN_A_READABLE_NAME: usize = 80;
+
+/// A file or folder name made from what a person reads, such as an app's name, keeping its letters
+/// and digits in any script: `Über 日本 Café` stays `Über 日本 Café`. ASCII punctuation other than
+/// `-`, `_`, and `.` becomes `_`, as do control and invisible formatting characters; spaces stay.
+/// Nothing is left that Windows refuses in a name: no trailing dot or space, and no device name.
+/// Empty when nothing readable is left.
+pub fn readable_file_name(value: &str) -> String {
+    let kept: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii() {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ' ') {
+                    character
+                } else {
+                    '_'
+                }
+            } else if character.is_whitespace() {
+                ' '
+            } else if character.is_control() || is_invisible_format(character) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .take(MOST_LETTERS_IN_A_READABLE_NAME)
+        .collect();
+    let trimmed = kept
+        .trim_matches(|character: char| character == ' ' || character == '_')
+        .trim_end_matches(['.', ' ']);
+    let stem = trimmed.split('.').next().unwrap_or_default().trim_end();
+    if DEVICE_NAMES
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
+    {
+        format!("_{trimmed}")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Characters that draw nothing and only steer how text is laid out: direction marks and
+/// isolates, zero-width spaces and joiners, and the byte order mark.
+fn is_invisible_format(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}'
+    )
+}
+
 pub fn split_command_executable_path(command: &str) -> Option<PathBuf> {
     let trimmed = trim_icon_suffix(command.trim());
     if trimmed.is_empty() {
@@ -1033,6 +1089,38 @@ pub fn is_auxiliary_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC-UNICODE: an app's name keeps its letters in the names of what is made for it.
+    #[test]
+    fn a_readable_name_keeps_letters_in_any_script() {
+        assert_eq!(readable_file_name("Über 日本 Café"), "Über 日本 Café");
+        assert_eq!(readable_file_name("हिन्दी संपादक"), "हिन्दी संपादक");
+        assert_eq!(readable_file_name("محرر النصوص"), "محرر النصوص");
+        assert_eq!(readable_file_name("ภาษาไทย"), "ภาษาไทย");
+        assert_eq!(
+            readable_file_name("YAMAHA DIAGNOSTIC SYSTEM2"),
+            "YAMAHA DIAGNOSTIC SYSTEM2"
+        );
+    }
+
+    #[test]
+    fn a_readable_name_has_nothing_windows_refuses() {
+        assert_eq!(
+            readable_file_name(r#"A<b>:c"d/e\f|g?h*"#),
+            "A_b__c_d_e_f_g_h"
+        );
+        assert_eq!(readable_file_name("Tool v2.0. "), "Tool v2.0");
+        assert_eq!(readable_file_name("CON"), "_CON");
+        assert_eq!(readable_file_name("nul.txt"), "_nul.txt");
+        assert_eq!(readable_file_name("Console"), "Console");
+        assert_eq!(
+            readable_file_name("a\u{2067}b\u{2069}\u{200F}c\tq"),
+            "a_b__c_q"
+        );
+        assert_eq!(readable_file_name("\u{3000}名前\u{3000}"), "名前");
+        assert_eq!(readable_file_name("???"), "");
+        assert_eq!(readable_file_name(&"字".repeat(200)).chars().count(), 80);
+    }
 
     #[test]
     fn bare_tool_names_resolve_to_absolute_system_paths() {

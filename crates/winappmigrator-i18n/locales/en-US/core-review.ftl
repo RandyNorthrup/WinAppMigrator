@@ -108,7 +108,7 @@ core-review-kind-other-settings = Other Settings
 ## The installer's list of what an app sets up: what each line says of it.
 
 # { $file } is a program's file name. { $account } is the Windows account it runs as, such as LocalSystem. { $starts }
-# says when it starts, and is not shown itself; for "other", { $start } is how Windows records it, such as "boot".
+# says when it starts, and is not shown itself; for "other", { $start } is one of the core-review-start- words below.
 core-review-service-detail = { $starts ->
         [automatic] Runs { $file } as { $account }, starts now and each time this PC starts
         [delayed] Runs { $file } as { $account }, starts now and soon after each time this PC starts
@@ -121,8 +121,16 @@ core-review-service-detail = { $starts ->
 core-policy-account-custom = { $account } (custom account not restored)
 # { $file } is a driver's file name.
 core-review-driver-detail = Loads { $file } into Windows itself
-# { $file } is a driver's file name. { $start } is when Windows starts it, as Windows records it, such as "boot".
+# { $file } is a driver's file name. { $start } is when Windows starts it: one of the core-review-start- words below.
 core-review-driver-detail-starts = Loads { $file } into Windows itself, starts { $start }
+# When a service or driver starts, ending a sentence such as "Loads disk.sys into Windows itself, starts …".
+core-review-start-boot = with Windows, before anything else
+core-review-start-system = with Windows, as it starts
+core-review-start-automatic = each time this PC starts
+core-review-start-delayed = soon after each time this PC starts
+core-review-start-manual = only when something asks it to
+core-review-start-disabled = never, as it is disabled
+core-review-start-unknown = in a way Windows does not say
 # { $account } is the account a task runs as: an account's name, or core-review-task-runs-as-you, or
 # core-review-task-runs-as-creator.
 core-review-task-detail = Runs as { $account }
@@ -166,6 +174,11 @@ core-review-other-settings-detail-more = In { $keys }, and { $count } more
 # { $ports } is a list of port numbers, and { $port_count } how many. { $program } is the program's file name.
 # { $networks } is a list of the kinds of network Windows names in English (domain, private, public), and
 # { $network_count } how many.
+# The kinds of network a firewall rule is for, as Windows Defender Firewall names its profiles in your language. They
+# fill { $networks } in core-review-firewall-detail, joined into a list.
+core-review-network-domain = domain
+core-review-network-private = private
+core-review-network-public = public
 core-review-firewall-detail = { $way ->
         [allow-in] Allows incoming
         [allow-out] Allows outgoing

@@ -33,7 +33,7 @@ use crate::models::{
 use crate::packer::{PackItem, PackOutcome, PackedFile, Packer, SourceRules};
 use crate::path_utils::{
     DEEPEST_WALK, comparable_path, hidden_command, is_on_a_local_disk, path_is_within,
-    sanitize_filename, walk_asking,
+    readable_file_name, sanitize_filename, walk_asking,
 };
 use crate::prerequisites::PREREQUISITES_DIR;
 use crate::privilege::ProtectedFolder;
@@ -1139,7 +1139,7 @@ fn installer_output_path(options: &PackageOptions) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "app".to_owned());
-    let mut name = sanitize_artifact_name(&base);
+    let mut name = readable_file_name(&base).replace(' ', "_");
     if name.is_empty() {
         name = "app".to_owned();
     }
