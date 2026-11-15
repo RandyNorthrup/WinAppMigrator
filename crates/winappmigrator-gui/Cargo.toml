@@ -24,6 +24,7 @@ eframe.workspace = true
 rfd.workspace = true
 tracing.workspace = true
 winappmigrator-core.workspace = true
+winappmigrator-i18n.workspace = true
 winappmigrator-ui.workspace = true
 winappmigrator-link.workspace = true
 

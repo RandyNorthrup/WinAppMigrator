@@ -37,6 +37,8 @@ use winappmigrator_core::{
     scan_app, scan_options_for, survey_of, survey_profiles, sweep_leaked_hive_mounts,
     verify_installer, volume_stats_at, what_goes_with,
 };
+use winappmigrator_i18n::t;
+use winappmigrator_ui::language::LanguageAction;
 use winappmigrator_ui::theme::{self, Theme, ThemeMode};
 use winappmigrator_ui::widgets;
 use winappmigrator_ui::window::{self, Opening, WindowSizes};
@@ -47,7 +49,8 @@ const WINDOW_SIZES: WindowSizes = WindowSizes {
     opens_at: egui::vec2(1240.0, 780.0),
     at_least: egui::vec2(1000.0, 640.0),
 };
-const WINDOW_TITLE: &str = "WinAppMigrator";
+/// What eframe knows the program by. The title a person sees is set on the window, in their language.
+const APP_NAME: &str = "WinAppMigrator";
 const STAGING_PREFIX: &str = ".winappmigrator-build-";
 /// How often to redraw while a worker runs, enough for smooth animation without
 /// spending a core on repainting during a long build.
@@ -64,10 +67,16 @@ pub fn run() -> eframe::Result {
         sweep_leaked_images();
         signed_in_user();
     });
-    let native_options = winappmigrator_ui::window_options(WINDOW_SIZES.viewport("winappmigrator"));
+    // Before anything is said: what the person chose, if it still ships, else what Windows speaks.
+    winappmigrator_i18n::use_preferred_language(window::chosen_language().as_deref());
+    let native_options = winappmigrator_ui::window_options(
+        WINDOW_SIZES
+            .viewport("winappmigrator")
+            .with_title(t!("app-name")),
+    );
 
     eframe::run_native(
-        WINDOW_TITLE,
+        APP_NAME,
         native_options,
         Box::new(move |cc| {
             let adapter = winappmigrator_ui::graphics_adapter_of(cc);
@@ -820,8 +829,8 @@ impl WinAppMigratorApp {
     /// read-only, away from the window, and its apps are listed once it is.
     pub(crate) fn pick_disk_image(&mut self) {
         let picked = rfd::FileDialog::new()
-            .set_title("Select a Disk Image of the Other PC (.vhd or .vhdx)")
-            .add_filter("Disk Images", DISK_IMAGE_EXTENSIONS)
+            .set_title(t!("app-source-pick-image-title"))
+            .add_filter(t!("app-source-pick-image-filter"), DISK_IMAGE_EXTENSIONS)
             .pick_file();
         // The dialog leaves this process in whatever folder was chosen, and a scan searches that.
         let _ = std::env::set_current_dir(system_root());
@@ -840,9 +849,9 @@ impl WinAppMigratorApp {
             let message = match AttachedImage::attach(&image) {
                 Ok(attached) => match attached.windows_volumes().into_iter().next() {
                     Some(volume) => ImageMessage::Attached(Box::new(attached), volume),
-                    None => ImageMessage::Failed(format!(
-                        "{} has no volume with Windows on it.",
-                        image.display()
+                    None => ImageMessage::Failed(t!(
+                        "app-source-image-has-no-windows",
+                        path = image.display().to_string()
                     )),
                 },
                 Err(error) => ImageMessage::Failed(error.to_string()),
@@ -855,7 +864,7 @@ impl WinAppMigratorApp {
     /// Pick a connected drive (a disk from another PC) as the scan source.
     fn pick_offline_drive(&mut self) {
         let picked = rfd::FileDialog::new()
-            .set_title("Select the Connected Drive's Root (e.g. E:\\)")
+            .set_title(t!("app-source-pick-drive-title"))
             .pick_folder();
         // The dialog leaves this process in whatever folder was chosen, and a scan searches that.
         let _ = std::env::set_current_dir(system_root());
@@ -866,10 +875,9 @@ impl WinAppMigratorApp {
         // listable) rather than the registry hive file, whose ACL denies even an
         // existence check until we are elevated and reading it via backup mode.
         if !looks_like_a_windows_drive(&root) {
-            self.source_error = Some(format!(
-                "{} does not look like a Windows system drive (no \\Windows and \\Users). \
-                 Pick the root of the drive from the other PC.",
-                root.display()
+            self.source_error = Some(t!(
+                "app-source-not-a-windows-drive",
+                path = root.display().to_string()
             ));
             return;
         }
@@ -890,12 +898,11 @@ impl WinAppMigratorApp {
             return;
         }
         let Some(app) = self.selected_app().cloned() else {
-            self.last_error = Some("Select an application to migrate first.".to_owned());
+            self.last_error = Some(t!("app-build-select-an-app-first"));
             return;
         };
         let Some(ready) = self.ready_scan() else {
-            self.last_error =
-                Some("This app has to be looked at again before it can be built.".to_owned());
+            self.last_error = Some(t!("app-build-look-again-first"));
             return;
         };
         let report = Arc::clone(&ready.report);
@@ -911,11 +918,7 @@ impl WinAppMigratorApp {
         let stub = installer_stub();
         let Some(stub) = stub else {
             self.migrate_state = OperationState::Failed;
-            self.last_error = Some(
-                "Installer stub (winappmigrator-installer.exe) was not found beside this app, so a \
-                 self-extracting installer cannot be built."
-                    .to_owned(),
-            );
+            self.last_error = Some(t!("app-build-no-stub"));
             return;
         };
 
@@ -962,10 +965,7 @@ impl WinAppMigratorApp {
                 .unwrap_or_else(|panic| {
                     let reason = panic_text(panic.as_ref());
                     tracing::error!(%reason, "a build stopped unexpectedly");
-                    MigrateMessage::Failed(format!(
-                        "The build stopped unexpectedly: {reason}. If it left an installer in the \
-                         output folder, do not use it."
-                    ))
+                    MigrateMessage::Failed(t!("app-build-stopped-unexpectedly", reason = reason))
                 });
             let _send_result = sender.send(message);
             ctx.request_repaint();
@@ -1045,7 +1045,7 @@ impl WinAppMigratorApp {
                     self.ctx.request_repaint_after(BUSY_REPAINT_INTERVAL);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    self.source_error = Some("The disk image could not be attached.".to_owned());
+                    self.source_error = Some(t!("app-source-image-not-attached"));
                     self.start_inventory_load();
                 }
             }
@@ -1055,14 +1055,7 @@ impl WinAppMigratorApp {
             match receiver.try_recv() {
                 Ok(InventoryMessage::Loaded(apps, survey, windows)) => {
                     self.source_windows = windows;
-                    theme::add_fallback_fonts(
-                        &self.ctx,
-                        &fonts_dir(),
-                        apps.iter().flat_map(|app| {
-                            std::iter::once(app.display_name.as_str())
-                                .chain(app.publisher.as_deref())
-                        }),
-                    );
+                    add_fallback_fonts_for(&self.ctx, &apps);
                     self.apps = apps;
                     self.profile_survey = survey;
                     self.inventory_state = InventoryState::Loaded;
@@ -1076,7 +1069,7 @@ impl WinAppMigratorApp {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.inventory_state =
-                        InventoryState::Failed("Inventory worker disconnected.".to_owned());
+                        InventoryState::Failed(t!("app-list-worker-disconnected"));
                 }
             }
         }
@@ -1114,7 +1107,7 @@ impl WinAppMigratorApp {
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
                         self.migrate_state = OperationState::Failed;
-                        self.last_error = Some("Migration worker disconnected.".to_owned());
+                        self.last_error = Some(t!("app-build-worker-disconnected"));
                         self.finish_build();
                         return;
                     }
@@ -1208,6 +1201,25 @@ impl WinAppMigratorApp {
         self.theme.apply(&self.ctx);
         window::remember_chosen_mode(mode);
     }
+
+    /// Do what a person asked of the Language menu.
+    pub(crate) fn take_language_action(&mut self, action: LanguageAction) {
+        match action {
+            LanguageAction::Choose(language) => {
+                winappmigrator_i18n::use_language(language);
+                window::remember_chosen_language(language.tag);
+                // The fonts follow the language, and the names on the list need theirs again after.
+                theme::install_fonts(&self.ctx, &fonts_dir());
+                add_fallback_fonts_for(&self.ctx, &self.apps);
+                self.ctx
+                    .send_viewport_cmd(egui::ViewportCommand::Title(t!("app-name")));
+            }
+            LanguageAction::Report(url) => {
+                // In the browser, the way a folder is opened. Nothing is lost if it does not open.
+                let _ = hidden_command("explorer").arg(url).spawn();
+            }
+        }
+    }
 }
 
 impl eframe::App for WinAppMigratorApp {
@@ -1269,9 +1281,10 @@ fn run_build(
 ) -> MigrateMessage {
     tracing::info!(app = %job.app_name, folder = %job.installer_dir.display(), "building an installer");
     if let Err(error) = std::fs::create_dir_all(&job.installer_dir) {
-        return MigrateMessage::Failed(format!(
-            "Could not create the output folder {}: {error}",
-            job.installer_dir.display()
+        return MigrateMessage::Failed(t!(
+            "app-build-no-output-folder",
+            path = job.installer_dir.display().to_string(),
+            error = error.to_string()
         ));
     }
     // Stage the (potentially large) package on the SAME drive as the chosen output
@@ -1289,8 +1302,9 @@ fn run_build(
         {
             Ok(directory) => directory,
             Err(error) => {
-                return MigrateMessage::Failed(format!(
-                    "Could not create a protected staging folder, so nothing was built: {error}",
+                return MigrateMessage::Failed(t!(
+                    "app-build-no-staging-folder",
+                    error = error.to_string()
                 ));
             }
         };
@@ -1321,14 +1335,17 @@ fn run_build(
         Err(WinAppMigratorError::Cancelled) => return MigrateMessage::Cancelled,
         Err(error) => {
             tracing::error!(%error, "the installer could not be built");
-            return MigrateMessage::Failed(format!("The installer could not be built. {error}"));
+            return MigrateMessage::Failed(t!(
+                "app-build-could-not-build",
+                error = error.to_string()
+            ));
         }
     };
 
     tracing::info!(files = package.files_copied, "the package was built");
     let _send_result = progress.send(MigrateMessage::Progress(BuildProgress::Verifying));
     let Some(installer) = package.self_extracting_archive_path.clone() else {
-        return MigrateMessage::Failed("The build finished with no installer.".to_owned());
+        return MigrateMessage::Failed(t!("app-build-no-installer"));
     };
     // Read what was written, as whoever runs it will find it.
     match verify_installer(&installer, monitor) {
@@ -1354,8 +1371,9 @@ fn run_build(
             }
             MigrateMessage::Cancelled
         }
-        Err(error) => MigrateMessage::Failed(format!(
-            "The installer was written, but its hash check could not run: {error}. Do not use it."
+        Err(error) => MigrateMessage::Failed(t!(
+            "app-build-hash-check-did-not-run",
+            error = error.to_string()
         )),
     }
 }
@@ -1389,7 +1407,7 @@ fn run_scan(job: ScanJob, sender: &Sender<ScanMessage>) {
         Err(panic) => {
             let reason = panic_text(panic.as_ref());
             tracing::error!(%reason, "a scan stopped unexpectedly");
-            ScanMessage::Failed(id, format!("It stopped unexpectedly: {reason}."))
+            ScanMessage::Failed(id, t!("app-scan-stopped-unexpectedly", reason = reason))
         }
     };
     let _send_result = sender.send(message);
@@ -1415,6 +1433,18 @@ fn stub_size(stub: &InstallerStub) -> u64 {
         InstallerStub::Embedded(bytes) => bytes.len() as u64,
         InstallerStub::File(path) => std::fs::metadata(path).map_or(0, |metadata| metadata.len()),
     }
+}
+
+/// Have the fallback fonts that the apps' names and publishers need, so a name in a script the language in use does
+/// not write still draws.
+fn add_fallback_fonts_for(ctx: &egui::Context, apps: &[InstalledApp]) {
+    theme::add_fallback_fonts(
+        ctx,
+        &fonts_dir(),
+        apps.iter().flat_map(|app| {
+            std::iter::once(app.display_name.as_str()).chain(app.publisher.as_deref())
+        }),
+    );
 }
 
 /// Open a folder in File Explorer.

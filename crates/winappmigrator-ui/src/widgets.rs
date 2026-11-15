@@ -1263,12 +1263,6 @@ pub fn format_count(count: usize) -> String {
     text
 }
 
-/// A byte count for people, in the language in use. Removed once the app and the installer call
-/// `winappmigrator_i18n::size` themselves (T-APP-TEXT, T-INSTALLER-TEXT).
-pub fn format_bytes(bytes: u64) -> String {
-    winappmigrator_i18n::size(bytes)
-}
-
 /// Format a duration as `mm:ss`, or `h:mm:ss` past an hour.
 pub fn format_elapsed(seconds: u64) -> String {
     let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
@@ -1317,15 +1311,6 @@ mod tests {
             as_text(&sweep_at(0.9, false)),
             "it holds still"
         );
-    }
-
-    #[test]
-    fn bytes_read_in_the_largest_whole_unit() {
-        assert_eq!(format_bytes(0), "0 bytes");
-        assert_eq!(format_bytes(1023), "1,023 bytes");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
-        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");
     }
 
     #[test]

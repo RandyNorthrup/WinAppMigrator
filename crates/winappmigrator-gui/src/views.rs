@@ -11,6 +11,7 @@ use winappmigrator_core::{
     AppArchitecture, InstallScope, InstalledApp, ScanSource, SourceIdentity, Warning,
 };
 use winappmigrator_core::{BuildStep, WarningSeverity};
+use winappmigrator_i18n::t;
 
 use crate::network_view;
 use crate::theme::{
@@ -41,21 +42,29 @@ const ARCH_COLUMN: f32 = 58.0;
 const CHANGE_BUTTON_ROOM: f32 = 96.0;
 const MIN_SOURCE_TEXT_WIDTH: f32 = 120.0;
 const NAME_SHARE: f32 = 0.6;
-const LICENSE_OPTION_TEXT: &str = "May be tied to this PC and need reactivation on the new one.";
-const USER_DATA_OPTION_TEXT: &str =
-    "Settings and history, Documents, Saved Games, and ProgramData.";
 /// How many warnings to list before summarizing the rest.
 const MAX_LISTED_WARNINGS: usize = 200;
 /// How many accounts' names fit across the details panel, of a width anyone would have.
 const MAX_PROFILES_IN_A_ROW: usize = 3;
 
-const COLUMNS: [(&str, SortColumn); 5] = [
-    ("Name", SortColumn::Name),
-    ("Publisher", SortColumn::Publisher),
-    ("Version", SortColumn::Version),
-    ("Scope", SortColumn::Scope),
-    ("Arch", SortColumn::Architecture),
+const COLUMNS: [SortColumn; 5] = [
+    SortColumn::Name,
+    SortColumn::Publisher,
+    SortColumn::Version,
+    SortColumn::Scope,
+    SortColumn::Architecture,
 ];
+
+/// A column's heading, and what a screen reader says its button does.
+fn column_words(column: SortColumn) -> (String, String) {
+    match column {
+        SortColumn::Name => (t!("app-column-name"), t!("app-column-name-sort")),
+        SortColumn::Publisher => (t!("app-column-publisher"), t!("app-column-publisher-sort")),
+        SortColumn::Version => (t!("app-column-version"), t!("app-column-version-sort")),
+        SortColumn::Scope => (t!("app-column-scope"), t!("app-column-scope-sort")),
+        SortColumn::Architecture => (t!("app-column-arch"), t!("app-column-arch-sort")),
+    }
+}
 
 /// Whether this window is short of room, going up and down.
 pub(crate) fn is_short(ctx: &egui::Context) -> bool {
@@ -64,6 +73,7 @@ pub(crate) fn is_short(ctx: &egui::Context) -> bool {
 
 impl WinAppMigratorApp {
     pub(crate) fn draw(&mut self, ui: &mut egui::Ui) {
+        winappmigrator_ui::language::declare_language(ui.ctx());
         let theme = self.theme.clone();
         let short = is_short(ui.ctx());
 
@@ -103,12 +113,12 @@ impl WinAppMigratorApp {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.label(
-                    RichText::new("WinAppMigrator")
+                    RichText::new(t!("app-name"))
                         .font(theme::semibold(16.0))
                         .color(theme.text),
                 );
                 ui.label(
-                    RichText::new("Turn an installed app into a self-extracting installer")
+                    RichText::new(t!("app-tagline"))
                         .size(12.5)
                         .color(theme.text_muted),
                 );
@@ -117,11 +127,11 @@ impl WinAppMigratorApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = SPACE_XS;
                 let (icon, label) = if theme.mode == ThemeMode::Dark {
-                    (Icon::Sun, "Switch to Light Theme")
+                    (Icon::Sun, t!("app-theme-to-light"))
                 } else {
-                    (Icon::Moon, "Switch to Dark Theme")
+                    (Icon::Moon, t!("app-theme-to-dark"))
                 };
-                if widgets::icon_button(ui, theme, icon, label, true).clicked() {
+                if widgets::icon_button(ui, theme, icon, &label, true).clicked() {
                     self.toggle_theme();
                 }
                 let can_reload =
@@ -130,21 +140,26 @@ impl WinAppMigratorApp {
                     ui,
                     theme,
                     Icon::Refresh,
-                    "Reload the Application List",
+                    &t!("app-reload-list"),
                     can_reload,
                 )
                 .clicked()
                 {
                     self.start_inventory_load();
                 }
+                ui.add_space(SPACE_XS);
+                if let Some(action) =
+                    winappmigrator_ui::language::language_menu(ui, &crate::fonts_dir())
+                {
+                    self.take_language_action(action);
+                }
                 ui.add_space(SPACE_SM);
                 let (label, role) = match &self.inventory_state {
-                    InventoryState::Loading => ("Loading".to_owned(), Role::Neutral),
-                    InventoryState::Loaded => (
-                        format!("{} Apps", widgets::format_count(self.apps.len())),
-                        Role::Success,
-                    ),
-                    InventoryState::Failed(_) => ("Load Failed".to_owned(), Role::Danger),
+                    InventoryState::Loading => (t!("app-list-loading"), Role::Neutral),
+                    InventoryState::Loaded => {
+                        (t!("app-list-count", count = self.apps.len()), Role::Success)
+                    }
+                    InventoryState::Failed(_) => (t!("app-list-load-failed"), Role::Danger),
                 };
                 widgets::status_pill(ui, theme, &label, role);
             });
@@ -170,18 +185,23 @@ impl WinAppMigratorApp {
                 theme,
                 search_id,
                 &mut self.app_search,
-                "Search by Name or Publisher  (Ctrl+F)",
+                &t!("app-list-search"),
                 search_width,
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (all, per_user, per_machine) = (
+                    t!("app-list-filter-all"),
+                    t!("app-scope-per-user"),
+                    t!("app-scope-per-machine"),
+                );
                 widgets::segmented(
                     ui,
                     theme,
                     &mut self.app_scope_filter,
                     &[
-                        ("All", ScopeFilter::All),
-                        ("Per-User", ScopeFilter::PerUser),
-                        ("Per-Machine", ScopeFilter::PerMachine),
+                        (all.as_str(), ScopeFilter::All),
+                        (per_user.as_str(), ScopeFilter::PerUser),
+                        (per_machine.as_str(), ScopeFilter::PerMachine),
                     ],
                     true,
                 );
@@ -195,12 +215,12 @@ impl WinAppMigratorApp {
         match &self.inventory_state {
             InventoryState::Loading => {
                 widgets::card(ui, theme, |ui| {
-                    busy_row(ui, theme, "Loading installed applications…");
+                    busy_row(ui, theme, &t!("app-list-loading-apps"));
                 });
                 return;
             }
             InventoryState::Failed(error) => {
-                let message = format!("Could not list applications: {error}");
+                let message = t!("app-list-could-not-list", error = error.as_str());
                 widgets::notice(ui, theme, Role::Danger, &message);
                 return;
             }
@@ -227,8 +247,8 @@ impl WinAppMigratorApp {
                         ui,
                         theme,
                         Icon::Apps,
-                        "No Matching Applications",
-                        "Adjust the search text or scope filter.",
+                        &t!("app-list-no-matches"),
+                        &t!("app-list-no-matches-hint"),
                     );
                     return;
                 }
@@ -281,17 +301,23 @@ impl WinAppMigratorApp {
                 .as_ref()
                 .is_some_and(network_view::NetworkWizard::is_connecting);
         widgets::control_row(ui, |ui| {
-            widgets::field_label(ui, theme, "Scan Source");
+            widgets::field_label(ui, theme, &t!("app-source"));
             let before = chosen;
+            let (this_pc, drive, image, network) = (
+                t!("app-source-this-pc"),
+                t!("app-source-drive"),
+                t!("app-source-image"),
+                t!("app-source-network"),
+            );
             let changed = widgets::segmented(
                 ui,
                 theme,
                 &mut chosen,
                 &[
-                    ("This PC", Source::ThisPc),
-                    ("Connected Drive…", Source::Drive),
-                    ("Disk Image…", Source::Image),
-                    ("Network PC…", Source::Network),
+                    (this_pc.as_str(), Source::ThisPc),
+                    (drive.as_str(), Source::Drive),
+                    (image.as_str(), Source::Image),
+                    (network.as_str(), Source::Network),
                 ],
                 enabled,
             );
@@ -308,7 +334,7 @@ impl WinAppMigratorApp {
         if self.image_receiver.is_some() {
             ui.add_space(SPACE_XS);
             ui.label(
-                RichText::new("Attaching the image, read-only…")
+                RichText::new(t!("app-source-attaching-image"))
                     .size(13.0)
                     .color(theme.text_muted),
             );
@@ -320,10 +346,10 @@ impl WinAppMigratorApp {
                         || image.image().display().to_string(),
                         |name| name.to_string_lossy().into_owned(),
                     ),
-                    (None, Some(remote)) => format!(
-                        "{} over the network ({})",
-                        remote.about().computer_name,
-                        remote.address().ip()
+                    (None, Some(remote)) => t!(
+                        "app-source-network-pc",
+                        computer = remote.about().computer_name.as_str(),
+                        address = remote.address().ip().to_string()
                     ),
                     (None, None) => volume_root.display().to_string(),
                 };
@@ -347,11 +373,11 @@ impl WinAppMigratorApp {
                     );
                 });
                 let change = if self.remote.is_some() {
-                    "Disconnect"
+                    t!("app-source-disconnect")
                 } else {
-                    "Change…"
+                    t!("app-source-change")
                 };
-                if widgets::button(ui, theme, ButtonKind::Ghost, change, enabled).clicked() {
+                if widgets::button(ui, theme, ButtonKind::Ghost, &change, enabled).clicked() {
                     if self.remote.is_some() {
                         // Back to the steps, to pair with this PC again or another.
                         self.leave_network_source();
@@ -445,22 +471,21 @@ impl WinAppMigratorApp {
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::hover());
         let cells = column_rects(rect);
-        for (index, (cell, (label, column))) in cells.into_iter().zip(COLUMNS).enumerate() {
+        for (index, (cell, column)) in cells.into_iter().zip(COLUMNS).enumerate() {
             let id = ui.scope_id().with(("sort", index));
             let response = ui
                 .interact(cell, id, Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             let sorted = self.sort_column == column;
-            response.widget_info(|| {
-                WidgetInfo::labeled(A11yRole::Button, true, format!("Sort by {label}"))
-            });
+            let (label, sort_by) = column_words(column);
+            response.widget_info(|| WidgetInfo::labeled(A11yRole::Button, true, &sort_by));
             let color = if sorted || response.hovered() {
                 theme.text
             } else {
                 theme.text_subtle
             };
             let font = theme::semibold(12.0);
-            let galley = ui.painter().layout_no_wrap(label.to_owned(), font, color);
+            let galley = ui.painter().layout_no_wrap(label, font, color);
             let text_size = galley.size();
             let top = cell.center().y - text_size.y / 2.0;
             ui.painter()
@@ -525,19 +550,16 @@ impl WinAppMigratorApp {
                             ui,
                             theme,
                             Icon::Apps,
-                            "Pair with the Old PC",
-                            "Once WinAppMigrator Client is running there and you have typed its \
-                             code, its apps are listed here, and you build an installer from one \
-                             as from this PC.",
+                            &t!("app-details-pair-first"),
+                            &t!("app-details-pair-first-hint"),
                         );
                     } else {
                         widgets::empty_state(
                             ui,
                             theme,
                             Icon::Apps,
-                            "Pick an Application",
-                            "Select an app from the list to choose what to include and build its \
-                             installer.",
+                            &t!("app-details-pick-an-app"),
+                            &t!("app-details-pick-an-app-hint"),
                         );
                     }
                 });
@@ -585,30 +607,32 @@ impl WinAppMigratorApp {
     /// chosen from, which is all a matter of what is left out.
     pub(crate) fn draw_options(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         let enabled = !self.is_building();
+        let license_text = t!("app-option-license-hint");
+        let user_data_text = t!("app-option-user-data-hint");
         widgets::control_row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = SPACE_MD;
             widgets::inline_choice(
                 ui,
                 theme,
                 &mut self.backup_license,
-                "License and Activation Data",
-                LICENSE_OPTION_TEXT,
+                &t!("app-option-license"),
+                &license_text,
                 enabled,
             );
             widgets::inline_choice(
                 ui,
                 theme,
                 &mut self.backup_user_data,
-                "User Data",
-                USER_DATA_OPTION_TEXT,
+                &t!("app-option-user-data"),
+                &user_data_text,
                 enabled,
             );
         });
         if self.backup_license {
-            widgets::hint(ui, theme, LICENSE_OPTION_TEXT);
+            widgets::hint(ui, theme, &license_text);
         }
         if self.backup_user_data {
-            widgets::hint(ui, theme, USER_DATA_OPTION_TEXT);
+            widgets::hint(ui, theme, &user_data_text);
         }
         self.draw_profile_choice(ui, theme, enabled);
     }
@@ -627,7 +651,7 @@ impl WinAppMigratorApp {
             return;
         }
         ui.add_space(SPACE_SM);
-        widgets::field_label(ui, theme, "Whose Data");
+        widgets::field_label(ui, theme, &t!("app-option-whose-data"));
         ui.add_space(2.0);
         let mut chosen = picker
             .rows
@@ -650,12 +674,7 @@ impl WinAppMigratorApp {
             .and_then(|index| picker.rows.get(index))
             .map(|row| row.id.clone());
         ui.add_space(SPACE_XS);
-        widgets::hint(
-            ui,
-            theme,
-            "An installer holds one account's data. It goes to whoever is signed in where it \
-             runs.",
-        );
+        widgets::hint(ui, theme, &t!("app-option-whose-data-hint"));
     }
 
     pub(crate) fn output_dir_is_valid(&self) -> bool {
@@ -666,7 +685,7 @@ impl WinAppMigratorApp {
         if self.is_building() {
             let (label, fraction) = progress_label(self.build_progress.as_ref());
             let label = if self.is_cancelling() {
-                "Cancelling after the current step…".to_owned()
+                t!("app-build-cancelling")
             } else {
                 label
             };
@@ -687,8 +706,14 @@ impl WinAppMigratorApp {
             widgets::progress_bar(ui, theme, fraction);
             ui.add_space(SPACE_MD);
             let cancelling = self.is_cancelling();
-            if widgets::wide_button(ui, theme, ButtonKind::Secondary, "Cancel", !cancelling)
-                .clicked()
+            if widgets::wide_button(
+                ui,
+                theme,
+                ButtonKind::Secondary,
+                &t!("app-build-cancel"),
+                !cancelling,
+            )
+            .clicked()
             {
                 self.cancel_migration();
             }
@@ -696,42 +721,32 @@ impl WinAppMigratorApp {
         }
 
         if !self.stub_available {
-            widgets::notice(
-                ui,
-                theme,
-                Role::Danger,
-                "Installer stub (winappmigrator-installer.exe) was not found beside this app, \
-                 so a self-extracting installer cannot be built.",
-            );
+            widgets::notice(ui, theme, Role::Danger, &t!("app-build-no-stub"));
             ui.add_space(SPACE_SM);
         }
         // Beside the button that writes there, so that where it goes is always in view.
         widgets::path_field(
             ui,
             theme,
-            "Output Folder",
+            &t!("app-output-folder"),
             &mut self.output_dir,
-            r"C:\Users\You\WinAppMigrator",
+            &t!("app-output-folder-example"),
             true,
             || rfd::FileDialog::new().pick_folder(),
         );
         if !self.output_dir_is_valid() {
             ui.add_space(SPACE_XS);
-            widgets::hint(
-                ui,
-                theme,
-                "Enter a full folder path, such as D:\\Installers.",
-            );
+            widgets::hint(ui, theme, &t!("app-output-folder-not-full"));
         }
         ui.add_space(SPACE_SM);
         let can_build = self.can_build();
         // Once an installer exists, the result is the next thing to act on.
         let (kind, label) = if matches!(self.migrate_state, OperationState::Completed) {
-            (ButtonKind::Secondary, "Create Installer Again")
+            (ButtonKind::Secondary, t!("app-build-create-again"))
         } else {
-            (ButtonKind::Primary, "Create Installer")
+            (ButtonKind::Primary, t!("app-build-create"))
         };
-        if widgets::wide_button(ui, theme, kind, label, can_build).clicked() {
+        if widgets::wide_button(ui, theme, kind, &label, can_build).clicked() {
             self.start_migration();
         }
     }
@@ -741,12 +756,7 @@ impl WinAppMigratorApp {
             OperationState::Idle | OperationState::Running => {}
             OperationState::Cancelled => {
                 ui.add_space(SPACE_MD);
-                widgets::notice(
-                    ui,
-                    theme,
-                    Role::Neutral,
-                    "Build cancelled. No installer was written.",
-                );
+                widgets::notice(ui, theme, Role::Neutral, &t!("app-build-cancelled"));
             }
             OperationState::Failed => {
                 ui.add_space(SPACE_MD);
@@ -754,7 +764,12 @@ impl WinAppMigratorApp {
                 widgets::notice(ui, theme, Role::Danger, &error);
                 ui.add_space(SPACE_SM);
                 if let Some(log) = self.log_file.as_deref() {
-                    widgets::mono_path(ui, theme, "Log", &log.display().to_string());
+                    widgets::mono_path(
+                        ui,
+                        theme,
+                        &t!("app-result-log"),
+                        &log.display().to_string(),
+                    );
                     ui.add_space(SPACE_SM);
                 }
                 if widgets::icon_text_button(
@@ -762,7 +777,7 @@ impl WinAppMigratorApp {
                     theme,
                     ButtonKind::Secondary,
                     Icon::Copy,
-                    "Copy Error",
+                    &t!("app-result-copy-error"),
                     true,
                 )
                 .clicked()
@@ -792,7 +807,7 @@ impl WinAppMigratorApp {
         if role == Role::Danger
             && let Some(log) = self.log_file.as_deref()
         {
-            widgets::mono_path(ui, theme, "Log", &log.display().to_string());
+            widgets::mono_path(ui, theme, &t!("app-result-log"), &log.display().to_string());
             ui.add_space(SPACE_SM);
         }
         widgets::metric_tiles(
@@ -800,18 +815,18 @@ impl WinAppMigratorApp {
             theme,
             &[
                 metric(
-                    "Files",
-                    widgets::format_count(package.files_copied),
+                    t!("app-result-files"),
+                    winappmigrator_i18n::number(package.files_copied as u64),
                     Role::Accent,
                 ),
                 metric(
-                    "Installer Size",
-                    widgets::format_bytes(*installer_bytes),
+                    t!("app-result-installer-size"),
+                    winappmigrator_i18n::size(*installer_bytes),
                     Role::Accent,
                 ),
                 metric(
-                    "Warnings",
-                    widgets::format_count(package.warnings.len()),
+                    t!("app-result-warnings"),
+                    winappmigrator_i18n::number(package.warnings.len() as u64),
                     if package.warnings.is_empty() {
                         Role::Neutral
                     } else {
@@ -830,7 +845,7 @@ impl WinAppMigratorApp {
             .partition(|warning| warning.code == MENTIONS_CODE);
         for warning in &mentions {
             ui.add_space(SPACE_SM);
-            widgets::notice(ui, theme, Role::Warning, &warning.message);
+            widgets::notice(ui, theme, Role::Warning, &warning.text());
         }
 
         let mut folder_error = None;
@@ -840,10 +855,20 @@ impl WinAppMigratorApp {
                 widgets::notice(ui, theme, Role::Warning, &two_files_text(path, data_file));
             }
             ui.add_space(SPACE_SM);
-            widgets::mono_path(ui, theme, "Installer", &path.display().to_string());
+            widgets::mono_path(
+                ui,
+                theme,
+                &t!("app-result-installer"),
+                &path.display().to_string(),
+            );
             if let Some(data_file) = package.data_file_path.as_ref() {
                 ui.add_space(SPACE_XS);
-                widgets::mono_path(ui, theme, "Data File", &data_file.display().to_string());
+                widgets::mono_path(
+                    ui,
+                    theme,
+                    &t!("app-result-data-file"),
+                    &data_file.display().to_string(),
+                );
             }
             ui.add_space(SPACE_SM);
             widgets::control_row(ui, |ui| {
@@ -852,21 +877,24 @@ impl WinAppMigratorApp {
                     theme,
                     ButtonKind::Secondary,
                     Icon::Folder,
-                    "Open Folder",
+                    &t!("app-result-open-folder"),
                     true,
                 )
                 .clicked()
                     && let Some(folder) = path.parent()
                     && let Err(error) = crate::open_folder(folder)
                 {
-                    folder_error = Some(format!("Could not open the folder: {error}"));
+                    folder_error = Some(t!(
+                        "app-result-could-not-open-folder",
+                        error = error.to_string()
+                    ));
                 }
                 if widgets::icon_text_button(
                     ui,
                     theme,
                     ButtonKind::Ghost,
                     Icon::Copy,
-                    "Copy Path",
+                    &t!("app-result-copy-path"),
                     true,
                 )
                 .clicked()
@@ -879,19 +907,24 @@ impl WinAppMigratorApp {
         widgets::hint(
             ui,
             theme,
-            &format!(
-                "Run it on the other PC to reinstall {app_name}. It checks its files by SHA-256. \
-                 Windows shows \"Unknown publisher\" because installers you build are not \
-                 signed."
-            ),
+            &t!("app-result-run-it", app_name = app_name.as_str()),
         );
 
-        warning_list(ui, theme, "Verification Errors", &verification.errors, true);
+        warning_list(
+            ui,
+            theme,
+            &t!(
+                "app-result-verification-errors",
+                count = verification.errors.len()
+            ),
+            &verification.errors,
+            true,
+        );
         // When files were lost, the list of which ones is the next thing to read.
         warning_list(
             ui,
             theme,
-            "Warnings",
+            &t!("app-result-warnings-heading", count = other_warnings.len()),
             &other_warnings,
             role == Role::Warning,
         );
@@ -910,21 +943,15 @@ impl WinAppMigratorApp {
 
 /// What happens to an app from a Windows older than 10, said once a drive or an image has one.
 pub(crate) fn older_windows_note(identity: &SourceIdentity) -> String {
-    let windows = identity
-        .windows_name()
-        .unwrap_or_else(|| "an older Windows".to_owned());
-    let mut note = format!(
-        "This has {windows}. Installers built from it are made for Windows 10 and 11. With User \
-         Data, settings that Windows quietly kept aside for an older app come along, and \
-         runtimes Windows 11 does not have, such as DirectX 9, are installed with the app."
-    );
-    if identity.is_32_bit() {
-        note.push_str(
-            " Its apps are 32-bit, so they go to Program Files (x86), where 64-bit Windows keeps \
-             them.",
-        );
+    let bits = if identity.is_32_bit() { "yes" } else { "no" };
+    match identity.windows_name() {
+        Some(windows) => t!(
+            "app-source-older-windows",
+            windows = windows,
+            is_32_bit = bits
+        ),
+        None => t!("app-source-older-windows-unnamed", is_32_bit = bits),
     }
-    note
 }
 
 fn draw_app_title(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp, short: bool) {
@@ -942,10 +969,10 @@ fn draw_app_title(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp, short: b
         widgets::status_pill(
             ui,
             theme,
-            scope_label(&app.install_scope),
+            &scope_label(&app.install_scope),
             scope_role(&app.install_scope),
         );
-        widgets::badge(ui, theme, arch_label(&app.architecture), theme.text_muted);
+        widgets::badge(ui, theme, &arch_label(&app.architecture), theme.text_muted);
         if short {
             ui.add_space(SPACE_XS);
             ui.add(
@@ -961,10 +988,18 @@ fn draw_app_title(ui: &mut egui::Ui, theme: &Theme, app: &InstalledApp, short: b
 }
 
 fn who_and_which_version(app: &InstalledApp) -> String {
-    let publisher = app.publisher.as_deref().unwrap_or("Unknown publisher");
-    match app.version.as_deref() {
-        Some(version) => format!("{publisher}, version {version}"),
-        None => publisher.to_owned(),
+    match (app.publisher.as_deref(), app.version.as_deref()) {
+        (Some(publisher), Some(version)) => t!(
+            "app-details-publisher-and-version",
+            publisher = publisher,
+            version = version
+        ),
+        (Some(publisher), None) => publisher.to_owned(),
+        (None, Some(version)) => t!(
+            "app-details-unknown-publisher-and-version",
+            version = version
+        ),
+        (None, None) => t!("app-details-unknown-publisher"),
     }
 }
 
@@ -1002,44 +1037,18 @@ pub(crate) fn outcome_summary(outcome: &MigrationOutcome) -> (Role, String) {
     let missed = count_of("file_copy_failed");
     let gone = count_of("file_gone_since_it_was_looked_at");
     if !outcome.verification.package_valid {
-        (
-            Role::Danger,
-            "Do not use this installer: it failed its hash check.".to_owned(),
-        )
+        (Role::Danger, t!("app-result-failed-hash-check"))
     } else if gone > 0 && missed == 0 {
-        (
-            Role::Warning,
-            format!(
-                "Installer built, but {gone} {} gone since the app was looked at, so {} not in it. \
-                 See Warnings below.",
-                if gone == 1 { "file was" } else { "files were" },
-                if gone == 1 { "it is" } else { "they are" },
-            ),
-        )
+        (Role::Warning, t!("app-result-files-gone", count = gone))
     } else if missed + gone > 0 {
-        let missed = missed + gone;
         (
             Role::Warning,
-            format!(
-                "Installer built, but {missed} {} could not be captured, usually because \
-                 {} locked or unreadable. The app may not work without {}. See Warnings below.",
-                if missed == 1 { "file" } else { "files" },
-                if missed == 1 { "it was" } else { "they were" },
-                if missed == 1 { "it" } else { "them" },
-            ),
+            t!("app-result-files-not-captured", count = missed + gone),
         )
     } else if count_of(MENTIONS_CODE) > 0 {
-        (
-            Role::Warning,
-            "Installer built, and it still says something of who it came from. Read what it says \
-             below before you give it to anyone."
-                .to_owned(),
-        )
+        (Role::Warning, t!("app-result-mentions-who"))
     } else {
-        (
-            Role::Success,
-            "Installer ready. Its package passed its hash check.".to_owned(),
-        )
+        (Role::Success, t!("app-result-ready"))
     }
 }
 
@@ -1049,19 +1058,18 @@ fn two_files_text(installer: &std::path::Path, data_file: &std::path::Path) -> S
         path.file_name()
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
     };
-    format!(
-        "This app is too big for one executable, so its installer is two files, {} and {}. They \
-         have to stay together: copy both to the other PC, into the same folder, with these names. \
-         If you sign the installer, that signature also covers the data file.",
-        name(installer),
-        name(data_file)
+    t!(
+        "app-result-two-files",
+        installer = name(installer),
+        data_file = name(data_file)
     )
 }
 
+/// Warnings under a heading that opens and closes. The heading says how many there are.
 pub(crate) fn warning_list(
     ui: &mut egui::Ui,
     theme: &Theme,
-    title: &str,
+    heading: &str,
     warnings: &[Warning],
     open: bool,
 ) {
@@ -1070,12 +1078,9 @@ pub(crate) fn warning_list(
     }
     ui.add_space(SPACE_SM);
     egui::CollapsingHeader::new(
-        RichText::new(format!(
-            "{title} ({})",
-            widgets::format_count(warnings.len())
-        ))
-        .font(theme::semibold(13.0))
-        .color(theme.text),
+        RichText::new(heading)
+            .font(theme::semibold(13.0))
+            .color(theme.text),
     )
     .default_open(open)
     .show(ui, |ui| {
@@ -1086,9 +1091,9 @@ pub(crate) fn warning_list(
             widgets::hint(
                 ui,
                 theme,
-                &format!(
-                    "and {} more.",
-                    widgets::format_count(warnings.len() - MAX_LISTED_WARNINGS)
+                &t!(
+                    "app-warnings-and-more",
+                    count = warnings.len() - MAX_LISTED_WARNINGS
                 ),
             );
         }
@@ -1109,7 +1114,7 @@ fn warning_row(ui: &mut egui::Ui, theme: &Theme, warning: &Warning) {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             ui.add(
-                egui::Label::new(RichText::new(&warning.message).size(12.5).color(theme.text))
+                egui::Label::new(RichText::new(warning.text()).size(12.5).color(theme.text))
                     .wrap_mode(egui::TextWrapMode::Wrap),
             );
             if let Some(source) = warning.source.as_deref() {
@@ -1126,14 +1131,12 @@ fn warning_row(ui: &mut egui::Ui, theme: &Theme, warning: &Warning) {
 fn progress_label(progress: Option<&BuildProgress>) -> (String, Option<f32>) {
     match progress {
         None | Some(BuildProgress::Build(BuildStep::Scanning | BuildStep::Preparing)) => {
-            ("Working out what goes in…".to_owned(), None)
+            (t!("app-progress-preparing"), None)
         }
         Some(BuildProgress::Build(BuildStep::RoomChecked(_))) => {
-            ("Checking there is room…".to_owned(), None)
+            (t!("app-progress-checking-room"), None)
         }
-        Some(BuildProgress::Build(BuildStep::Bundling)) => {
-            ("Bundling runtimes and drivers…".to_owned(), None)
-        }
+        Some(BuildProgress::Build(BuildStep::Bundling)) => (t!("app-progress-bundling"), None),
         // By how much, since one large file can be most of the time and only one of the files.
         Some(BuildProgress::Build(BuildStep::Packing {
             done,
@@ -1141,25 +1144,17 @@ fn progress_label(progress: Option<&BuildProgress>) -> (String, Option<f32>) {
             bytes_done,
             bytes_total,
         })) => (
-            format!(
-                "Reading and compressing files: {} of {}",
-                widgets::format_count(*done),
-                widgets::format_count(*total)
-            ),
+            t!("app-progress-packing", done = *done, total = *total),
             (*bytes_total > 0).then(|| *bytes_done as f32 / *bytes_total as f32),
         ),
         Some(BuildProgress::Build(BuildStep::LookingOverWhatItSays { done, total })) => (
-            format!(
-                "Looking over what the installer says: {} of {}…",
-                widgets::format_count(*done),
-                widgets::format_count(*total)
-            ),
+            t!("app-progress-looking-over", done = *done, total = *total),
             None,
         ),
         Some(BuildProgress::Build(BuildStep::WritingInstaller)) => {
-            ("Writing the installer…".to_owned(), None)
+            (t!("app-progress-writing"), None)
         }
-        Some(BuildProgress::Verifying) => ("Verifying hashes…".to_owned(), None),
+        Some(BuildProgress::Verifying) => (t!("app-progress-verifying"), None),
     }
 }
 
@@ -1194,7 +1189,12 @@ fn app_row(
             A11yRole::Button,
             enabled,
             selected,
-            format!("{}, {publisher}, version {version}", app.display_name),
+            t!(
+                "app-list-row",
+                name = app.display_name.as_str(),
+                publisher = publisher,
+                version = version
+            ),
         )
     });
 
@@ -1207,12 +1207,14 @@ fn app_row(
             .rect_filled(row, theme::RADIUS_SM, theme.card_hover);
     }
 
+    let scope = scope_label(&app.install_scope);
+    let arch = arch_label(&app.architecture);
     let cells = [
         (app.display_name.as_str(), theme.text, true),
         (publisher, theme.text_muted, false),
         (version, theme.text_muted, false),
-        (scope_label(&app.install_scope), theme.text_muted, false),
-        (arch_label(&app.architecture), theme.text_muted, false),
+        (scope.as_str(), theme.text_muted, false),
+        (arch.as_str(), theme.text_muted, false),
     ];
     let columns = column_rects(rect);
     // All of it, if any of it was cut. It would otherwise only cover the rows below.
@@ -1288,11 +1290,9 @@ fn compare_apps(left: &InstalledApp, right: &InstalledApp, column: SortColumn) -
             left.version.as_deref().unwrap_or_default(),
             right.version.as_deref().unwrap_or_default(),
         ),
-        SortColumn::Scope => {
-            scope_label(&left.install_scope).cmp(scope_label(&right.install_scope))
-        }
+        SortColumn::Scope => scope_rank(&left.install_scope).cmp(&scope_rank(&right.install_scope)),
         SortColumn::Architecture => {
-            arch_label(&left.architecture).cmp(arch_label(&right.architecture))
+            arch_rank(&left.architecture).cmp(&arch_rank(&right.architecture))
         }
     };
     ordering.then_with(by_name)
@@ -1318,20 +1318,40 @@ fn scope_matches(filter: ScopeFilter, scope: &InstallScope) -> bool {
     }
 }
 
-pub(crate) fn arch_label(arch: &AppArchitecture) -> &'static str {
+/// An architecture by the name Windows gives it, which is not translated, or that it is not known.
+pub(crate) fn arch_label(arch: &AppArchitecture) -> String {
     match arch {
-        AppArchitecture::X86 => "x86",
-        AppArchitecture::X64 => "x64",
-        AppArchitecture::Arm64 => "ARM64",
-        AppArchitecture::Unknown => "Unknown",
+        AppArchitecture::X86 => "x86".to_owned(),
+        AppArchitecture::X64 => "x64".to_owned(),
+        AppArchitecture::Arm64 => "ARM64".to_owned(),
+        AppArchitecture::Unknown => t!("app-arch-unknown"),
     }
 }
 
-pub(crate) fn scope_label(scope: &InstallScope) -> &'static str {
+pub(crate) fn scope_label(scope: &InstallScope) -> String {
     match scope {
-        InstallScope::PerUser => "Per-User",
-        InstallScope::PerMachine => "Per-Machine",
-        InstallScope::Unknown => "Unknown",
+        InstallScope::PerUser => t!("app-scope-per-user"),
+        InstallScope::PerMachine => t!("app-scope-per-machine"),
+        InstallScope::Unknown => t!("app-scope-unknown"),
+    }
+}
+
+/// Where a scope sorts, the same in every language: as its English labels do, which is how it always has.
+fn scope_rank(scope: &InstallScope) -> u8 {
+    match scope {
+        InstallScope::PerMachine => 0,
+        InstallScope::PerUser => 1,
+        InstallScope::Unknown => 2,
+    }
+}
+
+/// Where an architecture sorts, the same way.
+fn arch_rank(arch: &AppArchitecture) -> u8 {
+    match arch {
+        AppArchitecture::Arm64 => 0,
+        AppArchitecture::Unknown => 1,
+        AppArchitecture::X64 => 2,
+        AppArchitecture::X86 => 3,
     }
 }
 

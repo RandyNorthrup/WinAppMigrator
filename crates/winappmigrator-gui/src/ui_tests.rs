@@ -763,6 +763,27 @@ fn failed_and_cancelled_builds_explain_themselves() {
     assert!(harness.query_by_label_contains("Build cancelled").is_some());
 }
 
+/// The window speaks the language in use, from its title down, and offers the others.
+#[test]
+fn the_window_speaks_the_language_in_use() {
+    winappmigrator_i18n::with_language(&winappmigrator_i18n::PSEUDO_LONG, || {
+        let harness = harness_with(ThemeMode::Dark, |_| {});
+        let title = winappmigrator_i18n::t!("app-name");
+        assert!(winappmigrator_i18n::is_marked(&title), "{title}");
+        assert!(harness.query_by_label(&title).is_some(), "{title}");
+        assert!(
+            harness.query_by_label("WinAppMigrator").is_none(),
+            "the title is not left in English"
+        );
+        assert!(
+            harness
+                .query_by_role(egui::accesskit::Role::ComboBox)
+                .is_some(),
+            "the Language menu is in the header"
+        );
+    });
+}
+
 #[test]
 fn versions_sort_by_number_not_by_text() {
     assert_eq!(compare_versions("9.11.0", "10.2.0"), Ordering::Less);

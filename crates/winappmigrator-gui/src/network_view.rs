@@ -15,6 +15,7 @@ use eframe::egui::{self, RichText};
 
 use winappmigrator_core::path_utils::{POWERSHELL_UTF8_OUTPUT, powershell_command};
 use winappmigrator_core::remote::{self, RemotePc};
+use winappmigrator_i18n::t;
 use winappmigrator_link::discovery::Found;
 use winappmigrator_ui::theme::{Role, SPACE_MD, SPACE_SM, SPACE_XS, Theme};
 use winappmigrator_ui::widgets::{self, ButtonKind};
@@ -24,20 +25,6 @@ use crate::WinAppMigratorApp;
 /// What the client is saved as, and the note beside it.
 pub(crate) const CLIENT_FILE_NAME: &str = "WinAppMigrator Client.exe";
 const CLIENT_NOTE_NAME: &str = "WinAppMigrator Client - start here.txt";
-const CLIENT_NOTE: &str = "WinAppMigrator Client\r\n\
-\r\n\
-Run this on the PC you are moving apps off: Windows 7, 8, 10 or 11.\r\n\
-\r\n\
-1. Close the app you are moving.\r\n\
-2. Double-click \"WinAppMigrator Client.exe\" and let it make changes.\r\n\
-3. It shows a 6-digit pairing code. In WinAppMigrator on your new PC, choose\r\n\
-   Network PC..., pick this PC, and type the code.\r\n\
-4. When the new PC is done, press Enter in the client's window, or close it.\r\n\
-\r\n\
-It only reads. While it runs it keeps a snapshot of the Windows drive and lets\r\n\
-its own two ports through Windows Firewall from your local network, and it\r\n\
-removes both when it stops. What crosses the network is encrypted, and only a\r\n\
-PC that has the code can read anything.\r\n";
 /// How long to wait between asking the network who is there.
 const SEARCH_EVERY: Duration = Duration::from_secs(5);
 /// What lists the USB drives plugged in: drive type 2 is removable.
@@ -148,24 +135,30 @@ fn usb_drives() -> Vec<UsbDrive> {
 /// either name is taken away, not what it leads to.
 pub(crate) fn save_client(folder: &Path) -> Result<PathBuf, String> {
     let could_not_save = |error: std::io::Error| {
-        format!(
-            "the client could not be saved in {}: {error}",
-            folder.display()
+        t!(
+            "app-client-could-not-save",
+            path = folder.display().to_string(),
+            error = error.to_string()
         )
     };
     let _held = winappmigrator_core::privilege::hold_real_folder(folder).map_err(could_not_save)?;
     if EMBEDDED_CLIENT.is_empty() {
-        return Err(
-            "this build of WinAppMigrator does not carry the client. Build it with \
-             scripts\\build-client.ps1, then build the app again."
-                .to_owned(),
-        );
+        return Err(t!("app-client-not-carried"));
     }
     let client =
         save_in_place(folder, CLIENT_FILE_NAME, EMBEDDED_CLIENT).map_err(could_not_save)?;
-    save_in_place(folder, CLIENT_NOTE_NAME, CLIENT_NOTE.as_bytes())
-        .map_err(|error| format!("the note beside it could not be saved: {error}"))?;
+    save_in_place(folder, CLIENT_NOTE_NAME, client_note().as_bytes())
+        .map_err(|error| t!("app-client-could-not-save-note", error = error.to_string()))?;
     Ok(client)
+}
+
+/// The note saved beside the client, in the language in use, with Windows' line breaks so that Notepad on Windows 7
+/// shows its lines.
+fn client_note() -> String {
+    let note = t!("app-client-note").replace("\r\n", "\n");
+    let mut text = note.replace('\n', "\r\n");
+    text.push_str("\r\n");
+    text
 }
 
 /// Opens a link itself, not what it leads to.
@@ -286,7 +279,7 @@ impl WinAppMigratorApp {
                 Ok(Err(error)) => wizard.error = Some(error),
                 Err(TryRecvError::Empty) => wizard.connecting = Some(receiver),
                 Err(TryRecvError::Disconnected) => {
-                    wizard.error = Some("pairing stopped before it was done".to_owned());
+                    wizard.error = Some(t!("app-network-pairing-stopped"));
                 }
             }
         }
@@ -312,9 +305,9 @@ impl WinAppMigratorApp {
         thread::spawn(move || {
             let result = remote::connect(address, &code).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::PermissionDenied {
-                    "that is not the code the old PC shows. Check it and try again.".to_owned()
+                    t!("app-network-wrong-code")
                 } else {
-                    format!("the old PC could not be reached: {error}")
+                    t!("app-network-not-reached", error = error.to_string())
                 }
             });
             let _ = sender.send(result);
@@ -334,23 +327,21 @@ impl WinAppMigratorApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                widgets::card_titled(ui, theme, "1. Put the Client on the Old PC", None, |ui| {
-                    widgets::hint(
-                        ui,
-                        theme,
-                        "WinAppMigrator Client runs on the PC the app is on now, Windows 7 or \
-                         later. It only lets this PC read it, encrypted, by a code it shows.",
-                    );
+                widgets::card_titled(ui, theme, &t!("app-network-step-client"), None, |ui| {
+                    widgets::hint(ui, theme, &t!("app-network-step-client-hint"));
                     ui.add_space(SPACE_SM);
                     widgets::control_row(ui, |ui| {
                         for drive in &wizard.usb_drives {
                             let label = if drive.label.is_empty() {
-                                format!("Save to USB Drive {}", drive.root.display())
+                                t!(
+                                    "app-network-save-to-usb",
+                                    drive = drive.root.display().to_string()
+                                )
                             } else {
-                                format!(
-                                    "Save to USB Drive {} ({})",
-                                    drive.root.display(),
-                                    drive.label
+                                t!(
+                                    "app-network-save-to-named-usb",
+                                    drive = drive.root.display().to_string(),
+                                    name = drive.label.as_str()
                                 )
                             };
                             if widgets::button(ui, theme, ButtonKind::Primary, &label, true)
@@ -359,25 +350,32 @@ impl WinAppMigratorApp {
                                 save_to = Some(drive.root.clone());
                             }
                         }
-                        if widgets::button(ui, theme, ButtonKind::Secondary, "Save to a Folder…", true)
-                            .clicked()
+                        if widgets::button(
+                            ui,
+                            theme,
+                            ButtonKind::Secondary,
+                            &t!("app-network-save-to-folder"),
+                            true,
+                        )
+                        .clicked()
                         {
                             pick_folder = true;
                         }
-                        if widgets::button(ui, theme, ButtonKind::Ghost, "Look for USB Drives Again", true)
-                            .clicked()
+                        if widgets::button(
+                            ui,
+                            theme,
+                            ButtonKind::Ghost,
+                            &t!("app-network-look-for-usb-again"),
+                            true,
+                        )
+                        .clicked()
                         {
                             refresh_drives = true;
                         }
                     });
                     if wizard.usb_drives.is_empty() {
                         ui.add_space(SPACE_XS);
-                        widgets::hint(
-                            ui,
-                            theme,
-                            "No USB drive is plugged in. Plug one in, or save to a folder: one you \
-                             can reach from the old PC, such as a shared folder on your network.",
-                        );
+                        widgets::hint(ui, theme, &t!("app-network-no-usb"));
                     }
                     match &wizard.saved {
                         Some(Ok(client)) => {
@@ -386,10 +384,9 @@ impl WinAppMigratorApp {
                                 ui,
                                 theme,
                                 Role::Success,
-                                &format!(
-                                    "Saved as {}. On the old PC, close the app you are moving, then \
-                                     double-click it and let it make changes. It shows a code.",
-                                    client.display()
+                                &t!(
+                                    "app-network-client-saved",
+                                    path = client.display().to_string()
                                 ),
                             );
                         }
@@ -401,9 +398,9 @@ impl WinAppMigratorApp {
                     }
                 });
                 ui.add_space(SPACE_MD);
-                widgets::card_titled(ui, theme, "2. Pick the Old PC", None, |ui| {
+                widgets::card_titled(ui, theme, &t!("app-network-step-pick"), None, |ui| {
                     if wizard.found.is_empty() {
-                        busy_line(ui, theme, "Looking on your network for PCs running the client…");
+                        busy_line(ui, theme, &t!("app-network-looking"));
                     }
                     for client in &wizard.found {
                         let about = &client.announcement;
@@ -421,23 +418,36 @@ impl WinAppMigratorApp {
                     }
                     ui.add_space(SPACE_SM);
                     widgets::control_row(ui, |ui| {
-                        widgets::field_label(ui, theme, "Or Type Its Name or Address");
-                        let typed = widgets::text_field(ui, &mut wizard.typed, "OLD-PC or 192.168.1.20", 220.0);
+                        widgets::field_label(ui, theme, &t!("app-network-type-name"));
+                        let typed = widgets::text_field(
+                            ui,
+                            &mut wizard.typed,
+                            &t!("app-network-type-name-example"),
+                            220.0,
+                        );
                         if typed.changed() && !wizard.typed.trim().is_empty() {
                             wizard.chosen = None;
                         }
                     });
                 });
                 ui.add_space(SPACE_MD);
-                widgets::card_titled(ui, theme, "3. Type the Code It Shows", None, |ui| {
+                widgets::card_titled(ui, theme, &t!("app-network-step-code"), None, |ui| {
                     let ready = (wizard.chosen.is_some() || !wizard.typed.trim().is_empty())
                         && wizard.code.chars().filter(char::is_ascii_digit).count()
                             == winappmigrator_link::CODE_DIGITS
                         && !wizard.is_connecting();
                     widgets::control_row(ui, |ui| {
-                        widgets::field_label(ui, theme, "Pairing Code");
+                        widgets::field_label(ui, theme, &t!("app-network-code"));
                         widgets::text_field(ui, &mut wizard.code, "123 456", 120.0);
-                        if widgets::button(ui, theme, ButtonKind::Primary, "Connect", ready).clicked() {
+                        if widgets::button(
+                            ui,
+                            theme,
+                            ButtonKind::Primary,
+                            &t!("app-network-connect"),
+                            ready,
+                        )
+                        .clicked()
+                        {
                             match wizard.chosen {
                                 Some(address) => pair_with = Some(address),
                                 None => match remote::address_of(&wizard.typed) {
@@ -448,7 +458,7 @@ impl WinAppMigratorApp {
                         }
                     });
                     if wizard.is_connecting() {
-                        busy_line(ui, theme, "Pairing…");
+                        busy_line(ui, theme, &t!("app-network-pairing"));
                     }
                     if let Some(error) = &wizard.error {
                         ui.add_space(SPACE_SM);
@@ -461,7 +471,7 @@ impl WinAppMigratorApp {
         }
         if pick_folder {
             save_to = rfd::FileDialog::new()
-                .set_title("Choose a Folder for WinAppMigrator Client")
+                .set_title(t!("app-network-pick-folder-title"))
                 .pick_folder();
             let _ = std::env::set_current_dir(winappmigrator_core::path_utils::system_root());
         }
@@ -513,6 +523,29 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// In English, the note is what it always was, to the byte, with Windows' line breaks.
+    #[test]
+    fn the_note_beside_the_client_keeps_its_lines() {
+        let note = winappmigrator_i18n::with_language(winappmigrator_i18n::ENGLISH, client_note);
+        assert_eq!(
+            note,
+            "WinAppMigrator Client\r\n\
+             \r\n\
+             Run this on the PC you are moving apps off: Windows 7, 8, 10 or 11.\r\n\
+             \r\n\
+             1. Close the app you are moving.\r\n\
+             2. Double-click \"WinAppMigrator Client.exe\" and let it make changes.\r\n\
+             3. It shows a 6-digit pairing code. In WinAppMigrator on your new PC, choose\r\n   \
+             Network PC..., pick this PC, and type the code.\r\n\
+             4. When the new PC is done, press Enter in the client's window, or close it.\r\n\
+             \r\n\
+             It only reads. While it runs it keeps a snapshot of the Windows drive and lets\r\n\
+             its own two ports through Windows Firewall from your local network, and it\r\n\
+             removes both when it stops. What crosses the network is encrypted, and only a\r\n\
+             PC that has the code can read anything.\r\n"
+        );
     }
 
     /// A junction needs no special right, unlike a symbolic link. Temp folders only.

@@ -10,9 +10,10 @@ fn main() -> eframe::Result {
         tracing::error!(%error, "the window could not open");
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
-            .set_title("WinAppMigrator")
+            .set_title(winappmigrator_i18n::t!("app-name"))
             .set_description(format!(
-                "The window could not open: {error}\n\n{}",
+                "{}\n\n{}",
+                winappmigrator_i18n::t!("app-window-could-not-open", error = error.to_string()),
                 winappmigrator_ui::NEEDS_DIRECT3D_12_TEXT
             ))
             .show();
