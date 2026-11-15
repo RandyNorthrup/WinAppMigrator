@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use pelite::{PeFile, Wrap};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use winappmigrator_i18n::t;
 
 use crate::errors::{Result, WinAppMigratorError, panic_text};
 use crate::models::{
@@ -61,7 +62,7 @@ fn not_a_panic<T>(path: &Path, read: impl FnOnce() -> Result<T>) -> Result<T> {
     panic::catch_unwind(AssertUnwindSafe(read)).unwrap_or_else(|panicked| {
         Err(WinAppMigratorError::pe(
             path,
-            format!("it could not be read: {}", panic_text(&*panicked)),
+            t!("core-pe-unreadable", reason = panic_text(&*panicked)),
         ))
     })
 }
@@ -75,7 +76,7 @@ fn parse_program<'a>(path: &Path, bytes: &'a [u8]) -> Result<PeFile<'a>> {
     if !headers_are_where_they_can_be(bytes) {
         return Err(WinAppMigratorError::pe(
             path,
-            "its headers are not on the boundaries a program's have to be".to_owned(),
+            t!("core-pe-headers-misaligned"),
         ));
     }
     PeFile::from_bytes(bytes).map_err(|source| WinAppMigratorError::pe(path, source.to_string()))
@@ -178,7 +179,7 @@ fn read_program(path: &Path) -> Result<Vec<u8>> {
     if size > MAX_PROGRAM_BYTES {
         return Err(WinAppMigratorError::pe(
             path,
-            format!("it is {size} bytes, too large to be a program"),
+            t!("core-pe-too-large", size = size),
         ));
     }
     if size > READ_WHOLE_UP_TO_BYTES
@@ -466,7 +467,7 @@ pub(crate) fn file_version_of(path: &Path) -> Option<String> {
 pub fn read_pe_architecture(path: &Path) -> Result<AppArchitecture> {
     let start = read_start_of(path)?;
     let facts = header_facts(&start)
-        .ok_or_else(|| WinAppMigratorError::pe(path, "it has no PE headers".to_owned()))?;
+        .ok_or_else(|| WinAppMigratorError::pe(path, t!("core-pe-no-headers")))?;
     Ok(architecture_from_machine(facts.machine))
 }
 
@@ -621,10 +622,11 @@ fn read_imports(path: &Path, pe: &PeFile<'_>, warnings: &mut Vec<Warning>) -> Ve
         Ok(imports) => imports,
         Err(error) if error.is_null() => return Vec::new(),
         Err(error) => {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "pe_imports_unreadable",
+                "core-warning-scan-imports-unreadable",
                 WarningSeverity::Warning,
-                format!("Import table could not be read: {error}"),
+                vec![("error", error.to_string().into())],
                 Some(path.display().to_string()),
             ));
             return Vec::new();
@@ -643,10 +645,11 @@ fn read_imports(path: &Path, pe: &PeFile<'_>, warnings: &mut Vec<Warning>) -> Ve
                 name: name.to_string(),
                 delay_loaded: false,
             }),
-            Err(error) => warnings.push(Warning::new(
+            Err(error) => warnings.push(Warning::localized(
                 "pe_import_name_unreadable",
+                "core-warning-scan-import-name-unreadable",
                 WarningSeverity::Warning,
-                format!("An import descriptor name could not be read: {error}"),
+                vec![("error", error.to_string().into())],
                 Some(path.display().to_string()),
             )),
         }
@@ -794,12 +797,11 @@ fn read_delay_imports(
     let spans = section_spans(pe);
     let (names, legacy_skipped) = read_delay_import_names(bytes, &spans, directory.VirtualAddress);
     if legacy_skipped > 0 {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "delay_import_legacy_format",
+            "core-warning-scan-legacy-delay-imports",
             WarningSeverity::Info,
-            format!(
-                "{legacy_skipped} legacy (v1) delay-load descriptor(s) were skipped; only modern RVA-based delay imports are parsed."
-            ),
+            vec![("count", legacy_skipped.into())],
             None,
         ));
     }

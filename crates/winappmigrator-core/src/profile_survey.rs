@@ -271,19 +271,24 @@ fn pick(rows: Vec<ProfileRow>, on_a_drive: bool, unknown_user: Option<&str>) -> 
         };
     }
     if let Some(reason) = unknown_user {
-        let note = format!("Could not tell who is signed in ({reason}).");
         return match with_data.as_slice() {
             [] => ProfilePicker {
                 rows: Vec::new(),
                 selected: None,
-                note: Some(note),
+                note: Some(winappmigrator_i18n::t!(
+                    "core-profile-signed-in-unknown",
+                    reason = reason
+                )),
             },
             many => {
                 let rows = many.iter().map(|row| (*row).clone()).collect();
                 ProfilePicker {
                     rows,
                     selected: None,
-                    note: Some(format!("{note} Choose whose data to include.")),
+                    note: Some(winappmigrator_i18n::t!(
+                        "core-profile-signed-in-unknown-choose",
+                        reason = reason
+                    )),
                 }
             }
         };

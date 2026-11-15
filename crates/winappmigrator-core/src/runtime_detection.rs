@@ -351,13 +351,23 @@ pub(crate) fn inspect_app_runtimes(
                         runtimes
                             .visual_cpp
                             .entry((dll.runtime, architecture.unwrap_or(build)))
-                            .or_insert_with(|| format!("{program_name} imports {}", import.name));
+                            .or_insert_with(|| {
+                                winappmigrator_i18n::t!(
+                                    "core-runtime-program-imports",
+                                    program = program_name.as_str(),
+                                    dll = import.name.as_str()
+                                )
+                            });
                     }
                     Some(_) => {}
                     None if ships_with_it => pending.push_back(beside),
                     None if is_legacy_directx_dll(&import.name) => {
                         runtimes.legacy_directx.get_or_insert_with(|| {
-                            format!("{program_name} imports {}", import.name)
+                            winappmigrator_i18n::t!(
+                                "core-runtime-program-imports",
+                                program = program_name.as_str(),
+                                dll = import.name.as_str()
+                            )
                         });
                     }
                     None => {}

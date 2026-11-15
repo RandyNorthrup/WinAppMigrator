@@ -40,10 +40,11 @@ pub fn scan_environment(
             &expand,
             &mut entries,
         ),
-        Err(error) => warnings.push(Warning::new(
+        Err(error) => warnings.push(Warning::localized(
             "environment_registry_unreadable",
+            "core-warning-scan-environment-unreadable",
             WarningSeverity::Info,
-            format!("Could not read machine environment registry key: {error}"),
+            vec![("error", error.to_string().into())],
             Some(HKLM_ENVIRONMENT.to_owned()),
         )),
     }

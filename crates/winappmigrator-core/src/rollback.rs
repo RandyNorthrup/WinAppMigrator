@@ -33,6 +33,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
+use winappmigrator_i18n::t;
 use winreg::enums::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_SET_VALUE, KEY_WRITE,
 };
@@ -277,10 +278,9 @@ pub(crate) fn undo_journal(
     if journal.damaged {
         // Said, and not held against it. It cannot get better by trying again, and it must
         // not stop every later install.
-        undoer.kept(format!(
-            "Part of the record of {} could not be read, so anything it described is still in \
-             place, and a file it replaced may not come back.",
-            journal.header.app_name
+        undoer.kept(t!(
+            "core-rollback-record-damaged",
+            app_name = journal.header.app_name.as_str()
         ));
     }
     // The app's entry in Settings goes last and only if all else went, so that an uninstall
@@ -307,10 +307,10 @@ pub(crate) fn undo_journal(
             done += 1;
         }
     } else if !entry_changes.is_empty() {
-        undoer.report.kept.push(
-            "The app's entry in Settings stays, so that this can be run again from there."
-                .to_owned(),
-        );
+        undoer
+            .report
+            .kept
+            .push(t!("core-rollback-settings-entry-stays"));
     }
     monitor.report(InstallStep::new(phase, total, total));
     undoer.report
@@ -406,15 +406,16 @@ impl Undoer<'_> {
                 written,
                 item,
             } => {
-                let label = value_label(hive, key, name);
+                let setting = Setting::value(hive, key, name);
                 // What it replaced was someone's own, and goes back as any other value does.
                 if self.keeps(*item) && prior.is_none() {
-                    self.kept(format!(
-                        "{label} stays, since it was not asked to be removed."
+                    self.kept(t!(
+                        "core-rollback-value-kept-by-request",
+                        name = setting.name.as_str()
                     ));
                     return;
                 }
-                self.undo_value(hive, key, name, prior.as_ref(), written, &label);
+                self.undo_value(hive, key, name, prior.as_ref(), written, &setting);
             }
             Change::EnvironmentValue {
                 scope,
@@ -423,8 +424,8 @@ impl Undoer<'_> {
                 written,
             } => {
                 let (hive, key) = environment_location(scope);
-                let label = format!("The {} environment variable {name}", scope_name(scope));
-                self.undo_value(&hive, key, name, prior.as_ref(), written, &label);
+                let setting = Setting::variable(scope, name);
+                self.undo_value(&hive, key, name, prior.as_ref(), written, &setting);
             }
             Change::PathEntries {
                 scope,
@@ -468,10 +469,10 @@ impl Undoer<'_> {
                 (protocol.as_deref(), local_ports, remote_ports),
                 fingerprint,
             ),
-            Change::Prerequisite { name } => self.report.left_behind.push(format!(
-                "{name} was installed, or may have been, and stays, because other programs may \
-                 be using it."
-            )),
+            Change::Prerequisite { name } => self
+                .report
+                .left_behind
+                .push(t!("core-rollback-prerequisite-stays", name = name.as_str())),
         }
     }
 
@@ -482,10 +483,9 @@ impl Undoer<'_> {
     /// unless it is a whole drive that is not there, in which case it may come back.
     fn guard(&self, root: &Path, path: &Path) -> std::result::Result<Guard, String> {
         if self.roots_being_changed.contains(&root_key(root)) {
-            return Err(format!(
-                "something was changing {} while this ran, so nothing more was done in it. Close \
-                 what is doing that, and run this again",
-                root.display()
+            return Err(t!(
+                "core-rollback-reason-being-changed",
+                folder = root.display().to_string()
             ));
         }
         let hold = match hold_folder(root) {
@@ -497,7 +497,7 @@ impl Undoer<'_> {
                     Guard::DriveGone
                 });
             }
-            Err(error) => return Err(format!("{} could not be opened: {error}", root.display())),
+            Err(error) => return Err(not_opened(root, &error)),
         };
         if self.damaged && !self.roots.contains_key(&root_key(root)) {
             return Ok(Guard::RootUnknown);
@@ -509,18 +509,20 @@ impl Undoer<'_> {
     }
 
     fn confirm_root_is_where_it_was(&self, root: &Path) -> std::result::Result<(), String> {
-        let expected = self
-            .roots
-            .get(&root_key(root))
-            .ok_or_else(|| format!("there is no record of where {} was", root.display()))?;
-        let actual = real_path(root)
-            .map_err(|error| format!("{} could not be opened: {error}", root.display()))?;
+        let expected = self.roots.get(&root_key(root)).ok_or_else(|| {
+            t!(
+                "core-rollback-reason-no-record",
+                folder = root.display().to_string()
+            )
+        })?;
+        let actual = real_path(root).map_err(|error| not_opened(root, &error))?;
         if actual.eq_ignore_ascii_case(expected) {
             return Ok(());
         }
-        Err(format!(
-            "{} now leads to {actual}, not where it was during the install",
-            root.display()
+        Err(t!(
+            "core-rollback-reason-moved",
+            folder = root.display().to_string(),
+            actual = actual
         ))
     }
 
@@ -567,16 +569,14 @@ impl Undoer<'_> {
                 {
                     self.report.drives_waited_for.push(root.to_path_buf());
                 }
-                format!(
-                    "What this install put in {} is on a drive that is not connected. Connect \
-                     it, and this can be finished.",
-                    root.display()
+                t!(
+                    "core-rollback-drive-not-connected",
+                    folder = root.display().to_string()
                 )
             }
-            Guard::RootUnknown => format!(
-                "What this install put in {} stays, because that part of the record could not \
-                 be read.",
-                root.display()
+            Guard::RootUnknown => t!(
+                "core-rollback-record-part-unread",
+                folder = root.display().to_string()
             ),
             Guard::RootGone | Guard::Held(_) => return false,
         };
@@ -587,11 +587,17 @@ impl Undoer<'_> {
     }
 
     fn undo_folder(&mut self, path: &Path, root: &Path, item: ItemKind) {
-        let what = format!("The folder {}", path.display());
+        let left = |reason: String| {
+            t!(
+                "core-rollback-folder-left",
+                path = path.display().to_string(),
+                reason = reason
+            )
+        };
         let guard = match self.guard(root, path) {
             Ok(guard) => guard,
             Err(reason) => {
-                self.failed(format!("{what} was left: {reason}."));
+                self.failed(left(reason));
                 return;
             }
         };
@@ -605,14 +611,17 @@ impl Undoer<'_> {
         let pinned = match self.pin(root, path) {
             Ok(pinned) => pinned,
             Err(reason) => {
-                self.failed(format!("{what} was left: {reason}."));
+                self.failed(left(reason));
                 return;
             }
         };
         let removed = remove_folder_if_nothing_real_is_in_it(path);
         drop(pinned);
         match removed {
-            Ok(()) => self.undone(format!("Removed the folder {}", path.display())),
+            Ok(()) => self.undone(t!(
+                "core-rollback-folder-removed",
+                path = path.display().to_string()
+            )),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) if error.raw_os_error() == Some(ERROR_DIR_NOT_EMPTY) => {
                 // A folder this was the parent of has already said so.
@@ -622,16 +631,16 @@ impl Undoer<'_> {
                     .any(|kept| path_is_within(kept, path));
                 self.kept_folders.push(path.to_path_buf());
                 if !already_said && !self.keeps(item) {
-                    self.kept(format!(
-                        "The folder {} stays, because it holds files this install did not \
-                         put there.",
-                        path.display()
+                    self.kept(t!(
+                        "core-rollback-folder-holds-others",
+                        path = path.display().to_string()
                     ));
                 }
             }
-            Err(error) => self.failed(format!(
-                "The folder {} could not be removed: {error}.",
-                path.display()
+            Err(error) => self.failed(t!(
+                "core-rollback-folder-not-removed",
+                path = path.display().to_string(),
+                error = error.to_string()
             )),
         }
     }
@@ -646,11 +655,17 @@ impl Undoer<'_> {
         partial: Option<&Path>,
     ) {
         let found_backup = backup.and_then(|number| find_backup(self.folder, number));
-        let what = format!("The file {}", path.display());
+        let left = |reason: String| {
+            t!(
+                "core-rollback-file-left",
+                path = path.display().to_string(),
+                reason = reason
+            )
+        };
         let guard = match self.guard(root, path) {
             Ok(guard) => guard,
             Err(reason) => {
-                self.failed(format!("{what} was left: {reason}."));
+                self.failed(left(reason));
                 return;
             }
         };
@@ -661,9 +676,9 @@ impl Undoer<'_> {
             Guard::Held(holds) => holds,
             _ => {
                 if found_backup.is_some() {
-                    self.kept(format!(
-                        "{} is not being put back, because the folder it was under has gone.",
-                        path.display()
+                    self.kept(t!(
+                        "core-rollback-file-folder-gone",
+                        path = path.display().to_string()
                     ));
                 }
                 return;
@@ -674,9 +689,10 @@ impl Undoer<'_> {
                 remove_regular_file(partial).map_err(|error| error.to_string())
             });
             if let Err(error) = removed {
-                self.failed(format!(
-                    "A partial file could not be removed: {} ({error}).",
-                    partial.display()
+                self.failed(t!(
+                    "core-rollback-partial-not-removed",
+                    path = partial.display().to_string(),
+                    error = error
                 ));
             }
         }
@@ -696,7 +712,11 @@ impl Undoer<'_> {
                 None => Some(matches!(self.mode, UndoMode::Recovery)),
                 // In use, which says nothing about whether it has changed.
                 Some(Err(error)) => {
-                    self.failed(format!("{} could not be checked: {error}.", path.display()));
+                    self.failed(t!(
+                        "core-rollback-file-not-checked",
+                        path = path.display().to_string(),
+                        error = error.to_string()
+                    ));
                     return;
                 }
             }
@@ -716,8 +736,12 @@ impl Undoer<'_> {
         if matches!(action, FileAction::Delete | FileAction::PutBackBackup)
             && self.is_still_named(path)
         {
-            let why = "because something that stays still uses it";
-            self.keep_with_what_it_replaced(root, path, found_backup.as_ref(), why);
+            self.keep_with_what_it_replaced(
+                root,
+                path,
+                found_backup.as_ref(),
+                KeptBecause::StillUsed,
+            );
             return;
         }
         match action {
@@ -726,7 +750,7 @@ impl Undoer<'_> {
                 let pinned = match self.pin(root, path) {
                     Ok(pinned) => pinned,
                     Err(reason) => {
-                        self.failed(format!("{what} was left: {reason}."));
+                        self.failed(left(reason));
                         return;
                     }
                 };
@@ -735,41 +759,50 @@ impl Undoer<'_> {
                 });
                 drop(pinned);
                 match deleted {
-                    Ok(()) => self.undone(format!("Removed {}", path.display())),
-                    Err(error) => {
-                        self.failed(format!("{} could not be removed: {error}.", path.display()))
-                    }
+                    Ok(()) => self.undone(t!(
+                        "core-rollback-file-removed",
+                        path = path.display().to_string()
+                    )),
+                    Err(error) => self.failed(t!(
+                        "core-rollback-file-not-removed",
+                        path = path.display().to_string(),
+                        error = error.to_string()
+                    )),
                 }
             }
             FileAction::PutBackBackup => {
                 let pinned = match self.pin(root, path) {
                     Ok(pinned) => pinned,
                     Err(reason) => {
-                        self.failed(format!("{what} was left: {reason}."));
+                        self.failed(left(reason));
                         return;
                     }
                 };
                 let put_back = found_backup
                     .as_ref()
                     .ok_or_else(|| {
-                        WinAppMigratorError::InvalidInput("the backup has gone".to_owned())
+                        WinAppMigratorError::InvalidInput(t!("core-rollback-backup-gone"))
                     })
                     .and_then(|found| put_back_backup(found, path));
                 drop(pinned);
                 match put_back {
-                    Ok(()) => self.undone(format!("Put back {}", path.display())),
-                    Err(error) => self.failed(format!(
-                        "{} could not be put back: {error}.",
-                        path.display()
+                    Ok(()) => self.undone(t!(
+                        "core-rollback-file-put-back",
+                        path = path.display().to_string()
+                    )),
+                    Err(error) => self.failed(t!(
+                        "core-rollback-file-not-put-back",
+                        path = path.display().to_string(),
+                        error = error.to_string()
                     )),
                 }
             }
             FileAction::KeepChanged => {
-                let why = "because it has changed since it was installed";
+                let why = KeptBecause::Changed;
                 self.keep_with_what_it_replaced(root, path, found_backup.as_ref(), why);
             }
             FileAction::KeepByRequest => {
-                let why = "since it was not asked to be removed";
+                let why = KeptBecause::NotAsked;
                 self.keep_with_what_it_replaced(root, path, found_backup.as_ref(), why);
             }
         }
@@ -783,17 +816,22 @@ impl Undoer<'_> {
         root: &Path,
         path: &Path,
         replaced: Option<&Backup>,
-        why: &str,
+        why: KeptBecause,
     ) {
+        let shown = path.display().to_string();
         let Some(replaced) = replaced else {
-            self.kept(format!("{} stays, {why}.", path.display()));
+            self.kept(t!(
+                "core-rollback-file-stays",
+                path = shown,
+                why = why.as_arg()
+            ));
             return;
         };
         let Some(beside) = free_name_beside(path) else {
-            self.failed(format!(
-                "{} stays, {why}, and the file it replaced could not be put beside it: every name \
-                 for it is taken.",
-                path.display()
+            self.failed(t!(
+                "core-rollback-file-stays-no-name-beside",
+                path = shown,
+                why = why.as_arg()
             ));
             return;
         };
@@ -806,15 +844,18 @@ impl Undoer<'_> {
                 placed
             });
         match placed {
-            Ok(()) => self.kept(format!(
-                "{} stays, {why}. The file it replaced is beside it, as {}.",
-                path.display(),
-                file_name_of(&beside)
+            Ok(()) => self.kept(t!(
+                "core-rollback-file-stays-beside",
+                path = shown,
+                why = why.as_arg(),
+                name = file_name_of(&beside)
             )),
             // This install's record stays while this is in it, so nothing is lost by stopping.
-            Err(error) => self.failed(format!(
-                "{} stays, {why}, and the file it replaced could not be put beside it: {error}.",
-                path.display()
+            Err(error) => self.failed(t!(
+                "core-rollback-file-stays-not-beside",
+                path = shown,
+                why = why.as_arg(),
+                error = error.to_string()
             )),
         }
     }
@@ -841,26 +882,28 @@ impl Undoer<'_> {
         }
     }
 
-    fn kept_for_another_account(&mut self, label: &str) {
-        self.kept(format!(
-            "{label} stays, because it belongs to the account that installed this, which is not \
-             signed in."
+    fn kept_for_another_account(&mut self, setting: &Setting) {
+        self.kept(t!(
+            "core-rollback-setting-other-account",
+            kind = setting.kind,
+            name = setting.name.as_str()
         ));
     }
 
     fn undo_new_key(&mut self, hive: &RegistryHive, key: &str, item: ItemKind) {
-        let label = format!("{}\\{key}", registry_hive_name(hive));
+        let setting = Setting::key(hive, key);
+        let label = setting.name.as_str();
         if self.keeps(item) {
             return;
         }
         let root = match self.hive_root(hive) {
             Ok(Some(root)) => root,
             Ok(None) => {
-                self.kept_for_another_account(&format!("The key {label}"));
+                self.kept_for_another_account(&setting);
                 return;
             }
             Err(error) => {
-                self.failed(format!("The key {label} could not be reached: {error}."));
+                self.failed(setting.not_reached(&error));
                 return;
             }
         };
@@ -868,22 +911,23 @@ impl Undoer<'_> {
             Ok(info) => info,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return,
             Err(error) => {
-                self.failed(format!("The key {label} could not be read: {error}."));
+                self.failed(setting.not_read(&error));
                 return;
             }
         };
         if info.values > 0 || info.sub_keys > 0 {
             if item == ItemKind::Program {
-                self.kept(format!(
-                    "The key {label} stays, because it holds what this install did not put \
-                     there."
-                ));
+                self.kept(t!("core-rollback-key-holds-others", name = label));
             }
             return;
         }
         match root.delete_subkey(key) {
-            Ok(()) => self.undone(format!("Removed the key {label}")),
-            Err(error) => self.failed(format!("The key {label} could not be removed: {error}.")),
+            Ok(()) => self.undone(t!("core-rollback-key-removed", name = label)),
+            Err(error) => self.failed(t!(
+                "core-rollback-key-not-removed",
+                name = label,
+                error = error.to_string()
+            )),
         }
     }
 
@@ -894,16 +938,16 @@ impl Undoer<'_> {
         name: &str,
         prior: Option<&StoredValue>,
         written: &StoredValue,
-        label: &str,
+        setting: &Setting,
     ) {
         let root = match self.hive_root(hive) {
             Ok(Some(root)) => root,
             Ok(None) => {
-                self.kept_for_another_account(label);
+                self.kept_for_another_account(setting);
                 return;
             }
             Err(error) => {
-                self.failed(format!("{label} could not be reached: {error}."));
+                self.failed(setting.not_reached(&error));
                 return;
             }
         };
@@ -911,7 +955,7 @@ impl Undoer<'_> {
             Ok(handle) => Some(handle),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => {
-                self.failed(format!("{label} could not be reached: {error}."));
+                self.failed(setting.not_reached(&error));
                 return;
             }
         };
@@ -921,7 +965,7 @@ impl Undoer<'_> {
             Some(Err(error)) if error.kind() == io::ErrorKind::NotFound => None,
             // Not knowing is not the same as it not being there.
             Some(Err(error)) => {
-                self.failed(format!("{label} could not be read: {error}."));
+                self.failed(setting.not_read(&error));
                 return;
             }
         };
@@ -931,8 +975,10 @@ impl Undoer<'_> {
                 if let Some(Ok(value)) = current.as_ref().map(StoredValue::to_reg) {
                     self.note_kept_text(&value.to_string());
                 }
-                self.kept(format!(
-                    "{label} stays, because it has changed since it was installed."
+                self.kept(t!(
+                    "core-rollback-setting-changed",
+                    kind = setting.kind,
+                    name = setting.name.as_str()
                 ));
             }
             ValueAction::PutBack => {
@@ -947,8 +993,17 @@ impl Undoer<'_> {
                     None => handle.delete_value(name),
                 };
                 match result {
-                    Ok(()) => self.undone(format!("Put back {label}")),
-                    Err(error) => self.failed(format!("{label} could not be put back: {error}.")),
+                    Ok(()) => self.undone(t!(
+                        "core-rollback-setting-put-back",
+                        kind = setting.kind,
+                        name = setting.name.as_str()
+                    )),
+                    Err(error) => self.failed(t!(
+                        "core-rollback-setting-not-put-back",
+                        kind = setting.kind,
+                        name = setting.name.as_str(),
+                        error = error.to_string()
+                    )),
                 }
             }
         }
@@ -962,16 +1017,16 @@ impl Undoer<'_> {
         prior: Option<&StoredValue>,
         written: &StoredValue,
     ) {
-        let label = format!("The {} {name}", scope_name(scope));
+        let setting = Setting::list(scope, name);
         let (hive, key) = environment_location(scope);
         let root = match self.hive_root(&hive) {
             Ok(Some(root)) => root,
             Ok(None) => {
-                self.kept_for_another_account(&label);
+                self.kept_for_another_account(&setting);
                 return;
             }
             Err(error) => {
-                self.failed(format!("{label} could not be reached: {error}."));
+                self.failed(setting.not_reached(&error));
                 return;
             }
         };
@@ -979,7 +1034,7 @@ impl Undoer<'_> {
             Ok(handle) => handle,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return,
             Err(error) => {
-                self.failed(format!("{label} could not be reached: {error}."));
+                self.failed(setting.not_reached(&error));
                 return;
             }
         };
@@ -987,19 +1042,19 @@ impl Undoer<'_> {
             Ok(value) => StoredValue::from_reg(&value),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return,
             Err(error) => {
-                self.failed(format!("{label} could not be read: {error}."));
+                self.failed(setting.not_read(&error));
                 return;
             }
         };
         // Exactly as written, so it can go back exactly as it was.
         if current == *written {
-            self.undo_value(&hive, key, name, prior, written, &label);
+            self.undo_value(&hive, key, name, prior, written, &setting);
             return;
         }
         let current_value = match current.to_reg() {
             Ok(value) => value,
             Err(reason) => {
-                self.failed(format!("{label} could not be read: {reason}."));
+                self.failed(setting.not_read(&reason));
                 return;
             }
         };
@@ -1021,9 +1076,16 @@ impl Undoer<'_> {
             )
         };
         match result {
-            Ok(()) => self.undone(format!("Took this install's entries out of {label}")),
-            Err(error) => self.failed(format!(
-                "This install's entries could not be taken out of {label}: {error}."
+            Ok(()) => self.undone(t!(
+                "core-rollback-list-entries-removed",
+                kind = setting.kind,
+                name = setting.name.as_str()
+            )),
+            Err(error) => self.failed(t!(
+                "core-rollback-list-entries-not-removed",
+                kind = setting.kind,
+                name = setting.name.as_str(),
+                error = error.to_string()
             )),
         }
     }
@@ -1036,9 +1098,10 @@ impl Undoer<'_> {
             return;
         }
         if let StartAnswer::Failed(reason) = run_sc_start(name) {
-            self.kept(format!(
-                "The service {name} was running before this install, and did not start again: \
-                 {reason}."
+            self.kept(t!(
+                "core-rollback-service-not-restarted",
+                name = name,
+                reason = reason.to_string()
             ));
         }
     }
@@ -1056,15 +1119,22 @@ impl Undoer<'_> {
             Ok(Some(current)) => current,
             Ok(None) => return,
             Err(error) => {
-                self.failed(format!("The {kind} {name} could not be read: {error}."));
+                self.failed(t!(
+                    "core-rollback-service-not-read",
+                    kind = kind,
+                    name = name,
+                    error = error.to_string()
+                ));
                 return;
             }
         };
         if !image_path_matches(&current, binary, arguments, system_root()) {
             if prior.is_none_or(|prior| prior.image_path != current) {
                 self.note_kept_text(&current);
-                self.kept(format!(
-                    "The {kind} {name} stays, because it has changed since it was installed."
+                self.kept(t!(
+                    "core-rollback-service-changed",
+                    kind = kind,
+                    name = name
                 ));
             }
             return;
@@ -1075,9 +1145,11 @@ impl Undoer<'_> {
         let was_running = match stop_service(name) {
             Ok(was_running) => was_running,
             Err(reason) => {
-                self.kept(format!(
-                    "The {kind} {name} could not be stopped ({reason}), so what it is using may \
-                     stay until the PC restarts."
+                self.kept(t!(
+                    "core-rollback-service-not-stopped",
+                    kind = kind,
+                    name = name,
+                    reason = reason
                 ));
                 false
             }
@@ -1087,8 +1159,10 @@ impl Undoer<'_> {
             Some(prior) => {
                 self.restore_service(name, kind, driver, prior);
                 if was_running {
-                    self.kept(format!(
-                        "The {kind} {name} was stopped to do this. Start it again when you need it."
+                    self.kept(t!(
+                        "core-rollback-service-stopped-for-this",
+                        kind = kind,
+                        name = name
                     ));
                 }
             }
@@ -1106,19 +1180,26 @@ impl Undoer<'_> {
         if let Err(warning) = run_checked(&mut command, "service_delete_failed", name)
             && !warning.message.contains(SC_ALREADY_MARKED_FOR_DELETE)
         {
-            self.failed(format!(
-                "The {kind} {name} could not be removed: {}.",
-                warning.message.trim()
+            self.failed(t!(
+                "core-rollback-service-not-removed",
+                kind = kind,
+                name = name,
+                reason = warning.text().trim().to_owned()
             ));
             return;
         }
         if matches!(service_image_path(name), Ok(Some(_))) {
-            self.kept(format!(
-                "The {kind} {name} is marked for removal, and goes when the PC restarts or \
-                 whatever has it open lets go."
+            self.kept(t!(
+                "core-rollback-service-marked-for-removal",
+                kind = kind,
+                name = name
             ));
         } else {
-            self.undone(format!("Removed the {kind} {name}"));
+            self.undone(t!(
+                "core-rollback-service-removed",
+                kind = kind,
+                name = name
+            ));
         }
     }
 
@@ -1146,18 +1227,25 @@ impl Undoer<'_> {
             let mut command = hidden_command(SC_EXE);
             command.args(arguments);
             if let Err(warning) = run_checked(&mut command, "service_restore_failed", name) {
-                self.failed(format!(
-                    "The {kind} {name} could not be put back as it was: {}.",
-                    warning.message.trim()
+                self.failed(t!(
+                    "core-rollback-service-not-restored",
+                    kind = kind,
+                    name = name,
+                    reason = warning.text().trim().to_owned()
                 ));
                 return;
             }
         }
-        self.undone(format!("Put back the settings of the {kind} {name}"));
+        self.undone(t!(
+            "core-rollback-service-restored",
+            kind = kind,
+            name = name
+        ));
         if let ServiceAccount::Custom(account) = account {
-            self.kept(format!(
-                "The service {name} ran as {account}. Its password is not kept, so set its \
-                 account again in Services."
+            self.kept(t!(
+                "core-rollback-service-account-again",
+                name = name,
+                account = account
             ));
         }
     }
@@ -1173,12 +1261,15 @@ impl Undoer<'_> {
         (protocol, local_ports, remote_ports): (Option<&str>, &[String], &[String]),
         fingerprint: &str,
     ) {
-        let label = format!("The firewall rule {name}");
         let stored = match stored_firewall_rules() {
             Ok(stored) => stored,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => {
-                self.failed(format!("{label} could not be read: {error}."));
+                self.failed(t!(
+                    "core-rollback-firewall-not-read",
+                    name = name,
+                    error = error.to_string()
+                ));
                 return;
             }
         };
@@ -1201,9 +1292,7 @@ impl Undoer<'_> {
                 .any(|rule| stored_firewall_rule_matches(rule, name, direction, program));
             if another_like_it {
                 self.note_kept_text(&program.display().to_string());
-                self.kept(format!(
-                    "{label} stays, because what is there by that name says something else."
-                ));
+                self.kept(t!("core-rollback-firewall-says-otherwise", name = name));
             }
             return;
         }
@@ -1212,9 +1301,7 @@ impl Undoer<'_> {
             .any(|rule| firewall_fingerprint(rule) == fingerprint);
         if !as_it_was && !matches!(self.mode, UndoMode::Rollback) {
             self.note_kept_text(&program.display().to_string());
-            self.kept(format!(
-                "{label} stays, because it has changed since it was installed."
-            ));
+            self.kept(t!("core-rollback-firewall-changed", name = name));
             return;
         }
         let deleted = hidden_command("netsh.exe")
@@ -1229,31 +1316,41 @@ impl Undoer<'_> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        let not_removed = |error: String| {
+            t!(
+                "core-rollback-firewall-not-removed",
+                name = name,
+                error = error
+            )
+        };
         match deleted {
-            Ok(status) if status.success() => self.undone(format!("Removed {label}")),
-            Ok(status) => self.failed(format!("{label} could not be removed: {status}.")),
-            Err(error) => self.failed(format!("{label} could not be removed: {error}.")),
+            Ok(status) if status.success() => {
+                self.undone(t!("core-rollback-firewall-removed", name = name));
+            }
+            Ok(status) => self.failed(not_removed(status.to_string())),
+            Err(error) => self.failed(not_removed(error.to_string())),
         }
     }
 
     fn undo_task_folder(&mut self, path: &str) {
         let script = delete_empty_task_folder_script(path);
         let output = powershell_command(&script).output();
+        let not_removed = |error: String| {
+            t!(
+                "core-rollback-task-folder-not-removed",
+                path = path,
+                error = error
+            )
+        };
         match output {
             Ok(output) if output.status.success() => {}
             Ok(output) if output.status.code() == Some(TASK_FOLDER_NOT_EMPTY_EXIT) => {
-                self.kept(format!(
-                    "The task folder {path} stays, because it holds tasks this install did not \
-                     put there."
-                ));
+                self.kept(t!("core-rollback-task-folder-holds-others", path = path));
             }
-            Ok(output) => self.failed(format!(
-                "The task folder {path} could not be removed: {}.",
-                String::from_utf8_lossy(&output.stderr).trim()
+            Ok(output) => self.failed(not_removed(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             )),
-            Err(error) => self.failed(format!(
-                "The task folder {path} could not be removed: {error}."
-            )),
+            Err(error) => self.failed(not_removed(error.to_string())),
         }
     }
 
@@ -1265,10 +1362,15 @@ impl Undoer<'_> {
         written: Option<&str>,
     ) {
         let label = format!("{task_path}{task_name}");
+        let label = label.as_str();
         let live = match live_task_xml(task_path, task_name) {
             Ok(live) => live,
             Err(error) => {
-                self.failed(format!("The task {label} could not be read: {error}."));
+                self.failed(t!(
+                    "core-rollback-task-not-read",
+                    name = label,
+                    error = error.to_string()
+                ));
                 return;
             }
         };
@@ -1282,16 +1384,15 @@ impl Undoer<'_> {
                     // A path in a task's definition is followed by the tag that ends it.
                     self.note_kept_text(&xml.replace('<', "\""));
                 }
-                self.kept(format!(
-                    "The task {label} stays, because it has changed since it was installed."
-                ));
+                self.kept(t!("core-rollback-task-changed", name = label));
             }
             TaskAction::Delete => {
                 match run_powershell_script(&unregister_task_script(task_path, task_name)) {
-                    Ok(()) => self.undone(format!("Removed the task {label}")),
-                    Err(warning) => self.failed(format!(
-                        "The task {label} could not be removed: {}.",
-                        warning.message.trim()
+                    Ok(()) => self.undone(t!("core-rollback-task-removed", name = label)),
+                    Err(warning) => self.failed(t!(
+                        "core-rollback-task-not-removed",
+                        name = label,
+                        reason = warning.text().trim().to_owned()
                     )),
                 }
             }
@@ -1306,13 +1407,14 @@ impl Undoer<'_> {
                             &xml_path, task_path, task_name, true,
                         ));
                         let _ = fs::remove_file(&xml_path);
-                        registered.map_err(|warning| warning.message)
+                        registered.map_err(|warning| warning.text())
                     });
                 match result {
-                    Ok(()) => self.undone(format!("Put back the task {label}")),
-                    Err(reason) => self.failed(format!(
-                        "The task {label} could not be put back: {}.",
-                        reason.trim()
+                    Ok(()) => self.undone(t!("core-rollback-task-put-back", name = label)),
+                    Err(reason) => self.failed(t!(
+                        "core-rollback-task-not-put-back",
+                        name = label,
+                        reason = reason.trim().to_owned()
                     )),
                 }
             }
@@ -1327,19 +1429,102 @@ fn drive_is_connected(path: &Path) -> bool {
         .is_some_and(|drive| Path::new(&format!("{}\\", drive.as_os_str().display())).exists())
 }
 
-fn scope_name(scope: &EnvironmentScope) -> &'static str {
-    match scope {
-        EnvironmentScope::User => "user's",
-        EnvironmentScope::Machine => "machine's",
+fn not_opened(folder: &Path, error: &dyn std::fmt::Display) -> String {
+    t!(
+        "core-rollback-reason-not-opened",
+        folder = folder.display().to_string(),
+        error = error.to_string()
+    )
+}
+
+/// A key or value in the registry that is being put back, as a sentence about it names it. Each kind
+/// is its own wording, so a language can say each its own way.
+struct Setting {
+    /// What the messages choose their words by: `key`, `value`, `user-variable`, `machine-variable`,
+    /// `user-list`, or `machine-list`.
+    kind: &'static str,
+    /// A key's or value's place in the registry, or a variable's name.
+    name: String,
+}
+
+impl Setting {
+    fn key(hive: &RegistryHive, key: &str) -> Self {
+        Self {
+            kind: "key",
+            name: format!("{}\\{key}", registry_hive_name(hive)),
+        }
+    }
+
+    fn value(hive: &RegistryHive, key: &str, name: &str) -> Self {
+        let name = if name.is_empty() {
+            t!("core-registry-default-value-name")
+        } else {
+            name.to_owned()
+        };
+        Self {
+            kind: "value",
+            name: format!("{}\\{key}\\{name}", registry_hive_name(hive)),
+        }
+    }
+
+    fn variable(scope: &EnvironmentScope, name: &str) -> Self {
+        Self {
+            kind: match scope {
+                EnvironmentScope::User => "user-variable",
+                EnvironmentScope::Machine => "machine-variable",
+            },
+            name: name.to_owned(),
+        }
+    }
+
+    /// A variable that is a list of folders, such as `Path`, which an install adds to.
+    fn list(scope: &EnvironmentScope, name: &str) -> Self {
+        Self {
+            kind: match scope {
+                EnvironmentScope::User => "user-list",
+                EnvironmentScope::Machine => "machine-list",
+            },
+            name: name.to_owned(),
+        }
+    }
+
+    fn not_reached(&self, error: &dyn std::fmt::Display) -> String {
+        t!(
+            "core-rollback-setting-not-reached",
+            kind = self.kind,
+            name = self.name.as_str(),
+            error = error.to_string()
+        )
+    }
+
+    fn not_read(&self, error: &dyn std::fmt::Display) -> String {
+        t!(
+            "core-rollback-setting-not-read",
+            kind = self.kind,
+            name = self.name.as_str(),
+            error = error.to_string()
+        )
     }
 }
 
-fn value_label(hive: &RegistryHive, key: &str, name: &str) -> String {
-    format!(
-        "The registry value {}\\{key}\\{}",
-        registry_hive_name(hive),
-        if name.is_empty() { "(Default)" } else { name }
-    )
+/// Why a file stays, as the messages that say so choose their words by.
+#[derive(Debug, Clone, Copy)]
+enum KeptBecause {
+    /// Something that stays still names it.
+    StillUsed,
+    Changed,
+    /// User data or a license, and nobody asked for it to go.
+    NotAsked,
+}
+
+impl KeptBecause {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::StillUsed => "still-used",
+            Self::Changed => "changed",
+            Self::NotAsked => "not-asked",
+        }
+    }
 }
 
 /// What a file an install replaced is called when the file that replaced it stays.
@@ -1377,7 +1562,10 @@ fn file_name_of(path: &Path) -> String {
 /// The caller has pinned the way there.
 pub(crate) fn put_back_backup(backup: &Backup, path: &Path) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
-        WinAppMigratorError::InvalidInput(format!("{} has no parent folder", path.display()))
+        WinAppMigratorError::InvalidInput(t!(
+            "core-rollback-no-parent-folder",
+            path = path.display().to_string()
+        ))
     })?;
     make_replaceable(path)?;
     match backup {
@@ -1520,7 +1708,7 @@ pub(crate) fn stop_service(name: &str) -> std::result::Result<bool, String> {
         }
         std::thread::sleep(STOP_SERVICE_POLL);
     }
-    Err("it did not stop in time".to_owned())
+    Err(t!("core-rollback-reason-did-not-stop"))
 }
 
 /// The `sc.exe config` arguments that set a service back as it was. A custom account's
@@ -1616,8 +1804,9 @@ pub(crate) fn roll_back(mut journal: Journal, monitor: &InstallMonitor) -> UndoR
         Ok(read) => read,
         Err(error) => {
             return UndoReport {
-                failed: vec![format!(
-                    "The record of this install could not be read, so nothing was undone: {error}."
+                failed: vec![t!(
+                    "core-rollback-record-unreadable",
+                    error = error.to_string()
                 )],
                 ..UndoReport::default()
             };
@@ -1739,12 +1928,11 @@ pub(crate) fn recover_interrupted_installs(
         );
         remove_staging_left_behind(&journal);
         if !report.failed.is_empty() {
-            stuck.push(format!(
-                "{}: {} If it can never be undone, an administrator can give up on it by \
-                 removing {}.",
-                journal.header.app_name,
-                report.failed.join(" "),
-                journal.folder.display()
+            stuck.push(t!(
+                "core-rollback-earlier-install-stuck",
+                app_name = journal.header.app_name.as_str(),
+                failures = report.failed.join(" "),
+                folder = journal.folder.display().to_string()
             ));
         } else if let Some(left) = what_is_left_of(&report, UndoMode::Recovery) {
             // Waiting for a drive stops nothing else, and what is there is looked at when it is
@@ -1762,10 +1950,9 @@ pub(crate) fn recover_interrupted_installs(
         });
     }
     if !stuck.is_empty() {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "an earlier install that never finished could not be fully undone, so nothing was \
-             installed. Close whatever is using these and try again. {}",
-            stuck.join(" ")
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-rollback-earlier-installs-not-undone",
+            details = stuck.join(" ")
         )));
     }
     Ok(Recovery {
@@ -1802,9 +1989,7 @@ pub fn open_install(state_root: &Path, id: &str) -> Result<OpenInstall> {
     let folder = checked_install_folder(state_root, id)?;
     let lock = lock_journal(&folder).map_err(|error| {
         if is_in_use(&error) {
-            WinAppMigratorError::InvalidInput(
-                "this install is being changed by another installer or uninstaller".to_owned(),
-            )
+            WinAppMigratorError::InvalidInput(t!("core-rollback-install-busy"))
         } else {
             WinAppMigratorError::io(&folder, error)
         }
@@ -1846,7 +2031,10 @@ impl OpenInstall {
             Err(error) => {
                 return UninstallOutcome {
                     report: UndoReport {
-                        failed: vec![format!("Nothing was undone: {error}.")],
+                        failed: vec![t!(
+                            "core-rollback-nothing-undone",
+                            error = error.to_string()
+                        )],
                         ..UndoReport::default()
                     },
                     ..UninstallOutcome::default()
@@ -1958,12 +2146,21 @@ pub fn schedule_removal_of_running_uninstaller(folder: &Path) -> io::Result<()> 
 /// A summary of a report for the log and for automation.
 pub fn report_lines(report: &UndoReport) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(format!("Undone: {}", report.undone.len()));
-    lines.push(format!("Could not be undone: {}", report.failed.len()));
+    lines.push(t!(
+        "core-rollback-count-undone",
+        count = report.undone.len()
+    ));
+    lines.push(t!(
+        "core-rollback-count-failed",
+        count = report.failed.len()
+    ));
     lines.extend(report.failed.iter().map(|line| format!("  {line}")));
-    lines.push(format!("Left in place: {}", report.kept.len()));
+    lines.push(t!("core-rollback-count-kept", count = report.kept.len()));
     lines.extend(report.kept.iter().map(|line| format!("  {line}")));
-    lines.push(format!("Left behind: {}", report.left_behind.len()));
+    lines.push(t!(
+        "core-rollback-count-left-behind",
+        count = report.left_behind.len()
+    ));
     lines.extend(report.left_behind.iter().map(|line| format!("  {line}")));
     lines
 }

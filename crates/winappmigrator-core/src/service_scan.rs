@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use winappmigrator_i18n::t_english;
 use winreg::enums::KEY_READ;
 
 use crate::models::{DriverEntry, DriverKind, ServiceEntry, Warning, WarningSeverity};
@@ -56,10 +57,11 @@ pub fn scan_services(
     let services_key = match system.open_hklm(SERVICES_KEY, KEY_READ) {
         Ok(key) => key,
         Err(error) => {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "services_registry_unreadable",
+                "core-warning-scan-services-unreadable",
                 WarningSeverity::Warning,
-                format!("Could not read services registry key: {error}"),
+                vec![("error", error.to_string().into())],
                 Some(SERVICES_KEY.to_owned()),
             ));
             return (services, warnings);
@@ -140,10 +142,11 @@ pub fn scan_drivers(
     let services_key = match system.open_hklm(SERVICES_KEY, KEY_READ) {
         Ok(key) => key,
         Err(error) => {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "drivers_registry_unreadable",
+                "core-warning-scan-drivers-unreadable",
                 WarningSeverity::Warning,
-                format!("Could not read services registry key for driver discovery: {error}"),
+                vec![("error", error.to_string().into())],
                 Some(SERVICES_KEY.to_owned()),
             ));
             return (drivers, warnings);
@@ -261,6 +264,7 @@ fn driver_signer(image_path: &Path) -> Option<String> {
     (!subject.is_empty()).then_some(subject)
 }
 
+/// In English, as a package records it: an installer shows it as it was recorded.
 fn driver_restore_instructions(
     service_name: &str,
     image_path: &Path,
@@ -268,25 +272,26 @@ fn driver_restore_instructions(
     app_owned: bool,
     signer: &Option<String>,
 ) -> String {
-    let signed = signer
-        .as_deref()
-        .map(|subject| format!(", signed by {subject}"))
-        .unwrap_or_else(|| ", signature unknown".to_owned());
+    let signed = if signer.is_some() { "yes" } else { "no" };
+    let signer = signer.clone().unwrap_or_default();
+    let path = image_path.display().to_string();
     if app_owned {
-        format!(
-            "Application-owned {} driver '{}' ({}{}). The installer bundles its .sys and re-registers the driver service automatically (sc create, requires elevation), then confirms the service is registered.",
-            driver_kind_label(kind),
-            service_name,
-            image_path.display(),
-            signed
+        t_english!(
+            "core-service-driver-bundled",
+            kind = driver_kind_label(kind),
+            name = service_name,
+            path = path,
+            signed = signed,
+            signer = signer
         )
     } else {
-        format!(
-            "Vendor/inbox {} driver '{}' ({}{}). WinAppMigrator does not redistribute third-party drivers; reinstall it with the vendor's signed driver package on the target before launching the app.",
-            driver_kind_label(kind),
-            service_name,
-            image_path.display(),
-            signed
+        t_english!(
+            "core-service-driver-from-vendor",
+            kind = driver_kind_label(kind),
+            name = service_name,
+            path = path,
+            signed = signed,
+            signer = signer
         )
     }
 }

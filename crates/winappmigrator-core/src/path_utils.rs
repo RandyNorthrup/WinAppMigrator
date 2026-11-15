@@ -445,14 +445,15 @@ fn query_signed_in_user() -> SignedInUser {
             String::from_utf8_lossy(&output.stdout).into_owned()
         }
         Ok(output) => {
-            return SignedInUser::Unknown(format!(
-                "Windows would not say whose desktop this is: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+            return SignedInUser::Unknown(winappmigrator_i18n::t!(
+                "core-profile-desktop-owner-not-said",
+                error = String::from_utf8_lossy(&output.stderr).trim().to_owned()
             ));
         }
         Err(error) => {
-            return SignedInUser::Unknown(format!(
-                "Windows could not be asked whose desktop this is: {error}"
+            return SignedInUser::Unknown(winappmigrator_i18n::t!(
+                "core-profile-desktop-owner-not-asked",
+                error = error.to_string()
             ));
         }
     };
@@ -501,36 +502,38 @@ fn signed_in_user_from(
     match desktop_owners.as_slice() {
         [owner] if is_person_sid(owner) => account(owner).map_or_else(
             || {
-                SignedInUser::Unknown(format!(
-                    "the account signed in here, {owner}, has no profile on record"
+                SignedInUser::Unknown(winappmigrator_i18n::t!(
+                    "core-profile-signed-in-account-no-profile",
+                    account = owner.as_str()
                 ))
             },
             SignedInUser::Desktop,
         ),
-        [owner] => SignedInUser::Unknown(format!(
-            "the desktop here belongs to {owner}, which is not a person's account"
+        [owner] => SignedInUser::Unknown(winappmigrator_i18n::t!(
+            "core-profile-desktop-not-a-person",
+            account = owner.as_str()
         )),
         [] => match running_as {
             Some(sid) if is_person_sid(sid) => account(sid).map_or_else(
                 || {
-                    SignedInUser::Unknown(format!(
-                        "no one is signed in here, and the account running this, {sid}, has no \
-                         profile on record"
+                    SignedInUser::Unknown(winappmigrator_i18n::t!(
+                        "core-profile-nobody-signed-in-running-account-no-profile",
+                        account = sid
                     ))
                 },
                 SignedInUser::NoDesktop,
             ),
-            Some(sid) => SignedInUser::Unknown(format!(
-                "no one is signed in here, and {sid}, which is running this, is not a person's \
-                 account"
+            Some(sid) => SignedInUser::Unknown(winappmigrator_i18n::t!(
+                "core-profile-nobody-signed-in-running-not-a-person",
+                account = sid
             )),
-            None => SignedInUser::Unknown(
-                "no one is signed in here, and this account has no SID".into(),
-            ),
+            None => SignedInUser::Unknown(winappmigrator_i18n::t!(
+                "core-profile-nobody-signed-in-no-sid"
+            )),
         },
-        _ => SignedInUser::Unknown(format!(
-            "more than one account has a desktop in this session: {}",
-            desktop_owners.join(", ")
+        _ => SignedInUser::Unknown(winappmigrator_i18n::t!(
+            "core-profile-several-desktops",
+            accounts = winappmigrator_i18n::join_list(&desktop_owners)
         )),
     }
 }

@@ -520,10 +520,11 @@ fn scan_app_paths_view(
         let child = match key.open_subkey_with_flags(&child_name, KEY_READ) {
             Ok(child) => child,
             Err(error) => {
-                warnings.push(Warning::new(
+                warnings.push(Warning::localized(
                     "registry_key_unreadable",
+                    "core-warning-scan-app-paths-key-unreadable",
                     WarningSeverity::Info,
-                    format!("Could not read App Paths child key: {error}"),
+                    vec![("error", error.to_string().into())],
                     Some(child_name),
                 ));
                 continue;
@@ -1258,10 +1259,11 @@ pub(crate) fn capture_registry_subtree(
             .last()
             .is_none_or(|warning| warning.code != "registry_capture_truncated")
         {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "registry_capture_truncated",
+                "core-warning-scan-registry-limit",
                 WarningSeverity::Warning,
-                "Registry capture reached the configured safety limit.",
+                Vec::new(),
                 Some(key_path.to_owned()),
             ));
         }
@@ -1286,10 +1288,11 @@ fn capture_registry_subtree_inner(
     depth: usize,
 ) {
     if depth > MAX_REGISTRY_CAPTURE_DEPTH || context.keys_seen >= MAX_REGISTRY_CAPTURE_KEYS {
-        context.warnings.push(Warning::new(
+        context.warnings.push(Warning::localized(
             "registry_capture_truncated",
+            "core-warning-scan-registry-subtree-limit",
             WarningSeverity::Warning,
-            "Registry subtree capture reached the configured safety limit.",
+            Vec::new(),
             Some(key_path.to_owned()),
         ));
         return;
@@ -1299,10 +1302,11 @@ fn capture_registry_subtree_inner(
     let key = match context.root.open(key_path, KEY_READ) {
         Ok(key) => key,
         Err(error) => {
-            context.warnings.push(Warning::new(
+            context.warnings.push(Warning::localized(
                 "registry_key_unreadable",
+                "core-warning-scan-registry-key-unreadable",
                 WarningSeverity::Warning,
-                format!("Could not read registry key: {error}"),
+                vec![("error", error.to_string().into())],
                 Some(key_path.to_owned()),
             ));
             return;
@@ -1315,10 +1319,11 @@ fn capture_registry_subtree_inner(
         let value_name = value.0;
         let raw_value = value.1;
         if raw_value.bytes.len() > MAX_REGISTRY_VALUE_BYTES {
-            context.warnings.push(Warning::new(
+            context.warnings.push(Warning::localized(
                 "registry_value_too_large",
+                "core-warning-scan-registry-value-too-large",
                 WarningSeverity::Warning,
-                "Registry value exceeded the configured capture size limit.",
+                Vec::new(),
                 Some(format!("{key_path}\\{value_name}")),
             ));
             continue;
@@ -1327,10 +1332,11 @@ fn capture_registry_subtree_inner(
         if context.bytes_seen > MAX_REGISTRY_CAPTURE_BYTES {
             // The same stop as for too many keys, which says so at the next one it comes to.
             context.keys_seen = MAX_REGISTRY_CAPTURE_KEYS;
-            context.warnings.push(Warning::new(
+            context.warnings.push(Warning::localized(
                 "registry_capture_truncated",
+                "core-warning-scan-registry-subtree-limit",
                 WarningSeverity::Warning,
-                "Registry subtree capture reached the configured safety limit.",
+                Vec::new(),
                 Some(key_path.to_owned()),
             ));
             return;

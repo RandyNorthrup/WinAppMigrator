@@ -42,6 +42,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use winappmigrator_i18n::t;
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
@@ -353,39 +354,39 @@ impl SourceIdentity {
                 product.replacen("Windows 10", "Windows 11", 1)
             }
             Some(product) => product.to_owned(),
-            None => windows_family(build).to_owned(),
+            None => windows_family(build),
         };
-        let mut words = match self.service_pack.as_deref() {
+        let words = match self.service_pack.as_deref() {
             Some(pack) => format!("{name} {pack}"),
             None => name,
         };
-        match self.architecture_name.as_deref().map(str::trim) {
+        Some(match self.architecture_name.as_deref().map(str::trim) {
             Some(architecture) if architecture.eq_ignore_ascii_case("x86") => {
-                words.push_str(", 32-bit");
+                t!("core-system-windows-32-bit", name = words)
             }
             Some(architecture)
                 if architecture.eq_ignore_ascii_case("amd64")
                     || architecture.eq_ignore_ascii_case("arm64") =>
             {
-                words.push_str(", 64-bit");
+                t!("core-system-windows-64-bit", name = words)
             }
-            _ => {}
-        }
-        Some(words)
+            _ => words,
+        })
     }
 }
 
 /// Which Windows a build number is, for a drive whose registry did not name it.
-fn windows_family(build: u32) -> &'static str {
-    match build {
-        0..6000 => "Windows XP or older",
+fn windows_family(build: u32) -> String {
+    let name = match build {
+        0..6000 => return t!("core-system-windows-xp-or-older"),
         6000..7600 => "Windows Vista",
         7600..9200 => "Windows 7",
         9200..9600 => "Windows 8",
         9600..FIRST_WINDOWS_10_BUILD => "Windows 8.1",
         FIRST_WINDOWS_10_BUILD..FIRST_WINDOWS_11_BUILD => "Windows 10",
         _ => "Windows 11",
-    }
+    };
+    name.to_owned()
 }
 
 /// A profile a PC records.
@@ -471,18 +472,13 @@ struct HiveMounts {
 impl HiveMounts {
     fn begin() -> Result<Self> {
         if !is_elevated() {
-            return Err(WinAppMigratorError::InvalidInput(
-                "reading a connected drive or another account's settings needs administrator \
-                 rights"
-                    .to_owned(),
-            ));
+            return Err(WinAppMigratorError::InvalidInput(t!(
+                "core-system-needs-administrator"
+            )));
         }
         sweep_leaked_hive_mounts();
-        let parent = hives_folder().ok_or_else(|| {
-            WinAppMigratorError::InvalidInput(
-                "this PC's ProgramData folder could not be found".to_owned(),
-            )
-        })?;
+        let parent = hives_folder()
+            .ok_or_else(|| WinAppMigratorError::InvalidInput(t!("core-system-no-program-data")))?;
         for folder in parent.ancestors().take(2).collect::<Vec<_>>().iter().rev() {
             ensure_protected_folder(folder)
                 .map_err(|error| WinAppMigratorError::io(folder, error))?;
@@ -675,7 +671,10 @@ fn copy_hive(
     cancel: Option<&AtomicBool>,
 ) -> Result<PathBuf> {
     let name = hive_file.file_name().ok_or_else(|| {
-        WinAppMigratorError::InvalidInput(format!("not a hive file: {}", hive_file.display()))
+        WinAppMigratorError::InvalidInput(t!(
+            "core-system-not-a-hive-file",
+            path = hive_file.display().to_string()
+        ))
     })?;
     fs::create_dir_all(into).map_err(|error| WinAppMigratorError::io(into, error))?;
     let copy = into.join(name);
@@ -792,10 +791,10 @@ fn copy_at_most(
 }
 
 fn too_large_for_a_hive(source: &Path, size: u64) -> WinAppMigratorError {
-    WinAppMigratorError::InvalidInput(format!(
-        "{} is {size} bytes, too large to be a registry hive, or more than this drive's hives could \
-         add up to",
-        source.display()
+    WinAppMigratorError::InvalidInput(t!(
+        "core-system-hive-too-large",
+        path = source.display().to_string(),
+        size = size
     ))
 }
 
@@ -1043,13 +1042,13 @@ impl SystemContext {
             ProfileChoice::Profile(id) => {
                 let found = find_profile(&self.listed, id);
                 if found.is_none() {
-                    self.note(
+                    self.note(Warning::localized(
                         "user_profile_not_found",
-                        format!(
-                            "The account {id} is not on record here, so no one's per-user data \
-                             or settings were included."
-                        ),
-                    );
+                        "core-warning-scan-account-not-on-record",
+                        WarningSeverity::Warning,
+                        vec![("account", id.as_str().into())],
+                        None,
+                    ));
                 }
                 found
             }
@@ -1071,25 +1070,24 @@ impl SystemContext {
             SignedInUser::Desktop(account) | SignedInUser::NoDesktop(account) => {
                 let found = find_profile(&self.listed, &account.sid);
                 if found.is_none() {
-                    self.note(
+                    self.note(Warning::localized(
                         "user_profile_not_found",
-                        format!(
-                            "The account signed in here, {}, has no profile on record, so no \
-                             one's per-user data or settings were included.",
-                            account.name()
-                        ),
-                    );
+                        "core-warning-scan-signed-in-account-no-profile",
+                        WarningSeverity::Warning,
+                        vec![("account", account.name().into())],
+                        None,
+                    ));
                 }
                 found
             }
             SignedInUser::Unknown(reason) => {
-                self.note(
+                self.note(Warning::localized(
                     "signed_in_user_unknown",
-                    format!(
-                        "Could not tell who is signed in ({reason}), so no one's per-user data \
-                         or settings were included. Choose whose to include."
-                    ),
-                );
+                    "core-warning-scan-signed-in-account-unknown",
+                    WarningSeverity::Warning,
+                    vec![("reason", reason.as_str().into())],
+                    None,
+                ));
                 None
             }
         }
@@ -1104,11 +1102,13 @@ impl SystemContext {
             return Some(0);
         }
         if !self.listed.is_empty() {
-            self.note(
+            self.note(Warning::localized(
                 "user_profile_unknown",
-                "This drive does not say who last signed in, and it has more than one account, \
-                 so no one's per-user data or settings were included. Choose whose to include.",
-            );
+                "core-warning-scan-last-account-unknown",
+                WarningSeverity::Warning,
+                Vec::new(),
+                None,
+            ));
         }
         None
     }
@@ -1131,14 +1131,16 @@ impl SystemContext {
                         users
                     }
                     Err(error) => {
-                        self.note(
+                        self.note(Warning::localized(
                             "user_hive_unreadable",
-                            format!(
-                                "The settings of {} could not be read, so they were not \
-                                 included: {error}",
-                                profile.name
-                            ),
-                        );
+                            "core-warning-scan-account-settings-unreadable",
+                            WarningSeverity::Warning,
+                            vec![
+                                ("account", profile.name.as_str().into()),
+                                ("error", error.to_string().into()),
+                            ],
+                            None,
+                        ));
                         Vec::new()
                     }
                 },
@@ -1172,14 +1174,16 @@ impl SystemContext {
                 Ok(mount) => mount,
                 Err(error) => {
                     warn!(%error, profile = %profile.dir.display(), "could not load a user's hive");
-                    self.note(
+                    self.note(Warning::localized(
                         "user_hive_unreadable",
-                        format!(
-                            "The settings of {} could not be read, so they were not included: \
-                             {error}",
-                            profile.name
-                        ),
-                    );
+                        "core-warning-scan-account-settings-unreadable",
+                        WarningSeverity::Warning,
+                        vec![
+                            ("account", profile.name.as_str().into()),
+                            ("error", error.to_string().into()),
+                        ],
+                        None,
+                    ));
                     continue;
                 }
             };
@@ -1191,14 +1195,16 @@ impl SystemContext {
                 match mounts.load(&format!("{CLASSES_LABEL}{index}"), &classes_file) {
                     Ok(classes) => Some(classes),
                     Err(error) => {
-                        self.note(
+                        self.note(Warning::localized(
                             "user_classes_unreadable",
-                            format!(
-                                "The COM classes and file types registered for {} could not be \
-                                 read, so they were not included: {error}",
-                                profile.name
-                            ),
-                        );
+                            "core-warning-scan-account-classes-unreadable",
+                            WarningSeverity::Warning,
+                            vec![
+                                ("account", profile.name.as_str().into()),
+                                ("error", error.to_string().into()),
+                            ],
+                            None,
+                        ));
                         None
                     }
                 }
@@ -1220,9 +1226,8 @@ impl SystemContext {
         self.offline.is_some()
     }
 
-    fn note(&mut self, code: &str, message: impl Into<String>) {
-        self.notes
-            .push(Warning::new(code, WarningSeverity::Warning, message, None));
+    fn note(&mut self, warning: Warning) {
+        self.notes.push(warning);
     }
 
     /// What this context has to say about what it read, including what a drive named and it did
@@ -1244,38 +1249,40 @@ impl SystemContext {
                 .collect::<Vec<_>>()
                 .join("; ");
             let more = refused.len().saturating_sub(MAX_LISTED_REFUSALS);
-            let more = if more > 0 {
-                format!(" and {more} more")
-            } else {
-                String::new()
-            };
-            let some = if refused.len() == 1 {
-                "A path"
-            } else {
-                "Some paths"
-            };
-            warnings.push(if on_a_drive {
-                Warning::new(
+            let args = vec![
+                ("count", refused.len().into()),
+                ("paths", shown.into()),
+                ("more", more.into()),
+            ];
+            warnings.push(match (on_a_drive, more > 0) {
+                (true, false) => Warning::localized(
                     "drive_paths_not_followed",
+                    "core-warning-scan-drive-paths-not-followed",
                     WarningSeverity::Warning,
-                    format!(
-                        "{some} recorded on this drive could not be read, so nothing there was \
-                         included. Each is on another disk, is not a full path, or goes through a \
-                         link, which would lead off the drive: {shown}{more}"
-                    ),
+                    args,
                     None,
-                )
-            } else {
-                Warning::new(
+                ),
+                (true, true) => Warning::localized(
+                    "drive_paths_not_followed",
+                    "core-warning-scan-drive-paths-not-followed-more",
+                    WarningSeverity::Warning,
+                    args,
+                    None,
+                ),
+                (false, false) => Warning::localized(
                     "network_paths_not_followed",
+                    "core-warning-scan-network-paths-not-followed",
                     WarningSeverity::Warning,
-                    format!(
-                        "{some} recorded on this PC could not be read, so nothing there was \
-                         included. Each is not on a disk of this PC, where looking at it would \
-                         connect to it, or has a name that would open something else: {shown}{more}"
-                    ),
+                    args,
                     None,
-                )
+                ),
+                (false, true) => Warning::localized(
+                    "network_paths_not_followed",
+                    "core-warning-scan-network-paths-not-followed-more",
+                    WarningSeverity::Warning,
+                    args,
+                    None,
+                ),
             });
         }
         warnings
@@ -1306,7 +1313,7 @@ impl SystemContext {
                 let mapped = hives.map_hklm(logical).ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::NotFound,
-                        format!("offline hive has no mapping for HKLM\\{logical}"),
+                        t!("core-system-hive-no-mapping", key = logical),
                     )
                 })?;
                 RegKey::predef(HKEY_LOCAL_MACHINE)
@@ -1869,9 +1876,9 @@ fn mount_machine_hives(volume_root: &Path, mounts: &mut HiveMounts) -> Result<Of
     // under \Windows\System32\config are ACL-protected and may not even stat
     // until they are read through backup privilege, so don't precheck them.
     if !is_real_folder {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "{} is not a Windows system drive (no \\Windows folder).",
-            volume_root.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-system-not-a-system-drive",
+            drive = volume_root.display().to_string()
         )));
     }
     if path_is_within(
@@ -1881,9 +1888,9 @@ fn mount_machine_hives(volume_root: &Path, mounts: &mut HiveMounts) -> Result<Of
         &resolved_location(system_root()),
         &resolved_location(&windows),
     ) {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "{} is this PC's own system drive. Choose This PC to read this PC.",
-            volume_root.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-system-own-system-drive",
+            drive = volume_root.display().to_string()
         )));
     }
     let provisional = VolumeMap {
@@ -1892,9 +1899,9 @@ fn mount_machine_hives(volume_root: &Path, mounts: &mut HiveMounts) -> Result<Of
     };
     let software_hive = volume_root.join(CONFIG_SOFTWARE);
     if !provisional.may_read(&software_hive) {
-        return Err(WinAppMigratorError::InvalidInput(format!(
-            "{} is not a Windows system drive: the way to its registry goes through a link.",
-            volume_root.display()
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-system-registry-through-link",
+            drive = volume_root.display().to_string()
         )));
     }
 
@@ -2083,9 +2090,10 @@ fn reg_load(mount: &str, hive_file: &Path) -> Result<()> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(WinAppMigratorError::Registry(format!(
-            "reg load HKLM\\{mount} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+        Err(WinAppMigratorError::Registry(t!(
+            "core-system-hive-not-loaded",
+            key = format!(r"HKLM\{mount}"),
+            error = String::from_utf8_lossy(&output.stderr).trim().to_owned()
         )))
     }
 }
@@ -2099,9 +2107,10 @@ fn reg_unload(mount: &str) -> Result<()> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(WinAppMigratorError::Registry(format!(
-            "reg unload HKLM\\{mount} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+        Err(WinAppMigratorError::Registry(t!(
+            "core-system-hive-not-unloaded",
+            key = format!(r"HKLM\{mount}"),
+            error = String::from_utf8_lossy(&output.stderr).trim().to_owned()
         )))
     }
 }

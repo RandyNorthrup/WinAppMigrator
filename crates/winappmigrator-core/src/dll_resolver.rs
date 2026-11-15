@@ -4,6 +4,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use winappmigrator_i18n::t;
+
 use crate::errors::{Result, WinAppMigratorError};
 use crate::hashing::sha256_file;
 use crate::models::{
@@ -130,10 +132,11 @@ pub fn resolve_imports(
             if scanned_paths.insert(key) {
                 match scan_pe(path) {
                     Ok(scan) => pending.extend(scan.direct_imports),
-                    Err(error) => warnings.push(Warning::new(
+                    Err(error) => warnings.push(Warning::localized(
                         "recursive_dependency_scan_failed",
+                        "core-warning-scan-dependency-unscanned",
                         WarningSeverity::Warning,
-                        format!("Could not scan recursive dependency: {error}"),
+                        vec![("error", error.to_string().into())],
                         Some(path.display().to_string()),
                     )),
                 }
@@ -157,9 +160,9 @@ pub fn find_app_local_dlls(
     system: &SystemContext,
 ) -> Result<Vec<FileEntry>> {
     let app_dir = executable_path.parent().ok_or_else(|| {
-        WinAppMigratorError::InvalidInput(format!(
-            "executable has no parent directory: {}",
-            executable_path.display()
+        WinAppMigratorError::InvalidInput(t!(
+            "core-dll-program-has-no-folder",
+            path = executable_path.display().to_string()
         ))
     })?;
     let entries = crate::source_fs::read_dir(app_dir)
@@ -181,7 +184,7 @@ pub fn find_app_local_dlls(
             hash_sha256: None,
             classification: FileClassification::AppOwned,
             should_copy: true,
-            reason: "DLL located beside selected executable".to_owned(),
+            reason: t!("core-dll-beside-program"),
             user_folder: None,
         });
     }
@@ -403,16 +406,11 @@ fn say_if_newer_windows_lacks(dependency: &DependencyEntry, warnings: &mut Vec<W
     {
         return;
     }
-    warnings.push(Warning::new(
-        DEPENDENCY_NOT_IN_NEWER_WINDOWS,
+    warnings.push(Warning::localized(
+        "dependency_not_in_newer_windows",
+        "core-warning-scan-dependency-not-in-newer-windows",
         WarningSeverity::Warning,
-        format!(
-            "{} was in the Windows folder of the PC this app was on, and Windows 10 and 11 do not \
-             come with it. Something installed it there, so it is not part of the app's own files \
-             and does not come along. The app may not start until whatever provides it is \
-             installed.",
-            dependency.name
-        ),
+        vec![("name", dependency.name.as_str().into())],
         dependency
             .resolved_path
             .as_ref()
@@ -465,10 +463,11 @@ fn hash_dependency(
     match sha256_file(path) {
         Ok(hash) => Some(hash),
         Err(error) => {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "dependency_hash_failed",
+                "core-warning-scan-dependency-not-hashed",
                 WarningSeverity::Warning,
-                format!("Could not hash dependency: {error}"),
+                vec![("error", error.to_string().into())],
                 Some(path.display().to_string()),
             ));
             None
@@ -530,10 +529,11 @@ fn build_search_directories(
             system,
         );
     } else {
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "windows_dir_not_found",
+            "core-warning-scan-windows-folder-unknown",
             WarningSeverity::Warning,
-            "SystemRoot/windir environment variables are not available; system DLL search is limited.",
+            Vec::new(),
             None,
         ));
     }
@@ -618,10 +618,11 @@ fn read_architecture_with_warning(
     match read_pe_architecture(path) {
         Ok(architecture) => Some(architecture),
         Err(error) => {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "dependency_architecture_unreadable",
+                "core-warning-scan-dependency-architecture-unreadable",
                 WarningSeverity::Warning,
-                format!("Could not read dependency architecture: {error}"),
+                vec![("error", error.to_string().into())],
                 Some(path.display().to_string()),
             ));
             None

@@ -14,6 +14,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use winappmigrator_i18n::t;
+
 use crate::license_scan::is_license_registry_name;
 use crate::models::{
     ComRegistrationEntry, EnvironmentVariableEntry, FileAssociationEntry, FileEntry,
@@ -197,9 +199,8 @@ const NOT_A_CREDENTIAL: &[&str] = &["0", "1", "false", "no", "none", "true", "ye
 const DPAPI_PROVIDER_GUID_HEX: &str = "d08c9ddf0115d1118c7a00c04fc297eb";
 /// In hex: four bytes of version come before that.
 const DPAPI_GUID_OFFSET: usize = 8;
+/// The English of `core-secret-why-credential`, for code that has yet to ask the catalog for it.
 pub(crate) const LEFT_OUT_REASON_SECRET: &str = "it looks like a credential";
-const NAME_HOLDS_A_CREDENTIAL: &str = "(a value whose name holds a credential)";
-const LEFT_OUT_REASON_LICENSE: &str = "the License option is off";
 /// A default value is named by its key, but not one under this: `Acme.Token` is a file type.
 const NOT_NAMED_BY_THEIR_KEY: &str = r"software\classes";
 /// Keys whose names are nobody's license, whatever they are called: a file type or an app's entry
@@ -533,7 +534,7 @@ fn without_options(
         let (name, has_value) = option_name(part);
         if name.is_empty() {
             if holds_credentials(part) {
-                taken.push("an argument holding a credential".to_owned());
+                taken.push(t!("core-secret-unnamed-argument"));
             } else {
                 kept.push(part);
             }
@@ -659,14 +660,14 @@ impl LeftOut {
     pub(crate) fn secret(&mut self, name: String) {
         self.secrets.push(LeftOutItem {
             name,
-            why: LEFT_OUT_REASON_SECRET.to_owned(),
+            why: t!("core-secret-why-credential"),
         });
     }
 
     pub(crate) fn license(&mut self, name: String) {
         self.licenses.push(LeftOutItem {
             name,
-            why: LEFT_OUT_REASON_LICENSE.to_owned(),
+            why: t!("core-secret-why-license-option-off"),
         });
     }
 
@@ -680,11 +681,7 @@ impl LeftOut {
 
     /// How much of what an account keeps for an app went from a key, and never what it was.
     pub(crate) fn setting(&mut self, key: String, values: usize) {
-        let why = if values == 1 {
-            "1 value, which only goes with the User Data option".to_owned()
-        } else {
-            format!("{values} values, which only go with the User Data option")
-        };
+        let why = t!("core-secret-why-account-values", count = values);
         self.settings.push(LeftOutItem { name: key, why });
     }
 }
@@ -695,11 +692,10 @@ pub(crate) fn registry_entry_name(entry: &RegistryEntry) -> String {
         crate::models::RegistryHive::CurrentUser => "HKCU",
     };
     // Names are what is said of a value, but a recent URL can be all a value's name is.
-    let name = entry.value_name.as_deref().unwrap_or("(Default)");
-    let name = if value_holds_credentials(name) {
-        NAME_HOLDS_A_CREDENTIAL
-    } else {
-        name
+    let name = match entry.value_name.as_deref() {
+        None => t!("core-registry-default-value-name"),
+        Some(name) if value_holds_credentials(name) => t!("core-secret-name-holds-credential"),
+        Some(name) => name.to_owned(),
     };
     format!(r"{hive}\{}\{name}", entry.key_path)
 }
@@ -829,6 +825,25 @@ pub(crate) struct ScannedSettings<'a> {
     pub source_app: Option<&'a mut InstalledApp>,
 }
 
+/// Where a command line was, as what is taken out of it goes down by: what the message that says so
+/// chooses its words by, and the name of what it was in.
+struct About {
+    /// `service`, `task`, `shortcut`, `opener`, `opener-unnamed`, or `uninstall`.
+    kind: &'static str,
+    name: String,
+}
+
+impl About {
+    fn says_of(&self, option: &str) -> String {
+        t!(
+            "core-secret-taken-from",
+            option = option,
+            place = self.kind,
+            name = self.name.as_str()
+        )
+    }
+}
+
 /// One way of taking something out of a command line, and what it goes down as.
 struct Taking<'a> {
     take: &'a dyn Fn(&str) -> (String, Vec<String>),
@@ -837,10 +852,10 @@ struct Taking<'a> {
 
 impl Taking<'_> {
     /// `about` says where it was, for a name to go by.
-    fn take_from(&mut self, text: &mut String, about: &str) -> bool {
+    fn take_from(&mut self, text: &mut String, about: &About) -> bool {
         let (kept, taken) = (self.take)(text);
         for option in &taken {
-            (self.note)(format!("{option} in {about}"));
+            (self.note)(about.says_of(option));
         }
         if taken.is_empty() {
             return false;
@@ -851,7 +866,10 @@ impl Taking<'_> {
 
     fn go_through_commands(&mut self, settings: &mut ScannedSettings<'_>) {
         for service in settings.services.iter_mut() {
-            let about = format!("how {} is run", service.service_name);
+            let about = About {
+                kind: "service",
+                name: service.service_name.clone(),
+            };
             if let Some(arguments) = service.arguments.as_mut()
                 && self.take_from(arguments, &about)
             {
@@ -864,7 +882,10 @@ impl Taking<'_> {
             }
         }
         for task in settings.tasks.iter_mut() {
-            let about = format!("how the task {}{} is run", task.task_path, task.task_name);
+            let about = About {
+                kind: "task",
+                name: format!("{}{}", task.task_path, task.task_name),
+            };
             if let Some(arguments) = task.arguments.as_mut() {
                 self.take_from(arguments, &about);
             }
@@ -872,14 +893,14 @@ impl Taking<'_> {
                 match task_xml_without_arguments(xml, self.take) {
                     Some((kept, taken)) => {
                         for option in taken {
-                            (self.note)(format!("{option} in {about}"));
+                            (self.note)(about.says_of(&option));
                         }
                         task.definition_xml = Some(kept);
                     }
                     None => {
-                        (self.note)(format!(
-                            "The definition of the task {}{}, which could not be read to check it",
-                            task.task_path, task.task_name
+                        (self.note)(t!(
+                            "core-secret-task-definition-unreadable",
+                            task = about.name.as_str()
                         ));
                         task.definition_xml = None;
                     }
@@ -887,20 +908,29 @@ impl Taking<'_> {
             }
         }
         for shortcut in settings.shortcuts.iter_mut() {
-            let about = format!("the shortcut {}", shortcut.original_lnk_path.display());
+            let about = About {
+                kind: "shortcut",
+                name: shortcut.original_lnk_path.display().to_string(),
+            };
             if let Some(arguments) = shortcut.arguments.as_mut() {
                 self.take_from(arguments, &about);
             }
         }
         for association in settings.file_associations.iter_mut() {
-            let about = format!(
-                "what opens {}",
-                association
-                    .prog_id
-                    .as_deref()
-                    .or(association.extension.as_deref())
-                    .unwrap_or("a file type")
-            );
+            let about = match association
+                .prog_id
+                .as_deref()
+                .or(association.extension.as_deref())
+            {
+                Some(name) => About {
+                    kind: "opener",
+                    name: name.to_owned(),
+                },
+                None => About {
+                    kind: "opener-unnamed",
+                    name: String::new(),
+                },
+            };
             if let Some(command) = association.command.as_mut() {
                 self.take_from(command, &about);
             }
@@ -908,7 +938,10 @@ impl Taking<'_> {
         if let Some(app) = settings.source_app.as_deref_mut()
             && let Some(uninstall) = app.uninstall_string.as_mut()
         {
-            let about = format!("how {} is uninstalled", app.display_name);
+            let about = About {
+                kind: "uninstall",
+                name: app.display_name.clone(),
+            };
             self.take_from(uninstall, &about);
         }
     }
@@ -968,7 +1001,10 @@ pub(crate) fn take_secrets_from_settings(
     settings.environment.retain(|variable| {
         let secret = is_secret_value_name(&variable.name) || holds_a_credential(&variable.value);
         if secret {
-            left_out.secret(format!("The environment variable {}", variable.name));
+            left_out.secret(t!(
+                "core-secret-left-out-variable",
+                name = variable.name.as_str()
+            ));
         }
         !secret
     });
@@ -987,15 +1023,18 @@ pub(crate) fn take_secrets_from_settings(
             .as_deref()
             .is_some_and(|path| holds_a_credential(&path.to_string_lossy()));
         if holds_it {
-            left_out.secret(format!("What the class {} says it runs", class.clsid));
+            left_out.secret(t!(
+                "core-secret-left-out-class-server",
+                class = class.clsid.as_str()
+            ));
             class.server_path = None;
         }
     }
     for rule in settings.firewall_rules.iter_mut() {
         if rule.description.as_deref().is_some_and(holds_a_credential) {
-            left_out.secret(format!(
-                "The description of the firewall rule {}",
-                rule.name
+            left_out.secret(t!(
+                "core-secret-left-out-firewall-description",
+                rule = rule.name.as_str()
             ));
             rule.description = None;
         }

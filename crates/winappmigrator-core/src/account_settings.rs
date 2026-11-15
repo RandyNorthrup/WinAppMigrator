@@ -233,7 +233,8 @@ pub(crate) fn say_no_more_of_licenses_than_the_apps_key(
             .and_then(of_an_account)
         {
             artifact.registry_location = Some(said);
-            "Registry value suggests licensing data".clone_into(&mut artifact.detail);
+            artifact.detail =
+                winappmigrator_i18n::t!("core-license-detail-registry-value-of-an-account");
         }
     }
     for item in &mut left_out.licenses {

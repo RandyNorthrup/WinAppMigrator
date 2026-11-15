@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use winappmigrator_i18n::t;
 use winreg::RegKey;
 use winreg::enums::{KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
@@ -102,9 +103,9 @@ fn record_can_be_believed(
         || app.install_scope == InstallScope::PerUser
         || only_administrators_can_change(log);
     if !believed {
-        evidence.push(format!(
-            "{} was not used: others than administrators can change it",
-            log.display()
+        evidence.push(t!(
+            "core-source-record-not-believed",
+            path = log.display().to_string()
         ));
     }
     believed
@@ -187,16 +188,13 @@ pub(crate) fn detect_install_source_unless(
                 })
                 .unwrap_or_default();
             if products.len() > 1 {
-                evidence.push(format!(
-                    "Burn bundle of {} Windows Installer packages",
-                    products.len() - 1
-                ));
+                evidence.push(t!("core-source-burn-bundle", count = products.len() - 1));
             }
             if let Some(paths) = msi_component_paths(&products, system, is_cancelled) {
                 authoritative_file_count = paths.files.len();
-                evidence.push(format!(
-                    "Windows Installer database: {} component key paths",
-                    authoritative_file_count + paths.registry_keys.len()
+                evidence.push(t!(
+                    "core-source-msi-database",
+                    count = authoritative_file_count + paths.registry_keys.len()
                 ));
                 let found = footprint_roots(&paths.files, &names, system, is_cancelled);
                 roots.extend(found.dirs);
@@ -211,11 +209,12 @@ pub(crate) fn detect_install_source_unless(
             {
                 let manifest = inno_manifest(&log, system);
                 if manifest.files.is_empty() {
-                    evidence.push("Inno Setup uninstall log (unins000.dat)".to_owned());
+                    evidence.push(t!("core-source-inno-log"));
                 } else {
                     authoritative_file_count = manifest.files.len();
-                    evidence.push(format!(
-                        "Inno Setup uninstall log: {authoritative_file_count} recorded paths"
+                    evidence.push(t!(
+                        "core-source-inno-log-paths",
+                        count = authoritative_file_count
                     ));
                     let found = footprint_roots(&manifest.files, &names, system, is_cancelled);
                     roots.extend(found.dirs);
@@ -226,7 +225,7 @@ pub(crate) fn detect_install_source_unless(
             }
         }
         InstallMethod::Nsis => {
-            evidence.push("NSIS (Nullsoft) uninstaller signature".to_owned());
+            evidence.push(t!("core-source-nsis"));
             // NSIS keeps no manifest by default, but the AdvUninstLog macro
             // writes an `uninstall.log` of installed paths in the install dir.
             if let Some(dir) = primary_install_dir(app)
@@ -237,8 +236,9 @@ pub(crate) fn detect_install_source_unless(
                 let files = nsis_manifest_files(&log, system);
                 if !files.is_empty() {
                     authoritative_file_count = files.len();
-                    evidence.push(format!(
-                        "NSIS AdvUninstLog uninstall.log: {authoritative_file_count} recorded paths"
+                    evidence.push(t!(
+                        "core-source-nsis-log-paths",
+                        count = authoritative_file_count
                     ));
                     let found = footprint_roots(&files, &names, system, is_cancelled);
                     roots.extend(found.dirs);
@@ -248,22 +248,22 @@ pub(crate) fn detect_install_source_unless(
             }
         }
         InstallMethod::Squirrel => {
-            evidence.push("Squirrel per-user layout (Update.exe / app-*)".to_owned());
+            evidence.push(t!("core-source-squirrel"));
             if let Some(dir) = primary_install_dir(app) {
                 roots.push(dir.clone());
                 if let Some(app_dir) = latest_squirrel_app_dir(&dir, system) {
                     if let Some(version) = app_dir.file_name().and_then(|name| name.to_str()) {
-                        evidence.push(format!("Squirrel current version: {version}"));
+                        evidence.push(t!("core-source-squirrel-version", version = version));
                     }
                     roots.push(app_dir);
                 }
             }
         }
         InstallMethod::Chocolatey => {
-            evidence.push("Chocolatey package metadata".to_owned());
+            evidence.push(t!("core-source-chocolatey"));
         }
         InstallMethod::Msix => {
-            evidence.push("MSIX / Appx package".to_owned());
+            evidence.push(t!("core-source-msix"));
             // The install payload under WindowsApps is authoritative, but the
             // app's mutable per-user state lives at
             // %LOCALAPPDATA%\Packages\<PackageFamilyName>, whose folder name is
@@ -274,13 +274,13 @@ pub(crate) fn detect_install_source_unless(
                 && system.may_read(&dir.join(APPX_MANIFEST))
                 && let Some(identity) = appx_identity_name(&dir, system)
             {
-                evidence.push(format!("AppxManifest identity: {identity}"));
+                evidence.push(t!(
+                    "core-source-appx-identity",
+                    identity = identity.as_str()
+                ));
                 let package_roots = msix_package_data_roots(&identity, system);
                 if !package_roots.is_empty() {
-                    evidence.push(format!(
-                        "MSIX per-user package data: {} location(s)",
-                        package_roots.len()
-                    ));
+                    evidence.push(t!("core-source-msix-data", count = package_roots.len()));
                     roots.extend(package_roots);
                 }
             }
@@ -301,7 +301,7 @@ pub(crate) fn detect_install_source_unless(
             &mut folders_left_alone,
         );
         if !app_paths.is_empty() {
-            evidence.push("App Paths registration".to_owned());
+            evidence.push(t!("core-source-app-paths"));
             roots.extend(app_paths);
         }
     }
@@ -510,7 +510,7 @@ pub fn add_app_paths_roots(
         &mut source.folders_left_alone,
     );
     if !app_paths.is_empty() {
-        source.evidence.push("App Paths registration".to_owned());
+        source.evidence.push(t!("core-source-app-paths"));
         let mut roots = std::mem::take(&mut source.roots);
         roots.extend(app_paths);
         source.roots = dedup_existing_dirs(roots, system);

@@ -17,6 +17,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+use winappmigrator_i18n::t;
 use winreg::RegKey;
 use winreg::enums::KEY_READ;
 
@@ -150,8 +151,6 @@ const OID_COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
 const OID_ORGANIZATION: &[u8] = &[0x55, 0x04, 0x0a];
 /// Windows has these in a store for everyone, so a publisher of this name says nothing about one.
 const PUBLISHERS_OF_WINDOWS: &[&str] = &["microsoft"];
-const WHY_NAMED_FOR_PUBLISHER: &str = "it is named for the app or who published it";
-const WHY_RECORDED: &str = "the app's install record names it";
 
 /// What of a command or a path a value holds is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1194,7 +1193,7 @@ impl Scan<'_> {
             hash_sha256: None,
             classification: FileClassification::AppOwned,
             should_copy: true,
-            reason: "A font the app's install record names".to_owned(),
+            reason: t!("core-registry-font-recorded"),
             user_folder: None,
         });
     }
@@ -1255,7 +1254,7 @@ impl Scan<'_> {
                         hive: hive.clone(),
                         thumbprint,
                         subject: subject.text(),
-                        why: WHY_NAMED_FOR_PUBLISHER.to_owned(),
+                        why: t!("core-registry-certificate-named-for-the-app"),
                     });
                 }
             }
@@ -1540,7 +1539,7 @@ pub(crate) fn certificate_named_by(entry: &RegistryEntry) -> Option<CertificateE
         hive: entry.hive.clone(),
         thumbprint: thumbprint.to_owned(),
         subject,
-        why: WHY_RECORDED.to_owned(),
+        why: t!("core-registry-certificate-recorded"),
     })
 }
 

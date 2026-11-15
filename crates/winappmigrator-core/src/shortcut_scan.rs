@@ -245,10 +245,11 @@ $items | ConvertTo-Json -Depth 4
     let output = match run_powershell(&script) {
         Ok(output) => output,
         Err(error) => {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "shortcuts_unreadable",
+                "core-warning-scan-shortcuts-not-queried",
                 WarningSeverity::Warning,
-                format!("Could not query shortcuts: {error}"),
+                vec![("error", error.to_string().into())],
                 None,
             ));
             return (Vec::new(), warnings);
@@ -257,10 +258,11 @@ $items | ConvertTo-Json -Depth 4
     let shortcuts = match parse_json_array::<PowerShellShortcut>(&output) {
         Ok(shortcuts) => shortcuts,
         Err(error) => {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "shortcuts_parse_failed",
+                "core-warning-scan-shortcuts-not-parsed",
                 WarningSeverity::Warning,
-                format!("Could not parse shortcut query output: {error}"),
+                vec![("error", error.to_string().into())],
                 None,
             ));
             return (Vec::new(), warnings);

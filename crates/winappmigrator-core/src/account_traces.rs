@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use winappmigrator_i18n::t;
 
 use crate::account_settings::{
     say_no_more_of_licenses_than_the_apps_key, say_no_more_than_the_apps_key,
@@ -19,7 +20,7 @@ use crate::file_discovery::folders_an_account_has_moved;
 use crate::models::{
     DependencyEntry, EnvironmentScope, EnvironmentVariableEntry, FileEntry, InstallScope,
     LeftOutItem, PackageManifest, RegistryHive, ScanReport, ScheduledTaskEntry, ServiceEntry,
-    ShortcutEntry, Warning, WarningSeverity,
+    ShortcutEntry, Warning, WarningArg, WarningSeverity,
 };
 use crate::path_utils::{
     comparable_path, current_user_sid, expand_env_vars, is_person_sid, path_is_within,
@@ -55,12 +56,12 @@ const DESKTOP_PART: &str = r"\desktop\";
 /// goes by the folder's name, and puts it in the Desktop or Start Menu of whoever is installing.
 const ACCOUNTS_START_MENU: &str = r"%USERPROFILE%\Start Menu";
 const ACCOUNTS_DESKTOP: &str = r"%USERPROFILE%\Desktop";
-const SHORTCUTS_LEFT_OUT_NAME: &str = "Shortcuts in this account's own folders";
-const VARIABLES_LEFT_OUT_NAME: &str = "Environment variables of this account's";
 /// What a service that ran as someone is said to have run as. A restore goes by there being a name it
-/// has no password for, and makes it `LocalService` whichever it is.
+/// has no password for, and makes it `LocalService` whichever it is. It is what the package records,
+/// for a program to read, so it is not translated.
 const AN_ACCOUNT_OF_ITS_OWN: &str = "an account of the PC it came from";
-/// What stands for each in what a package says.
+/// What stands for each in what a package says. They are put into what a package records, paths and
+/// command lines among it, so they are not translated.
 const AN_ACCOUNTS_FOLDER: &str = "<an account's folder>";
 const AN_ACCOUNT: &str = "<an account>";
 const A_PC: &str = "<a PC>";
@@ -275,12 +276,13 @@ enum TraceKind {
 }
 
 impl TraceKind {
-    fn called(self) -> &'static str {
+    /// What the message that says one was found chooses its words by.
+    fn as_arg(self) -> &'static str {
         match self {
-            Self::Account => "an account's name",
-            Self::Folder => "where an account's folder is",
-            Self::Computer => "the PC's name",
-            Self::Sid => "an account's id",
+            Self::Account => "account",
+            Self::Folder => "folder",
+            Self::Computer => "computer",
+            Self::Sid => "id",
         }
     }
 }
@@ -644,14 +646,14 @@ fn mentions(lower: &str, kind: TraceKind, what: &str) -> bool {
 /// What a part of a manifest is called on a screen.
 fn part_called(field: &str) -> String {
     match field {
-        "file_inventory" | "empty_folders" => "the paths of the app's own files".to_owned(),
-        "registry_keys_exported" | "license_registry_entries" => "registry values".to_owned(),
-        "application_metadata" => "the app's entry in Settings".to_owned(),
-        "main_executable_path" => "where its main program is".to_owned(),
-        "shortcuts_detected" => "shortcuts".to_owned(),
-        "scheduled_tasks_detected" => "scheduled tasks".to_owned(),
-        "services_detected" => "services".to_owned(),
-        "environment_variables_detected" => "environment variables".to_owned(),
+        "file_inventory" | "empty_folders" => t!("core-account-part-files"),
+        "registry_keys_exported" | "license_registry_entries" => t!("core-account-part-registry"),
+        "application_metadata" => t!("core-account-part-settings-entry"),
+        "main_executable_path" => t!("core-account-part-main-program"),
+        "shortcuts_detected" => t!("core-account-part-shortcuts"),
+        "scheduled_tasks_detected" => t!("core-account-part-tasks"),
+        "services_detected" => t!("core-account-part-services"),
+        "environment_variables_detected" => t!("core-account-part-variables"),
         other => other.replace('_', " "),
     }
 }
@@ -711,17 +713,18 @@ pub(crate) fn what_a_package_still_says(
         .map(|(kind, places)| {
             let places: Vec<String> = places
                 .into_iter()
-                .map(|(place, count)| format!("{place} ({count})"))
+                .map(|(place, count)| {
+                    t!("core-account-mention-place", place = place, count = count)
+                })
                 .collect();
-            Warning::new(
-                MENTIONS_CODE,
+            Warning::localized(
+                "package_mentions_an_account",
+                "core-warning-scan-package-mentions",
                 WarningSeverity::Warning,
-                format!(
-                    "This package mentions {} in {}. It was built with none of an account's data, \
-                     and anyone who has the installer can read this.",
-                    kind.called(),
-                    places.join(", ")
-                ),
+                vec![
+                    ("kind", kind.as_arg().into()),
+                    ("places", winappmigrator_i18n::join_list(&places).into()),
+                ],
                 None,
             )
         })
@@ -1040,14 +1043,9 @@ fn withhold_shortcuts(
         true
     });
     if withheld > 0 {
-        let why = if withheld == 1 {
-            "1 shortcut, which only goes with the User Data option".to_owned()
-        } else {
-            format!("{withheld} shortcuts, which only go with the User Data option")
-        };
         left_out.settings.push(crate::models::LeftOutItem {
-            name: SHORTCUTS_LEFT_OUT_NAME.to_owned(),
-            why,
+            name: t!("core-account-left-out-shortcuts"),
+            why: t!("core-account-left-out-shortcuts-why", count = withheld),
         });
     }
 }
@@ -1073,7 +1071,10 @@ fn withhold_tasks(
             .any(|sid| name.contains(&sid.to_ascii_lowercase()))
     };
     tasks.retain_mut(|task| {
-        let item = format!("The scheduled task {}{}", task.task_path, task.task_name);
+        let item = t!(
+            "core-account-left-out-task",
+            task = format!("{}{}", task.task_path, task.task_name)
+        );
         let goes_whole =
             is_named_for_them(task) || task.arguments.as_deref().is_some_and(arguments_are_theirs);
         let cut = if goes_whole {
@@ -1087,21 +1088,13 @@ fn withhold_tasks(
         match cut {
             TaskThatNames::NothingOfTheirs => {}
             TaskThatNames::GoesWhole => {
-                left_out.setting_of(
-                    item,
-                    "It works on a place in an account's folders, or is named for one, and only \
-                     goes with the User Data option",
-                );
+                left_out.setting_of(item, &t!("core-account-task-works-on-account-folder"));
                 return false;
             }
             TaskThatNames::LostSome { xml, actions } => {
                 task.definition_xml = Some(xml);
                 if actions > 0 {
-                    left_out.setting_of(
-                        item,
-                        "What it also runs from an account's folders only goes with the User Data \
-                         option",
-                    );
+                    left_out.setting_of(item, &t!("core-account-task-runs-from-account-folder"));
                 }
             }
         }
@@ -1195,14 +1188,9 @@ fn withhold_variables(
         true
     });
     if withheld > 0 {
-        let why = if withheld == 1 {
-            "1 variable, which only goes with the User Data option".to_owned()
-        } else {
-            format!("{withheld} variables, which only go with the User Data option")
-        };
         left_out.settings.push(LeftOutItem {
-            name: VARIABLES_LEFT_OUT_NAME.to_owned(),
-            why,
+            name: t!("core-account-left-out-variables"),
+            why: t!("core-account-left-out-variables-why", count = withheld),
         });
     }
 }
@@ -1244,9 +1232,11 @@ fn withhold_services(
                 || arguments_name_what_is_not_the_apps(arguments, app_folders, traces)
         }) {
             left_out.setting_of(
-                format!("The service {}", service.service_name),
-                "It works on a place in an account's folders, and only goes with the User Data \
-                 option",
+                t!(
+                    "core-account-left-out-service",
+                    service = service.service_name.as_str()
+                ),
+                &t!("core-account-service-works-on-account-folder"),
             );
             return false;
         }
@@ -1307,13 +1297,11 @@ fn say_only_how_many_folders_of_others_could_not_be_read(
     });
     let gone = before - warnings.len();
     if gone > 0 {
-        warnings.push(Warning::new(
-            FOLDER_UNREADABLE_CODE,
+        warnings.push(Warning::localized(
+            "file_discovery_dir_unreadable",
+            "core-warning-scan-folders-of-others-unreadable",
             WarningSeverity::Info,
-            format!(
-                "{gone} folders outside the app could not be read, so data of the app's there may be \
-                 missing."
-            ),
+            vec![("count", gone.into())],
             None,
         ));
     }
@@ -1437,6 +1425,14 @@ fn scrub_warnings(warnings: &mut [Warning], traces: &AccountTraces) {
     for warning in warnings {
         warning.message = traces.scrub(&warning.message);
         warning.source = warning.source.as_deref().map(|source| traces.scrub(source));
+        // What its words are given is shown in them, wherever they are read.
+        if let Some(words) = warning.localized.as_deref_mut() {
+            for (_, value) in &mut words.args {
+                if let WarningArg::Text(text) = value {
+                    *text = traces.scrub(text);
+                }
+            }
+        }
     }
 }
 

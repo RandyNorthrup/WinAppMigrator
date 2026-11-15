@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use winappmigrator_i18n::{t, t_english};
+
 use crate::models::{ScheduledTaskEntry, Warning, WarningSeverity};
 use crate::path_rewrite::escape_xml_text;
 use crate::path_utils::{
@@ -13,8 +15,6 @@ use crate::system_context::{SystemContext, is_windows_own_account_name};
 
 /// Where the Task Scheduler keeps each task, as a file named for it, under the Windows folder.
 const TASKS_SUBDIR: &str = r"System32\Tasks";
-const TASK_RESTORE_INSTRUCTIONS: &str =
-    "Restore uses Register-ScheduledTask with the archived XML definition.";
 /// Far above any real definition. Anything larger is not a task, and on a drive from elsewhere it
 /// could be made big enough to run this out of memory, which is why there is a limit on how many
 /// one app can have kept too.
@@ -109,11 +109,11 @@ pub fn scan_scheduled_tasks(
     if !system.may_read(&tasks_root) {
         return (
             Vec::new(),
-            vec![Warning::new(
+            vec![Warning::localized(
                 "scheduled_tasks_unreadable",
+                "core-warning-scan-tasks-folder-through-link",
                 WarningSeverity::Warning,
-                "The folder of scheduled tasks on this drive goes through a link, so its tasks \
-                 were not read.",
+                Vec::new(),
                 Some(tasks_root.display().to_string()),
             )],
         );
@@ -150,14 +150,11 @@ pub fn scan_scheduled_tasks(
         }
     });
     warnings.extend(left_out.into_iter().map(|task| {
-        Warning::new(
+        Warning::localized(
             "scheduled_task_left_out",
+            "core-warning-scan-task-left-out",
             WarningSeverity::Warning,
-            format!(
-                "The scheduled task {task} was left out: it runs as another account than the one \
-                 whose settings are being included, others than administrators can change its \
-                 file, or the app has too many to keep."
-            ),
+            vec![("task", task.as_str().into())],
             Some(task),
         )
     }));
@@ -203,10 +200,11 @@ fn for_each_task_file(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                warnings.push(Warning::new(
+                warnings.push(Warning::localized(
                     "scheduled_task_folder_unreadable",
+                    "core-warning-scan-tasks-folder-unreadable",
                     WarningSeverity::Warning,
-                    format!("Could not read part of the scheduled tasks: {error}"),
+                    vec![("error", error.to_string().into())],
                     Some(tasks_root.display().to_string()),
                 ));
                 continue;
@@ -217,14 +215,14 @@ fn for_each_task_file(
         }
         match read_task_file(tasks_root, &entry.path) {
             Ok(file) => visit(file),
-            Err(reason) => warnings.push(Warning::new(
+            Err(reason) => warnings.push(Warning::localized(
                 "scheduled_task_unreadable",
+                "core-warning-scan-task-unreadable",
                 WarningSeverity::Warning,
-                format!(
-                    "Could not read the scheduled task {}: {reason}. If it runs the app, it was \
-                     not included.",
-                    entry.path.display()
-                ),
+                vec![
+                    ("path", entry.path.display().to_string().into()),
+                    ("reason", reason.into()),
+                ],
                 Some(entry.path.display().to_string()),
             )),
         }
@@ -237,7 +235,7 @@ fn read_task_file(tasks_root: &Path, path: &Path) -> Result<TaskFile, String> {
         .map_err(|error| error.to_string())?
         .len();
     if size > MAX_TASK_FILE_BYTES {
-        return Err(format!("it is {size} bytes, too large to be a task"));
+        return Err(t!("core-task-too-large", size = size));
     }
     let bytes = crate::source_fs::read_at_most(path, MAX_TASK_FILE_BYTES)
         .map_err(|error| error.to_string())?;
@@ -282,7 +280,8 @@ fn task_entry(
         run_level: file.run_level.clone(),
         account: file.account.clone(),
         requires_admin,
-        restore_instructions: TASK_RESTORE_INSTRUCTIONS.to_owned(),
+        // In English, as a package records it, for whoever reads the package.
+        restore_instructions: t_english!("core-task-restore-instructions"),
         definition_xml: Some(file.definition_xml.clone()),
     })
 }
@@ -663,10 +662,11 @@ fn decode_task_xml(bytes: &[u8]) -> Result<String, String> {
     let utf16 = |rest: &[u8], from_bytes: fn([u8; 2]) -> u16| {
         let (pairs, odd_byte) = rest.as_chunks::<2>();
         if !odd_byte.is_empty() {
-            return Err("it ends part-way through a character".to_owned());
+            return Err(t!("core-task-ends-mid-character"));
         }
         let units: Vec<u16> = pairs.iter().map(|pair| from_bytes(*pair)).collect();
-        String::from_utf16(&units).map_err(|error| format!("it is not valid UTF-16: {error}"))
+        String::from_utf16(&units)
+            .map_err(|error| t!("core-task-not-utf16", error = error.to_string()))
     };
     if let Some(rest) = bytes.strip_prefix(&UTF16_LE_BOM) {
         return utf16(rest, u16::from_le_bytes);
@@ -683,7 +683,7 @@ fn decode_task_xml(bytes: &[u8]) -> Result<String, String> {
     }
     std::str::from_utf8(rest)
         .map(ToOwned::to_owned)
-        .map_err(|error| format!("it is not valid UTF-8 or UTF-16: {error}"))
+        .map_err(|error| t!("core-task-not-text", error = error.to_string()))
 }
 
 fn task_requires_admin(run_level: Option<&str>, account: Option<&str>) -> bool {

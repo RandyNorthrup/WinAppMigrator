@@ -19,6 +19,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use winappmigrator_i18n::t;
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 
@@ -40,7 +41,6 @@ use crate::privilege::{
 
 const WINGET_EXE: &str = "winget.exe";
 const WINDOWS_APPS_FOLDER: &str = "WindowsApps";
-const WINGET_NOT_INSTALLED: &str = "winget is not installed";
 const DISM_EXE: &str = "dism";
 /// Where the package keeps prerequisite payloads, and the only place one can be run from.
 pub const PREREQUISITES_DIR: &str = "prerequisites";
@@ -277,23 +277,26 @@ pub fn handling_before_a_build(
         prerequisite.kind,
         RuntimePrerequisiteKind::DotNetFramework4x
     ) {
-        return ("Built into Windows".to_owned(), false);
+        return (t!("core-runtime-handling-built-in"), false);
     }
     if !prerequisite.install_manually {
-        return ("Ships with the App".to_owned(), false);
+        return (t!("core-runtime-handling-ships-with-app"), false);
     }
     let found = spec(&prerequisite.kind, architecture);
     let found = found.as_ref();
     if let Some(feature) = found.and_then(|spec| spec.windows_feature.as_deref()) {
-        return (format!("Windows Feature: {feature}"), false);
+        return (
+            t!("core-runtime-handling-windows-feature", feature = feature),
+            false,
+        );
     }
     if found.is_some_and(|spec| spec.bundleable) {
-        return ("Included".to_owned(), false);
+        return (t!("core-runtime-handling-included"), false);
     }
     if let Some(id) = found.and_then(|spec| spec.winget_id.as_deref()) {
-        return (format!("Installed with winget: {id}"), false);
+        return (t!("core-runtime-handling-winget", id = id), false);
     }
-    ("Install Manually".to_owned(), true)
+    (t!("core-runtime-handling-manual"), true)
 }
 
 pub fn spec_for_bundle(
@@ -316,8 +319,9 @@ const WAITS_BEFORE_TRYING_AGAIN: [Duration; 3] = [
 /// Used at package time only. Whatever came is checked by whoever asked, as it would be anyway.
 pub fn download(url: &str, dest: &Path) -> Result<()> {
     if !is_https(url) {
-        return Err(WinAppMigratorError::Network(format!(
-            "refusing to download {url}: it is not HTTPS"
+        return Err(WinAppMigratorError::Network(t!(
+            "core-runtime-download-not-https",
+            url = url
         )));
     }
     trying_again(&WAITS_BEFORE_TRYING_AGAIN, || download_once(url, dest))
@@ -338,8 +342,9 @@ fn trying_again(waits: &[Duration], mut attempt: impl FnMut() -> Result<()>) -> 
 }
 
 fn download_once(url: &str, dest: &Path) -> Result<()> {
-    let connector = native_tls::TlsConnector::new()
-        .map_err(|error| WinAppMigratorError::Network(format!("TLS init failed: {error}")))?;
+    let connector = native_tls::TlsConnector::new().map_err(|error| {
+        WinAppMigratorError::Network(t!("core-runtime-tls-failed", error = error.to_string()))
+    })?;
     let agent = ureq::AgentBuilder::new()
         .tls_connector(Arc::new(connector))
         // This one also covers each redirect, which is where a download would be led off
@@ -349,10 +354,13 @@ fn download_once(url: &str, dest: &Path) -> Result<()> {
         .timeout_connect(Duration::from_secs(30))
         .timeout_read(DOWNLOAD_TIMEOUT)
         .build();
-    let response = agent
-        .get(url)
-        .call()
-        .map_err(|error| WinAppMigratorError::Network(format!("download {url} failed: {error}")))?;
+    let response = agent.get(url).call().map_err(|error| {
+        WinAppMigratorError::Network(t!(
+            "core-runtime-download-failed",
+            url = url,
+            error = error.to_string()
+        ))
+    })?;
 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|error| WinAppMigratorError::io(parent, error))?;
@@ -365,16 +373,25 @@ fn download_once(url: &str, dest: &Path) -> Result<()> {
         .into_reader()
         .take(MAX_DOWNLOAD_BYTES)
         .read_to_end(&mut bytes)
-        .map_err(|error| WinAppMigratorError::Network(format!("reading {url} failed: {error}")))?;
+        .map_err(|error| {
+            WinAppMigratorError::Network(t!(
+                "core-runtime-download-unreadable",
+                url = url,
+                error = error.to_string()
+            ))
+        })?;
     if bytes.is_empty() {
-        return Err(WinAppMigratorError::Network(format!(
-            "download {url} returned no data"
+        return Err(WinAppMigratorError::Network(t!(
+            "core-runtime-download-empty",
+            url = url
         )));
     }
     if let Some(length) = says_it_is.filter(|length| *length != bytes.len()) {
-        return Err(WinAppMigratorError::Network(format!(
-            "download {url} was cut short: {} of {length} bytes came",
-            bytes.len()
+        return Err(WinAppMigratorError::Network(t!(
+            "core-runtime-download-cut-short",
+            url = url,
+            came = bytes.len(),
+            expected = length
         )));
     }
     std::fs::write(dest, &bytes).map_err(|error| WinAppMigratorError::io(dest, error))?;
@@ -394,9 +411,7 @@ pub fn install_bundle(
     package_root: &Path,
 ) -> PrerequisiteInstallOutcome {
     let Some(spec) = spec_for_bundle(kind, bundle) else {
-        return PrerequisiteInstallOutcome::Skipped(
-            "there is no known installer for this runtime".to_owned(),
-        );
+        return PrerequisiteInstallOutcome::Skipped(t!("core-runtime-no-known-installer"));
     };
     // A Windows optional feature (e.g. NetFx3) is enabled via DISM, never a
     // payload or winget, so it takes precedence over the other mechanisms.
@@ -407,29 +422,29 @@ pub fn install_bundle(
         && let Some(relative) = bundle.package_relative_path.as_ref()
     {
         if !is_expected_payload_path(relative, &spec) {
-            return PrerequisiteInstallOutcome::Failed(format!(
-                "the package names {} as this runtime's installer, which is not where it \
-                 belongs, so it was not run",
-                relative.display()
+            return PrerequisiteInstallOutcome::Failed(t!(
+                "core-runtime-payload-misplaced",
+                path = relative.display().to_string()
             ));
         }
         return match package_destination_path(package_root, relative) {
             Ok(payload) if payload.is_file() => run_payload(&payload, &spec),
-            Ok(payload) => PrerequisiteInstallOutcome::Failed(format!(
-                "bundled installer is missing: {}",
-                payload.display()
+            Ok(payload) => PrerequisiteInstallOutcome::Failed(t!(
+                "core-runtime-payload-missing",
+                path = payload.display().to_string()
             )),
-            Err(error) => PrerequisiteInstallOutcome::Failed(format!(
-                "bundled installer path is invalid: {error}"
+            Err(error) => PrerequisiteInstallOutcome::Failed(t!(
+                "core-runtime-payload-path-invalid",
+                error = error.to_string()
             )),
         };
     }
     if let Some(winget_id) = spec.winget_id.as_deref() {
         return run_winget(winget_id, &bundle.architecture);
     }
-    PrerequisiteInstallOutcome::Skipped(format!(
-        "no bundled installer or winget id; acquire it from {}",
-        spec.download_url
+    PrerequisiteInstallOutcome::Skipped(t!(
+        "core-runtime-no-installer-route",
+        url = spec.download_url.as_str()
     ))
 }
 
@@ -455,7 +470,7 @@ fn give_a_protected_temp(
     command: &mut std::process::Command,
 ) -> std::result::Result<Option<ProtectedFolder>, String> {
     let temp = protected_temp_for_a_tool()
-        .map_err(|error| format!("could not make a folder for it to unpack in: {error}"))?;
+        .map_err(|error| t!("core-runtime-no-temp-folder", error = error.to_string()))?;
     if let Some(temp) = temp.as_ref() {
         command.env("TEMP", temp.path()).env("TMP", temp.path());
     }
@@ -466,8 +481,9 @@ fn run_payload(payload: &Path, spec: &PrerequisiteSpec) -> PrerequisiteInstallOu
     // Checked again here, just before it runs elevated. The check at build time is on
     // another PC, and nothing authenticates the package in between.
     if let Err(reason) = check_microsoft_signature(payload) {
-        return PrerequisiteInstallOutcome::Failed(format!(
-            "the bundled installer failed its signature check and was not run: {reason}"
+        return PrerequisiteInstallOutcome::Failed(t!(
+            "core-runtime-payload-signature-failed",
+            reason = reason.to_string()
         ));
     }
     let mut command = hidden_command(payload);
@@ -478,11 +494,12 @@ fn run_payload(payload: &Path, spec: &PrerequisiteSpec) -> PrerequisiteInstallOu
     };
     match wait_with_timeout(command, INSTALL_TIMEOUT) {
         WaitOutcome::Exited(code) => classify_exit_code(code, spec),
-        WaitOutcome::TimedOut => PrerequisiteInstallOutcome::Failed(
-            "bundled installer did not finish within the timeout and was terminated".to_owned(),
-        ),
-        WaitOutcome::StartFailed(error) => PrerequisiteInstallOutcome::Failed(format!(
-            "could not start bundled installer: {error}"
+        WaitOutcome::TimedOut => {
+            PrerequisiteInstallOutcome::Failed(t!("core-runtime-payload-timed-out"))
+        }
+        WaitOutcome::StartFailed(error) => PrerequisiteInstallOutcome::Failed(t!(
+            "core-runtime-payload-not-started",
+            error = error.to_string()
         )),
     }
 }
@@ -512,18 +529,23 @@ fn run_windows_feature(feature: &str) -> PrerequisiteInstallOutcome {
         // 0 = enabled, 3010 = enabled but a reboot is required to complete it.
         WaitOutcome::Exited(Some(0)) => PrerequisiteInstallOutcome::Installed,
         WaitOutcome::Exited(Some(3010)) => PrerequisiteInstallOutcome::InstalledNeedsReboot,
-        WaitOutcome::Exited(code) => PrerequisiteInstallOutcome::Failed(format!(
-            "DISM could not enable the {feature} Windows feature (exit {}); the payload likely \
-             could not be downloaded. Enable it via Windows Features, or run \
-             `dism /online /enable-feature /featurename:{feature} /all /Source:<install-media>\\sources\\sxs /LimitAccess`.",
-            code.map(|code| code.to_string())
-                .unwrap_or_else(|| "unknown".to_owned())
+        WaitOutcome::Exited(Some(code)) => PrerequisiteInstallOutcome::Failed(t!(
+            "core-runtime-feature-failed",
+            feature = feature,
+            code = code.to_string()
         )),
-        WaitOutcome::TimedOut => PrerequisiteInstallOutcome::Failed(format!(
-            "enabling the {feature} Windows feature did not finish within the timeout and was terminated"
+        WaitOutcome::Exited(None) => PrerequisiteInstallOutcome::Failed(t!(
+            "core-runtime-feature-failed-no-code",
+            feature = feature
         )),
-        WaitOutcome::StartFailed(error) => PrerequisiteInstallOutcome::Failed(format!(
-            "DISM is not available to enable the {feature} Windows feature: {error}"
+        WaitOutcome::TimedOut => PrerequisiteInstallOutcome::Failed(t!(
+            "core-runtime-feature-timed-out",
+            feature = feature
+        )),
+        WaitOutcome::StartFailed(error) => PrerequisiteInstallOutcome::Failed(t!(
+            "core-runtime-feature-no-dism",
+            feature = feature,
+            error = error.to_string()
         )),
     }
 }
@@ -541,24 +563,30 @@ fn trusted_winget_path() -> std::result::Result<PathBuf, String> {
         "{POWERSHELL_IMPORT_APPX}{POWERSHELL_IMPORT_UTILITY}{WINGET_LOCATION_SCRIPT}"
     ))
     .output()
-    .map_err(|error| format!("could not look for winget: {error}"))?;
+    .map_err(|error| {
+        t!(
+            "core-runtime-winget-not-looked-for",
+            error = error.to_string()
+        )
+    })?;
     let location = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !output.status.success() || location.is_empty() {
-        return Err(WINGET_NOT_INSTALLED.to_owned());
+        return Err(t!("core-runtime-winget-not-installed"));
     }
     let winget = Path::new(&location).join(WINGET_EXE);
     // With Developer Mode on, an account can register a package from any folder of its own, by this
     // name, with a higher version, and a signed copy of winget in it would pass the check below.
     if !is_where_windows_keeps_packages(&winget) || !only_administrators_can_change(&winget) {
-        return Err(format!(
-            "{} is not where Windows keeps its own packages, so it was not run",
-            winget.display()
+        return Err(t!(
+            "core-runtime-winget-misplaced",
+            path = winget.display().to_string()
         ));
     }
     check_microsoft_signature(&winget).map_err(|reason| {
-        format!(
-            "{} failed its signature check and was not run: {reason}",
-            winget.display()
+        t!(
+            "core-runtime-winget-signature-failed",
+            path = winget.display().to_string(),
+            reason = reason.to_string()
         )
     })?;
     Ok(winget)
@@ -580,8 +608,10 @@ fn run_winget(winget_id: &str, architecture: &AppArchitecture) -> PrerequisiteIn
     let winget = match trusted_winget_path() {
         Ok(winget) => winget,
         Err(reason) => {
-            return PrerequisiteInstallOutcome::Failed(format!(
-                "could not use winget to install {winget_id}: {reason}"
+            return PrerequisiteInstallOutcome::Failed(t!(
+                "core-runtime-winget-unusable",
+                id = winget_id,
+                reason = reason
             ));
         }
     };
@@ -604,16 +634,22 @@ fn run_winget(winget_id: &str, architecture: &AppArchitecture) -> PrerequisiteIn
     ]);
     match wait_with_timeout(command, INSTALL_TIMEOUT) {
         WaitOutcome::Exited(Some(0)) => PrerequisiteInstallOutcome::Installed,
-        WaitOutcome::Exited(code) => PrerequisiteInstallOutcome::Failed(format!(
-            "winget install {winget_id} exited with {}",
-            code.map(|code| code.to_string())
-                .unwrap_or_else(|| "an unknown code".to_owned())
+        WaitOutcome::Exited(Some(code)) => PrerequisiteInstallOutcome::Failed(t!(
+            "core-runtime-winget-failed",
+            id = winget_id,
+            code = code.to_string()
         )),
-        WaitOutcome::TimedOut => PrerequisiteInstallOutcome::Failed(format!(
-            "winget install {winget_id} did not finish within the timeout and was terminated"
+        WaitOutcome::Exited(None) => PrerequisiteInstallOutcome::Failed(t!(
+            "core-runtime-winget-failed-no-code",
+            id = winget_id
         )),
-        WaitOutcome::StartFailed(error) => PrerequisiteInstallOutcome::Failed(format!(
-            "winget is not available to install {winget_id}: {error}"
+        WaitOutcome::TimedOut => {
+            PrerequisiteInstallOutcome::Failed(t!("core-runtime-winget-timed-out", id = winget_id))
+        }
+        WaitOutcome::StartFailed(error) => PrerequisiteInstallOutcome::Failed(t!(
+            "core-runtime-winget-not-started",
+            id = winget_id,
+            error = error.to_string()
         )),
     }
 }
@@ -653,16 +689,17 @@ fn wait_with_timeout(mut command: Command, timeout: Duration) -> WaitOutcome {
 
 fn classify_exit_code(code: Option<i32>, spec: &PrerequisiteSpec) -> PrerequisiteInstallOutcome {
     let Some(code) = code else {
-        return PrerequisiteInstallOutcome::Failed(
-            "installer was terminated without an exit code".to_owned(),
-        );
+        return PrerequisiteInstallOutcome::Failed(t!("core-runtime-installer-killed"));
     };
     if spec.reboot_exit_codes.contains(&code) {
         PrerequisiteInstallOutcome::InstalledNeedsReboot
     } else if spec.success_exit_codes.contains(&code) {
         PrerequisiteInstallOutcome::Installed
     } else {
-        PrerequisiteInstallOutcome::Failed(format!("installer exited with code {code}"))
+        PrerequisiteInstallOutcome::Failed(t!(
+            "core-runtime-installer-failed",
+            code = code.to_string()
+        ))
     }
 }
 
@@ -1211,7 +1248,9 @@ mod tests {
                 );
                 assert!(!text.contains(r"\appdata\"), "{text}");
             }
-            Err(reason) if reason == WINGET_NOT_INSTALLED => eprintln!("skipping: {reason}"),
+            Err(reason) if reason == t!("core-runtime-winget-not-installed") => {
+                eprintln!("skipping: {reason}");
+            }
             Err(reason) => panic!("{reason}"),
         }
     }

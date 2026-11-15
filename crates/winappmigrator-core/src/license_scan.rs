@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use winappmigrator_i18n::t;
 use winreg::RegKey;
 use winreg::enums::KEY_READ;
 
@@ -108,17 +109,19 @@ pub(crate) fn scan_license_artifacts(
     if !artifacts.is_empty() {
         // Informational only: the installer restores license data automatically.
         // No manual action is required of the user.
-        warnings.push(Warning::new(
+        warnings.push(Warning::localized(
             "license_data_detected",
+            "core-warning-scan-license-data",
             WarningSeverity::Info,
-            "Licensing/activation data was detected. With the License option on, the installer restores what can be moved; machine-wide values and hardware-bound stores are only reported. WinAppMigrator never decrypts, bypasses activation, or emulates dongles.",
+            Vec::new(),
             None,
         ));
         if artifacts.iter().any(|artifact| artifact.machine_bound) {
-            warnings.push(Warning::new(
+            warnings.push(Warning::localized(
                 "license_machine_bound",
+                "core-warning-scan-license-machine-bound",
                 WarningSeverity::Info,
-                "Some licenses are machine-bound (hardware dongle, machine-locked activation, or encrypted). The installer restores what it can; these may still require reactivation on the new PC.",
+                Vec::new(),
                 None,
             ));
         }
@@ -164,9 +167,10 @@ fn detect_license_files(
             framework: class.framework,
             path: Some(file.original_path.clone()),
             registry_location: None,
-            detail: format!(
-                "License file detected: {}",
-                file.original_path
+            detail: t!(
+                "core-license-detail-file",
+                name = file
+                    .original_path
                     .file_name()
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_default()
@@ -298,7 +302,7 @@ fn detect_framework_stores(
                 framework: framework.clone(),
                 path: Some(path.clone()),
                 registry_location: None,
-                detail: format!("{} license store present", framework.label()),
+                detail: t!("core-license-detail-store", framework = framework.label()),
                 machine_bound,
                 requires_admin: true,
                 transferable: if machine_bound {
@@ -367,7 +371,7 @@ fn detect_license_env_vars(
             framework: LicenseFramework::EnvironmentVariable,
             path: None,
             registry_location: None,
-            detail: format!("License environment variable {name}"),
+            detail: t!("core-license-detail-variable", name = name.as_str()),
             machine_bound: false,
             requires_admin: false,
             transferable: TransferableHint::Unknown,
@@ -435,7 +439,10 @@ fn detect_captured_license_values(
             Some(value_name),
             machine_wide,
             machine_wide || dpapi,
-            format!("Registry value suggests licensing data: {value_name}"),
+            t!(
+                "core-license-detail-registry-value",
+                name = value_name.to_string()
+            ),
         ));
         if !context.include_license_data {
             left_out.license(registry_entry_name(entry));
@@ -480,7 +487,10 @@ fn detect_vendor_license_values(
                     Some(&value_name),
                     admin,
                     admin,
-                    format!("Registry value suggests licensing data: {value_name}"),
+                    t!(
+                        "core-license-detail-registry-value",
+                        name = value_name.to_string()
+                    ),
                 ));
             }
         }
@@ -493,7 +503,10 @@ fn detect_vendor_license_values(
                     None,
                     admin,
                     admin,
-                    format!("Registry key suggests licensing data: {hive}\\{sub_path}"),
+                    t!(
+                        "core-license-detail-registry-key",
+                        key = format!(r"{hive}\{sub_path}")
+                    ),
                 ));
             }
         }
