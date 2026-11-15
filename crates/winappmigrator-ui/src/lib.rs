@@ -7,6 +7,7 @@
 pub mod bidi;
 pub mod hardening;
 pub mod language;
+pub mod system_settings;
 pub mod theme;
 pub mod widgets;
 pub mod window;

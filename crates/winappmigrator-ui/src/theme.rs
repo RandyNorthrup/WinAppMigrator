@@ -15,6 +15,8 @@ use eframe::egui::{
 };
 use winappmigrator_i18n::Script;
 
+use crate::system_settings::ContrastColors;
+
 /// Corner radius tokens, in points.
 pub const RADIUS_SM: u8 = 6;
 pub const RADIUS_MD: u8 = 8;
@@ -97,6 +99,15 @@ pub struct Theme {
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
+}
+
+/// Half of full brightness, between a dark and a light background.
+const HALF_BRIGHT: f32 = 0.5;
+
+/// How bright a color looks, from 0 for black to 1 for white, by the weights the eye gives red, green, and blue.
+fn perceived_brightness(color: Color32) -> f32 {
+    (0.299 * f32::from(color.r()) + 0.587 * f32::from(color.g()) + 0.114 * f32::from(color.b()))
+        / 255.0
 }
 
 /// Straight-alpha tint of a base color; useful for soft backgrounds.
@@ -263,6 +274,39 @@ impl Theme {
         match mode {
             ThemeMode::Dark => Self::dark(),
             ThemeMode::Light => Self::light(),
+        }
+    }
+
+    /// A theme in the colors of a Windows contrast theme, which a person chose so that everything has the contrast they
+    /// need: every token is one of its system colors, and nothing is softened or tinted. Status is told by icons and
+    /// words, not by color, as the theme has none to spare.
+    pub fn contrast(colors: ContrastColors) -> Self {
+        let dark = perceived_brightness(colors.window) < HALF_BRIGHT;
+        Self {
+            mode: if dark {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            },
+            accent: colors.link,
+            accent_fill: colors.highlight,
+            accent_fill_hover: colors.highlight,
+            accent_soft: colors.button_face,
+            on_accent: colors.highlight_text,
+            bg: colors.window,
+            surface: colors.window,
+            card: colors.window,
+            card_hover: colors.button_face,
+            border: colors.text,
+            border_strong: colors.text,
+            field_bg: colors.window,
+            text: colors.text,
+            text_muted: colors.text,
+            text_subtle: colors.text,
+            success: colors.text,
+            warning: colors.text,
+            danger: colors.text,
+            shadow: Color32::TRANSPARENT,
         }
     }
 
@@ -443,7 +487,10 @@ pub enum Role {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color32, Script, Theme, ThemeMode, alpha, egui, fallback_script, script_fonts};
+    use super::{
+        Color32, ContrastColors, Script, Theme, ThemeMode, alpha, egui, fallback_script,
+        script_fonts,
+    };
 
     /// WCAG AA minimum for normal-size text.
     const AA_TEXT: f32 = 4.5;
@@ -547,6 +594,97 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn hex(value: u32) -> Color32 {
+        Color32::from_rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
+    }
+
+    /// The system colors of Windows 11's four contrast themes, as Settings shows them.
+    fn windows_contrast_themes() -> [(&'static str, ContrastColors); 4] {
+        #[allow(clippy::too_many_arguments)]
+        fn theme(
+            window: u32,
+            text: u32,
+            link: u32,
+            disabled: u32,
+            highlight: u32,
+            highlight_text: u32,
+            face: u32,
+            button_text: u32,
+        ) -> ContrastColors {
+            ContrastColors {
+                window: hex(window),
+                text: hex(text),
+                link: hex(link),
+                disabled_text: hex(disabled),
+                highlight: hex(highlight),
+                highlight_text: hex(highlight_text),
+                button_face: hex(face),
+                button_text: hex(button_text),
+            }
+        }
+        [
+            (
+                "Aquatic",
+                theme(
+                    0x202020, 0xFFFFFF, 0x75E9FC, 0xA6A6A6, 0x8EE3F0, 0x263B50, 0x202020, 0xFFFFFF,
+                ),
+            ),
+            (
+                "Desert",
+                theme(
+                    0xFFFAEF, 0x3D3D3D, 0x1C5E75, 0x676767, 0x903909, 0xFFF5E3, 0xFFFAEF, 0x202020,
+                ),
+            ),
+            (
+                "Dusk",
+                theme(
+                    0x2D3236, 0xB6F6F0, 0x70EBDE, 0xA6A6A6, 0xA1BFDE, 0x212D3B, 0x2D3236, 0xB6F6F0,
+                ),
+            ),
+            (
+                "Night sky",
+                theme(
+                    0x000000, 0xFFFFFF, 0x8080FF, 0xA6A6A6, 0xD6B4FD, 0x2B2B2B, 0x000000, 0xFFEE32,
+                ),
+            ),
+        ]
+    }
+
+    /// AC-A11Y-CONTRAST-THEME: in a contrast theme, the windows draw in its system colors, and every text color still
+    /// meets its minimum on every surface.
+    #[test]
+    fn a_windows_contrast_theme_is_drawn_in_its_own_colors() {
+        for (name, colors) in windows_contrast_themes() {
+            let theme = Theme::contrast(colors);
+            for surface in [theme.bg, theme.surface, theme.card, theme.field_bg] {
+                assert_eq!(surface, colors.window, "{name}");
+                for ink in [
+                    theme.text,
+                    theme.text_muted,
+                    theme.text_subtle,
+                    theme.accent,
+                    theme.danger,
+                ] {
+                    let ratio = contrast(ink, surface);
+                    assert!(ratio >= AA_TEXT, "{name}: {ratio:.2}:1");
+                }
+            }
+            assert_eq!(theme.text, colors.text, "{name}");
+            assert_eq!(theme.accent, colors.link, "{name}");
+            assert_eq!(
+                (theme.accent_fill, theme.on_accent),
+                (colors.highlight, colors.highlight_text),
+                "{name}"
+            );
+            assert!(
+                contrast(theme.on_accent, theme.accent_fill) >= AA_TEXT,
+                "{name}"
+            );
+            assert_eq!(theme.shadow, Color32::TRANSPARENT);
+            assert_eq!(theme.mode == ThemeMode::Light, name == "Desert", "{name}");
         }
     }
 

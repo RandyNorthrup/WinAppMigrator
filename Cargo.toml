@@ -55,6 +55,8 @@ intl-memoizer = "0.5.3"
 unic-langid = "0.9.6"
 # Which way each part of a line runs, for right-to-left languages.
 unicode-bidi = "0.3.18"
+# Windows' own accessibility settings (contrast theme, Text size, Animation effects), the version wgpu already uses.
+windows = { version = "0.62.2", features = ["UI_ViewManagement"] }
 embed-manifest = "1.5.1"
 winresource = { version = "0.1.34", default-features = false }
 egui_kittest = { version = "0.37.0", features = ["snapshot", "wgpu"] }

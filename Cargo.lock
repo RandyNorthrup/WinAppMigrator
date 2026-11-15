@@ -4599,6 +4599,7 @@ dependencies = [
  "unicode-bidi",
  "wgpu",
  "winappmigrator-i18n",
+ "windows",
 ]
 
 [[package]]
