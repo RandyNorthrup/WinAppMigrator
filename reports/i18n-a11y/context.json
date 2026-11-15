@@ -1,0 +1,11 @@
+{
+  "platform": "windows",
+  "tools": {
+    "python": "3.14.10",
+    "rustc": "1.99.1",
+    "cargo": "1.99.1",
+    "pwsh": "7.6.10",
+    "node": "24.20.0",
+    "dotnet": "10.0.404"
+  }
+}

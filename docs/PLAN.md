@@ -104,6 +104,11 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
 - Dev/release build profiles tuned (deps + first-party optimized in dev for fast
   tests; LTO + single codegen unit + strip in release).
 
+## In progress
+
+- **Languages and accessibility, for 0.7.0:** 24 languages (machine-translated, right-to-left included), WCAG 2.2 AA, and
+  a translated website. Its own plan, with requirements, tasks, and evidence: [plans/i18n-a11y.md](plans/i18n-a11y.md).
+
 ## Definition of done (every change)
 
 ```powershell
