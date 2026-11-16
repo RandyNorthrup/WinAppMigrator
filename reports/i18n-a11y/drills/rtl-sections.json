@@ -1,0 +1,16 @@
+{
+  "name": "rtl-sections",
+  "file": "crates/winappmigrator-ui/src/bidi.rs",
+  "mutation": "fn push_run(job: &mut LayoutJob, text: &str, format: TextFormat) { -> fn push_run(job: &mut LayoutJob, text: &str, format: TextFormat) {\n    if text.len() < usize::MAX {\n        job.append(text, 0.0, format);\n        return;\n    }",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-ui --lib bidi::tests::a_number_inside_an_arabic_phrase_reads_as_written_where_it_belongs -- --exact",
+  "expected_diagnostic": "57 reads 57",
+  "before": "d259a15834dad4c7c39b89d3edc1fdbe012ceb424595b8fca1ab71b5ffca9d8b",
+  "mutated": "770baf7c95a2e4227772a37aa7447f311ac952313d4db36dcbf9ada9e69cbcc0",
+  "after": "d259a15834dad4c7c39b89d3edc1fdbe012ceb424595b8fca1ab71b5ffca9d8b",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "57 reads 57: [('7', 0.0), ('5', 6.0), ('╪º', 13.0), ('┘é', 17.0), ('┘é', 16.0), ('┘è', 22.0), ('╪¿', 26.0), ('╪╖', 30.0), ('╪¬', 40.0), (' ', 44.0), ('╪¬', 47.0), ('╪╖', 47.0), ('╪¿', 47.0), ('┘è', 47.0), ('┘é', 47.0), ('\\u{64b}', 47.0), ('╪º', 47.0), ('5', 47.0), ('7', 47.0)]",
+  "failure": null,
+  "passed": true
+}

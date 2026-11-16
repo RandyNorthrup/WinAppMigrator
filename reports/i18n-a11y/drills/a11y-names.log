@@ -5,26 +5,26 @@ mutation: 'name_control(ui, &response, hint);
 command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-gui --lib ui_tests_a11y::every_control_has_a_name_a_role_and_its_state -- --exact
 expect: a TextInput at [[16.0 133.0] - [458.0 168.0]] has no name
 ===== baseline
-warning: winappmigrator-gui@0.6.2: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
-warning: winappmigrator-gui@0.6.2: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
-    Finished `test` profile [optimized + debuginfo] target(s) in 0.79s
-     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-7f4e3ef93a02e41c.exe)
+warning: winappmigrator-gui@0.7.0: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.7.0: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.15s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-d49089e5507f5a90.exe)
 
 running 1 test
 test ui_tests_a11y::every_control_has_a_name_a_role_and_its_state ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.78s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 2.30s
 
 
 
 exit 0
 ===== mutated
-   Compiling winappmigrator-ui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
-warning: winappmigrator-gui@0.6.2: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
-warning: winappmigrator-gui@0.6.2: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
-   Compiling winappmigrator-gui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
-    Finished `test` profile [optimized + debuginfo] target(s) in 20.57s
-     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-7f4e3ef93a02e41c.exe)
+   Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+warning: winappmigrator-gui@0.7.0: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.7.0: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 27.50s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-d49089e5507f5a90.exe)
 
 running 1 test
 test ui_tests_a11y::every_control_has_a_name_a_role_and_its_state ... FAILED
@@ -33,7 +33,7 @@ failures:
 
 ---- ui_tests_a11y::every_control_has_a_name_a_role_and_its_state stdout ----
 
-thread 'ui_tests_a11y::every_control_has_a_name_a_role_and_its_state' (49340) panicked at crates\winappmigrator-gui\src\ui_tests_a11y.rs:93:17:
+thread 'ui_tests_a11y::every_control_has_a_name_a_role_and_its_state' (18780) panicked at crates\winappmigrator-gui\src\ui_tests_a11y.rs:93:17:
 en-US nothing selected: [
     "a TextInput at [[16.0 133.0] - [458.0 168.0]] has no name",
 ]
@@ -43,24 +43,24 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 failures:
     ui_tests_a11y::every_control_has_a_name_a_role_and_its_state
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.05s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.03s
 
 error: test failed, to rerun pass `-p winappmigrator-gui --lib`
 
 
 exit 101
 ===== restored
-warning: winappmigrator-gui@0.6.2: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
-warning: winappmigrator-gui@0.6.2: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
-   Compiling winappmigrator-ui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
-   Compiling winappmigrator-gui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
-    Finished `test` profile [optimized + debuginfo] target(s) in 24.64s
-     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-7f4e3ef93a02e41c.exe)
+   Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+warning: winappmigrator-gui@0.7.0: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.7.0: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 27.04s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-d49089e5507f5a90.exe)
 
 running 1 test
 test ui_tests_a11y::every_control_has_a_name_a_role_and_its_state ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 1.58s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 1.28s
 
 
 

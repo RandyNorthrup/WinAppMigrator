@@ -1,17 +1,16 @@
 command: cargo test -p winappmigrator-gui --lib
-worktree: C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt at f86e8f19fb8e09bf4b1cfeb0be8f9f8f2351f1ad
+worktree: C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt at 1601d7210db567deacfb93a421bdfb544abb0a83
 warning: winappmigrator-gui@0.7.0: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
 warning: winappmigrator-gui@0.7.0: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
    Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
-   Compiling winappmigrator-core v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-core)
    Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
-    Finished `test` profile [optimized + debuginfo] target(s) in 36.01s
+    Finished `test` profile [optimized + debuginfo] target(s) in 11.70s
      Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-d49089e5507f5a90.exe)
 
 running 71 tests
 test checks::tests::only_words_outside_the_marks_and_the_data_count_as_unmarked ... ok
-test network_view::tests::the_note_beside_the_client_keeps_its_lines ... ok
 test ui_tests::a_failed_hash_check_says_not_to_use_the_installer ... ok
+test network_view::tests::the_note_beside_the_client_keeps_its_lines ... ok
 test ui_tests::files_gone_since_the_app_was_looked_at_are_said_to_be ... ok
 test network_view::tests::the_client_and_its_note_are_saved_side_by_side ... ok
 test ui_tests::versions_sort_by_number_not_by_text ... ok
@@ -21,8 +20,8 @@ test ui_tests::the_window_speaks_the_language_in_use ... ok
 test ui_tests::the_choice_is_about_user_data_and_only_shows_with_it ... ok
 test ui_tests::a_build_needs_a_full_output_path ... ok
 test ui_tests::accounts_with_data_can_be_chosen_between_and_a_build_goes_by_the_choice ... ok
-test ui_tests::nothing_selected_invites_a_pick ... ok
 test ui_tests::when_who_is_signed_in_cannot_be_told_that_is_said_and_no_one_is_assumed ... ok
+test ui_tests::nothing_selected_invites_a_pick ... ok
 test ui_tests::a_drive_with_windows_7_says_which_and_what_becomes_of_its_apps ... ok
 test ui_tests::with_one_account_there_is_nothing_to_choose ... ok
 test ui_tests::the_first_time_it_takes_the_theme_windows_is_in_and_a_choice_stays ... ok
@@ -30,58 +29,58 @@ test ui_tests_a11y::a_contrast_theme_is_kept_and_not_offered_away ... ok
 test ui_tests::failed_and_cancelled_builds_explain_themselves ... ok
 test ui_tests::before_the_accounts_have_been_looked_at_a_build_goes_by_the_default ... ok
 test ui_tests::a_running_build_locks_the_selection ... ok
-test ui_tests::a_partial_build_does_not_read_as_success ... ok
 test ui_tests_footprint::a_build_waits_until_what_goes_with_a_choice_is_known ... ok
-test ui_tests_footprint::a_drive_that_will_not_say_does_not_stop_a_build_and_is_said_not_to_have_said ... ok
-test ui_tests::what_a_package_still_says_of_who_it_came_from_cannot_be_missed ... ok
-test network_view::tests::a_link_where_the_client_or_its_note_goes_is_not_written_through ... ok
-test ui_tests_footprint::a_failed_scan_says_why_and_can_be_tried_again ... ok
 test ui_tests::selected_app_offers_the_build ... ok
-test ui_tests_a11y::a_right_to_left_window_is_the_mirror_image ... ok
+test ui_tests::what_a_package_still_says_of_who_it_came_from_cannot_be_missed ... ok
+test ui_tests_footprint::a_drive_that_will_not_say_does_not_stop_a_build_and_is_said_not_to_have_said ... ok
+test ui_tests::a_partial_build_does_not_read_as_success ... ok
+test ui_tests::a_clean_build_reads_as_success ... ok
+test ui_tests_footprint::a_failed_scan_says_why_and_can_be_tried_again ... ok
+test ui_tests_a11y::larger_text_leaves_every_control_within_reach ... ok
+test network_view::tests::a_link_where_the_client_or_its_note_goes_is_not_written_through ... ok
 test ui_tests_a11y::progress_and_problems_are_said_as_they_change ... ok
 test ui_tests_footprint::a_small_window_does_not_cut_what_a_row_says_of_how_it_was_installed ... ok
-test ui_tests_a11y::larger_text_leaves_every_control_within_reach ... ok
-test ui_tests::a_clean_build_reads_as_success ... ok
-test ui_tests_footprint::a_near_match_in_a_data_folder_comes_with_the_user_data_option ... ok
-test ui_tests_footprint::a_result_from_a_scan_of_something_else_is_not_taken ... ok
-test ui_tests_footprint::a_license_in_a_folder_left_out_is_said_to_still_go ... ok
 test ui_tests::a_build_too_big_for_one_file_says_its_two_files_must_stay_together ... ok
-test ui_tests_footprint::a_long_list_keeps_a_row_with_the_focus_in_view ... ok
+test ui_tests_a11y::a_right_to_left_window_is_the_mirror_image ... ok
+test ui_tests_footprint::a_near_match_in_a_data_folder_comes_with_the_user_data_option ... ok
 test ui_tests_a11y::every_word_on_every_screen_is_from_the_catalog ... ok
+test ui_tests_footprint::a_result_from_a_scan_of_something_else_is_not_taken ... ok
 test ui_tests_a11y::the_tab_key_reaches_every_control_in_reading_order ... ok
-test ui_tests_a11y::nothing_clickable_is_too_small_to_hit ... ok
-test ui_tests_footprint::looking_again_takes_a_new_scan_and_a_stale_one_says_how_old_it_is ... ok
-test ui_tests_footprint::a_running_build_locks_every_choice ... ok
-test ui_tests_footprint::nothing_of_a_real_pc_is_in_what_these_show ... ok
-test ui_tests_footprint::a_service_a_task_and_a_group_can_each_be_left_out ... ok
-test ui_tests_footprint::another_account_or_another_source_is_another_scan ... ok
-test ui_tests_footprint::a_row_can_be_worked_from_the_keyboard_and_says_what_it_is ... ok
 test ui_tests_a11y::what_has_the_focus_can_be_seen ... ok
-test ui_tests_footprint::one_waiting_for_the_user_data_option_is_not_counted_as_added ... ok
+test ui_tests_footprint::a_long_list_keeps_a_row_with_the_focus_in_view ... ok
+test ui_tests_footprint::a_service_a_task_and_a_group_can_each_be_left_out ... ok
+test ui_tests_footprint::a_license_in_a_folder_left_out_is_said_to_still_go ... ok
+test ui_tests_footprint::looking_again_takes_a_new_scan_and_a_stale_one_says_how_old_it_is ... ok
+test ui_tests_a11y::nothing_clickable_is_too_small_to_hit ... ok
+test ui_tests_footprint::a_running_build_locks_every_choice ... ok
+test ui_tests_footprint::another_account_or_another_source_is_another_scan ... ok
+test ui_tests_footprint::nothing_of_a_real_pc_is_in_what_these_show ... ok
+test ui_tests_footprint::a_row_can_be_worked_from_the_keyboard_and_says_what_it_is ... ok
 test ui_tests_footprint::it_reads_the_same_at_the_smallest_window ... ok
-test ui_tests_footprint::selecting_another_app_stops_the_scan_and_its_result_never_turns_up ... ok
-test ui_tests_network::a_pc_found_on_the_network_is_offered_with_its_windows ... ok
 test ui_tests_footprint::the_main_program_cannot_be_left_out ... ok
-test ui_tests_footprint::size_and_room_are_there_before_anything_is_clicked_and_first ... ok
+test ui_tests_footprint::near_matches_start_unticked_say_why_and_ticking_one_looks_again_for_it ... ok
+test ui_tests_footprint::without_the_room_it_says_where_and_how_much_and_will_not_start ... ok
+test ui_tests_footprint::one_waiting_for_the_user_data_option_is_not_counted_as_added ... ok
+test ui_tests_footprint::a_choice_that_changes_what_a_scan_reads_looks_again_and_keeps_the_rest ... ok
 test worker::tests::a_job_not_started_is_replaced_by_a_newer_one ... ok
 test worker::tests::dropping_it_ends_the_thread ... ok
-test ui_tests_network::the_steps_show_until_a_pc_is_paired ... ok
-test ui_tests_footprint::without_the_room_it_says_where_and_how_much_and_will_not_start ... ok
+test ui_tests_footprint::selecting_another_app_stops_the_scan_and_its_result_never_turns_up ... ok
+test ui_tests_network::a_pc_found_on_the_network_is_offered_with_its_windows ... ok
 test ui_tests_network::once_paired_the_old_pcs_drive_is_the_source_and_says_so ... ok
+test ui_tests_network::the_steps_show_until_a_pc_is_paired ... ok
 test ui_tests_footprint::scanning_says_so_and_the_build_waits_for_it ... ok
-test ui_tests_footprint::near_matches_start_unticked_say_why_and_ticking_one_looks_again_for_it ... ok
-test ui_tests_footprint::a_choice_that_changes_what_a_scan_reads_looks_again_and_keeps_the_rest ... ok
-test ui_tests_footprint::on_a_small_screen_what_matters_can_be_reached ... ok
+test ui_tests_footprint::size_and_room_are_there_before_anything_is_clicked_and_first ... ok
 test ui_tests_footprint::what_stays_out_is_named_and_cannot_be_ticked ... ok
-test ui_tests_footprint::what_ties_it_into_windows_is_said_as_what_was_left_out_leaves_it ... ok
 test ui_tests_a11y::every_control_has_a_name_a_role_and_its_state ... ok
+test ui_tests_footprint::what_ties_it_into_windows_is_said_as_what_was_left_out_leaves_it ... ok
+test ui_tests_footprint::on_a_small_screen_what_matters_can_be_reached ... ok
 test ui_tests_footprint::leaving_a_folder_out_takes_effect_at_once_and_says_what_goes_with_it ... ok
-test ui_tests_footprint::every_group_reads_in_plain_words_and_in_the_installers_own ... ok
 test ui_tests_footprint::stopping_a_scan_stays_stopped_until_asked ... ok
+test ui_tests_footprint::every_group_reads_in_plain_words_and_in_the_installers_own ... ok
 test ui_tests_footprint::a_list_of_any_length_only_draws_what_is_in_view ... ok
 test ui_tests::a_person_who_picks_an_app_and_clicks_create_gets_an_installer ... ok
 
-test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.58s
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.70s
 
 
 

@@ -1,0 +1,61 @@
+drill rtl-sections
+file crates/winappmigrator-ui/src/bidi.rs
+mutation: 'fn push_run(job: &mut LayoutJob, text: &str, format: TextFormat) {' -> 'fn push_run(job: &mut LayoutJob, text: &str, format: TextFormat) {
+    if text.len() < usize::MAX {
+        job.append(text, 0.0, format);
+        return;
+    }'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-ui --lib bidi::tests::a_number_inside_an_arabic_phrase_reads_as_written_where_it_belongs -- --exact
+expect: 57 reads 57
+===== baseline
+   Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 19.82s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-a84449a8eabd6251.exe)
+
+running 1 test
+test bidi::tests::a_number_inside_an_arabic_phrase_reads_as_written_where_it_belongs ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.02s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 10.79s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-a84449a8eabd6251.exe)
+
+running 1 test
+test bidi::tests::a_number_inside_an_arabic_phrase_reads_as_written_where_it_belongs ... FAILED
+
+failures:
+
+---- bidi::tests::a_number_inside_an_arabic_phrase_reads_as_written_where_it_belongs stdout ----
+
+thread 'bidi::tests::a_number_inside_an_arabic_phrase_reads_as_written_where_it_belongs' (60952) panicked at crates\winappmigrator-ui\src\bidi.rs:513:17:
+57 reads 57: [('7', 0.0), ('5', 6.0), ('╪º', 13.0), ('┘é', 17.0), ('┘é', 16.0), ('┘è', 22.0), ('╪¿', 26.0), ('╪╖', 30.0), ('╪¬', 40.0), (' ', 44.0), ('╪¬', 47.0), ('╪╖', 47.0), ('╪¿', 47.0), ('┘è', 47.0), ('┘é', 47.0), ('\u{64b}', 47.0), ('╪º', 47.0), ('5', 47.0), ('7', 47.0)]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    bidi::tests::a_number_inside_an_arabic_phrase_reads_as_written_where_it_belongs
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p winappmigrator-ui --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 16.86s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-a84449a8eabd6251.exe)
+
+running 1 test
+test bidi::tests::a_number_inside_an_arabic_phrase_reads_as_written_where_it_belongs ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.01s
+
+
+
+exit 0
