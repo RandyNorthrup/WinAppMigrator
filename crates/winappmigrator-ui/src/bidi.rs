@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use eframe::egui::{
     self, Color32, FontId, Galley, Painter, Response, Role, Sense, Ui, Vec2, WidgetInfo, pos2,
-    text::LayoutJob, text::TextFormat, vec2,
+    text::{ByteIndex, LayoutJob, LayoutSection, TextFormat},
+    vec2,
 };
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use winappmigrator_i18n::{Direction, is_isolation_mark, without_isolation};
@@ -39,7 +40,7 @@ pub fn needs_bidi(text: &str, _base: Direction) -> bool {
 
 /// One line of text in the order it is seen, as egui is given it: each run a piece of its own. Text with line breaks
 /// keeps them.
-pub fn visual_job(painter: &Painter, text: &str, font: FontId, color: Color32) -> LayoutJob {
+fn visual_job(painter: &Painter, text: &str, font: FontId, color: Color32) -> LayoutJob {
     let base = winappmigrator_i18n::direction();
     if !needs_bidi(text, base) {
         return LayoutJob::simple_singleline(text.to_owned(), font, color);
@@ -53,13 +54,26 @@ pub fn visual_job(painter: &Painter, text: &str, font: FontId, color: Color32) -
     let mut job = LayoutJob::default();
     for (index, line) in lines.iter().enumerate() {
         if index > 0 {
-            job.append("\n", 0.0, TextFormat::simple(font.clone(), color));
+            push_run(&mut job, "\n", TextFormat::simple(font.clone(), color));
         }
         for run in line {
-            job.append(&run.text, 0.0, TextFormat::simple(font.clone(), color));
+            push_run(&mut job, &run.text, TextFormat::simple(font.clone(), color));
         }
     }
     job
+}
+
+/// Add a run to a job as a piece of its own. egui's `append` joins a piece to the one before it when they look the
+/// same, and its shaper then lays the joined text out in one direction: a number inside an Arabic phrase was turned
+/// around and put on the wrong side of it.
+fn push_run(job: &mut LayoutJob, text: &str, format: TextFormat) {
+    let start = job.text.len();
+    job.text.push_str(text);
+    job.sections.push(LayoutSection {
+        leading_space: 0.0,
+        byte_range: ByteIndex(start)..ByteIndex(job.text.len()),
+        format,
+    });
 }
 
 /// `text` broken into lines no wider than `wrap_width`, at spaces, in the order it is read, with each line's runs in
@@ -181,7 +195,7 @@ fn break_lines(
 pub fn line_job(line: &[Run], font: &FontId, color: Color32) -> LayoutJob {
     let mut job = LayoutJob::default();
     for run in line {
-        job.append(&run.text, 0.0, TextFormat::simple(font.clone(), color));
+        push_run(&mut job, &run.text, TextFormat::simple(font.clone(), color));
     }
     job
 }
@@ -457,5 +471,48 @@ mod tests {
         );
         assert_eq!(texts(&lines[0]), [("abcdefghij ", false)]);
         assert_eq!(texts(&lines[1]), [("kl", false)]);
+    }
+
+    /// Seen on a real Windows: the app counted 57 apps, and its Arabic badge read "75" on the wrong side of the word.
+    /// egui joined the pieces of a line into one when they looked the same, and laid the joined text out right to left
+    /// as one, turning the number around. What is drawn is read here glyph by glyph, with Windows' own fonts.
+    #[test]
+    fn a_number_inside_an_arabic_phrase_reads_as_written_where_it_belongs() {
+        let Some(arabic) = winappmigrator_i18n::LANGUAGES
+            .iter()
+            .find(|language| language.tag == "ar-SA")
+        else {
+            panic!("no Arabic in the language table");
+        };
+        winappmigrator_i18n::with_language(arabic, || {
+            let ctx = egui::Context::default();
+            crate::theme::install_fonts(&ctx, std::path::Path::new(r"C:\Windows\Fonts"));
+            let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+            output.textures_delta.clear();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let galley = line_galley(
+                    ui.painter(),
+                    "\u{2068}57\u{2069} تطبيقًا",
+                    crate::theme::regular(12.0),
+                    Color32::WHITE,
+                );
+                let seen: Vec<(char, f32)> = galley.rows[0]
+                    .glyphs
+                    .iter()
+                    .map(|glyph| (glyph.chr, glyph.pos.x))
+                    .collect();
+                let at = |wanted: char| {
+                    seen.iter()
+                        .find(|(chr, _)| *chr == wanted)
+                        .map_or(f32::NAN, |(_, x)| *x)
+                };
+                assert!(at('5') < at('7'), "57 reads 57: {seen:?}");
+                assert!(
+                    at('ت') < at('5'),
+                    "the number is at the right, where reading starts: {seen:?}"
+                );
+            });
+            output.textures_delta.clear();
+        });
     }
 }

@@ -90,14 +90,29 @@ pub fn mark_pane(ui: &Ui) {
 }
 
 /// A text field's hint, laid out in both directions when it needs to be: egui would lay "Search (Ctrl+F)" in Arabic
-/// as one right-to-left run, and turn the Latin letters around.
-fn field_hint(ui: &Ui, hint: &str) -> egui::WidgetText {
+/// as one right-to-left run, and turn the Latin letters around. It is given laid out and already shortened to `width`:
+/// egui shortens a hint that does not fit by cutting its laid-out text, which on a right-to-left one, seen on a real
+/// Windows, left the Arabic letters reversed and unjoined.
+fn field_hint(ui: &Ui, hint: &str, width: f32) -> egui::WidgetText {
     if !bidi::needs_bidi(hint, winappmigrator_i18n::direction()) {
         return hint.into();
     }
     let font = TextStyle::Body.resolve(ui.style());
     let color = ui.visuals().weak_text_color();
-    bidi::visual_job(ui.painter(), hint, font, color).into()
+    egui::WidgetText::Galley(bidi::elided_galley(ui.painter(), hint, font, color, width))
+}
+
+/// A field whose text, and hint, start at the right edge in a right-to-left window, as Windows' own fields there do.
+/// In a left-to-right one egui's own alignment is kept.
+fn aligned_for_language<'t>(edit: egui::TextEdit<'t>, ui: &Ui) -> egui::TextEdit<'t> {
+    if right_to_left() {
+        edit.align(egui::Align2([
+            egui::Align::RIGHT,
+            ui.layout().vertical_align(),
+        ]))
+    } else {
+        edit
+    }
 }
 
 /// Give a control the name a screen reader says for it.
@@ -1249,13 +1264,16 @@ pub fn disclosure_row(
 
 /// A single-line text field at the shared control height.
 pub fn text_field(ui: &mut Ui, value: &mut String, hint: &str, width: f32) -> Response {
-    let response = ui.add(
-        egui::TextEdit::singleline(value)
-            .hint_text(field_hint(ui, hint))
-            .desired_width(width)
-            .min_size(vec2(width, CONTROL_HEIGHT))
-            .margin(Margin::symmetric(TEXT_FIELD_MARGIN_X, 8)),
-    );
+    let edit = egui::TextEdit::singleline(value)
+        .hint_text(field_hint(
+            ui,
+            hint,
+            width - 2.0 * f32::from(TEXT_FIELD_MARGIN_X),
+        ))
+        .desired_width(width)
+        .min_size(vec2(width, CONTROL_HEIGHT))
+        .margin(Margin::symmetric(TEXT_FIELD_MARGIN_X, 8));
+    let response = ui.add(aligned_for_language(edit, ui));
     name_control(ui, &response, hint);
     response
 }
@@ -1278,19 +1296,18 @@ pub fn search_field(
     } else {
         (ICON_SIDE, CLEAR_SIDE)
     };
-    let response = ui.add(
-        egui::TextEdit::singleline(value)
-            .id(id)
-            .hint_text(field_hint(ui, hint))
-            .desired_width(width)
-            .min_size(vec2(width, CONTROL_HEIGHT))
-            .margin(Margin {
-                left,
-                right,
-                top: 8,
-                bottom: 8,
-            }),
-    );
+    let edit = egui::TextEdit::singleline(value)
+        .id(id)
+        .hint_text(field_hint(ui, hint, width - f32::from(left + right)))
+        .desired_width(width)
+        .min_size(vec2(width, CONTROL_HEIGHT))
+        .margin(Margin {
+            left,
+            right,
+            top: 8,
+            bottom: 8,
+        });
+    let response = ui.add(aligned_for_language(edit, ui));
     name_control(ui, &response, hint);
     let mirror = Mirror::of(response.rect);
     let center_y = response.rect.center().y;
@@ -1775,6 +1792,37 @@ mod tests {
         assert!(left < 20.0, "{left}");
         let (_, right) = text_left(&PSEUDO_RTL);
         assert!(right > WIDTH - 20.0, "{right}");
+    }
+
+    /// Seen on a real Windows: egui shortened an Arabic search hint that did not fit by cutting its laid-out text,
+    /// which left the letters reversed and unjoined. A hint with right-to-left letters is now handed over laid out, and
+    /// already no wider than the field; one without is left to egui, as before.
+    #[test]
+    fn a_right_to_left_hint_is_given_laid_out_and_short_enough() {
+        let Some(arabic) = winappmigrator_i18n::LANGUAGES
+            .iter()
+            .find(|language| language.tag == "ar-SA")
+        else {
+            panic!("no Arabic in the language table");
+        };
+        with_language(arabic, || {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let hint = "ابحث بالاسم أو الناشر  (Ctrl+F)";
+                match field_hint(ui, hint, 80.0) {
+                    egui::WidgetText::Galley(galley) => {
+                        assert!(galley.size().x <= 80.0, "{}", galley.size().x);
+                        assert!(galley.text().contains('…'), "shortened: {}", galley.text());
+                    }
+                    other => panic!("not laid out: {:?}", other.text()),
+                }
+                assert!(!matches!(
+                    field_hint(ui, "Search (Ctrl+F)", 80.0),
+                    egui::WidgetText::Galley(_)
+                ));
+            });
+            output.textures_delta.clear();
+        });
     }
 
     #[test]
