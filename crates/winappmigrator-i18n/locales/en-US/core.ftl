@@ -133,13 +133,13 @@ core-rollback-setting-changed = { $kind ->
         [machine-list] The machine's { $name } stays, because it has changed since it was installed.
        *[value] The registry value { $name } stays, because it has changed since it was installed.
     }
-# Said when it is back as it was before the install. The capital "The" is as the app has always said it.
+# Said when it is back as it was before the install.
 core-rollback-setting-put-back = { $kind ->
-        [user-variable] Put back The user's environment variable { $name }
-        [machine-variable] Put back The machine's environment variable { $name }
-        [user-list] Put back The user's { $name }
-        [machine-list] Put back The machine's { $name }
-       *[value] Put back The registry value { $name }
+        [user-variable] Put back the user's environment variable { $name }
+        [machine-variable] Put back the machine's environment variable { $name }
+        [user-list] Put back the user's { $name }
+        [machine-list] Put back the machine's { $name }
+       *[value] Put back the registry value { $name }
     }
 core-rollback-setting-not-put-back = { $kind ->
         [user-variable] The user's environment variable { $name } could not be put back: { $error }.
@@ -153,14 +153,14 @@ core-rollback-value-kept-by-request = The registry value { $name } stays, since 
 core-rollback-key-holds-others = The key { $name } stays, because it holds what this install did not put there.
 core-rollback-key-removed = Removed the key { $name }
 core-rollback-key-not-removed = The key { $name } could not be removed: { $error }.
-# { $kind } is user-list or machine-list. The capital "The" is as the app has always said it.
+# { $kind } is user-list or machine-list.
 core-rollback-list-entries-removed = { $kind ->
-        [user-list] Took this install's entries out of The user's { $name }
-       *[machine-list] Took this install's entries out of The machine's { $name }
+        [user-list] Took this install's entries out of the user's { $name }
+       *[machine-list] Took this install's entries out of the machine's { $name }
     }
 core-rollback-list-entries-not-removed = { $kind ->
-        [user-list] This install's entries could not be taken out of The user's { $name }: { $error }.
-       *[machine-list] This install's entries could not be taken out of The machine's { $name }: { $error }.
+        [user-list] This install's entries could not be taken out of the user's { $name }: { $error }.
+       *[machine-list] This install's entries could not be taken out of the machine's { $name }: { $error }.
     }
 
 ## Services and drivers. { $kind } is service or driver; { $name } is its name, such as AppUpdater. { $error } and
@@ -212,7 +212,7 @@ core-rollback-firewall-not-read = The firewall rule { $name } could not be read:
 core-rollback-firewall-says-otherwise = The firewall rule { $name } stays, because what is there by that name says something else.
 core-rollback-firewall-changed = The firewall rule { $name } stays, because it has changed since it was installed.
 # The capital "The" is as the app has always said it.
-core-rollback-firewall-removed = Removed The firewall rule { $name }
+core-rollback-firewall-removed = Removed the firewall rule { $name }
 core-rollback-firewall-not-removed = The firewall rule { $name } could not be removed: { $error }.
 
 ## Scheduled tasks. { $path } is a folder of tasks, and { $name } a task with its folder, such as \App\Nightly Update.
@@ -245,7 +245,9 @@ core-rollback-install-busy = this install is being changed by another installer 
 
 core-rollback-count-undone = Undone: { $count }
 core-rollback-count-failed = Could not be undone: { $count }
+# What was left on purpose: it has changed since the install, or it is the user's.
 core-rollback-count-kept = Left in place: { $count }
+# What no uninstall can take back, such as a runtime that was installed, which other programs may use.
 core-rollback-count-left-behind = Left behind: { $count }
 
 ## Which Windows a PC or drive has, as the app shows it beside the drive.
@@ -363,7 +365,7 @@ core-warning-scan-folders-of-others-unreadable = { $count ->
 ## list of what was left out. Each has a name, and below it why.
 
 core-secret-why-credential = it looks like a credential
-core-secret-why-license-option-off = the License option is off
+core-secret-why-license-option-off = the License and Activation Data option is off
 # { $count } is how many values of a registry key.
 core-secret-why-account-values = { $count ->
         [one] { $count } value, which only goes with the User Data option
@@ -410,7 +412,7 @@ core-license-detail-registry-key = Registry key suggests licensing data: { $key 
 
 ## Warnings a scan records about licenses.
 
-core-warning-scan-license-data = Licensing/activation data was detected. With the License option on, the installer restores what can be moved; machine-wide values and hardware-bound stores are only reported. WinAppMigrator never decrypts, bypasses activation, or emulates dongles.
+core-warning-scan-license-data = Licensing/activation data was detected. With the License and Activation Data option on, the installer restores what can be moved; machine-wide values and hardware-bound stores are only reported. WinAppMigrator never decrypts, bypasses activation, or emulates dongles.
 core-warning-scan-license-machine-bound = Some licenses are machine-bound (hardware dongle, machine-locked activation, or encrypted). The installer restores what it can; these may still require reactivation on the new PC.
 
 ## Warnings a scan records about the registry. What could not be read is not named in them: it is kept beside them.

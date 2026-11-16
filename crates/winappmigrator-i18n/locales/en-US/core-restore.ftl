@@ -10,7 +10,8 @@
 ## done.
 
 core-error-list-changed = what this install would do has changed since it was agreed to, so nothing was installed
-# { $path } is a file or folder, such as C:\Program Files\App\app.exe. { $error } is what Windows said went wrong.
+# { $path } is a file or folder, such as C:\Program Files\App\app.exe, or words that name one, such as "the installer".
+# { $error } is what Windows said went wrong.
 core-error-io = I/O failed for { $path }: { $error }
 # { $detail } is what went wrong.
 core-error-registry = registry read failed: { $detail }

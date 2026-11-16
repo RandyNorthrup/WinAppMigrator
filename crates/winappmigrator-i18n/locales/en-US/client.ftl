@@ -60,7 +60,7 @@ client-paired = Paired with { $from ->
     }. It is reading what it needs...
 # { $count } is how many requests it answered.
 client-builder-done = { $from ->
-        [unknown] another PC
+        [unknown] Another PC
        *[address] { $from }
     } is done ({ $count ->
         [one] { $count } request
@@ -72,12 +72,12 @@ client-link-ended = The link to { $from ->
        *[address] { $from }
     } ended: { $error }
 client-wrong-code = { $from ->
-        [unknown] another PC
+        [unknown] Another PC
        *[address] { $from }
     } tried a code that is not this one.
 # { $error } is what went wrong, often in Windows' words.
 client-pair-failed = { $from ->
-        [unknown] another PC
+        [unknown] Another PC
        *[address] { $from }
     } could not pair: { $error }
 client-too-many-wrong-codes =

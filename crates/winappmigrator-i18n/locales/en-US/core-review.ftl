@@ -257,8 +257,9 @@ core-review-com-detail = { $count ->
        *[other] { $count } settings of the classes other programs can start
     }
 core-review-com-support-title = COM type libraries, interfaces, and AppIDs
-# { $libraries }, { $interfaces }, and { $app_ids } are how many registry values there are of each.
-core-review-com-support-detail = { $libraries } and { $interfaces } and { $app_ids } settings of each, which go with its classes
+# { $libraries }, { $interfaces }, and { $app_ids } are how many registry values there are for its type libraries, its
+# interfaces, and its AppIDs.
+core-review-com-support-detail = Settings for its type libraries ({ $libraries }), interfaces ({ $interfaces }), and AppIDs ({ $app_ids }), which go with its classes
 core-review-compatibility-title = How its programs start
 # { $count } is how many registry values.
 core-review-compatibility-detail = { $count ->
@@ -284,7 +285,7 @@ core-review-left-out-fonts = These fonts go by the app's name, and nothing says 
 # { $names } is a list of names, such as the names of saved passwords.
 core-review-note-credentials = Not in this installer, because they look like credentials: { $names }. What is on this PC of them stays as it is, and you may have to enter them again.
 # { $names } is a list of names of license data.
-core-review-note-licenses = Not in this installer, because the License option was off when it was built: { $names }.
+core-review-note-licenses = Not in this installer, because the License and Activation Data option was off when it was built: { $names }.
 # { $names } is a list of places an account keeps settings, such as folders.
 core-review-note-settings = Not in this installer, because the User Data option was off when it was built: the settings and history an account keeps for the app, in { $names }. The app starts here as it would for someone new to it.
 # { $names } is a list of certificates, each as core-review-certificate.

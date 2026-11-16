@@ -50,7 +50,7 @@ core-footprint-place-in = In { $folder }
 # A row for the files directly in the app's folder. { $folder } is that folder's name, such as Acme.
 core-footprint-files-directly-in = Files directly in { $folder }
 # Headings over what is left out, and why each item is.
-core-footprint-licenses-left-out = Not in this installer, because the License option is off
+core-footprint-licenses-left-out = Not in this installer, because the License and Activation Data option is off
 core-footprint-font-stays-behind = It stays behind.
 core-footprint-drivers-left-out = Drivers that belong to Windows or a vendor, which cannot be passed on, so reinstall them on the other PC
 core-footprint-driver-reinstall = Reinstall it from its vendor's own package.
@@ -256,7 +256,7 @@ core-warning-build-app-paths-folder-left-out = This app's App Paths entry says i
 core-warning-build-uninstaller-folder-left-out = The folder this app's uninstaller is in was left out, because Windows Installer says another app has a file there.
 # { $why } is never shown: it chooses the reason. Translate each reason as the end of the sentence.
 core-warning-build-recorded-folder-left-out = Something on record for this app names a folder that was left out, because { $why ->
-        [unreadable] it may not be read
+        [unreadable] its path leaves the drive or goes through a link, so it cannot safely be read
         [missing] it is not there
         [link] it goes through a link
         [short-name] it is not written the way it is really called
@@ -296,7 +296,7 @@ core-warning-build-near-no-longer-offered = Something ticked in the list of what
 # { $app_name } is the name of a part of the app, as the list of apps calls it. { $why } is never shown: it chooses the
 # reason. Translate each reason as the end of the sentence.
 core-warning-build-near-part-left-out = Part of what { $app_name } says is its own was left out: { $why ->
-        [unreadable] it may not be read
+        [unreadable] its path leaves the drive or goes through a link, so it cannot safely be read
         [missing] it is not there
         [link] it goes through a link
         [short-name] it is not written the way it is really called

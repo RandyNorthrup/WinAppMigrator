@@ -202,10 +202,9 @@ app-scan-finishing = Finishing up…
 app-scan-look-again = Look Again
 app-scan-stop = Stop
 app-scan-running-hint = You can pick another app or change what is included while this runs.
-# { $error } is why, as a sentence.
-app-scan-failed = This app could not be looked at. { $error }
+# { $error } is why, in words that follow a colon.
+app-scan-failed = This app could not be looked at: { $error }
 app-scan-try-again = Try Again
-# "Look Again" names the button of that name.
 app-scan-stopped = Stopped. An installer can be built once this app has been looked at.
 # { $reason } is what went wrong, in the program's own words, often in English.
 app-scan-stopped-unexpectedly = It stopped unexpectedly: { $reason }.
@@ -239,8 +238,8 @@ app-footprint-would-not-make-a-package = What is left would not make a package: 
 app-footprint-also-left-out = That also leaves out { $list }, because what they run or name would not be there. They will not be set up on the other PC.
 # { $list } is the names of the first few of what else is left out, and { $count } how many more there are.
 app-footprint-also-left-out-and-more = That also leaves out { $list }, and { $count } more, because what they run or name would not be there. They will not be set up on the other PC.
-# { $list } is the names of license files. "License" names the License and Activation Data option.
-app-footprint-licenses-still-go = License data in what you left out still goes in, because that goes by the License option: { $list }.
+# { $list } is the names of license files. The option is the one named "License and Activation Data".
+app-footprint-licenses-still-go = License data in what you left out still goes in, because that goes by the License and Activation Data option: { $list }.
 # { $elapsed } is how long ago, in minutes and seconds such as 45:00, or hours, minutes, and seconds such as 1:05:00.
 # "Look Again" names the button of that name.
 app-footprint-looked-at-long-ago = This was looked at { $elapsed } ago. Files are read when you build, so a change is picked up, and anything gone by then is listed. Look Again for anything new.

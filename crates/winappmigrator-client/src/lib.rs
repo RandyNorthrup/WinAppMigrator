@@ -267,7 +267,7 @@ mod tests {
             );
             assert_eq!(
                 t!("client-wrong-code", from = "unknown"),
-                "another PC tried a code that is not this one."
+                "Another PC tried a code that is not this one."
             );
             assert_eq!(
                 t!("client-builder-done", from = "192.168.1.20", count = 1_u64),
@@ -275,7 +275,7 @@ mod tests {
             );
             assert_eq!(
                 t!("client-builder-done", from = "unknown", count = 812_u64),
-                "another PC is done (812 requests answered)."
+                "Another PC is done (812 requests answered)."
             );
             assert_eq!(
                 t!("client-snapshot-failed", drive = "C:", details = ""),

@@ -89,7 +89,7 @@ installer-user-data-detail = On: settings, Documents, and Saved Games go to the 
 # { $account } is the name of the account on the other PC whose data this is.
 installer-user-data-whose = This holds the data of { $account }.
 installer-license = License
-installer-license-detail = Activation and license files and keys. Some may need reactivation here.
+installer-license-detail = Activation and license files, and the registry values that hold licenses. Some may need reactivation here.
 
 ## Dependencies: what else the app needs, and how each is provided
 
@@ -154,7 +154,7 @@ installer-stopped-unexpectedly = The install stopped unexpectedly.
 installer-stopped-unexpectedly-because = The install stopped unexpectedly: { $reason }. If it had begun, running an installer again undoes what it did first.
 # { $error } is what went wrong reading it.
 installer-package-read-failed = Could not read the package: { $error }
-installer-no-programdata = This PC's ProgramData folder could not be found, so the install could not be undone.
+installer-no-programdata = This PC's ProgramData folder could not be found, so nothing was installed: an install keeps the record it is undone by there.
 # { $error } is why, such as that there is nowhere only administrators can get into.
 installer-staging-failed = Could not create a staging folder: { $error }
 # { $error } is what went wrong unpacking it.
@@ -199,7 +199,7 @@ installer-cli-usage = Run it with no arguments to open the graphical installer, 
 installer-cli-usage-preview = preview the reinstall: --dry-run [--target-root <DIR>]
 installer-cli-usage-apply = reinstall:             --apply [--target-root <DIR>]
 installer-cli-no-package = installer does not contain an embedded package
-installer-cli-no-programdata = this PC's ProgramData folder could not be found, so an install could not be undone
+installer-cli-no-programdata = this PC's ProgramData folder could not be found, so nothing was installed: an install keeps the record it is undone by there
 # { $path } is the folder asked for, such as C:\Program Files\App. { $problem } is why it cannot be used.
 installer-cli-folder-has-files = { $path } cannot be used: { $problem }. Give --force only if you know it is this app's
 installer-cli-no-location = this package does not say where its app was, so give a --target-root
