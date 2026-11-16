@@ -3276,4 +3276,22 @@ mod tests {
         let live = winappmigrator_ui::checks::live_regions(&harness.root());
         assert!(live.iter().any(|(_, urgent)| *urgent), "{live:#?}");
     }
+
+    /// AC-A11Y-TEXT-SIZE: with Windows' Text size at 150% and 225% on a 1024 by 768 screen, Install can still be reached.
+    #[test]
+    fn larger_text_leaves_every_control_within_reach() {
+        for (scale, percent) in [(1.5_f32, "150"), (2.25, "225")] {
+            let size = egui::vec2(1024.0 / scale, 697.0 / scale);
+            let mut harness = harness_sized(sample_installer(ThemeMode::Dark), size);
+            let label = winappmigrator_i18n::t!("installer-install");
+            harness.get_by_label(&label).scroll_to_me();
+            harness.run();
+            let button = harness.get_by_label(&label).rect();
+            let window = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            assert!(
+                window.contains_rect(button),
+                "{percent}%: Install is at {button:?} in {size:?}"
+            );
+        }
+    }
 }

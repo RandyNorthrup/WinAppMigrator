@@ -178,3 +178,59 @@ fn progress_and_problems_are_said_as_they_change() {
     let live = checks::live_regions(&harness.root());
     assert!(live.iter().any(|(_, urgent)| *urgent), "{live:#?}");
 }
+
+/// AC-A11Y-TEXT-SIZE: with Windows' Text size at 150% and 225% on a 1024 by 768 screen, everything is larger by that
+/// much, which is the window being that much smaller in points, and Create Installer can still be reached.
+#[test]
+fn larger_text_leaves_every_control_within_reach() {
+    for (scale, name) in [(1.5_f32, "150"), (2.25, "225")] {
+        let size = eframe::egui::vec2(1024.0 / scale, 697.0 / scale);
+        let mut harness =
+            crate::ui_tests::harness_sized(ThemeMode::Dark, size, select_first_looked_at);
+        let create_label = t!("app-build-create");
+        harness.get_by_label(&create_label).scroll_to_me();
+        harness.run();
+        let button = harness.get_by_label(&create_label).rect();
+        let window = eframe::egui::Rect::from_min_size(eframe::egui::Pos2::ZERO, size);
+        assert!(
+            window.contains_rect(button),
+            "{name}%: Create Installer is at {button:?} in {size:?}"
+        );
+    }
+}
+
+/// AC-A11Y-CONTRAST-THEME: in a Windows contrast theme the window is drawn in its colors, and does not offer to change
+/// to the app's own light or dark ones.
+#[test]
+fn a_contrast_theme_is_kept_and_not_offered_away() {
+    use eframe::egui::Color32;
+    use winappmigrator_ui::system_settings::{ContrastColors, SystemSettings};
+    use winappmigrator_ui::window::Opening;
+
+    let night_sky = ContrastColors {
+        window: Color32::from_rgb(0x00, 0x00, 0x00),
+        text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        highlight: Color32::from_rgb(0xD6, 0xB4, 0xFD),
+        highlight_text: Color32::from_rgb(0x2B, 0x2B, 0x2B),
+        button_face: Color32::from_rgb(0x00, 0x00, 0x00),
+        button_text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        disabled_text: Color32::from_rgb(0xA6, 0xA6, 0xA6),
+        link: Color32::from_rgb(0x80, 0x80, 0xFF),
+    };
+    let settings = SystemSettings {
+        contrast: Some(night_sky),
+        ..SystemSettings::default()
+    };
+    let harness = harness_with(ThemeMode::Dark, |app| {
+        let (opening, theme) = Opening::with_settings(crate::WINDOW_SIZES, settings);
+        app.opening = opening;
+        app.theme = theme;
+    });
+    assert_eq!(harness.state().theme.bg, night_sky.window);
+    assert_eq!(harness.state().theme.text, night_sky.text);
+    for offer in [t!("app-theme-to-light"), t!("app-theme-to-dark")] {
+        assert!(harness.query_by_label(&offer).is_none(), "{offer}");
+    }
+    let harness = harness_with(ThemeMode::Dark, |_| {});
+    assert!(harness.query_by_label(&t!("app-theme-to-light")).is_some());
+}

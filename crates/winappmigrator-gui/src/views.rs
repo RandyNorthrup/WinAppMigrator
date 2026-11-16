@@ -140,13 +140,16 @@ impl WinAppMigratorApp {
 
             widgets::trailing(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = SPACE_XS;
-                let (icon, label) = if theme.mode == ThemeMode::Dark {
-                    (Icon::Sun, t!("app-theme-to-light"))
-                } else {
-                    (Icon::Moon, t!("app-theme-to-dark"))
-                };
-                if widgets::icon_button(ui, theme, icon, &label, true).clicked() {
-                    self.toggle_theme();
+                // A Windows contrast theme is a person's choice of colors for everything, and is kept.
+                if !self.opening.in_contrast_theme() {
+                    let (icon, label) = if theme.mode == ThemeMode::Dark {
+                        (Icon::Sun, t!("app-theme-to-light"))
+                    } else {
+                        (Icon::Moon, t!("app-theme-to-dark"))
+                    };
+                    if widgets::icon_button(ui, theme, icon, &label, true).clicked() {
+                        self.toggle_theme();
+                    }
                 }
                 let can_reload =
                     !matches!(self.inventory_state, InventoryState::Loading) && !self.is_building();

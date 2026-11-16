@@ -187,9 +187,19 @@ fn mark_live(ui: &Ui, response: &Response, urgent: bool) {
         .accesskit_node_builder(response.id, |node| node.set_live(live));
 }
 
-/// A tooltip, read in the direction of the language in use.
+/// A tooltip, read in the direction of the language in use. It shows on hover, and also while the control has the
+/// keyboard's focus, so that what is cut short can be read in full without a pointer; Escape takes the focus, and it,
+/// away.
 pub fn tooltip(response: Response, text: impl Into<String>) -> Response {
     let text = text.into();
+    if response.has_focus() {
+        let shown = text.clone();
+        response.show_tooltip_ui(move |ui| {
+            let font = TextStyle::Body.resolve(ui.style());
+            let color = ui.visuals().text_color();
+            bidi::label(ui, &shown, font, color, false);
+        });
+    }
     if !bidi::needs_bidi(&text, winappmigrator_i18n::direction()) {
         return response.on_hover_text(text);
     }
