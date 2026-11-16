@@ -50,12 +50,12 @@ use winappmigrator_installer::cleanup::create_staging_dir;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-const APP_NAME: &str = "WAM E2E App";
+const APP_NAME: &str = "WAM E2E Über 日本 Café";
 const VENDOR: &str = "WAM E2E Vendor";
-const SOURCE_ROOT: &str = r"C:\Program Files\WAM E2E App";
+const SOURCE_ROOT: &str = r"C:\Program Files\WAM E2E Über 日本 Café";
 const TARGET_ROOT: &str = r"C:\Program Files\WAM E2E Restored";
 const PROGRAM_FILES: &str = r"C:\Program Files";
-const PROGRAM_DATA_FOLDER: &str = r"C:\ProgramData\WAM E2E App";
+const PROGRAM_DATA_FOLDER: &str = r"C:\ProgramData\WAM E2E Über 日本 Café";
 /// Where the fake app says what it was started with. Not named for the product, so a scan
 /// does not take it for the app's own data.
 const MARKER_DIR: &str = r"C:\ProgramData\WAM E2E Markers";
@@ -74,14 +74,15 @@ const SELF_REMOVAL_PATIENCE: Duration = Duration::from_secs(90);
 /// the answer that means Windows could read it, so a person would get asked.
 const ERROR_ELEVATION_REQUIRED: i32 = 740;
 
-const HKLM_APP_KEY: &str = r"HKLM\Software\WAM E2E Vendor\WAM E2E App";
-const HKLM_WOW_KEY: &str = r"HKLM\Software\WOW6432Node\WAM E2E Vendor\WAM E2E App";
-const HKCU_APP_KEY: &str = r"HKCU\Software\WAM E2E Vendor\WAM E2E App";
-const UNINSTALL_KEY: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\WAM E2E App";
+const HKLM_APP_KEY: &str = r"HKLM\Software\WAM E2E Vendor\WAM E2E Über 日本 Café";
+const HKLM_WOW_KEY: &str = r"HKLM\Software\WOW6432Node\WAM E2E Vendor\WAM E2E Über 日本 Café";
+const HKCU_APP_KEY: &str = r"HKCU\Software\WAM E2E Vendor\WAM E2E Über 日本 Café";
+const UNINSTALL_KEY: &str =
+    r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\WAM E2E Über 日本 Café";
 const HKLM_RUN_KEY: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Run";
 const HKCU_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const APP_PATHS_KEY: &str =
-    r"HKLM\Software\Microsoft\Windows\CurrentVersion\App Paths\WAM E2E App.exe";
+    r"HKLM\Software\Microsoft\Windows\CurrentVersion\App Paths\WAM E2E Über 日本 Café.exe";
 const CLSID_KEY: &str = r"HKLM\Software\Classes\CLSID\{5A7E6E0C-E2E0-4000-8000-00000000E2E0}";
 const HKCU_EXTENSION_KEY: &str = r"HKCU\Software\Classes\.wame2e";
 const HKCU_PROG_ID_KEY: &str = r"HKCU\Software\Classes\WamE2E.Document";
@@ -546,7 +547,7 @@ fn expected_registry(root: &str) -> Vec<ExpectedValue> {
             HKLM_APP_KEY,
             Some("LogDir"),
             "REG_EXPAND_SZ",
-            r"%ProgramData%\WAM E2E App\logs".to_owned(),
+            r"%ProgramData%\WAM E2E Über 日本 Café\logs".to_owned(),
         ),
         value(HKLM_APP_KEY, Some("Count"), "REG_DWORD", "0x2a".to_owned()),
         value(
@@ -2037,7 +2038,7 @@ fn check_scan(checks: &mut Checks, manifest: &PackageManifest) {
         );
     }
     for wanted in [
-        r"bin\WAM E2E App.exe",
+        r"bin\WAM E2E Über 日本 Café.exe",
         r"bin\WAM E2E Shell.dll",
         r"conf\app.conf",
         r"plugins\Größe.txt",
@@ -2273,6 +2274,13 @@ fn round_trip_of_a_real_app() -> TestResult {
         .self_extracting_archive_path
         .clone()
         .ok_or("no installer was built")?;
+    // AC-UNICODE: named after the app, with its letters kept.
+    checks.that(
+        "the installer is named after the app, letters and all",
+        installer.file_name().and_then(|name| name.to_str())
+            == Some("WAM_E2E_Über_日本_Café_installer.exe"),
+        installer.display(),
+    );
     let manifest = read_embedded_manifest(
         &EmbeddedPackage::open(&installer)?.ok_or("the installer has no package")?,
     )?;
@@ -4104,7 +4112,7 @@ fn staging_folder_is_locked_down_and_fails_closed() -> TestResult {
         "it reported success",
     );
     drop(on_fat32);
-    let fat32_target = format!(r"{FAT32_DRIVE}WAM E2E App");
+    let fat32_target = format!(r"{FAT32_DRIVE}WAM E2E Über 日本 Café");
     let beside = work.path().join("installer.exe");
     let fallback = create_staging_dir(
         Some(Path::new(&fat32_target)),

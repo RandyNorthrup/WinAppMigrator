@@ -1019,6 +1019,7 @@ impl InstallerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme.bg))
             .show(ui, |ui| {
+                widgets::mark_pane(ui);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -3293,5 +3294,16 @@ mod tests {
                 "{percent}%: Install is at {button:?} in {size:?}"
             );
         }
+    }
+
+    /// WCAG 2.4.11: on a small screen with large text, the Tab key never gives the focus to something that cannot be
+    /// seen.
+    #[test]
+    fn what_has_the_focus_can_be_seen() {
+        let size = egui::vec2(1024.0 / 1.5, 697.0 / 1.5);
+        let mut harness = harness_sized(sample_installer(ThemeMode::Dark), size);
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let hidden = winappmigrator_ui::checks::hidden_when_focused(&mut harness, window, 200);
+        assert!(hidden.is_empty(), "{hidden:#?}");
     }
 }

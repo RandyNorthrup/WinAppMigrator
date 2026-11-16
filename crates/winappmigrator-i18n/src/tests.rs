@@ -420,6 +420,30 @@ fn a_right_to_left_catalog_isolates_what_it_is_given_and_a_left_to_right_one_doe
     assert_eq!(italian, format!("Install to {path}"));
 }
 
+/// A right-to-left phrase given to a right-to-left message stays right to left, even when it starts with a Latin
+/// word; a path stays as Fluent isolates it.
+#[test]
+fn a_right_to_left_phrase_inside_a_right_to_left_sentence_keeps_its_direction() {
+    const SOURCE: &str = "outer = قبل { $why } بعد\n";
+    let phrase = "Windows لا يسمح بذلك";
+    let path = r"C:\Users\محمد\app.exe";
+    let (with_phrase, with_path) = with_source(lang("ar-SA"), SOURCE, || {
+        (
+            crate::t!("outer", why = phrase),
+            crate::t!("outer", why = path),
+        )
+    });
+    assert!(
+        with_phrase.contains(&format!("\u{2067}{phrase}\u{2069}")),
+        "{with_phrase:?}"
+    );
+    assert!(!with_path.contains('\u{2067}'), "{with_path:?}");
+    let english = with_source(ENGLISH, "outer = before { $why } after\n", || {
+        crate::t!("outer", why = phrase)
+    });
+    assert!(!english.contains('\u{2067}'), "{english:?}");
+}
+
 #[test]
 fn a_thread_s_language_is_put_back_after() {
     assert_eq!(with_language(lang("it-IT"), || current().tag), "it-IT");

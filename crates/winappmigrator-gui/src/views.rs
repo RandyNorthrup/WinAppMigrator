@@ -602,6 +602,7 @@ impl WinAppMigratorApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme.surface))
             .show(ui, |ui| {
+                widgets::mark_pane(ui);
                 let mut area = egui::ScrollArea::vertical()
                     .id_salt("details-scroll")
                     .auto_shrink([false, false]);
@@ -1200,6 +1201,7 @@ fn app_row(
     };
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), sense);
+    widgets::bring_into_view_on_focus(&response);
     let response = if enabled {
         response.on_hover_cursor(egui::CursorIcon::PointingHand)
     } else {

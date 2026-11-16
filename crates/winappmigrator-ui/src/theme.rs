@@ -326,7 +326,7 @@ impl Theme {
         Self {
             mode: ThemeMode::Dark,
             accent,
-            accent_fill: rgb(76, 90, 232),
+            accent_fill: rgb(90, 103, 234),
             accent_fill_hover: rgb(88, 102, 242),
             accent_soft: alpha(accent, 46),
             on_accent: rgb(255, 255, 255),
@@ -337,7 +337,7 @@ impl Theme {
             card: rgb(28, 32, 43),
             card_hover: rgb(38, 43, 57),
             border: rgb(48, 54, 71),
-            border_strong: rgb(78, 87, 110),
+            border_strong: rgb(108, 117, 140),
             field_bg: rgb(17, 19, 26),
             text: rgb(236, 239, 245),
             text_muted: rgb(170, 178, 193),
@@ -363,7 +363,7 @@ impl Theme {
             card: rgb(255, 255, 255),
             card_hover: rgb(240, 244, 249),
             border: rgb(218, 223, 232),
-            border_strong: rgb(160, 170, 186),
+            border_strong: rgb(132, 140, 153),
             field_bg: rgb(255, 255, 255),
             text: rgb(20, 27, 39),
             text_muted: rgb(76, 87, 104),
@@ -609,6 +609,38 @@ mod tests {
                     assert!(
                         ratio >= AA_TEXT,
                         "{} {ink_name} on {surface_name} is {ratio:.2}:1",
+                        mode.as_tag()
+                    );
+                }
+            }
+        }
+    }
+
+    /// WCAG 1.4.11: the outline that shows where a checkbox or a field is, a filled checkbox, and the focus outline
+    /// each stand out at least 3:1 from every surface they are drawn on.
+    #[test]
+    fn control_outlines_and_the_focus_ring_meet_non_text_contrast() {
+        const AA_NON_TEXT: f32 = 3.0;
+        for mode in [ThemeMode::Dark, ThemeMode::Light] {
+            let theme = Theme::new(mode);
+            let surfaces = [
+                ("bg", theme.bg),
+                ("surface", theme.surface),
+                ("card", theme.card),
+                ("field_bg", theme.field_bg),
+                ("card_hover", theme.card_hover),
+            ];
+            let marks = [
+                ("border_strong", theme.border_strong),
+                ("accent", theme.accent),
+                ("accent_fill", theme.accent_fill),
+            ];
+            for (surface_name, surface) in surfaces {
+                for (mark_name, mark) in marks {
+                    let ratio = contrast(mark, surface);
+                    assert!(
+                        ratio >= AA_NON_TEXT,
+                        "{} {mark_name} on {surface_name} is {ratio:.2}:1",
                         mode.as_tag()
                     );
                 }

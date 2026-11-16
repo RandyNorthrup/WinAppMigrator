@@ -211,6 +211,14 @@ pub fn has_message(id: &str) -> bool {
 
 fn message(id: &str, attribute: Option<&str>, args: Option<&FluentArgs>) -> String {
     let active = active();
+    let kept_right_to_left;
+    let args = match args {
+        Some(given) if active.language.direction == Direction::RightToLeft => {
+            kept_right_to_left = right_to_left_kept_whole(given);
+            Some(&kept_right_to_left)
+        }
+        other => other,
+    };
     active
         .catalog
         .as_deref()
@@ -220,6 +228,51 @@ fn message(id: &str, attribute: Option<&str>, args: Option<&FluentArgs>) -> Stri
                 .and_then(|english| format(&english, &active.separators, id, attribute, args))
         })
         .unwrap_or_else(|| id.to_owned())
+}
+
+/// Right-to-left isolate, and the end of an isolate.
+const RIGHT_TO_LEFT_ISOLATE: char = '\u{2067}';
+const POP_DIRECTIONAL_ISOLATE: char = '\u{2069}';
+
+/// What a right-to-left sentence is given. Fluent isolates each value by its first strong letter, so a translated phrase
+/// that starts with a Latin word, such as "Windows ...", would be laid out left to right and its words turned around.
+/// A value that is mostly right-to-left letters is kept right to left as a whole; a path or a name, mostly Latin, is
+/// left to Fluent's isolation.
+fn right_to_left_kept_whole(args: &FluentArgs<'_>) -> FluentArgs<'static> {
+    let mut kept = FluentArgs::new();
+    for (name, value) in args.iter() {
+        let value = match value {
+            FluentValue::String(text) if reads_right_to_left(text) => FluentValue::from(format!(
+                "{RIGHT_TO_LEFT_ISOLATE}{text}{POP_DIRECTIONAL_ISOLATE}"
+            )),
+            other => other.into_owned(),
+        };
+        kept.set(name.to_owned(), value);
+    }
+    kept
+}
+
+/// Whether more of a text's letters are of right-to-left scripts (Hebrew, and Arabic and the scripts written with it)
+/// than of any other.
+fn reads_right_to_left(text: &str) -> bool {
+    let (right, left) =
+        text.chars()
+            .filter(|c| c.is_alphabetic())
+            .fold((0_usize, 0_usize), |(right, left), c| {
+                if is_right_to_left_letter(c) {
+                    (right + 1, left)
+                } else {
+                    (right, left + 1)
+                }
+            });
+    right > left
+}
+
+/// A letter of a right-to-left script.
+fn is_right_to_left_letter(c: char) -> bool {
+    matches!(c,
+        '\u{0590}'..='\u{08FF}' | '\u{FB1D}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFF}'
+            | '\u{10800}'..='\u{10FFF}' | '\u{1E800}'..='\u{1EFFF}')
 }
 
 fn format(

@@ -480,9 +480,21 @@ jobs:
           name: wam-planted
           path: ${{ runner.temp }}\wam-planted
 
+      # Microsoft's accessibility rules for UI Automation, signed by Microsoft, pinned by version and hash.
+      - name: Take Axe.Windows
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'AxeWindowsCLI-2.4.2.zip'
+          Invoke-WebRequest -Uri 'https://github.com/microsoft/axe-windows/releases/download/v2.4.2/AxeWindowsCLI-2.4.2.zip' -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash
+          if ($hash -ne 'AECA43F41C89B3FFB1DB84011539E609ECD7CB3BADD6E78FADA2ADA327D10A64') { throw "AxeWindowsCLI-2.4.2.zip is not the file it should be: $hash" }
+          Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'axe')
+          $signature = Get-AuthenticodeSignature -LiteralPath (Join-Path $env:RUNNER_TEMP 'axe\AxeWindowsCLI.exe')
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '^CN=Microsoft Corporation,') { throw "AxeWindowsCLI.exe is not signed by Microsoft: $($signature.Status)" }
+
       - name: Open them, and look at what is on the screen
         shell: pwsh
-        run: .github/scripts/check-real-windows.ps1 -App "${{ runner.temp }}\wam-app\winappmigrator.exe" -Installers "${{ runner.temp }}\wam-move" -Pictures "${{ runner.temp }}\wam-pictures" -Planted "${{ runner.temp }}\wam-planted"
+        run: .github/scripts/check-real-windows.ps1 -App "${{ runner.temp }}\wam-app\winappmigrator.exe" -Installers "${{ runner.temp }}\wam-move" -Pictures "${{ runner.temp }}\wam-pictures" -Planted "${{ runner.temp }}\wam-planted" -Axe "${{ runner.temp }}\axe\AxeWindowsCLI.exe"
 
       # Of the test app, and of the runner's own list of what it has installed.
       - name: Keep the pictures

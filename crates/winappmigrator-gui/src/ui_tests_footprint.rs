@@ -587,7 +587,10 @@ fn it_reads_the_same_at_the_smallest_window() {
             "the button stays in view: {button:?}"
         );
         // Not just the top of the panel: what goes in is what the panel is about.
-        let panel_top = harness.get_by_label("Output Folder").rect().top();
+        let panel_top = harness
+            .get_by_role_and_label(egui::accesskit::Role::Label, "Output Folder")
+            .rect()
+            .top();
         let row = harness.get_by_label_contains("plugins").rect();
         assert!(
             row.bottom() <= panel_top,
@@ -629,7 +632,10 @@ fn on_a_small_screen_what_matters_can_be_reached() {
         }
         assert!(harness.query_by_label("Up To").is_some(), "{name}");
         // It scrolls, and whatever it scrolls to is not behind what is pinned below it.
-        let panel_top = harness.get_by_label("Output Folder").rect().top();
+        let panel_top = harness
+            .get_by_role_and_label(egui::accesskit::Role::Label, "Output Folder")
+            .rect()
+            .top();
         assert!(
             panel_top > 120.0,
             "{name}: only {panel_top} above the panel"
@@ -1443,7 +1449,10 @@ fn a_long_list_keeps_a_row_with_the_focus_in_view() {
         }
     });
     harness.run_steps(2);
-    let panel_top = harness.get_by_label("Output Folder").rect().top();
+    let panel_top = harness
+        .get_by_role_and_label(egui::accesskit::Role::Label, "Output Folder")
+        .rect()
+        .top();
     harness.get_by_label_contains("many 0,").focus();
     harness.run_steps(SCROLL_ANIMATION_FRAMES);
     let row = harness.get_by_label_contains("many 0,").rect();

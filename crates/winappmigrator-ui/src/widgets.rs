@@ -67,9 +67,43 @@ fn reading_row() -> egui::Layout {
     }
 }
 
+/// Tell screen readers where a part of the window is. egui gives a panel a node in the accessibility tree with no
+/// bounds, which UI Automation's tools report as an error.
+pub fn mark_pane(ui: &Ui) {
+    // What is drawn is in a frame inside the panel; the panel's own node is the one with no bounds.
+    let Some(panel) = ui
+        .stack()
+        .iter()
+        .find(|frame| frame.kind().is_some_and(|kind| kind.is_panel()))
+    else {
+        return;
+    };
+    let rect = panel.max_rect;
+    let _marked = ui.ctx().accesskit_node_builder(panel.unique_id, |node| {
+        node.set_bounds(egui::accesskit::Rect {
+            x0: rect.min.x.into(),
+            y0: rect.min.y.into(),
+            x1: rect.max.x.into(),
+            y1: rect.max.y.into(),
+        });
+    });
+}
+
+/// Give a control the name a screen reader says for it.
+fn name_control(ui: &Ui, response: &Response, name: &str) {
+    if name.is_empty() {
+        return;
+    }
+    let name = winappmigrator_i18n::without_isolation(name).into_owned();
+    let _named = ui
+        .ctx()
+        .accesskit_node_builder(response.id, |node| node.set_label(name));
+}
+
 /// What a page holds, its lines starting at the side the language starts reading from. Rows inside it, made with
 /// `ui.horizontal`, run that way too.
 pub fn page<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    mark_pane(ui);
     if right_to_left() {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), contents)
             .inner
@@ -187,12 +221,25 @@ fn mark_live(ui: &Ui, response: &Response, urgent: bool) {
         .accesskit_node_builder(response.id, |node| node.set_live(live));
 }
 
+/// Whether no tooltip has been shown yet this pass for the control with the focus. A control given two tooltips, its
+/// own and one its caller adds, shows the first while it has the focus; on hover egui shows both.
+fn first_focus_tooltip_this_pass(response: &Response) -> bool {
+    let pass = response.ctx.cumulative_pass_nr();
+    let key = response.id.with("winappmigrator-focus-tooltip");
+    response.ctx.data_mut(|data| {
+        let shown_in = data.get_temp_mut_or_insert_with(key, || u64::MAX);
+        let first = *shown_in != pass;
+        *shown_in = pass;
+        first
+    })
+}
+
 /// A tooltip, read in the direction of the language in use. It shows on hover, and also while the control has the
 /// keyboard's focus, so that what is cut short can be read in full without a pointer; Escape takes the focus, and it,
 /// away.
 pub fn tooltip(response: Response, text: impl Into<String>) -> Response {
     let text = text.into();
-    if response.has_focus() {
+    if response.has_focus() && first_focus_tooltip_this_pass(&response) {
         let shown = text.clone();
         response.show_tooltip_ui(move |ui| {
             let font = TextStyle::Body.resolve(ui.style());
@@ -310,12 +357,19 @@ pub fn control_row<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
 
 /// A semibold heading.
 pub fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
-    wrapped_label(
+    let response = wrapped_label(
         ui,
         RichText::new(text)
             .font(theme::semibold(15.0))
             .color(theme.text),
     );
+    // A screen reader can move from heading to heading. egui gives a label's text as its value; a heading's is its
+    // name.
+    let name = winappmigrator_i18n::without_isolation(text).into_owned();
+    let _marked = ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_role(A11yRole::Heading);
+        node.set_label(name);
+    });
 }
 
 /// A small label above a field or a group of controls.
@@ -421,12 +475,20 @@ fn allocate_control(ui: &mut Ui, size: egui::Vec2, enabled: bool) -> (Rect, Resp
         Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(size, sense);
+    bring_into_view_on_focus(&response);
     let response = if enabled {
         response.on_hover_cursor(CursorIcon::PointingHand)
     } else {
         response
     };
     (rect, response)
+}
+
+/// What the Tab key moves to is scrolled into view, so the focus is never somewhere that cannot be seen.
+pub fn bring_into_view_on_focus(response: &Response) {
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
 }
 
 fn button_ink(theme: &Theme, kind: ButtonKind, enabled: bool) -> Color32 {
@@ -601,6 +663,7 @@ pub fn segmented<T: Copy + PartialEq>(
             Sense::hover()
         };
         let response = ui.interact(segment, ui.make_persistent_id(label), sense);
+        bring_into_view_on_focus(&response);
         let response = if enabled {
             response.on_hover_cursor(CursorIcon::PointingHand)
         } else {
@@ -1175,13 +1238,15 @@ pub fn disclosure_row(
 
 /// A single-line text field at the shared control height.
 pub fn text_field(ui: &mut Ui, value: &mut String, hint: &str, width: f32) -> Response {
-    ui.add(
+    let response = ui.add(
         egui::TextEdit::singleline(value)
             .hint_text(hint)
             .desired_width(width)
             .min_size(vec2(width, CONTROL_HEIGHT))
             .margin(Margin::symmetric(TEXT_FIELD_MARGIN_X, 8)),
-    )
+    );
+    name_control(ui, &response, hint);
+    response
 }
 
 /// A text field with a leading search icon and a clear button.
@@ -1215,6 +1280,7 @@ pub fn search_field(
                 bottom: 8,
             }),
     );
+    name_control(ui, &response, hint);
     let mirror = Mirror::of(response.rect);
     let center_y = response.rect.center().y;
     let icon_rect = mirror.rect(Rect::from_center_size(
@@ -1270,6 +1336,8 @@ pub fn path_field(
         let current = value.clone();
         ui.add_enabled_ui(enabled, |ui| {
             let field = text_field(ui, value, hint, width);
+            // Named by its label, as a person reads it above the field.
+            name_control(ui, &field, label);
             // Only when some of it cannot be seen. It would otherwise only cover what is below.
             let font = egui::TextStyle::Body.resolve(ui.style());
             if !text_fits(ui, &current, font, width - FIELD_MARGINS) {

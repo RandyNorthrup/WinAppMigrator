@@ -33,9 +33,8 @@ const CONTROL_ROLES: &[Role] = &[
     Role::DisclosureTriangle,
 ];
 
-/// Roles a screen reader names by themselves: a text field is named by what is in it or its hint, and a scroll bar by
-/// what it scrolls.
-const NAMED_BY_ROLE: &[Role] = &[Role::TextInput, Role::SearchInput, Role::ScrollBar];
+/// Roles a screen reader names by themselves: a scroll bar, by what it scrolls.
+const NAMED_BY_ROLE: &[Role] = &[Role::ScrollBar];
 
 /// A node's name, as a screen reader would say it: its label, else its value.
 pub fn name_of(node: &Node<'_>) -> String {
@@ -52,7 +51,7 @@ pub fn is_interactive(node: &Node<'_>) -> bool {
     let data = node.accesskit_node();
     let role = data.role();
     !data.is_hidden()
-        && !matches!(role, Role::Label | Role::TextRun)
+        && !matches!(role, Role::Label | Role::TextRun | Role::Heading)
         && (data.data().supports_action(Action::Click)
             || data.data().supports_action(Action::Focus)
             || CONTROL_ROLES.contains(&role))
@@ -66,6 +65,12 @@ pub fn all_nodes<'tree>(root: &Node<'tree>) -> Vec<Node<'tree>> {
 /// AC-A11Y-NAMES: every control has a name and a role that says what it is, and a checkbox says whether it is ticked.
 pub fn interactive_problems(root: &Node<'_>) -> Vec<String> {
     let mut problems = Vec::new();
+    for node in all_nodes(root) {
+        let data = node.accesskit_node();
+        if data.role() == Role::Pane && data.bounding_box().is_none() {
+            problems.push("a pane has no bounds".to_owned());
+        }
+    }
     for node in all_nodes(root).iter().filter(|node| is_interactive(node)) {
         let data = node.accesskit_node();
         let name = name_of(node);
@@ -121,25 +126,47 @@ pub fn small_targets(root: &Node<'_>) -> Vec<String> {
 /// AC-A11Y-KEYBOARD: the names of the controls the Tab key moves the focus to, in order, from the first until it comes
 /// round again or `most` presses have been made.
 pub fn tab_order<State>(harness: &mut Harness<'_, State>, most: usize) -> Vec<String> {
-    let mut order: Vec<String> = Vec::new();
-    let mut seen: Vec<(String, egui::Pos2)> = Vec::new();
+    focus_stops(harness, most)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// [`tab_order`], with where each control is when it has the focus.
+pub fn focus_stops<State>(harness: &mut Harness<'_, State>, most: usize) -> Vec<(String, Rect)> {
+    let mut stops: Vec<(String, Rect)> = Vec::new();
     for _ in 0..most {
         harness.key_press(egui::Key::Tab);
         harness.run();
         let focused = all_nodes(&harness.root())
             .into_iter()
             .find(|node| node.accesskit_node().is_focused())
-            .map(|node| (name_of(&node), node.rect().min));
+            .map(|node| (name_of(&node), node.rect()));
         let Some(focused) = focused else {
             break;
         };
-        if seen.contains(&focused) {
+        if stops
+            .iter()
+            .any(|(name, rect)| *name == focused.0 && rect.min == focused.1.min)
+        {
             break;
         }
-        order.push(focused.0.clone());
-        seen.push(focused);
+        stops.push(focused);
     }
-    order
+    stops
+}
+
+/// WCAG 2.4.11: the controls that, when the Tab key gives them the focus, cannot be seen at all in `window`.
+pub fn hidden_when_focused<State>(
+    harness: &mut Harness<'_, State>,
+    window: Rect,
+    most: usize,
+) -> Vec<String> {
+    focus_stops(harness, most)
+        .into_iter()
+        .filter(|(_, rect)| !window.intersects(*rect))
+        .map(|(name, rect)| format!("{name:?} at {rect:?}"))
+        .collect()
 }
 
 /// AC-A11Y-LIVE: the names of the nodes a screen reader says again when they change, and whether each is urgent.

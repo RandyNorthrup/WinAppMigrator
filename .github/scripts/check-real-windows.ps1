@@ -13,7 +13,9 @@ param(
     [Parameter(Mandatory)][string]$App,
     [Parameter(Mandatory)][string]$Installers,
     [Parameter(Mandatory)][string]$Pictures,
-    [Parameter(Mandatory)][string]$Planted
+    [Parameter(Mandatory)][string]$Planted,
+    # AxeWindowsCLI.exe, Microsoft's accessibility rules for UI Automation, which scans each window as it first opens.
+    [string]$Axe = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -233,6 +235,19 @@ function Open-And-Look([string]$Program, [string]$Name, [string]$WindowTitle, [i
     return $process
 }
 
+# Microsoft's accessibility rules for UI Automation, on the window as it is: an error fails the check. What it found is
+# kept with the pictures.
+function Scan-Accessibility($Process, [string]$Name) {
+    if (-not $Axe) { return }
+    $folder = Join-Path $Pictures 'accessibility'
+    New-Item -ItemType Directory -Force -Path $folder | Out-Null
+    $scanId = ($Name -replace '[^A-Za-z0-9]+', '-').Trim('-')
+    $said = & $Axe --processId $Process.Id --outputDirectory $folder --scanId $scanId --showThirdPartyNotices false 2>&1
+    $exit = $LASTEXITCODE
+    $said | ForEach-Object { Write-Host "  Axe.Windows: $_" }
+    Check "$Name`: Axe.Windows finds no errors" ($exit -eq 0) "exit $exit"
+}
+
 # 16 is WM_CLOSE, which is what clicking its close button sends.
 
 function Ask-To-Close($Process, [string]$Name, [int]$ExpectedExit) {
@@ -286,6 +301,7 @@ $logBefore = (Latest-Log 'app').FullName
 $opened = Open-And-Look $App 'The app' 'WinAppMigrator' 32 20 -HasToFit
 if ($opened) {
     Check-Mode 'The app' 'light'
+    Scan-Accessibility $opened 'The app'
     # It starts its log in the background, which under emulation can take longer than all of this.
     [void](Wait-Until { (Latest-Log 'app').FullName -notin $null, $logBefore } 120)
     Ask-To-Close $opened 'The app' 0
@@ -305,6 +321,7 @@ $before = Test-Path -LiteralPath "C:\Program Files\$($expected.app.name)"
 $opened = Open-And-Look $installer 'The installer' "Install $($expected.app.name)" 32 15 -HasToFit
 if ($opened) {
     Check-Mode 'The installer' 'light'
+    Scan-Accessibility $opened 'The installer'
     Ask-To-Close $opened 'The installer' 0
 }
 Check 'The installer: it installed nothing' ((Test-Path -LiteralPath "C:\Program Files\$($expected.app.name)") -eq $before) ''
@@ -313,6 +330,7 @@ Write-Host "`n=== An uninstaller, of an install there is no record of, which onl
 $opened = Open-And-Look $installer 'The uninstaller' 'Uninstall' 8 8 -Arguments @('--uninstall', 'no-such-install') -HasToFit
 if ($opened) {
     Check-Mode 'The uninstaller' 'light'
+    Scan-Accessibility $opened 'The uninstaller'
     Ask-To-Close $opened 'The uninstaller' 0
 }
 

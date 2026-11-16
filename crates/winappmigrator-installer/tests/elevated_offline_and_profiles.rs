@@ -2719,7 +2719,8 @@ const PROFILES_VENDOR: &str = "WAM Profiles Vendor";
 const PROFILES_ROOT: &str = r"C:\Program Files\WAM Profiles App";
 const PROFILES_UNINSTALL_KEY: &str =
     r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\WAM Profiles App";
-const OTHER_USER: &str = "wamother";
+/// With a letter outside ASCII, so its profile folder is `C:\Users\wamjürgen` (AC-UNICODE).
+const OTHER_USER: &str = "wamjürgen";
 const OTHER_ADMIN: &str = "wamadmin";
 const SHARED_FOLDER: &str = r"C:\WAM Shared";
 
