@@ -1,0 +1,58 @@
+drill i18n-complete
+file crates/winappmigrator-i18n/locales/it-IT/app.ftl
+mutation: 'app-reload-list = Ricarica l'elenco delle app' -> 'app-reload-list = Reload the Application List'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-i18n --lib tests::every_language_in_the_table_ships_translated -- --exact
+expect: it-IT: app-reload-list
+===== baseline
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.26s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::every_language_in_the_table_ships_translated ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.13s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+    Finished `test` profile [optimized + debuginfo] target(s) in 3.41s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::every_language_in_the_table_ships_translated ... FAILED
+
+failures:
+
+---- tests::every_language_in_the_table_ships_translated stdout ----
+
+thread 'tests::every_language_in_the_table_ships_translated' (44976) panicked at crates\winappmigrator-i18n\src\tests.rs:554:5:
+still in English: [
+    "it-IT: app-reload-list",
+]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::every_language_in_the_table_ships_translated
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p winappmigrator-i18n --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+    Finished `test` profile [optimized + debuginfo] target(s) in 4.24s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::every_language_in_the_table_ships_translated ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.10s
+
+
+
+exit 0

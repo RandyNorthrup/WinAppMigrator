@@ -1,0 +1,16 @@
+{
+  "name": "i18n-catalog-4",
+  "file": "crates/winappmigrator-i18n/locales/en-US/winappmigrator.ftl",
+  "mutation": "size-mb = { $value } MB -> size-mb = { $amount } MB",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target';  cargo test -j 4 -p winappmigrator-i18n --lib -- every_catalog_has_exactly",
+  "expected_diagnostic": "it-IT: size-mb uses",
+  "before": "b35064830b1377fcc200cb6ac25630ed86ebc8d13aa7a79fe2ee87c04e2d811e",
+  "mutated": "067ea70efc13837ca60892becb1c5cfa68f664e08288075f2ef16bbaf60f9aad",
+  "after": "b35064830b1377fcc200cb6ac25630ed86ebc8d13aa7a79fe2ee87c04e2d811e",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "\"it-IT: size-mb uses {\\\"value\\\"}, not {\\\"amount\\\"}\",",
+  "failure": null,
+  "passed": true
+}

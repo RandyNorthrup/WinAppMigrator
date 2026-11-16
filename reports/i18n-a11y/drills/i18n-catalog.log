@@ -1,0 +1,67 @@
+drill i18n-catalog
+file crates\winappmigrator-i18n\locales\en-US\winappmigrator.ftl
+mutation: 'size-mb = { $value } MB' -> 'size-mb = { $amount } MB'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target';  cargo test -j 4 -p winappmigrator-i18n --lib -- every_catalog_has_exactly
+expect: it-IT: size-mb uses
+===== setup
+
+
+exit 0
+===== baseline
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-wt\crates\winappmigrator-i18n)
+    Finished `test` profile [optimized + debuginfo] target(s) in 3.86s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-wt\crates\winappmigrator-i18n)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.83s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders ... FAILED
+
+failures:
+
+---- tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders stdout ----
+
+thread 'tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders' (53064) panicked at crates\winappmigrator-i18n\src\tests.rs:160:5:
+[
+    "it-IT: size-mb uses {\"value\"}, not {\"amount\"}",
+]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p winappmigrator-i18n --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-wt\crates\winappmigrator-i18n)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.76s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+
+
+exit 0
+===== cleanup
+
+
+exit 0

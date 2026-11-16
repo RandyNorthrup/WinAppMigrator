@@ -46,6 +46,58 @@ const MAX_SHORTCUT_BYTES: u64 = 1024 * 1024;
 const SHORTCUT_EXTENSION: &str = "lnk";
 const COMMON_START_MENU: &str = r"Microsoft\Windows\Start Menu";
 
+/// PowerShell functions that read and make a shortcut, whatever its name and paths are written in. WScript.Shell passes
+/// them through the ANSI code page, so on a Windows set to a Western language a shortcut named in Japanese reads as
+/// empty, a path in Japanese comes back with question marks, and neither can be made. Shell.Application keeps them as
+/// they are, but only opens a shortcut that exists, so one is begun as an empty shell link: its header, which says
+/// it shows a normal window, and the block that ends it. Every shortcut WScript.Shell can spell is still read and made
+/// by it, as before.
+pub const POWERSHELL_SHORTCUTS: &str = r##"
+function Test-WamPlain([string]$Text) { $Text -notmatch '[^\x00-\x7F]' }
+function Read-WamShortcut([string]$Path) {
+  if (-not $script:WamWsh) { $script:WamWsh = New-Object -ComObject WScript.Shell }
+  $shortcut = $script:WamWsh.CreateShortcut($Path)
+  $read = [pscustomobject]@{ TargetPath = $shortcut.TargetPath; Arguments = $shortcut.Arguments; WorkingDirectory = $shortcut.WorkingDirectory; IconLocation = $shortcut.IconLocation }
+  $said = "$($read.TargetPath)|$($read.Arguments)|$($read.WorkingDirectory)|$($read.IconLocation)"
+  if ((Test-WamPlain $Path) -and -not $said.Contains('?')) { return $read }
+  try {
+    $link = (New-Object -ComObject Shell.Application).NameSpace([IO.Path]::GetDirectoryName($Path)).ParseName([IO.Path]::GetFileName($Path)).GetLink
+    $icon = ''
+    $index = $link.GetIconLocation([ref]$icon)
+    [pscustomobject]@{ TargetPath = $link.Path; Arguments = $link.Arguments; WorkingDirectory = $link.WorkingDirectory; IconLocation = "$icon,$index" }
+  } catch { $read }
+}
+function Save-WamShortcut([string]$Path, [string]$Target, $Arguments, $WorkingDirectory, $IconLocation) {
+  $ErrorActionPreference = 'Stop'
+  if (Test-WamPlain "$Path|$Target|$Arguments|$WorkingDirectory|$IconLocation") {
+    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($Path)
+    $shortcut.TargetPath = $Target
+    if ($null -ne $Arguments) { $shortcut.Arguments = $Arguments }
+    if ($null -ne $WorkingDirectory) { $shortcut.WorkingDirectory = $WorkingDirectory }
+    if ($null -ne $IconLocation) { $shortcut.IconLocation = $IconLocation }
+    $shortcut.Save()
+    return
+  }
+  $empty = [byte[]]::new(80)
+  $empty[0] = 0x4C
+  ([byte[]](0x01, 0x14, 0x02, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46)).CopyTo($empty, 4)
+  $empty[60] = 1
+  [IO.File]::WriteAllBytes($Path, $empty)
+  $link = (New-Object -ComObject Shell.Application).NameSpace([IO.Path]::GetDirectoryName($Path)).ParseName([IO.Path]::GetFileName($Path)).GetLink
+  $link.Path = $Target
+  if ($null -ne $Arguments) { $link.Arguments = $Arguments }
+  if ($null -ne $WorkingDirectory) { $link.WorkingDirectory = $WorkingDirectory }
+  if ($IconLocation) {
+    $at = $IconLocation.LastIndexOf(',')
+    if ($at -ge 0 -and $IconLocation.Substring($at + 1) -match '^-?\d+$') {
+      $file = $IconLocation.Substring(0, $at); $index = [int]$IconLocation.Substring($at + 1)
+    } else { $file = $IconLocation; $index = 0 }
+    if ($file) { $link.SetIconLocation($file, $index) }
+  }
+  $link.Save()
+}
+"##;
+
 /// The app's paths as its own PC calls them, which is what a shortcut holds.
 #[derive(Debug, Clone)]
 pub struct ShortcutScanContext {
@@ -225,11 +277,11 @@ fn scan_live_shortcuts(
         .join(", ");
     let script = format!(
         r#"
+{POWERSHELL_SHORTCUTS}
 $roots = @({roots}) | Where-Object {{ $_ -and (Test-Path -LiteralPath $_) }} | Select-Object -Unique
-$shell = New-Object -ComObject WScript.Shell
 $items = foreach ($root in $roots) {{
   Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {{
-    $shortcut = $shell.CreateShortcut($_.FullName)
+    $shortcut = Read-WamShortcut $_.FullName
     [pscustomobject]@{{
       Path = $_.FullName
       TargetPath = $shortcut.TargetPath
@@ -1024,5 +1076,78 @@ mod tests {
         assert_eq!(parse_json_array::<u32>(" [1,2] ")?, [1, 2]);
         assert!(parse_json_array::<u32>("not json").is_err());
         Ok(())
+    }
+
+    /// Seen in CI: WScript.Shell could not make a shortcut to "WAM E2E Über 日本 Café", and one named in Japanese
+    /// read as empty. Each is made and read back through PowerShell, and its bytes are read as well, by this crate's
+    /// own reader, which does not go through Windows.
+    #[test]
+    fn a_shortcut_named_and_pointing_in_any_script_is_made_and_read_as_it_is() {
+        let Ok(work) = tempfile::tempdir() else {
+            panic!("no temp folder");
+        };
+        let folder = work.path().join("Über 日本 Café");
+        assert!(std::fs::create_dir_all(&folder).is_ok());
+        let target = folder.join("app.exe");
+        assert!(std::fs::write(&target, b"").is_ok());
+        let plain_target = work.path().join("plain.exe");
+        assert!(std::fs::write(&plain_target, b"").is_ok());
+        let cases = [
+            ("Über 日本 Café.lnk", &target, r#"--from "日本""#),
+            ("plain name.lnk", &target, "--tray"),
+            ("ショートカット.lnk", &plain_target, ""),
+            ("plain.lnk", &plain_target, "--tray"),
+        ];
+        for (name, target, arguments) in cases {
+            let lnk = work.path().join(name);
+            let quoted = |value: &str| format!("'{}'", escape_powershell_single(value));
+            let target_text = target.display().to_string();
+            let folder_text = target
+                .parent()
+                .map(|parent| parent.display().to_string())
+                .unwrap_or_default();
+            let icon_location = format!("{target_text},1");
+            let script = format!(
+                "$ErrorActionPreference = 'Stop'; {POWERSHELL_SHORTCUTS}                 Save-WamShortcut {} {} {} {} {}; Read-WamShortcut {} | ConvertTo-Json -Compress",
+                quoted(&lnk.display().to_string()),
+                quoted(&target_text),
+                quoted(arguments),
+                quoted(&folder_text),
+                quoted(&icon_location),
+                quoted(&lnk.display().to_string()),
+            );
+            let said = run_powershell(&script).unwrap_or_else(|error| error.to_string());
+            let read: Vec<PowerShellShortcut> = parse_json_array(&said).unwrap_or_default();
+            let Some(read) = read.first() else {
+                panic!("{name}: PowerShell said {said}");
+            };
+            assert_eq!(
+                read.target_path.as_deref(),
+                Some(target_text.as_str()),
+                "{name}"
+            );
+            assert_eq!(read.arguments.as_deref(), Some(arguments), "{name}");
+            assert_eq!(
+                read.working_directory.as_deref(),
+                Some(folder_text.as_str()),
+                "{name}"
+            );
+            assert_eq!(
+                read.icon_location.as_deref(),
+                Some(icon_location.as_str()),
+                "{name}"
+            );
+
+            let bytes = read_shortcut_file(&lnk).unwrap_or_default();
+            let Some(file) = read_lnk(&bytes) else {
+                panic!("{name}: its bytes do not read as a shortcut");
+            };
+            assert_eq!(&file.target, target, "{name}");
+            assert_eq!(
+                file.arguments.as_deref().filter(|given| !given.is_empty()),
+                Some(arguments).filter(|given| !given.is_empty()),
+                "{name}"
+            );
+        }
     }
 }

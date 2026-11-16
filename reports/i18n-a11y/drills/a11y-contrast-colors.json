@@ -1,0 +1,16 @@
+{
+  "name": "a11y-contrast-colors",
+  "file": "crates/winappmigrator-ui/src/theme.rs",
+  "mutation": "border_strong: rgb(108, 117, 140), -> border_strong: rgb(78, 87, 110),",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-ui --lib theme::tests::control_outlines_and_the_focus_ring_meet_non_text_contrast -- --exact",
+  "expected_diagnostic": "dark border_strong on bg is",
+  "before": "ce6d839cfd58694a958478c7038842ae374430cd9209743d9c1521bcd08ad4f8",
+  "mutated": "6246b27b5ea05532353a4899061a54e97d248941a9ac0f0e9af93f20cf71d035",
+  "after": "ce6d839cfd58694a958478c7038842ae374430cd9209743d9c1521bcd08ad4f8",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "dark border_strong on bg is 2.62:1",
+  "failure": null,
+  "passed": true
+}

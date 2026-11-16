@@ -1,0 +1,80 @@
+drill i18n-catalog-4
+file crates/winappmigrator-i18n/locales/en-US/winappmigrator.ftl
+mutation: 'size-mb = { $value } MB' -> 'size-mb = { $amount } MB'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target';  cargo test -j 4 -p winappmigrator-i18n --lib -- every_catalog_has_exactly
+expect: it-IT: size-mb uses
+===== baseline
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.25s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.16s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+    Finished `test` profile [optimized + debuginfo] target(s) in 2.82s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders ... FAILED
+
+failures:
+
+---- tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders stdout ----
+
+thread 'tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders' (39224) panicked at crates\winappmigrator-i18n\src\tests.rs:160:5:
+[
+    "ar-SA: size-mb uses {\"value\"}, not {\"amount\"}",
+    "bn-BD: size-mb uses {\"value\"}, not {\"amount\"}",
+    "de-DE: size-mb uses {\"value\"}, not {\"amount\"}",
+    "es-ES: size-mb uses {\"value\"}, not {\"amount\"}",
+    "fa-IR: size-mb uses {\"value\"}, not {\"amount\"}",
+    "fr-FR: size-mb uses {\"value\"}, not {\"amount\"}",
+    "he-IL: size-mb uses {\"value\"}, not {\"amount\"}",
+    "hi-IN: size-mb uses {\"value\"}, not {\"amount\"}",
+    "id-ID: size-mb uses {\"value\"}, not {\"amount\"}",
+    "it-IT: size-mb uses {\"value\"}, not {\"amount\"}",
+    "ja-JP: size-mb uses {\"value\"}, not {\"amount\"}",
+    "ko-KR: size-mb uses {\"value\"}, not {\"amount\"}",
+    "nl-NL: size-mb uses {\"value\"}, not {\"amount\"}",
+    "pl-PL: size-mb uses {\"value\"}, not {\"amount\"}",
+    "pt-BR: size-mb uses {\"value\"}, not {\"amount\"}",
+    "ru-RU: size-mb uses {\"value\"}, not {\"amount\"}",
+    "th-TH: size-mb uses {\"value\"}, not {\"amount\"}",
+    "tr-TR: size-mb uses {\"value\"}, not {\"amount\"}",
+    "uk-UA: size-mb uses {\"value\"}, not {\"amount\"}",
+    "ur-PK: size-mb uses {\"value\"}, not {\"amount\"}",
+    "vi-VN: size-mb uses {\"value\"}, not {\"amount\"}",
+    "zh-CN: size-mb uses {\"value\"}, not {\"amount\"}",
+    "zh-TW: size-mb uses {\"value\"}, not {\"amount\"}",
+]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.13s
+
+error: test failed, to rerun pass `-p winappmigrator-i18n --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+    Finished `test` profile [optimized + debuginfo] target(s) in 2.70s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.13s
+
+
+
+exit 0

@@ -1,0 +1,16 @@
+{
+  "name": "i18n-complete",
+  "file": "crates/winappmigrator-i18n/locales/it-IT/app.ftl",
+  "mutation": "app-reload-list = Ricarica l'elenco delle app -> app-reload-list = Reload the Application List",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-i18n --lib tests::every_language_in_the_table_ships_translated -- --exact",
+  "expected_diagnostic": "it-IT: app-reload-list",
+  "before": "25b441f0e2b11a3adee5a0310710441e56f3a43f34cdd554b7efabf06b4dc572",
+  "mutated": "c148c0190201a5d3bc830a12c248871802fa8086bc298b7d8e6594da3eee38df",
+  "after": "25b441f0e2b11a3adee5a0310710441e56f3a43f34cdd554b7efabf06b4dc572",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "\"it-IT: app-reload-list\",",
+  "failure": null,
+  "passed": true
+}

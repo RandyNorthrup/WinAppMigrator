@@ -1,0 +1,60 @@
+drill i18n-client
+file crates/winappmigrator-client/src/lib.rs
+mutation: 'language: ENGLISH,' -> 'language: chosen,'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-client --lib tests::a_right_to_left_language_is_spoken_in_english_with_a_note -- --exact
+expect: Some("ar-SA") []
+===== baseline
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+   Compiling winappmigrator-client v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-client)
+    Finished `test` profile [optimized + debuginfo] target(s) in 2.18s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_client-7e0a3d7adef7b4f4.exe)
+
+running 1 test
+test tests::a_right_to_left_language_is_spoken_in_english_with_a_note ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-client v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-client)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.77s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_client-7e0a3d7adef7b4f4.exe)
+
+running 1 test
+test tests::a_right_to_left_language_is_spoken_in_english_with_a_note ... FAILED
+
+failures:
+
+---- tests::a_right_to_left_language_is_spoken_in_english_with_a_note stdout ----
+
+thread 'tests::a_right_to_left_language_is_spoken_in_english_with_a_note' (7488) panicked at crates\winappmigrator-client\src\lib.rs:174:13:
+assertion `left == right` failed: Some("ar-SA") []
+  left: Language { tag: "ar-SA", native_name: "العربية", english_name: "Arabic", direction: RightToLeft, script: Arabic, numbers: NumberStyle { decimal: ".", group: ",", grouping: Thousands, min_grouping_digits: 1 } }
+ right: Language { tag: "en-US", native_name: "English", english_name: "English", direction: LeftToRight, script: Latin, numbers: NumberStyle { decimal: ".", group: ",", grouping: Thousands, min_grouping_digits: 1 } }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::a_right_to_left_language_is_spoken_in_english_with_a_note
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p winappmigrator-client --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-client v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-client)
+    Finished `test` profile [optimized + debuginfo] target(s) in 3.06s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_client-7e0a3d7adef7b4f4.exe)
+
+running 1 test
+test tests::a_right_to_left_language_is_spoken_in_english_with_a_note ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+
+
+exit 0

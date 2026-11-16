@@ -1,0 +1,62 @@
+drill i18n-nohardcode-installer
+file crates/winappmigrator-installer/src/gui.rs
+mutation: '&t!("installer-preview"),' -> '"Preview Changes",'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-installer --lib gui::tests::every_word_on_every_screen_is_from_the_catalog -- --exact
+expect: Button \"Preview Changes\" has \"Preview Changes\"
+===== baseline
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+   Compiling winappmigrator-ui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+   Compiling winappmigrator-core v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-core)
+   Compiling winappmigrator-installer v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-installer)
+    Finished `test` profile [optimized + debuginfo] target(s) in 18.85s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_installer-e6c7da6fa49cb2c3.exe)
+
+running 1 test
+test gui::tests::every_word_on_every_screen_is_from_the_catalog ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 96 filtered out; finished in 0.32s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-installer v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-installer)
+    Finished `test` profile [optimized + debuginfo] target(s) in 17.92s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_installer-e6c7da6fa49cb2c3.exe)
+
+running 1 test
+test gui::tests::every_word_on_every_screen_is_from_the_catalog ... FAILED
+
+failures:
+
+---- gui::tests::every_word_on_every_screen_is_from_the_catalog stdout ----
+
+thread 'gui::tests::every_word_on_every_screen_is_from_the_catalog' (52552) panicked at crates\winappmigrator-installer\src\gui.rs:3215:17:
+ready: [
+    "Button \"Preview Changes\" has \"Preview Changes\"",
+]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gui::tests::every_word_on_every_screen_is_from_the_catalog
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 96 filtered out; finished in 0.21s
+
+error: test failed, to rerun pass `-p winappmigrator-installer --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-installer v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-installer)
+    Finished `test` profile [optimized + debuginfo] target(s) in 12.72s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_installer-e6c7da6fa49cb2c3.exe)
+
+running 1 test
+test gui::tests::every_word_on_every_screen_is_from_the_catalog ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 96 filtered out; finished in 0.36s
+
+
+
+exit 0

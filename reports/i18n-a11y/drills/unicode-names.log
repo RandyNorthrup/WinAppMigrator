@@ -1,0 +1,66 @@
+drill unicode-names
+file crates/winappmigrator-core/src/path_utils.rs
+mutation: 'is_invisible_format(character) {
+                '_'
+            } else {
+                character
+' -> 'is_invisible_format(character) {
+                '_'
+            } else {
+                '_'
+'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-core --lib path_utils::tests::a_readable_name_keeps_letters_in_any_script -- --exact
+expect: left: "ber __ Caf"
+===== baseline
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.38s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_core-b5cad62645ae2496.exe)
+
+running 1 test
+test path_utils::tests::a_readable_name_keeps_letters_in_any_script ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1000 filtered out; finished in 0.00s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-core v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-core)
+
+running 1 test
+    Finished `test` profile [optimized + debuginfo] target(s) in 48.45s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_core-b5cad62645ae2496.exe)
+test path_utils::tests::a_readable_name_keeps_letters_in_any_script ... FAILED
+
+failures:
+
+---- path_utils::tests::a_readable_name_keeps_letters_in_any_script stdout ----
+
+thread 'path_utils::tests::a_readable_name_keeps_letters_in_any_script' (36440) panicked at crates\winappmigrator-core\src\path_utils.rs:1096:9:
+assertion `left == right` failed
+  left: "ber __ Caf"
+ right: "Über 日本 Café"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    path_utils::tests::a_readable_name_keeps_letters_in_any_script
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1000 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p winappmigrator-core --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-core v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-core)
+    Finished `test` profile [optimized + debuginfo] target(s) in 44.13s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_core-b5cad62645ae2496.exe)
+
+running 1 test
+test path_utils::tests::a_readable_name_keeps_letters_in_any_script ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1000 filtered out; finished in 0.00s
+
+
+
+exit 0

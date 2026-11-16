@@ -1,0 +1,16 @@
+{
+  "name": "a11y-text-size",
+  "file": "crates/winappmigrator-installer/src/gui.rs",
+  "mutation": "        if matches!(self.screen, Screen::Ready) {\n            egui::Panel::bottom(\"actions\")\n                .frame(\n                    egui::Frame::new()\n                        .fill(theme.surface)\n                        .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_MD as i8)),\n                )\n                .show(ui, |ui| {\n                    widgets::page(ui, |ui| self.draw_actions(ui, &theme))\n                });\n        }\n\n        egui::CentralPanel::default()\n            .frame(egui::Frame::new().fill(theme.bg))\n            .show(ui, |ui| {\n                widgets::mark_pane(ui);\n                egui::ScrollArea::vertical()\n                    .auto_shrink([false, false])\n                    .show(ui, |ui| {\n                        egui::Frame::new()\n                            .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_LG as i8))\n                            .show(ui, |ui| {\n                                ui.set_max_width(ui.available_width());\n                                widgets::page(ui, |ui| self.draw_body(ui, &theme));\n                            });\n                    });\n            }); ->         egui::CentralPanel::default()\n            .frame(egui::Frame::new().fill(theme.bg))\n            .show(ui, |ui| {\n                widgets::mark_pane(ui);\n                egui::ScrollArea::vertical()\n                    .auto_shrink([false, false])\n                    .show(ui, |ui| {\n                        egui::Frame::new()\n                            .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_LG as i8))\n                            .show(ui, |ui| {\n                                ui.set_max_width(ui.available_width());\n                                widgets::page(ui, |ui| self.draw_body(ui, &theme));\n                            });\n                    });\n            });\n\n        if matches!(self.screen, Screen::Ready) {\n            egui::Panel::bottom(\"actions\")\n                .frame(\n                    egui::Frame::new()\n                        .fill(theme.surface)\n                        .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_MD as i8)),\n                )\n                .show(ui, |ui| {\n                    widgets::page(ui, |ui| self.draw_actions(ui, &theme))\n                });\n        }",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-installer --lib gui::tests::larger_text_leaves_every_control_within_reach -- --exact",
+  "expected_diagnostic": "%: Install is at",
+  "before": "93f64912d42edd891cdb7c84db84df034536940dee5648fc5a8e3d4ac1a71876",
+  "mutated": "5ab9f4467a56d3cd64b45d79401b0305316b4df2fc3be3cd77b9efd5314cc642",
+  "after": "93f64912d42edd891cdb7c84db84df034536940dee5648fc5a8e3d4ac1a71876",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "150%: Install is at [[24.0 485.7] - [90.0 519.7]] in [682.7 464.7]",
+  "failure": null,
+  "passed": true
+}

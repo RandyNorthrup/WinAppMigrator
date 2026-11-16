@@ -1,0 +1,21 @@
+drill web-locales
+file site/i18n/it-IT/Troubleshooting.md
+mutation: '<a id="the-window-could-not-open"></a>' -> ''
+command: Remove-Item -Recurse -Force C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\site-drill -ErrorAction SilentlyContinue; python -I .github/scripts/build-site.py --wiki C:\Users\Randy\Coding\WinAppMigrator.wiki --out C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\site-drill --base-url https://randynorthrup.github.io/WinAppMigrator
+expect: leads to no heading or anchor in it-IT/Troubleshooting.html
+===== baseline
+Built 25 wiki pages and the landing page for v0.6.2 into C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\site-drill, with 23 translations of the landing page and its key pages
+
+
+exit 0
+===== mutated
+error: broken links:
+  it-IT/Getting-Started.html: Troubleshooting#the-window-could-not-open leads to no heading or anchor in it-IT/Troubleshooting.html
+
+
+exit 1
+===== restored
+Built 25 wiki pages and the landing page for v0.6.2 into C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\site-drill, with 23 translations of the landing page and its key pages
+
+
+exit 0

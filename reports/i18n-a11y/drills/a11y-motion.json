@@ -1,0 +1,16 @@
+{
+  "name": "a11y-motion",
+  "file": "crates/winappmigrator-ui/src/widgets.rs",
+  "mutation": "STILL_ALPHA));\n        return;\n -> STILL_ALPHA));\n",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-ui --lib widgets::tests::a_progress_bar_of_unknown_length_holds_still_when_nothing_may_move -- --exact",
+  "expected_diagnostic": "it holds still",
+  "before": "833fd743e41834570538e4585c9be127792ab4e9af2372549bfe5eccf0f29abf",
+  "mutated": "d61f01cf378aded5395eb09bde43112839d1bf8652b5d7ed9c85f8f65f0b1747",
+  "after": "833fd743e41834570538e4585c9be127792ab4e9af2372549bfe5eccf0f29abf",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "assertion `left == right` failed: it holds still",
+  "failure": null,
+  "passed": true
+}

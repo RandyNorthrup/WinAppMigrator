@@ -106,7 +106,11 @@ and says so. It asks for nothing but to be closed.
 | Clause | Conformance | Remarks |
 | --- | --- | --- |
 | 11.1 to 11.4 | As WCAG above | |
+| 11.5.1 Closed functionality | Not applicable | Screen readers and other assistive technology can be used with every window. |
+| 11.5.2.1 Platform accessibility service support for software that provides a user interface | Not applicable | Applies to platform software, such as Windows. |
+| 11.5.2.2 Platform accessibility service support for assistive technologies | Not applicable | Applies to platform software. |
 | 11.5.2.3 Use of accessibility services | Supports | UI Automation, through AccessKit. |
+| 11.5.2.4 Assistive technology | Not applicable | It is not assistive technology. |
 | 11.5.2.5 Object information | Supports | Name, role, state, and bounds of each control. |
 | 11.5.2.6 Row, column, and headers | Partially supports | The list of apps is exposed as a list of rows, each named by its app, publisher and version; its columns are not exposed as a table. |
 | 11.5.2.7 Values | Supports | |
@@ -120,12 +124,13 @@ and says so. It asks for nothing but to be closed.
 | 11.5.2.15 Change notification | Supports | |
 | 11.5.2.16 Modifications of states and properties | Supports | |
 | 11.5.2.17 Modifications of values and text | Supports | |
-| 11.6 Documented accessibility usage | Not applicable | |
+| 11.6.1 User control of accessibility features | Not applicable | Applies to platform software. |
+| 11.6.2 No disruption of accessibility features | Supports | It changes none of Windows' accessibility settings, and takes the keyboard and pointer through Windows' ordinary messages, after Sticky Keys and Filter Keys have done their work. Contrast themes, Text size and Animation effects are followed (tested). |
 | 11.7 User preferences | Partially supports | Contrast themes, Text size, Animation effects, and light or dark mode are followed. The windows use Segoe UI and the fonts Windows has for each script, not a font chosen by the user. |
-| 11.8 Authoring tools | Not applicable | An installer it builds has the same accessible windows as everything else here; nothing else it produces is content for people. |
+| 11.8.1 to 11.8.5 Authoring tools | Not applicable | An installer it builds has the same accessible windows as everything else here; nothing else it produces is content for people. |
 | 12.1.1 Accessibility and compatibility features | Supports | [Languages and accessibility](https://github.com/RandyNorthrup/WinAppMigrator/wiki/Languages-and-Accessibility) |
 | 12.1.2 Accessible documentation | Supports | The website is held to WCAG 2.2 AA (below). |
-| 12.2 Support services | Supports | Issue forms for accessibility and for translation problems. |
+| 12.2.2 to 12.2.4 Support services | Supports | Issue forms for accessibility and for translation problems, which can be filled in with the keyboard and a screen reader on GitHub. |
 
 ## The website
 

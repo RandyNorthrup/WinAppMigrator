@@ -1,0 +1,108 @@
+drill a11y-text-size
+file crates/winappmigrator-installer/src/gui.rs
+mutation: '        if matches!(self.screen, Screen::Ready) {
+            egui::Panel::bottom("actions")
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme.surface)
+                        .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_MD as i8)),
+                )
+                .show(ui, |ui| {
+                    widgets::page(ui, |ui| self.draw_actions(ui, &theme))
+                });
+        }
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(theme.bg))
+            .show(ui, |ui| {
+                widgets::mark_pane(ui);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Frame::new()
+                            .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_LG as i8))
+                            .show(ui, |ui| {
+                                ui.set_max_width(ui.available_width());
+                                widgets::page(ui, |ui| self.draw_body(ui, &theme));
+                            });
+                    });
+            });' -> '        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(theme.bg))
+            .show(ui, |ui| {
+                widgets::mark_pane(ui);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Frame::new()
+                            .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_LG as i8))
+                            .show(ui, |ui| {
+                                ui.set_max_width(ui.available_width());
+                                widgets::page(ui, |ui| self.draw_body(ui, &theme));
+                            });
+                    });
+            });
+
+        if matches!(self.screen, Screen::Ready) {
+            egui::Panel::bottom("actions")
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme.surface)
+                        .inner_margin(Margin::symmetric(SPACE_XL as i8, SPACE_MD as i8)),
+                )
+                .show(ui, |ui| {
+                    widgets::page(ui, |ui| self.draw_actions(ui, &theme))
+                });
+        }'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-installer --lib gui::tests::larger_text_leaves_every_control_within_reach -- --exact
+expect: %: Install is at
+===== baseline
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.85s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_installer-e6c7da6fa49cb2c3.exe)
+
+running 1 test
+test gui::tests::larger_text_leaves_every_control_within_reach ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 96 filtered out; finished in 0.24s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-installer v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-installer)
+    Finished `test` profile [optimized + debuginfo] target(s) in 17.11s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_installer-e6c7da6fa49cb2c3.exe)
+
+running 1 test
+test gui::tests::larger_text_leaves_every_control_within_reach ... FAILED
+
+failures:
+
+---- gui::tests::larger_text_leaves_every_control_within_reach stdout ----
+
+thread 'gui::tests::larger_text_leaves_every_control_within_reach' (40284) panicked at crates\winappmigrator-installer\src\gui.rs:3292:13:
+150%: Install is at [[24.0 485.7] - [90.0 519.7]] in [682.7 464.7]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gui::tests::larger_text_leaves_every_control_within_reach
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 96 filtered out; finished in 0.28s
+
+error: test failed, to rerun pass `-p winappmigrator-installer --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-installer v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-installer)
+    Finished `test` profile [optimized + debuginfo] target(s) in 9.73s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_installer-e6c7da6fa49cb2c3.exe)
+
+running 1 test
+test gui::tests::larger_text_leaves_every_control_within_reach ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 96 filtered out; finished in 0.17s
+
+
+
+exit 0

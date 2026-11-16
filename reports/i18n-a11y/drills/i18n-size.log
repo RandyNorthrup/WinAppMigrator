@@ -1,0 +1,58 @@
+drill i18n-size
+file crates\winappmigrator-i18n\src\lib.rs
+mutation: 'decimal(value, 1, separators)' -> 'format!("{value:.1}")'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target';  cargo test -j 4 -p winappmigrator-i18n --lib -- sizes_and_counts_are_written
+expect: left: "824.0 MB"
+===== baseline
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.16s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::sizes_and_counts_are_written_the_language_s_way ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-wt\crates\winappmigrator-i18n)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.70s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::sizes_and_counts_are_written_the_language_s_way ... FAILED
+
+failures:
+
+---- tests::sizes_and_counts_are_written_the_language_s_way stdout ----
+
+thread 'tests::sizes_and_counts_are_written_the_language_s_way' (50056) panicked at crates\winappmigrator-i18n\src\tests.rs:353:5:
+assertion `left == right` failed
+  left: "824.0 MB"
+ right: "824,0 MB"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::sizes_and_counts_are_written_the_language_s_way
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p winappmigrator-i18n --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-wt\crates\winappmigrator-i18n)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.56s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test tests::sizes_and_counts_are_written_the_language_s_way ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+
+
+exit 0

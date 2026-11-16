@@ -73,6 +73,7 @@ use crate::rollback::{
     recover_interrupted_installs, roll_back, service_is_running, stop_service,
 };
 use crate::service_scan::DELAYED_AUTOMATIC_START_LABEL;
+use crate::shortcut_scan::POWERSHELL_SHORTCUTS;
 use crate::task_scan::live_task_xml;
 use crate::verify::{PackageFiles, verify_prepared_package, without_what_was_refused};
 
@@ -3972,31 +3973,20 @@ fn apply_shortcut(
 }
 
 fn shortcut_script(shortcut: &ReviewedShortcut) -> String {
-    let mut script = format!(
-        "{POWERSHELL_IMPORT_UTILITY}$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath = '{}';",
+    let given = |value: Option<&str>| {
+        value.map_or_else(
+            || "$null".to_owned(),
+            |value| format!("'{}'", escape_powershell_single(value)),
+        )
+    };
+    format!(
+        "{POWERSHELL_IMPORT_UTILITY}{POWERSHELL_SHORTCUTS}Save-WamShortcut '{}' '{}' {} {} {}",
         escape_powershell_single(&shortcut.placement.destination.display().to_string()),
         escape_powershell_single(&shortcut.target.display().to_string()),
-    );
-    if let Some(arguments) = shortcut.arguments.as_deref() {
-        script.push_str(&format!(
-            " $shortcut.Arguments = '{}';",
-            escape_powershell_single(arguments)
-        ));
-    }
-    if let Some(working_directory) = shortcut.working_directory.as_deref() {
-        script.push_str(&format!(
-            " $shortcut.WorkingDirectory = '{}';",
-            escape_powershell_single(working_directory)
-        ));
-    }
-    if let Some(icon) = shortcut.icon.as_deref() {
-        script.push_str(&format!(
-            " $shortcut.IconLocation = '{}';",
-            escape_powershell_single(icon)
-        ));
-    }
-    script.push_str(" $shortcut.Save();");
-    script
+        given(shortcut.arguments.as_deref()),
+        given(shortcut.working_directory.as_deref()),
+        given(shortcut.icon.as_deref()),
+    )
 }
 
 /// Put a file from the package at its destination, recording it first and keeping what it

@@ -1,0 +1,58 @@
+drill i18n-package
+file crates/winappmigrator-core/src/models.rs
+mutation: 'winappmigrator_i18n::tr(&words.message_id, Some(&fluent_args(&words.args)))' -> 'self.message.clone()'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-core --lib models::tests::a_recorded_warning_is_read_in_the_language_of_whoever_reads_it -- --exact
+expect: 5 shortcuts on this drive name no file, so whether they open this app could not be told.
+===== baseline
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+   Compiling winappmigrator-core v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-core)
+    Finished `test` profile [optimized + debuginfo] target(s) in 15.99s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_core-b5cad62645ae2496.exe)
+
+running 1 test
+test models::tests::a_recorded_warning_is_read_in_the_language_of_whoever_reads_it ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1000 filtered out; finished in 0.03s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-core v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-core)
+    Finished `test` profile [optimized + debuginfo] target(s) in 50.07s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_core-b5cad62645ae2496.exe)
+
+running 1 test
+test models::tests::a_recorded_warning_is_read_in_the_language_of_whoever_reads_it ... FAILED
+
+failures:
+
+---- models::tests::a_recorded_warning_is_read_in_the_language_of_whoever_reads_it stdout ----
+
+thread 'models::tests::a_recorded_warning_is_read_in_the_language_of_whoever_reads_it' (37736) panicked at crates\winappmigrator-core\src\models.rs:1393:9:
+5 shortcuts on this drive name no file, so whether they open this app could not be told.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    models::tests::a_recorded_warning_is_read_in_the_language_of_whoever_reads_it
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1000 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p winappmigrator-core --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-core v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-core)
+    Finished `test` profile [optimized + debuginfo] target(s) in 49.40s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_core-b5cad62645ae2496.exe)
+
+running 1 test
+test models::tests::a_recorded_warning_is_read_in_the_language_of_whoever_reads_it ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1000 filtered out; finished in 0.01s
+
+
+
+exit 0

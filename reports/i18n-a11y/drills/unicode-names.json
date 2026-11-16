@@ -1,0 +1,16 @@
+{
+  "name": "unicode-names",
+  "file": "crates/winappmigrator-core/src/path_utils.rs",
+  "mutation": "is_invisible_format(character) {\n                '_'\n            } else {\n                character\n -> is_invisible_format(character) {\n                '_'\n            } else {\n                '_'\n",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-core --lib path_utils::tests::a_readable_name_keeps_letters_in_any_script -- --exact",
+  "expected_diagnostic": "left: \"ber __ Caf\"",
+  "before": "6dfa381b940928b63c0e70cda7030734a80149752e00b3c8a963898f527bdb44",
+  "mutated": "657bfd0b74b48e916d4bdbfecb7ca86ff97dae08085e16ae14d2ec9495ab9ffd",
+  "after": "6dfa381b940928b63c0e70cda7030734a80149752e00b3c8a963898f527bdb44",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "left: \"ber __ Caf\"",
+  "failure": null,
+  "passed": true
+}

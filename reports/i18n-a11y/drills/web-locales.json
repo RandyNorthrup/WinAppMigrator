@@ -1,0 +1,16 @@
+{
+  "name": "web-locales",
+  "file": "site/i18n/it-IT/Troubleshooting.md",
+  "mutation": "<a id=\"the-window-could-not-open\"></a> -> ",
+  "command": "Remove-Item -Recurse -Force C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\site-drill -ErrorAction SilentlyContinue; python -I .github/scripts/build-site.py --wiki C:\\Users\\Randy\\Coding\\WinAppMigrator.wiki --out C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\site-drill --base-url https://randynorthrup.github.io/WinAppMigrator",
+  "expected_diagnostic": "leads to no heading or anchor in it-IT/Troubleshooting.html",
+  "before": "2dccb55cc060b514a66511c8a744045c3cdbf136118e30dc3e5bfac373ed8d40",
+  "mutated": "57d6cbfc471ea7208a1aab037070a466080b3bbd8d7e45ff7623f09199bfc367",
+  "after": "2dccb55cc060b514a66511c8a744045c3cdbf136118e30dc3e5bfac373ed8d40",
+  "baseline_exit": 0,
+  "mutated_exit": 1,
+  "restored_exit": 0,
+  "observed_diagnostic": "it-IT/Getting-Started.html: Troubleshooting#the-window-could-not-open leads to no heading or anchor in it-IT/Troubleshooting.html",
+  "failure": null,
+  "passed": true
+}

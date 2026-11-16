@@ -855,19 +855,47 @@ fn shortcut_specs(folders: &ShellFolders, root: &str) -> Vec<ShortcutSpec> {
     ]
 }
 
+/// The shell's own object for a shortcut that exists. Shell.Application keeps a name or a path in any script, where
+/// WScript.Shell passes them through the ANSI code page and cannot make a shortcut to "Über 日本 Café".
+fn shell_link(path: &str) -> String {
+    format!(
+        "$link = (New-Object -ComObject Shell.Application).NameSpace([IO.Path]::GetDirectoryName({path})).\
+         ParseName([IO.Path]::GetFileName({path})).GetLink; ",
+        path = quoted(path)
+    )
+}
+
+/// The app's own shortcuts, made as an installer would. Shell.Application only opens a shortcut that exists, so one
+/// is begun as an empty shell link: its header, and the block that ends it.
 fn create_shortcut(spec: &ShortcutSpec, target: &str) -> TestResult {
     if let Some(parent) = Path::new(&spec.path).parent() {
         fs::create_dir_all(parent)?;
     }
+    let mut empty = vec![0_u8; 80];
+    empty[0] = 0x4C;
+    empty[4..20].copy_from_slice(&[
+        0x01, 0x14, 0x02, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
+    ]);
+    empty[60] = 1;
+    fs::write(&spec.path, empty)?;
+    let (icon_file, icon_index) = spec
+        .icon
+        .rsplit_once(',')
+        .unwrap_or((spec.icon.as_str(), "0"));
+    let icon = if icon_file.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "$link.SetIconLocation({}, {icon_index}); ",
+            quoted(icon_file)
+        )
+    };
     powershell(&format!(
-        "$link = (New-Object -ComObject WScript.Shell).CreateShortcut({}); \
-         $link.TargetPath = {}; $link.Arguments = {}; $link.WorkingDirectory = {}; \
-         $link.IconLocation = {}; $link.Save()",
-        quoted(&spec.path),
+        "{}$link.Path = {}; $link.Arguments = {}; $link.WorkingDirectory = {}; {icon}$link.Save()",
+        shell_link(&spec.path),
         quoted(target),
         quoted(&spec.arguments),
         quoted(&spec.working_directory),
-        quoted(&spec.icon),
     ))
     .map(|_| ())
 }
@@ -878,10 +906,9 @@ fn read_shortcut(path: &str) -> TestResult<Option<[String; 4]>> {
         return Ok(None);
     }
     let shown = powershell(&format!(
-        "$link = (New-Object -ComObject WScript.Shell).CreateShortcut({}); \
-         $link.TargetPath; '|'; $link.Arguments; '|'; $link.WorkingDirectory; '|'; \
-         $link.IconLocation",
-        quoted(path)
+        "{}$icon = ''; $index = $link.GetIconLocation([ref]$icon); \
+         $link.Path; '|'; $link.Arguments; '|'; $link.WorkingDirectory; '|'; \"$icon,$index\"",
+        shell_link(path)
     ))?;
     let mut parts = shown
         .split('|')
@@ -6549,7 +6576,7 @@ fn integrations_come_and_go_and_take_nothing_else() -> TestResult {
         ("Default apps", INT_APP),
         ("Program name", "wam int app.exe"),
         ("Note", "look like credentials"),
-        ("Note", "License option was off"),
+        ("Note", "License and Activation Data option was off"),
         ("Note", INT_CERTIFICATE_SUBJECT),
         ("Note", INT_UNCLAIMED_FONT),
     ] {
@@ -6645,7 +6672,7 @@ fn integrations_come_and_go_and_take_nothing_else() -> TestResult {
     }
     let shortcut = read_shortcut(&format!(r"{}\{INT_APP}.lnk", folders.startup))?;
     checks.same(
-        "WScript.Shell: the shortcut kept its arguments, without the credential",
+        "Shell.Application: the shortcut kept its arguments, without the credential",
         shortcut.map(|details| details[1].clone()),
         Some("--tray".to_owned()),
     );

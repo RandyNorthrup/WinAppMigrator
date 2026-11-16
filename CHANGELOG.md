@@ -30,6 +30,9 @@ independent machine pass; the project has no native speakers yet, and a form in 
 - **Names keep their letters.** An installer for an app named in any script, such as "日本語エディタ", is named after it
   with those letters, where they used to become underscores.
 - **Fonts.** Each script is drawn with the font Windows has for it, loaded only when a language or an app's name needs it.
+- **Shortcuts in any script.** A shortcut named in, or pointing to a folder named in, letters outside Windows' own code
+  page, such as a Japanese one on a Windows set to English, was read as empty and left out of the installer, and could
+  not be made by it. Both now work.
 
 ### Accessibility
 

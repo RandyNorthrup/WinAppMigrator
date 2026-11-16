@@ -1,0 +1,16 @@
+{
+  "name": "i18n-fallback-4",
+  "file": "crates/winappmigrator-i18n/src/lib.rs",
+  "mutation": ".and_then(|english| format(&english, &active.separators, id, attribute, args)) -> .and_then(|_english| None::<String>)",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target';  cargo test -j 4 -p winappmigrator-i18n --lib -- a_message_a_language_lacks",
+  "expected_diagnostic": "left: \"size-mb\"",
+  "before": "313b53c8049f7e049ba3715c662451550adad6a925a5f9831cc00ed90c963acf",
+  "mutated": "4185fb6ac1b32bd55d5b92ca7fc0fc759187cd6cd422a733408670d00628d47c",
+  "after": "313b53c8049f7e049ba3715c662451550adad6a925a5f9831cc00ed90c963acf",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "left: \"size-mb\"",
+  "failure": null,
+  "passed": true
+}

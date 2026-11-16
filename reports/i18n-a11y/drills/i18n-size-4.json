@@ -1,0 +1,16 @@
+{
+  "name": "i18n-size-4",
+  "file": "crates/winappmigrator-i18n/src/lib.rs",
+  "mutation": "decimal(value, 1, separators) -> format!(\"{value:.1}\")",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target';  cargo test -j 4 -p winappmigrator-i18n --lib -- sizes_and_counts_are_written",
+  "expected_diagnostic": "left: \"824.0 MB\"",
+  "before": "313b53c8049f7e049ba3715c662451550adad6a925a5f9831cc00ed90c963acf",
+  "mutated": "f17fe043f4e2349681320385e8263b263fc67c9447496f199295a43e084d48c9",
+  "after": "313b53c8049f7e049ba3715c662451550adad6a925a5f9831cc00ed90c963acf",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "left: \"824.0 MB\"",
+  "failure": null,
+  "passed": true
+}

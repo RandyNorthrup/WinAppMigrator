@@ -1,0 +1,73 @@
+drill a11y-target
+file crates/winappmigrator-ui/src/widgets.rs
+mutation: 'let (rect, response) = allocate_control(ui, vec2(CONTROL_HEIGHT, CONTROL_HEIGHT), enabled);' -> 'let (rect, response) = allocate_control(ui, vec2(12.0, 12.0), enabled);'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-gui --lib ui_tests_a11y::nothing_clickable_is_too_small_to_hit -- --exact
+expect: is 12 by 12 points, with other targets within reach
+===== baseline
+   Compiling winappmigrator-i18n v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+   Compiling winappmigrator-link v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-link)
+   Compiling winappmigrator-client v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-client)
+   Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+warning: winappmigrator-gui@0.7.0: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.7.0: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-core v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-core)
+   Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 45s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-d49089e5507f5a90.exe)
+
+running 1 test
+test ui_tests_a11y::nothing_clickable_is_too_small_to_hit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.34s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+warning: winappmigrator-gui@0.7.0: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.7.0: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 17.65s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-d49089e5507f5a90.exe)
+
+running 1 test
+test ui_tests_a11y::nothing_clickable_is_too_small_to_hit ... FAILED
+
+failures:
+
+---- ui_tests_a11y::nothing_clickable_is_too_small_to_hit stdout ----
+
+thread 'ui_tests_a11y::nothing_clickable_is_too_small_to_hit' (61112) panicked at crates\winappmigrator-gui\src\ui_tests_a11y.rs:109:9:
+nothing selected: [
+    "\"Switch to Dark Theme\" is 12 by 12 points, with other targets within reach",
+    "\"Reload the Application List\" is 12 by 12 points, with other targets within reach",
+]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    ui_tests_a11y::nothing_clickable_is_too_small_to_hit
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p winappmigrator-gui --lib`
+
+
+exit 101
+===== restored
+warning: winappmigrator-gui@0.7.0: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.7.0: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+   Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 15.87s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-d49089e5507f5a90.exe)
+
+running 1 test
+test ui_tests_a11y::nothing_clickable_is_too_small_to_hit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.52s
+
+
+
+exit 0

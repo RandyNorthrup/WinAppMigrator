@@ -1,0 +1,62 @@
+drill a11y-contrast-theme
+file crates/winappmigrator-gui/src/views.rs
+mutation: 'if !self.opening.in_contrast_theme() {' -> '{'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-gui --lib ui_tests_a11y::a_contrast_theme_is_kept_and_not_offered_away -- --exact
+expect: Switch to Light Theme
+===== baseline
+warning: winappmigrator-gui@0.6.2: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.6.2: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.74s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-7f4e3ef93a02e41c.exe)
+
+running 1 test
+test ui_tests_a11y::a_contrast_theme_is_kept_and_not_offered_away ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.05s
+
+
+
+exit 0
+===== mutated
+warning: winappmigrator-gui@0.6.2: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.6.2: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-gui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 17.95s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-7f4e3ef93a02e41c.exe)
+
+running 1 test
+test ui_tests_a11y::a_contrast_theme_is_kept_and_not_offered_away ... FAILED
+
+failures:
+
+---- ui_tests_a11y::a_contrast_theme_is_kept_and_not_offered_away stdout ----
+
+thread 'ui_tests_a11y::a_contrast_theme_is_kept_and_not_offered_away' (55724) panicked at crates\winappmigrator-gui\src\ui_tests_a11y.rs:232:9:
+Switch to Light Theme
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    ui_tests_a11y::a_contrast_theme_is_kept_and_not_offered_away
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p winappmigrator-gui --lib`
+
+
+exit 101
+===== restored
+warning: winappmigrator-gui@0.6.2: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.6.2: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-gui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 13.29s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-7f4e3ef93a02e41c.exe)
+
+running 1 test
+test ui_tests_a11y::a_contrast_theme_is_kept_and_not_offered_away ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.04s
+
+
+
+exit 0

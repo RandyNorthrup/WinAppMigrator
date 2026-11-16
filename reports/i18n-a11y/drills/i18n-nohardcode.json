@@ -1,0 +1,16 @@
+{
+  "name": "i18n-nohardcode",
+  "file": "crates/winappmigrator-gui/src/views.rs",
+  "mutation": "&t!(\"app-reload-list\"), -> \"Reload the Application List\",",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-gui --lib ui_tests_a11y::every_word_on_every_screen_is_from_the_catalog -- --exact",
+  "expected_diagnostic": "Button \\\"Reload the Application List\\\" has \\\"Reload the Application List\\\"",
+  "before": "57e3db3c28a7fa8b1cae232d6359dde32b34bef4c1f2331b6334b44f46b40823",
+  "mutated": "4b071473a23c42b571e6397fb1b5da6a7abbad7bd0bd122a46a26863e1d4686a",
+  "after": "57e3db3c28a7fa8b1cae232d6359dde32b34bef4c1f2331b6334b44f46b40823",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "\"Button \\\"Reload the Application List\\\" has \\\"Reload the Application List\\\"\",",
+  "failure": null,
+  "passed": true
+}

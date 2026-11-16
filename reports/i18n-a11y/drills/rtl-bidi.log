@@ -1,0 +1,58 @@
+drill rtl-bidi
+file crates/winappmigrator-ui/src/bidi.rs
+mutation: 'Direction::RightToLeft => Level::rtl(),' -> 'Direction::RightToLeft => Level::ltr(),'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-ui --lib bidi::tests::a_path_inside_an_arabic_sentence_keeps_its_own_direction -- --exact
+expect: the last words read are seen leftmost
+===== baseline
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.59s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-d31dc5dd6ddd4b69.exe)
+
+running 1 test
+test bidi::tests::a_path_inside_an_arabic_sentence_keeps_its_own_direction ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 59 filtered out; finished in 0.00s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-ui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 9.36s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-d31dc5dd6ddd4b69.exe)
+
+running 1 test
+test bidi::tests::a_path_inside_an_arabic_sentence_keeps_its_own_direction ... FAILED
+
+failures:
+
+---- bidi::tests::a_path_inside_an_arabic_sentence_keeps_its_own_direction stdout ----
+
+thread 'bidi::tests::a_path_inside_an_arabic_sentence_keeps_its_own_direction' (49600) panicked at crates\winappmigrator-ui\src\bidi.rs:366:9:
+assertion `left == right` failed: the last words read are seen leftmost
+  left: [("ثب\u{651}ت في", true), (" C:\\Program Files\\App ", false), ("الآن", true)]
+ right: [(" الآن", true), ("C:\\Program Files\\App", false), ("ثب\u{651}ت في ", true)]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    bidi::tests::a_path_inside_an_arabic_sentence_keeps_its_own_direction
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 59 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p winappmigrator-ui --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-ui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 10.18s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-d31dc5dd6ddd4b69.exe)
+
+running 1 test
+test bidi::tests::a_path_inside_an_arabic_sentence_keeps_its_own_direction ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 59 filtered out; finished in 0.00s
+
+
+
+exit 0

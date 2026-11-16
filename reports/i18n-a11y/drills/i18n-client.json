@@ -1,0 +1,16 @@
+{
+  "name": "i18n-client",
+  "file": "crates/winappmigrator-client/src/lib.rs",
+  "mutation": "language: ENGLISH, -> language: chosen,",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-client --lib tests::a_right_to_left_language_is_spoken_in_english_with_a_note -- --exact",
+  "expected_diagnostic": "Some(\"ar-SA\") []",
+  "before": "0d9d5bcaf3c6add27a99ecb6a05309d727c983f8aa899b6f0993a2b551bf59ee",
+  "mutated": "12a3ce99f5827ef466e0c277b11f55a4f1fd0817b5901e396c89d6e9fd6632ee",
+  "after": "0d9d5bcaf3c6add27a99ecb6a05309d727c983f8aa899b6f0993a2b551bf59ee",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "assertion `left == right` failed: Some(\"ar-SA\") []",
+  "failure": null,
+  "passed": true
+}

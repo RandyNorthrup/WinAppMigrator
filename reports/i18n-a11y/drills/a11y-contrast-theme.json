@@ -1,0 +1,16 @@
+{
+  "name": "a11y-contrast-theme",
+  "file": "crates/winappmigrator-gui/src/views.rs",
+  "mutation": "if !self.opening.in_contrast_theme() { -> {",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-gui --lib ui_tests_a11y::a_contrast_theme_is_kept_and_not_offered_away -- --exact",
+  "expected_diagnostic": "Switch to Light Theme",
+  "before": "57e3db3c28a7fa8b1cae232d6359dde32b34bef4c1f2331b6334b44f46b40823",
+  "mutated": "e2d91fdba764823ec5b135fafa4ba55fb7d9a4c6831497855761bf06ad2136c2",
+  "after": "57e3db3c28a7fa8b1cae232d6359dde32b34bef4c1f2331b6334b44f46b40823",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "Switch to Light Theme",
+  "failure": null,
+  "passed": true
+}

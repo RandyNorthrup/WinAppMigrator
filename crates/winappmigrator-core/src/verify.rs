@@ -36,6 +36,7 @@ use crate::restore_review::{
     ReviewedDriver, ReviewedLicense, ReviewedPackage, ReviewedService, ReviewedShortcut,
     ReviewedTask,
 };
+use crate::shortcut_scan::POWERSHELL_SHORTCUTS;
 use crate::task_scan::live_task_xml;
 
 const VERIFICATION_REPORT_JSON: &str = "verification_report.json";
@@ -1489,7 +1490,7 @@ fn shortcut_target(path: &Path) -> std::io::Result<Option<String>> {
         return Ok(None);
     }
     let script = format!(
-        "{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_UTILITY}$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath",
+        "{POWERSHELL_UTF8_OUTPUT}{POWERSHELL_IMPORT_UTILITY}{POWERSHELL_SHORTCUTS}(Read-WamShortcut '{}').TargetPath",
         escape_powershell_single(path.display().to_string().as_str())
     );
     let output = powershell_command(script.as_str()).output()?;

@@ -1,0 +1,77 @@
+drill a11y-keyboard
+file crates/winappmigrator-ui/src/widgets.rs
+mutation: 'response.scroll_to_me(None);' -> ''
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-gui --lib ui_tests_a11y::what_has_the_focus_can_be_seen -- --exact
+expect: \"Services, 2 of 2, closed\" at
+===== baseline
+warning: winappmigrator-gui@0.6.2: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.6.2: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.89s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-7f4e3ef93a02e41c.exe)
+
+running 1 test
+test ui_tests_a11y::what_has_the_focus_can_be_seen ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.38s
+
+
+
+exit 0
+===== mutated
+warning: winappmigrator-gui@0.6.2: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.6.2: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-ui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+   Compiling winappmigrator-gui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 12.17s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-7f4e3ef93a02e41c.exe)
+
+running 1 test
+test ui_tests_a11y::what_has_the_focus_can_be_seen ... FAILED
+
+failures:
+
+---- ui_tests_a11y::what_has_the_focus_can_be_seen stdout ----
+
+thread 'ui_tests_a11y::what_has_the_focus_can_be_seen' (38452) panicked at crates\winappmigrator-gui\src\ui_tests_a11y.rs:245:5:
+[
+    "\"samples, 232 files. In the app's folder\" at [[320.0 500.0] - [659.0 544.0]]",
+    "\"Data Folders, 29.4 MB with the User Data option, closed\" at [[320.0 556.0] - [659.0 590.0]]",
+    "\"Services, 2 of 2, closed\" at [[320.0 598.0] - [659.0 632.0]]",
+    "\"Starts Automatically, 1 of 1, closed\" at [[320.0 640.0] - [659.0 674.0]]",
+    "\"Scheduled Tasks, 2 of 2, closed\" at [[320.0 682.0] - [659.0 716.0]]",
+    "\"Shortcuts, 1 of 1, closed\" at [[320.0 724.0] - [659.0 758.0]]",
+    "\"What Ties It into Windows, 3 of 3 kinds, closed\" at [[320.0 766.0] - [659.0 800.0]]",
+    "\"What It Needs to Run, 1 runtime, closed\" at [[320.0 808.0] - [659.0 842.0]]",
+    "\"Might Also Be Part of It, 0 of 3 added, open\" at [[320.0 850.0] - [659.0 884.0]]",
+    "\"Fabrikam Data Sync Tools, Its name starts with this app's name.\" at [[320.0 951.0] - [659.0 995.0]]",
+    "\"Fabrikam Updater, A part hidden from the list of apps, from the same publisher, Fabrikam Inc..\" at [[320.0 995.0] - [659.0 1039.0]]",
+    "\"Left Out, and Why, 3 things, closed\" at [[320.0 1103.0] - [659.0 1137.0]]",
+]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    ui_tests_a11y::what_has_the_focus_can_be_seen
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.47s
+
+error: test failed, to rerun pass `-p winappmigrator-gui --lib`
+
+
+exit 101
+===== restored
+warning: winappmigrator-gui@0.6.2: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.6.2: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-ui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+   Compiling winappmigrator-gui v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 15.79s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-7f4e3ef93a02e41c.exe)
+
+running 1 test
+test ui_tests_a11y::what_has_the_focus_can_be_seen ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.41s
+
+
+
+exit 0

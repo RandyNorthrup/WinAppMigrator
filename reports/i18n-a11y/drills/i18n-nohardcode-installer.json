@@ -1,0 +1,16 @@
+{
+  "name": "i18n-nohardcode-installer",
+  "file": "crates/winappmigrator-installer/src/gui.rs",
+  "mutation": "&t!(\"installer-preview\"), -> \"Preview Changes\",",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-installer --lib gui::tests::every_word_on_every_screen_is_from_the_catalog -- --exact",
+  "expected_diagnostic": "Button \\\"Preview Changes\\\" has \\\"Preview Changes\\\"",
+  "before": "93f64912d42edd891cdb7c84db84df034536940dee5648fc5a8e3d4ac1a71876",
+  "mutated": "aa250fe2b1c1ffca25f339d10fbf445f3d4217ce9f07313c9c6b6dc7992460e1",
+  "after": "93f64912d42edd891cdb7c84db84df034536940dee5648fc5a8e3d4ac1a71876",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "\"Button \\\"Preview Changes\\\" has \\\"Preview Changes\\\"\",",
+  "failure": null,
+  "passed": true
+}

@@ -1,0 +1,16 @@
+{
+  "name": "i18n-mt-notice",
+  "file": "crates/winappmigrator-ui/src/language.rs",
+  "mutation": "crate::widgets::wrapped_label(ui, t!(\"ui-machine-translated\")); -> ",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-ui --lib language::tests::any_language_but_english_says_it_is_by_machine_with_a_way_to_report_it -- --exact",
+  "expected_diagnostic": "Thíš tráñšlátíöñ wáš mádé bý máçhíñé",
+  "before": "edeb63b890ae77c4cc74a2eb2f40c1e0051b1f7b102891a2062bd4ce7c2c0686",
+  "mutated": "151c306ac6406b4f54b7f45424a5a67ffa56dca668cbf8b21a85e3a238879cac",
+  "after": "edeb63b890ae77c4cc74a2eb2f40c1e0051b1f7b102891a2062bd4ce7c2c0686",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "«Thíš tráñšlátíöñ wáš mádé bý máçhíñé áñd máý hávé míštákéš.~~~~~~~~~~~~~~~~~~~~»",
+  "failure": null,
+  "passed": true
+}

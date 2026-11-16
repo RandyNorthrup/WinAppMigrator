@@ -1,0 +1,16 @@
+{
+  "name": "i18n-package",
+  "file": "crates/winappmigrator-core/src/models.rs",
+  "mutation": "winappmigrator_i18n::tr(&words.message_id, Some(&fluent_args(&words.args))) -> self.message.clone()",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-core --lib models::tests::a_recorded_warning_is_read_in_the_language_of_whoever_reads_it -- --exact",
+  "expected_diagnostic": "5 shortcuts on this drive name no file, so whether they open this app could not be told.",
+  "before": "c9d849d36fff12220633695f19b228de90c40bfaf21afd8e4a40d49c2b141b86",
+  "mutated": "0c067c35fe6803b21b1bcaab71776110ad84849b4d645fab766289695f8b11db",
+  "after": "c9d849d36fff12220633695f19b228de90c40bfaf21afd8e4a40d49c2b141b86",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "5 shortcuts on this drive name no file, so whether they open this app could not be told.",
+  "failure": null,
+  "passed": true
+}

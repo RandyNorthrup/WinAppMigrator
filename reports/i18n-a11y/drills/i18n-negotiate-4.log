@@ -1,0 +1,58 @@
+drill i18n-negotiate-4
+file crates/winappmigrator-i18n/src/languages.rs
+mutation: 'return language(if traditional { "zh-TW" } else { "zh-CN" });' -> 'return language(if traditional { "zh-CN" } else { "zh-TW" });'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target';  cargo test -j 4 -p winappmigrator-i18n --lib -- a_regional_variant_gets_its_language
+expect: left: "zh-TW"
+===== baseline
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.27s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test languages::tests::a_regional_variant_gets_its_language ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.00s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.72s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test languages::tests::a_regional_variant_gets_its_language ... FAILED
+
+failures:
+
+---- languages::tests::a_regional_variant_gets_its_language stdout ----
+
+thread 'languages::tests::a_regional_variant_gets_its_language' (57948) panicked at crates\winappmigrator-i18n\src\languages.rs:504:13:
+assertion `left == right` failed: zh-SG
+  left: "zh-TW"
+ right: "zh-CN"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    languages::tests::a_regional_variant_gets_its_language
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p winappmigrator-i18n --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-i18n v0.6.2 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.40s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+
+running 1 test
+test languages::tests::a_regional_variant_gets_its_language ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.00s
+
+
+
+exit 0

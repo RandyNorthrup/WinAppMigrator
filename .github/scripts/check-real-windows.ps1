@@ -242,7 +242,9 @@ function Scan-Accessibility($Process, [string]$Name) {
     $folder = Join-Path $Pictures 'accessibility'
     New-Item -ItemType Directory -Force -Path $folder | Out-Null
     $scanId = ($Name -replace '[^A-Za-z0-9]+', '-').Trim('-')
-    $said = & $Axe --processId $Process.Id --outputDirectory $folder --scanId $scanId --showThirdPartyNotices false 2>&1
+    # The CLI's flags are lower case, and --showthirdpartynotices takes no value: given one, it shows the notices and
+    # scans nothing.
+    $said = & $Axe --processid $Process.Id --outputdirectory $folder --scanid $scanId --alwayssavetestfile 2>&1
     $exit = $LASTEXITCODE
     $said | ForEach-Object { Write-Host "  Axe.Windows: $_" }
     Check "$Name`: Axe.Windows finds no errors" ($exit -eq 0) "exit $exit"

@@ -1,0 +1,16 @@
+{
+  "name": "rtl-bidi",
+  "file": "crates/winappmigrator-ui/src/bidi.rs",
+  "mutation": "Direction::RightToLeft => Level::rtl(), -> Direction::RightToLeft => Level::ltr(),",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-ui --lib bidi::tests::a_path_inside_an_arabic_sentence_keeps_its_own_direction -- --exact",
+  "expected_diagnostic": "the last words read are seen leftmost",
+  "before": "a6bc10585517843f2ef17005d04290956a7fdb6e553839e1509fcdab678ded7d",
+  "mutated": "2fe0c5b7e84e50cca2a7aac049e6ddfe537a85e5aa545221f3aa9ae57b7e4724",
+  "after": "a6bc10585517843f2ef17005d04290956a7fdb6e553839e1509fcdab678ded7d",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "assertion `left == right` failed: the last words read are seen leftmost",
+  "failure": null,
+  "passed": true
+}

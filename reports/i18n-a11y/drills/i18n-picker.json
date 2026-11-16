@@ -1,0 +1,16 @@
+{
+  "name": "i18n-picker",
+  "file": "crates/winappmigrator-ui/src/language.rs",
+  "mutation": "action = Some(LanguageAction::Choose(language)); -> let _ = LanguageAction::Choose(language);",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-ui --lib language::tests::a_language_is_chosen_with_the_keyboard -- --exact",
+  "expected_diagnostic": "left: None",
+  "before": "edeb63b890ae77c4cc74a2eb2f40c1e0051b1f7b102891a2062bd4ce7c2c0686",
+  "mutated": "d1e5a0569d4e50ceaa5b07a9c2ffb9a6b959f6ea28f227793015a203b9541931",
+  "after": "edeb63b890ae77c4cc74a2eb2f40c1e0051b1f7b102891a2062bd4ce7c2c0686",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "left: None",
+  "failure": null,
+  "passed": true
+}
