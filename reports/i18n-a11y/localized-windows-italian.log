@@ -1,0 +1,203 @@
+task: Ready, last result 0
+[17:02:30] user patio01\wamitaliano, display language it-IT, region it-IT, elevated: True
+[17:02:30] sc.exe says: [SC] EnumQueryServicesStatus:OpenService OPERAZIONI NON RIUSCITE 1060:  Il servizio specificato non esiste come servizio installato. 
+[17:02:30] --- before
+    service windows_exporter: none
+    service mosquitto: none
+    firewall rules for windows_exporter: 0
+    tasks in \WAM Lab\: 0
+    PuTTY shortcuts: 0
+    C:\Program Files\windows_exporter: none
+    C:\Program Files\mosquitto: none
+    C:\Program Files\PuTTY: none
+[17:02:33] run: C:\WamRepro\out\it-exporter\windows_exporter_userdata_installer.exe --apply
+    Room: up to 111.3 MB on C: (58.4 GB free)
+    Sets up: 3
+      Service: windows_exporter: Runs windows_exporter.exe as LocalSystem, starts now and soon 
+after each time this PC starts
+      Scheduled Task: \WAM Lab\windows_exporter version: Runs as SYSTEM
+      Firewall Rule: windows_exporter: Allows incoming connections on 9182 for 
+windows_exporter.exe, on every network
+    Reinstall applied.
+    Changes logged: 28
+    Warnings: 4
+      registry_restore_review_required: Registry values were restored from the archived 
+structured data with known app paths rewritten to the target root.
+      scheduled_task_runs_as_system: The scheduled task \WAM Lab\windows_exporter version runs as 
+SYSTEM, with full rights over this PC. (\WAM Lab\windows_exporter version)
+      verification_service_scope: Service verification reads HKLM service configuration and does 
+not start services.
+      verification_scheduled_task_scope: Scheduled task verification checks registration and 
+command reference only.
+    Errors: 0
+    Refused: 0
+    Package hashes valid: true
+    Reinstall hashes valid: true
+    Install id: wam-G82lj3
+    Log: C:\ProgramData\WinAppMigrator\logs\install-20261116-010234-1424.log
+    
+[17:02:44] exit 0
+[17:02:44] run: 
+C:\WamRepro\out\it-mosquitto\Eclipse_Mosquitto_MQTT_broker__64_bit_userdata_installer.exe --apply
+    Room: up to 90.6 MB on C: (58.4 GB free)
+    Sets up: 2
+      Service: Mosquitto Broker: Runs mosquitto.exe as LocalSystem, starts now and each time this 
+PC starts
+      Environment Variable: MOSQUITTO_DIR: Set to C:\Program Files\Mosquitto
+    Reinstall applied.
+    Changes logged: 108
+    Warnings: 3
+      registry_restore_review_required: Registry values were restored from the archived 
+structured data with known app paths rewritten to the target root.
+      environment_restore_session_refresh_required: Environment variable changes may require a 
+new process, shell, or sign-in session to be observed.
+      verification_service_scope: Service verification reads HKLM service configuration and does 
+not start services.
+    Errors: 0
+    Refused: 0
+    Package hashes valid: true
+    Reinstall hashes valid: true
+    Install id: wam-9NMelN
+    Log: C:\ProgramData\WinAppMigrator\logs\install-20261116-010245-9460.log
+    
+[17:02:51] exit 0
+[17:02:51] run: C:\WamRepro\out\it-putty\PuTTY_release_0.85__64-bit_userdata_installer.exe --apply
+    Room: up to 59.1 MB on C: (58.4 GB free)
+    Sets up: 11
+      Shortcut: PuTTY: Opens putty.exe, for everyone on this PC
+      Shortcut: Pageant: Opens pageant.exe, for everyone on this PC
+      Shortcut: PSFTP: Opens psftp.exe, for everyone on this PC
+      Shortcut: PuTTY Manual: Opens putty.chm, for everyone on this PC
+      Shortcut: PuTTY Web Site: Opens website.url, for everyone on this PC
+      Shortcut: PuTTY: Opens putty.exe, for everyone on this PC
+      Shortcut: PuTTYgen: Opens puttygen.exe, for everyone on this PC
+      PATH: Adds to Path: The install folder
+      File Type: .ppk: Files of this type open with the app, for everyone on this PC
+      Menu Command: edit: Adds a command to the menu of PPK_Assoc_ProgId, for everyone on this PC
+      Menu Command: open: Adds a command to the menu of PPK_Assoc_ProgId, for everyone on this PC
+    Reinstall applied.
+    Changes logged: 51
+    Warnings: 4
+      registry_restore_review_required: Registry values were restored from the archived 
+structured data with known app paths rewritten to the target root.
+      shortcut_destination_exists: Shortcut exists; use --force to overwrite. 
+(C:\Users\Public\Desktop\PuTTY.lnk)
+      shortcut_admin_scope: One or more restored shortcuts target a public desktop or common 
+Start Menu location.
+      environment_restore_session_refresh_required: Environment variable changes may require a 
+new process, shell, or sign-in session to be observed.
+    Errors: 0
+    Refused: 0
+    Package hashes valid: true
+    Reinstall hashes valid: true
+    Install id: wam-MtaZw6
+    Log: C:\ProgramData\WinAppMigrator\logs\install-20261116-010252-7012.log
+    
+[17:03:01] exit 0
+[17:03:01] --- after installing all three
+    service windows_exporter: Running, Automatic
+    service mosquitto: Running, Automatic
+    firewall rules for windows_exporter: 1
+    tasks in \WAM Lab\: 1
+    PuTTY shortcuts: 4
+    C:\Program Files\windows_exporter: 2 files
+    C:\Program Files\mosquitto: 97 files
+    C:\Program Files\PuTTY: 10 files
+[17:03:03] sc.exe query windows_exporter:
+    NOME_SERVIZIO: windows_exporter 
+            TIPO                   : 10  WIN32_OWN_PROCESS  
+            STATO                  : 4  RUNNING 
+                                    (STOPPABLE, NOT_PAUSABLE, ACCEPTS_SHUTDOWN)
+            CODICE_USCITA_WIN32    : 0  (0x0)
+            CODICE_USCITA_SERVIZIO : 0  (0x0)
+            PUNTO_CONTROLLO          : 0x0
+            INDICAZIONE_ATTESA     : 0x0
+[17:03:03] sc.exe query mosquitto:
+    NOME_SERVIZIO: mosquitto 
+            TIPO                   : 10  WIN32_OWN_PROCESS  
+            STATO                  : 4  RUNNING 
+                                    (STOPPABLE, NOT_PAUSABLE, ACCEPTS_SHUTDOWN)
+            CODICE_USCITA_WIN32    : 0  (0x0)
+            CODICE_USCITA_SERVIZIO : 0  (0x0)
+            PUNTO_CONTROLLO          : 0x0
+            INDICAZIONE_ATTESA     : 0x0
+[17:03:03] run: C:\WamRepro\out\it-exporter\windows_exporter_userdata_installer.exe --uninstall 
+wam-G82lj3 --quiet
+    Uninstalling windows_exporter.
+    Undone: 31
+    Could not be undone: 0
+    Left in place: 0
+    Left behind: 0
+    Log: C:\ProgramData\WinAppMigrator\logs\uninstall-20261116-010304-6416.log
+    
+[17:03:08] exit 0
+[17:03:08] run: 
+C:\WamRepro\out\it-mosquitto\Eclipse_Mosquitto_MQTT_broker__64_bit_userdata_installer.exe 
+--uninstall wam-9NMelN --quiet
+    Uninstalling Eclipse Mosquitto MQTT broker (64 bit).
+    Undone: 119
+    Could not be undone: 0
+    Left in place: 0
+    Left behind: 0
+    Log: C:\ProgramData\WinAppMigrator\logs\uninstall-20261116-010309-7864.log
+    
+[17:03:12] exit 0
+[17:03:12] run: C:\WamRepro\out\it-putty\PuTTY_release_0.85__64-bit_userdata_installer.exe 
+--uninstall wam-MtaZw6 --quiet
+    Uninstalling PuTTY release 0.85 (64-bit).
+    Undone: 67
+    Could not be undone: 0
+    Left in place: 0
+    Left behind: 0
+    Log: C:\ProgramData\WinAppMigrator\logs\uninstall-20261116-010312-6752.log
+    
+[17:03:14] exit 0
+[17:03:14] --- after uninstalling all three
+    service windows_exporter: none
+    service mosquitto: none
+    firewall rules for windows_exporter: 0
+    tasks in \WAM Lab\: 0
+    PuTTY shortcuts: 0
+    C:\Program Files\windows_exporter: none
+    C:\Program Files\mosquitto: none
+    C:\Program Files\PuTTY: none
+[17:03:16] === an install made to fail part-way: a file it must replace is held open
+[17:03:16] run: C:\WamRepro\out\it-exporter\windows_exporter_userdata_installer.exe --apply 
+--force
+    Room: up to 111.3 MB on C: (58.4 GB free)
+    Sets up: 3
+      Service: windows_exporter: Runs windows_exporter.exe as LocalSystem, starts now and soon 
+after each time this PC starts
+      Scheduled Task: \WAM Lab\windows_exporter version: Runs as SYSTEM
+      Firewall Rule: windows_exporter: Allows incoming connections on 9182 for 
+windows_exporter.exe, on every network
+    Reinstall applied.
+    Changes logged: 1
+    Warnings: 0
+    Errors: 1
+      restore_file_failed: Could not write C:\Program 
+Files\windows_exporter\windows_exporter.exe: I/O failed for C:\Program 
+Files\windows_exporter\windows_exporter.exe: Impossibile accedere al file. Il file Š utilizzato 
+da un altro processo. (os error 32) (C:\Program Files\windows_exporter\windows_exporter.exe)
+    Refused: 0
+    Package hashes valid: true
+    The install failed, so what it changed was put back.
+    Undone: 1
+    Could not be undone: 0
+    Left in place: 0
+    Left behind: 0
+    Log: C:\ProgramData\WinAppMigrator\logs\install-20261116-010317-17156.log
+    
+[17:03:22] exit 1
+[17:03:22] --- after the install that failed
+    service windows_exporter: none
+    service mosquitto: none
+    firewall rules for windows_exporter: 0
+    tasks in \WAM Lab\: 0
+    PuTTY shortcuts: 0
+    C:\Program Files\windows_exporter: 1 files
+    C:\Program Files\mosquitto: none
+    C:\Program Files\PuTTY: none
+[17:03:23] the held file says: held open, so it cannot be replaced
+
+[17:03:23] done

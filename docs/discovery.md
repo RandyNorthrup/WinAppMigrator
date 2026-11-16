@@ -585,6 +585,25 @@ in a store that looks like a credential is not copied either.
 
 This cannot catch everything. See [SECURITY.md](../SECURITY.md#an-installer-can-contain-secrets).
 
+## Windows in another language
+
+Windows' own tools answer in the language of the account that runs them, so nothing here reads their words. What it
+takes from them is language-free:
+
+- **Accounts and groups by SID.** Permissions are given with `icacls` to `*S-1-5-32-544` (Administrators), `*S-1-5-18`
+  (SYSTEM), and the like, never by name; an account's elevation is read from `whoami /groups` by the SID of its
+  mandatory label; who owns a file comes back as a SID.
+- **Services by state number.** `sc.exe query` labels its fields in the account's language (`STATO` in Italian), but not
+  the state itself: `4  RUNNING`. The core reads the number and name after the colon, whatever comes before it.
+- **Everything else by exit code:** `netsh`, `robocopy`, `dism`, `schtasks`, PowerShell, and `sc.exe`'s own failures
+  (1060, 1072).
+- **What it shows of a tool's failure** is the tool's own text, in its own language, after words of WinAppMigrator's
+  own.
+
+This was checked with an account whose Windows speaks Italian: three apps installed, were uninstalled, and an install
+made to fail part-way was put back, with no error from the tools' Italian
+(`reports/i18n-a11y/localized-windows.md`).
+
 ## Options
 
 - `ScanOptions.include_user_data` / `PackageOptions.include_user_data` — when false,

@@ -1,0 +1,39 @@
+== app (pid 10284, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = WinAppMigrator-v0.7.0-pre, Process ID = 10284
+  Scan Id = app
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe\app_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe\app_2_of_2.a11ytest"
+  exit 0
+== uninstaller-no-record (pid 2704, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = winappmigrator-installer-0.7.0-pre, Process ID = 2704
+  Scan Id = uninstaller-no-record
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe\uninstaller-no-record_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe\uninstaller-no-record_2_of_2.a11ytest"
+  exit 0
+== stub-no-package (pid 2780, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = winappmigrator-installer-0.7.0-pre, Process ID = 2780
+  Scan Id = stub-no-package
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe\stub-no-package_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe\stub-no-package_2_of_2.a11ytest"
+  exit 0
+
+Name                                  Length
+----                                  ------
+app_1_of_2.a11ytest                   260158
+app_2_of_2.a11ytest                     4016
+stub-no-package_1_of_2.a11ytest       111325
+stub-no-package_2_of_2.a11ytest         4014
+uninstaller-no-record_1_of_2.a11ytest 112350
+uninstaller-no-record_2_of_2.a11ytest   4014
+
+
+
