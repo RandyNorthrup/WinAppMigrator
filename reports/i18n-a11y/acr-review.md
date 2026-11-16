@@ -31,7 +31,9 @@ exist. This is that review, made on 2026-11-15 against the code at the commit th
   `--showThirdPartyNotices false`; on testpc1 the same flag with a value made the CLI show its notices and scan nothing
   (exit 3, [axe-windows-lab-before-fix.log](axe-windows-lab-before-fix.log) shows the errors the first correct scan
   found). It now passes `--processid`, `--outputdirectory`, `--scanid` and `--alwayssavetestfile`, as the lab run that
-  found 0 errors did ([axe-windows-lab.log](axe-windows-lab.log)).
+  found 0 errors did ([axe-windows-lab.log](axe-windows-lab.log)). Its red drill
+  ([drills/a11y-axe.log](drills/a11y-axe.log)) breaks the code that gives each panel its bounds and shows Axe.Windows
+  failing the app, the installer and the uninstaller built from it, then passing them once it is put back.
 
 ## Where each tested claim is checked
 

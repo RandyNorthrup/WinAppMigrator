@@ -1,0 +1,16 @@
+{
+  "name": "unicode-shortcuts",
+  "file": "crates/winappmigrator-core/src/shortcut_scan.rs",
+  "mutation": "  if (Test-WamPlain \"$Path|$Target|$Arguments|$WorkingDirectory|$IconLocation\") { ->   if ($true) {",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-core --lib shortcut_scan::tests::a_shortcut_named_and_pointing_in_any_script_is_made_and_read_as_it_is -- --exact",
+  "expected_diagnostic": "Value does not fall within the expected range",
+  "before": "289986106cbef8d6967c3508844885de9ec3295d2408e70f395c0c21a4ab73c8",
+  "mutated": "f1f6321000c8a729591767a2b3e24df4f9b8dcb3eab9ccb23a6c47c84b8c7adf",
+  "after": "289986106cbef8d6967c3508844885de9ec3295d2408e70f395c0c21a4ab73c8",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "├£ber µùÑµ£¼ Caf├⌐.lnk: PowerShell said Value does not fall within the expected range.",
+  "failure": null,
+  "passed": true
+}

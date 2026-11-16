@@ -1,0 +1,80 @@
+command: cargo test -p winappmigrator-ui
+worktree: C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt at f86e8f19fb8e09bf4b1cfeb0be8f9f8f2351f1ad
+   Compiling winappmigrator-i18n v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+   Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 15.96s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-a84449a8eabd6251.exe)
+
+running 60 tests
+test bidi::tests::latin_text_in_a_right_to_left_window_keeps_its_own_order ... ok
+test bidi::tests::each_paragraph_starts_a_line ... ok
+test bidi::tests::a_long_sentence_breaks_in_the_order_it_is_read ... ok
+test bidi::tests::marks_between_right_to_left_words_are_turned_around_and_mirrored ... ok
+test bidi::tests::one_word_wider_than_the_line_stays_whole ... ok
+test bidi::tests::what_a_catalog_isolates_is_laid_out_the_same_and_its_marks_drawn_nowhere ... ok
+test checks::tests::only_words_outside_the_marks_and_the_data_count_as_unmarked ... ok
+test bidi::tests::an_arabic_name_in_an_english_window_reads_right_to_left_on_its_own ... ok
+test bidi::tests::hebrew_with_a_version_number_keeps_the_number_in_order ... ok
+test language::tests::the_issue_form_is_told_the_language ... ok
+test bidi::tests::a_path_inside_an_arabic_sentence_keeps_its_own_direction ... ok
+test system_settings::tests::text_scale_stays_within_what_windows_allows ... ok
+test tests::a_windows_options_come_from_here ... ok
+test tests::the_child_looks_at_what_it_was_given ... ok
+test system_settings::tests::a_window_remembers_whether_things_may_move ... ok
+test theme::tests::a_tag_that_is_not_one_says_nothing_was_chosen ... ok
+test theme::tests::a_window_stays_in_its_theme_whichever_mode_windows_is_in ... ok
+test theme::tests::a_windows_contrast_theme_is_drawn_in_its_own_colors ... ok
+test theme::tests::control_outlines_and_the_focus_ring_meet_non_text_contrast ... ok
+test theme::tests::button_label_meets_wcag_aa_on_the_accent_fill ... ok
+test theme::tests::targets_are_checked_against_the_size_they_are_made_to ... ok
+test theme::tests::every_text_color_meets_wcag_aa_on_every_surface ... ok
+test theme::tests::selected_row_text_stays_readable_on_its_tint ... ok
+test theme::tests::fallback_fonts_are_chosen_by_script ... ok
+test theme::tests::theme_mode_tag_round_trips ... ok
+test widgets::tests::elapsed_time_adds_hours_only_when_needed ... ok
+test widgets::tests::window_icon_decodes ... ok
+test window::tests::a_screen_with_no_room_at_all_still_asks_for_a_size_there_can_be ... ok
+test system_settings::tests::windows_settings_can_be_read ... ok
+test window::tests::a_window_on_a_big_screen_asks_nothing_of_it ... ok
+test window::tests::a_window_on_another_screen_is_not_taken_for_one_hanging_off_the_main_one ... ok
+test window::tests::a_window_that_fits_a_big_screen_is_left_where_windows_put_it ... ok
+test window::tests::a_window_is_in_the_mode_windows_is_in ... ok
+test window::tests::a_window_that_fits_can_still_be_put_with_its_bottom_behind_the_taskbar ... ok
+test window::tests::an_installer_does_not_fit_1024_by_768_and_an_uninstaller_does ... ok
+test window::tests::a_language_that_was_chosen_is_read_back_as_its_tag ... ok
+test window::tests::it_hides_what_it_changes_and_only_does_it_once ... ok
+test window::tests::choosing_a_mode_does_not_write_through_a_link_to_another_file ... ok
+test window::tests::choosing_a_mode_goes_no_further_if_its_scratch_file_is_there_already ... ok
+test window::tests::on_the_small_screens_people_have_a_window_comes_to_what_there_is ... ok
+test window::tests::the_smallest_a_window_can_be_made_is_never_more_than_a_screen_has ... ok
+test window::tests::once_it_has_taken_up_a_mode_a_change_of_windows_does_not_move_it ... ok
+test window::tests::a_mode_that_was_chosen_is_read_back_and_nothing_else_is_taken_for_one ... ok
+test window::tests::what_a_person_chose_goes_ahead_of_what_windows_is_in ... ok
+test language::tests::a_letter_no_font_has_is_reported_missing ... ok
+test widgets::tests::mirroring_turns_positions_around_inside_a_rect ... ok
+test widgets::tests::progress_fills_from_where_reading_starts ... ok
+test widgets::tests::a_checkbox_is_where_reading_starts ... ok
+test widgets::tests::a_progress_bar_of_unknown_length_holds_still_when_nothing_may_move ... ok
+test widgets::tests::a_label_starts_at_the_side_reading_starts ... ok
+test widgets::tests::a_row_runs_the_way_the_language_reads ... ok
+test widgets::tests::what_trails_a_row_is_at_its_far_end ... ok
+test language::tests::a_japanese_window_takes_han_from_the_japanese_font ... ok
+test window::tests::choosing_a_mode_writes_nothing_through_a_link_in_the_way_of_its_folder ... ok
+test tests::the_environment_can_only_narrow_the_renderer_away ... ok
+test tests::what_a_window_is_drawn_with_is_not_up_to_the_environment ... ok
+test language::tests::a_language_is_chosen_by_clicking_it ... ok
+test language::tests::a_language_is_chosen_with_the_keyboard ... ok
+test language::tests::any_language_but_english_says_it_is_by_machine_with_a_way_to_report_it ... ok
+test language::tests::every_language_draws_every_letter_with_windows_own_fonts ... ok
+
+test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+   Doc-tests winappmigrator_ui
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+
+exit 0

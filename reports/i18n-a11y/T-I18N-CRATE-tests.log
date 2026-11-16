@@ -1,0 +1,42 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.24s
+
+running 35 tests
+     Running unittests src\lib.rs (target\debug\deps\winappmigrator_i18n-a54bea7c9b6d3c2e.exe)
+test format::tests::decimals_use_the_language_s_mark ... ok
+test format::tests::sizes_pick_their_unit ... ok
+test format::tests::windows_grouping_is_read ... ok
+test format::tests::windows_marks_override_the_language_s ... ok
+test languages::tests::a_regional_variant_gets_its_language ... ok
+test languages::tests::a_saved_choice_that_no_longer_ships_is_passed_over ... ok
+test tests::a_catalog_that_differs_from_english_is_caught ... ok
+test languages::tests::the_first_preferred_language_that_ships_is_chosen ... ok
+test languages::tests::the_test_languages_are_never_chosen_from_windows_list ... ok
+test languages::tests::windows_7_language_ids_are_read ... ok
+test format::tests::whole_numbers_are_grouped_the_language_s_way ... ok
+test pseudo::tests::marked_text_is_told_from_unmarked ... ok
+test pseudo::tests::text_is_accented_padded_and_marked_and_what_it_is_given_is_left_alone ... ok
+test pseudo::tests::text_that_does_not_parse_makes_no_catalog ... ok
+test format::tests::spanish_and_polish_leave_four_digits_alone ... ok
+test languages::tests::a_saved_choice_that_ships_wins ... ok
+test languages::tests::every_language_is_listed_once_with_english_first ... ok
+test languages::tests::only_a_language_with_a_catalog_is_chosen ... ok
+test tests::a_number_in_a_message_uses_the_language_s_marks ... ok
+test tests::a_message_a_language_lacks_is_given_in_english ... ok
+test tests::a_catalog_that_does_not_parse_gives_english_not_part_of_itself ... ok
+test tests::a_message_nobody_has_is_given_as_its_name_and_a_missing_argument_by_its_name ... ok
+test tests::a_thread_s_language_is_put_back_after ... ok
+test tests::a_right_to_left_catalog_isolates_what_it_is_given_and_a_left_to_right_one_does_not ... ok
+test tests::calls_are_found_in_source_text ... ok
+test tests::english_text_is_english_whatever_the_language ... ok
+test tests::each_language_picks_its_own_plural_form ... ok
+test tests::english_is_built_in_and_parses_whole ... ok
+test tests::every_catalog_has_exactly_the_english_messages_with_their_placeholders ... ok
+test tests::sizes_and_counts_are_written_the_language_s_way ... ok
+test tests::the_catalogs_add_little_to_every_installer ... ok
+test tests::the_test_languages_never_ship ... ok
+test tests::the_test_languages_mark_catalog_text_and_leave_what_it_is_given ... ok
+test tests::windows_own_marks_win_over_the_language_s ... ok
+test tests::every_message_the_code_asks_for_is_in_english ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+

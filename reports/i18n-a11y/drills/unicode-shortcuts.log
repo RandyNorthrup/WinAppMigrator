@@ -1,0 +1,66 @@
+drill unicode-shortcuts
+file crates/winappmigrator-core/src/shortcut_scan.rs
+mutation: '  if (Test-WamPlain "$Path|$Target|$Arguments|$WorkingDirectory|$IconLocation") {' -> '  if ($true) {'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-core --lib shortcut_scan::tests::a_shortcut_named_and_pointing_in_any_script_is_made_and_read_as_it_is -- --exact
+expect: Value does not fall within the expected range
+===== baseline
+   Compiling winappmigrator-link v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-link)
+   Compiling winappmigrator-i18n v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+   Compiling winappmigrator-core v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-core)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 56s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_core-d5c958d028332e3c.exe)
+
+running 1 test
+test shortcut_scan::tests::a_shortcut_named_and_pointing_in_any_script_is_made_and_read_as_it_is ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1001 filtered out; finished in 5.22s
+
+
+
+exit 0
+===== mutated
+   Compiling winappmigrator-core v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-core)
+    Finished `test` profile [optimized + debuginfo] target(s) in 28.68s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_core-d5c958d028332e3c.exe)
+
+running 1 test
+test shortcut_scan::tests::a_shortcut_named_and_pointing_in_any_script_is_made_and_read_as_it_is ... FAILED
+
+failures:
+
+---- shortcut_scan::tests::a_shortcut_named_and_pointing_in_any_script_is_made_and_read_as_it_is stdout ----
+
+thread 'shortcut_scan::tests::a_shortcut_named_and_pointing_in_any_script_is_made_and_read_as_it_is' (49540) panicked at crates\winappmigrator-core\src\shortcut_scan.rs:1127:17:
+├£ber µùÑµ£¼ Caf├⌐.lnk: PowerShell said Value does not fall within the expected range.
+At line:20 char:5
++     $shortcut.TargetPath = $Target
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (:) [], ArgumentException
+    + FullyQualifiedErrorId : System.ArgumentException
+ 
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    shortcut_scan::tests::a_shortcut_named_and_pointing_in_any_script_is_made_and_read_as_it_is
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1001 filtered out; finished in 0.51s
+
+error: test failed, to rerun pass `-p winappmigrator-core --lib`
+
+
+exit 101
+===== restored
+   Compiling winappmigrator-core v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-core)
+    Finished `test` profile [optimized + debuginfo] target(s) in 24.38s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_core-d5c958d028332e3c.exe)
+
+running 1 test
+test shortcut_scan::tests::a_shortcut_named_and_pointing_in_any_script_is_made_and_read_as_it_is ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1001 filtered out; finished in 4.00s
+
+
+
+exit 0

@@ -1,0 +1,29 @@
+command: cargo test -p winappmigrator-client
+worktree: C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt at f86e8f19fb8e09bf4b1cfeb0be8f9f8f2351f1ad
+   Compiling winappmigrator-link v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-link)
+   Compiling winappmigrator-i18n v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-i18n)
+   Compiling winappmigrator-client v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-client)
+    Finished `test` profile [optimized + debuginfo] target(s) in 4.06s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_client-b243e1c3a3438542.exe)
+
+running 14 tests
+test tests::lang_it_it_gives_italian_if_it_ships_and_otherwise_what_windows_says ... ok
+test tests::a_right_to_left_language_that_does_not_ship_needs_no_note ... ok
+test tests::lang_chooses_a_language_that_ships_over_windows ... ok
+test system::tests::this_pc_says_what_it_is ... ok
+test system::tests::a_code_is_six_digits_in_two_groups ... ok
+test tests::without_lang_windows_display_language_is_spoken ... ok
+test tests::lang_for_a_language_that_does_not_ship_leaves_windows_then_english ... ok
+test tests::the_value_after_a_flag_is_read ... ok
+test tests::a_right_to_left_language_is_spoken_in_english_with_a_note ... ok
+test tests::the_screen_reads_as_it_did_in_english ... ok
+test serve::tests::a_file_is_described_listed_and_read_in_part ... ok
+test serve::tests::the_hives_that_hold_passwords_are_never_given ... ok
+test serve::tests::nothing_outside_the_root_or_through_a_link_is_answered ... ok
+test serve::tests::a_page_of_long_names_still_fits_in_a_message ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+
+
+exit 0

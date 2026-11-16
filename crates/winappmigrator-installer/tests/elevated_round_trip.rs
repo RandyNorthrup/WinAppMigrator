@@ -376,7 +376,7 @@ fn sc_qc(name: &str) -> TestResult<Option<BTreeMap<String, String>>> {
     if !output.status.success() {
         return Ok(None);
     }
-    let fields = text(&output.stdout)
+    let mut fields: BTreeMap<String, String> = text(&output.stdout)
         .lines()
         .filter_map(|line| {
             let (key, value) = line.split_once(':')?;
@@ -388,6 +388,15 @@ fn sc_qc(name: &str) -> TestResult<Option<BTreeMap<String, String>>> {
             is_field.then(|| (key.to_owned(), value.trim().to_owned()))
         })
         .collect();
+    // sc.exe writes in the console's code page, which has no "日本", so the program a service runs is read from the
+    // registry instead, with its variables filled in, as sc.exe shows it.
+    if fields.contains_key("BINARY_PATH_NAME") {
+        let image = powershell(&format!(
+            "(Get-Item -LiteralPath {}).GetValue('ImagePath')",
+            quoted(&format!(r"HKLM:\SYSTEM\CurrentControlSet\Services\{name}"))
+        ))?;
+        fields.insert("BINARY_PATH_NAME".to_owned(), image.trim().to_owned());
+    }
     Ok(Some(fields))
 }
 
@@ -2305,7 +2314,7 @@ fn round_trip_of_a_real_app() -> TestResult {
     checks.that(
         "the installer is named after the app, letters and all",
         installer.file_name().and_then(|name| name.to_str())
-            == Some("WAM_E2E_Über_日本_Café_installer.exe"),
+            == Some("WAM_E2E_Über_日本_Café_userdata_installer.exe"),
         installer.display(),
     );
     let manifest = read_embedded_manifest(
