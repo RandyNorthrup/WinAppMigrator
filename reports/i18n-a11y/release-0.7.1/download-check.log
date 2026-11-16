@@ -1,0 +1,18 @@
+Downloaded from https://github.com/RandyNorthrup/WinAppMigrator/releases/tag/v0.7.1 on 2026-11-15 into an empty folder.
+
+== SHA256SUMS.txt
+9fa3f556f0f40c5ae87e4bd0a0c6c770d4c15b552d5be601b925232578e08bbd  WinAppMigrator-v0.7.1-windows-x64.zip
+16b8aee891085d85fc81c9e00efba8f2d1f32e098b7b7f7664f4cef4de44b460  WinAppMigrator-v0.7.1.exe
+
+== sha256sum -c
+WinAppMigrator-v0.7.1-windows-x64.zip: OK
+WinAppMigrator-v0.7.1.exe: OK
+
+== Get-AuthenticodeSignature WinAppMigrator-v0.7.1.exe
+Status: Valid
+Signer: CN=Randy Northrup, O=Randy Northrup, L=Ventura, S=California, C=US
+Timestamped by: CN=Microsoft Public RSA Time Stamping Authority, OU=nShield TSS ESN:7D00-05E0-D947, OU=Microsoft America Operations, O=Microsoft Corporation, L=Redmond, S=Washington, C=US
+
+== gh attestation verify <file> --repo RandyNorthrup/WinAppMigrator (each exited 0)
+WinAppMigrator-v0.7.1.exe: verified; subjects WinAppMigrator-v0.7.1-windows-x64.zip sha256:9fa3f556f0f40c5ae87e4bd0a0c6c770d4c15b552d5be601b925232578e08bbd, WinAppMigrator-v0.7.1.exe sha256:16b8aee891085d85fc81c9e00efba8f2d1f32e098b7b7f7664f4cef4de44b460; built by https://github.com/RandyNorthrup/WinAppMigrator/.github/workflows/release.yml@refs/tags/v0.7.1 from refs/tags/v0.7.1 at f794262ce27581440d40d27e3770943bc097deee
+WinAppMigrator-v0.7.1-windows-x64.zip: verified; subjects WinAppMigrator-v0.7.1-windows-x64.zip sha256:9fa3f556f0f40c5ae87e4bd0a0c6c770d4c15b552d5be601b925232578e08bbd, WinAppMigrator-v0.7.1.exe sha256:16b8aee891085d85fc81c9e00efba8f2d1f32e098b7b7f7664f4cef4de44b460; built by https://github.com/RandyNorthrup/WinAppMigrator/.github/workflows/release.yml@refs/tags/v0.7.1 from refs/tags/v0.7.1 at f794262ce27581440d40d27e3770943bc097deee

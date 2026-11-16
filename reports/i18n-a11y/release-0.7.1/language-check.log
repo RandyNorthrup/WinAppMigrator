@@ -1,0 +1,36 @@
+app: C:\WamRepro\dl\release\WinAppMigrator-v0.7.1.exe
+sha256: 16B8AEE891085D85FC81C9E00EFBA8F2D1F32E098B7B7F7664F4CEF4DE44B460
+display-language list before: (none); choice saved in the app: (none)
+=== Windows set to it-IT: window 'WinAppMigrator'
+  Text: WinAppMigrator
+  Text: Trasforma un'app installata in un programma di installazione autoestraente
+  Button: Passa al tema scuro
+  Button: Ricarica l'elenco delle app
+  ComboBox: Lingua
+  Text: Lingua
+  Text: 57 app
+  Text: Scegli un'app
+  Text: Seleziona un'app nell'elenco per scegliere cosa includere e creare il relativo programma di installazione.
+  Text: Origine dell'analisi
+  Edit: Cerca per nome o autore  (Ctrl+F)
+  Button: Ordina per nome
+  Button: Ordina per autore
+  Button: Ordina per versione
+  picked: 7-Zip 26.05 (x64), Igor Pavlov, versione 26.05
+=== Windows set to ar-SA: window 'WinAppMigrator'
+  Text: WinAppMigrator
+  Text: تحويل تطبيق مثبت إلى برنامج تثبيت ذاتي الاستخراج
+  Button: التبديل إلى النسق الداكن
+  Button: إعادة تحميل قائمة التطبيقات
+  ComboBox: اللغة
+  Text: اللغة
+  Text: ⁨57⁩ تطبيقًا
+  Text: اختيار تطبيق
+  Text: حدد تطبيقًا من القائمة لاختيار ما سيتم تضمينه وإنشاء برنامج التثبيت الخاص به.
+  Text: مصدر الفحص
+  Edit: البحث حسب الاسم أو الناشر  (Ctrl+F)
+  Button: فرز حسب الاسم
+  Button: فرز حسب الناشر
+  Button: فرز حسب الإصدار
+  picked: ⁨7-Zip 26.05 (x64)⁩، ⁨Igor Pavlov⁩، الإصدار ⁨26.05⁩
+display-language list after: 
