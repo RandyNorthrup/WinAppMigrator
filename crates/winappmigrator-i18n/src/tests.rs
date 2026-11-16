@@ -474,6 +474,89 @@ fn the_test_languages_never_ship() {
     assert!(shipped().any(|language| language == ENGLISH));
 }
 
+// ---- AC-I18N-COMPLETE ----
+
+/// Messages whose words are the same in some languages as in English: the product's name, a pattern of placeholders,
+/// or a word such as "version" or "runtime" that those languages share.
+const SAME_IN_SOME_LANGUAGES: &[&str] = &[
+    "app-name",
+    "client-heading",
+    "app-list-row",
+    "app-footprint-prerequisites-summary",
+    // An example path, which some languages keep as Windows writes it.
+    "app-output-folder-example",
+    "core-review-com-title",
+    "core-review-certificate",
+];
+
+/// The text of each message and attribute, without its placeholders, for telling whether it was translated.
+fn words_of(source: &str) -> BTreeMap<String, String> {
+    let Ok(resource) = parser::parse(source) else {
+        return BTreeMap::new();
+    };
+    let mut words = BTreeMap::new();
+    for entry in &resource.body {
+        if let Entry::Message(message) = entry {
+            let mut text = String::new();
+            if let Some(value) = &message.value {
+                text_of(value, &mut text);
+            }
+            for attribute in &message.attributes {
+                text_of(&attribute.value, &mut text);
+            }
+            words.insert(message.id.name.to_owned(), text);
+        }
+    }
+    words
+}
+
+fn text_of(pattern: &Pattern<&str>, into: &mut String) {
+    for element in &pattern.elements {
+        match element {
+            PatternElement::TextElement { value } => into.push_str(value),
+            PatternElement::Placeable {
+                expression: Expression::Select { variants, .. },
+            } => {
+                for variant in variants {
+                    text_of(&variant.value, into);
+                }
+            }
+            PatternElement::Placeable { .. } => into.push(' '),
+        }
+    }
+}
+
+/// Every language in the table ships, and none has a message left as the English, beyond product names, codes, and
+/// a few words shared with English.
+#[test]
+fn every_language_in_the_table_ships_translated() {
+    let tags: Vec<&str> = shipped().map(|language| language.tag).collect();
+    let table: Vec<&str> = LANGUAGES.iter().map(|language| language.tag).collect();
+    assert_eq!(
+        tags, table,
+        "every language in the table ships, and no other"
+    );
+    assert_eq!(table.len(), 24);
+    let english = words_of(&catalog_source(ENGLISH.tag).unwrap_or_default());
+    let mut untranslated = Vec::new();
+    for language in shipped().filter(|language| *language != ENGLISH) {
+        let theirs = words_of(&catalog_source(language.tag).unwrap_or_default());
+        for (id, words) in &english {
+            let letters = words.chars().filter(|c| c.is_alphabetic()).count();
+            if letters >= 12
+                && theirs.get(id) == Some(words)
+                && !SAME_IN_SOME_LANGUAGES.contains(&id.as_str())
+            {
+                untranslated.push(format!("{}: {id}", language.tag));
+            }
+        }
+    }
+    assert!(
+        untranslated.is_empty(),
+        "still in English: {untranslated:#?}"
+    );
+}
+
 // ---- Size ----
 
 /// Every installer carries every catalog.
