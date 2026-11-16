@@ -76,7 +76,7 @@ fn sample_apps() -> Vec<InstalledApp> {
     ]
 }
 
-fn sample_outcome(warnings: Vec<Warning>, package_valid: bool) -> MigrationOutcome {
+pub(crate) fn sample_outcome(warnings: Vec<Warning>, package_valid: bool) -> MigrationOutcome {
     MigrationOutcome {
         app_name: "Fabrikam Data Sync".to_owned(),
         package: PackageResult {
@@ -107,7 +107,7 @@ fn sample_outcome(warnings: Vec<Warning>, package_valid: bool) -> MigrationOutco
     }
 }
 
-fn sample_room() -> RoomCheck {
+pub(crate) fn sample_room() -> RoomCheck {
     RoomCheck {
         drives: vec![DriveRoom {
             drive: "C:".to_owned(),
@@ -118,7 +118,7 @@ fn sample_room() -> RoomCheck {
     }
 }
 
-fn copy_failure() -> Warning {
+pub(crate) fn copy_failure() -> Warning {
     Warning::new(
         "file_copy_failed",
         WarningSeverity::Warning,
@@ -127,15 +127,19 @@ fn copy_failure() -> Warning {
     )
 }
 
-/// A scan that finds what the sample app has, with nothing of the PC this runs on.
+/// A scan that finds what the sample app has, with nothing of the PC this runs on. It speaks the
+/// language its test does, as a real scan speaks the one chosen in the app.
 fn fake_scan() -> crate::ScanRunner {
-    std::sync::Arc::new(|options, _monitor| match &options.selection {
-        winappmigrator_core::AppSelection::InstalledApp(app) => {
-            Ok(crate::ui_tests_footprint::sample_report(app))
-        }
-        winappmigrator_core::AppSelection::ExecutablePath(_) => Err(
-            winappmigrator_core::WinAppMigratorError::InvalidInput("no such app".to_owned()),
-        ),
+    let language = winappmigrator_i18n::current();
+    std::sync::Arc::new(move |options, _monitor| {
+        winappmigrator_i18n::with_language(language, || match &options.selection {
+            winappmigrator_core::AppSelection::InstalledApp(app) => {
+                Ok(crate::ui_tests_footprint::sample_report(app))
+            }
+            winappmigrator_core::AppSelection::ExecutablePath(_) => Err(
+                winappmigrator_core::WinAppMigratorError::InvalidInput("no such app".to_owned()),
+            ),
+        })
     })
 }
 
@@ -219,7 +223,7 @@ pub(crate) fn select_first(app: &mut WinAppMigratorApp) {
 }
 
 /// [`select_first`], with the app looked at and found to have what the sample has.
-fn select_first_looked_at(app: &mut WinAppMigratorApp) {
+pub(crate) fn select_first_looked_at(app: &mut WinAppMigratorApp) {
     select_first(app);
     crate::ui_tests_footprint::with_ready_scan(app);
 }

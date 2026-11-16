@@ -716,7 +716,7 @@ impl WinAppMigratorApp {
                 .build_started
                 .map_or(0, |start| start.elapsed().as_secs());
             ui.horizontal(|ui| {
-                widgets::label(ui, RichText::new(label).size(13.0).color(theme.text));
+                widgets::status_line(ui, RichText::new(label).size(13.0).color(theme.text));
                 widgets::trailing(ui, |ui| {
                     widgets::label(
                         ui,

@@ -5,6 +5,8 @@
 //! crate means the two front ends stay visually identical without duplication.
 
 pub mod bidi;
+#[cfg(any(test, feature = "test-support"))]
+pub mod checks;
 pub mod hardening;
 pub mod language;
 pub mod system_settings;

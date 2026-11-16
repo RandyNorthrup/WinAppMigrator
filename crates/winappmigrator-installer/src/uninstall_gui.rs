@@ -341,7 +341,7 @@ impl UninstallApp {
             let (label, fraction) = step_label(self.step);
             let elapsed = self.started.map_or(0, |start| start.elapsed().as_secs());
             ui.horizontal(|ui| {
-                widgets::label(ui, RichText::new(label).size(13.0).color(theme.text));
+                widgets::status_line(ui, RichText::new(label).size(13.0).color(theme.text));
                 widgets::trailing(ui, |ui| {
                     widgets::label(
                         ui,
@@ -813,5 +813,152 @@ mod tests {
                 .is_some()
         );
         assert!(harness.query_by_label("Close").is_some());
+    }
+
+    // ---- Every screen as a screen reader, a keyboard, and another language meet it ----
+
+    fn screens() -> Vec<(&'static str, UninstallApp)> {
+        let mut opening = sample(ThemeMode::Dark);
+        opening.stage = Stage::Opening;
+        let mut running = sample(ThemeMode::Dark);
+        running.stage = Stage::Running;
+        running.step = Some(InstallStep::new(InstallPhase::Uninstalling, 40, 200));
+        let mut failed = sample(ThemeMode::Dark);
+        failed.stage = Stage::Failed("It failed.".to_owned());
+        vec![
+            ("opening", opening),
+            ("ready", sample(ThemeMode::Dark)),
+            ("running", running),
+            (
+                "done",
+                done_with(UndoReport {
+                    undone: vec!["Removed it.".to_owned()],
+                    ..UndoReport::default()
+                }),
+            ),
+            (
+                "partly done",
+                done_with(UndoReport {
+                    failed: vec!["It could not be removed.".to_owned()],
+                    ..UndoReport::default()
+                }),
+            ),
+            ("failed", failed),
+        ]
+    }
+
+    /// What the tests put on screen themselves.
+    const DATA: &[&str] = &[
+        "Fabrikam Data Sync",
+        r"C:\Program Files\Fabrikam Data Sync",
+        "Microsoft Visual C++ Redistributable",
+        r"C:\ProgramData\WinAppMigrator\logs\uninstall-1.log",
+        "Removed it.",
+        "It could not be removed.",
+        "It failed.",
+    ];
+
+    fn arabic() -> &'static winappmigrator_i18n::Language {
+        winappmigrator_i18n::language("ar-SA").unwrap_or_else(|| panic!("Arabic is in the table"))
+    }
+
+    /// AC-A11Y-NAMES.
+    #[test]
+    fn every_control_has_a_name_a_role_and_its_state() {
+        for language in [winappmigrator_i18n::ENGLISH, arabic()] {
+            winappmigrator_i18n::with_language(language, || {
+                for (screen, app) in screens() {
+                    let harness = harness_for(app);
+                    let problems = winappmigrator_ui::checks::interactive_problems(&harness.root());
+                    assert!(
+                        problems.is_empty(),
+                        "{} {screen}: {problems:#?}",
+                        language.tag
+                    );
+                }
+            });
+        }
+    }
+
+    /// AC-A11Y-TARGET.
+    #[test]
+    fn nothing_clickable_is_too_small_to_hit() {
+        for (screen, app) in screens() {
+            let harness = harness_for(app);
+            let problems = winappmigrator_ui::checks::small_targets(&harness.root());
+            assert!(problems.is_empty(), "{screen}: {problems:#?}");
+        }
+    }
+
+    /// AC-I18N-NOHARDCODE.
+    #[test]
+    fn every_word_on_every_screen_is_from_the_catalog() {
+        winappmigrator_i18n::with_language(&winappmigrator_i18n::PSEUDO_LONG, || {
+            for (screen, app) in screens() {
+                let harness = harness_for(app);
+                let problems = winappmigrator_ui::checks::unmarked(&harness.root(), DATA);
+                assert!(problems.is_empty(), "{screen}: {problems:#?}");
+            }
+        });
+    }
+
+    /// AC-A11Y-KEYBOARD.
+    #[test]
+    fn the_tab_key_reaches_every_control() {
+        let mut harness = harness_for(sample(ThemeMode::Dark));
+        let order = winappmigrator_ui::checks::tab_order(&mut harness, 100);
+        let buttons: Vec<String> = winappmigrator_ui::checks::all_nodes(&harness.root())
+            .iter()
+            .filter(|node| {
+                node.accesskit_node().role() == egui::accesskit::Role::Button
+                    && !node.accesskit_node().is_disabled()
+            })
+            .map(winappmigrator_ui::checks::name_of)
+            .collect();
+        assert!(
+            buttons.contains(&winappmigrator_i18n::t!("uninstaller-uninstall")),
+            "{buttons:#?}"
+        );
+        for button in &buttons {
+            assert!(
+                order.contains(button),
+                "{button} is never reached: {order:#?}"
+            );
+        }
+    }
+
+    /// AC-RTL-MIRROR: Uninstall is on the other side of the window in a right-to-left language.
+    #[test]
+    fn a_right_to_left_window_is_the_mirror_image() {
+        let uninstall_x = |language: &'static winappmigrator_i18n::Language| -> f32 {
+            winappmigrator_i18n::with_language(language, || {
+                let harness = harness_for(sample(ThemeMode::Dark));
+                let button = harness
+                    .get_by_label(&winappmigrator_i18n::t!("uninstaller-uninstall"))
+                    .rect();
+                button.center().x / harness.ctx.content_rect().width()
+            })
+        };
+        let english = uninstall_x(winappmigrator_i18n::ENGLISH);
+        let mirrored = uninstall_x(&winappmigrator_i18n::PSEUDO_RTL);
+        assert!(
+            (english - 0.5) * (mirrored - 0.5) < 0.0,
+            "on opposite sides: {english} and {mirrored}"
+        );
+    }
+
+    /// AC-A11Y-LIVE: how an uninstall is going is said as it changes.
+    #[test]
+    fn progress_is_said_as_it_changes() {
+        let mut running = sample(ThemeMode::Dark);
+        running.stage = Stage::Running;
+        running.step = Some(InstallStep::new(InstallPhase::Uninstalling, 40, 200));
+        let harness = harness_for(running);
+        let live = winappmigrator_ui::checks::live_regions(&harness.root());
+        assert!(
+            live.iter()
+                .any(|(name, urgent)| name.contains("40") && !urgent),
+            "{live:#?}"
+        );
     }
 }

@@ -120,6 +120,13 @@ pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(SEMIBOLD_FAMILY.into()))
 }
 
+/// The least a target may measure across, in points, by WCAG 2.5.8.
+pub const SMALLEST_TARGET: f32 = 24.0;
+/// How wide a scroll bar is drawn while the pointer is not over it.
+const SCROLL_BAR_AT_REST: f32 = 8.0;
+/// How strong its handle is then: always to be seen, so that it is plain there is more.
+const SCROLL_HANDLE_AT_REST: f32 = 0.6;
+
 /// The regular interface font.
 pub fn regular(size: f32) -> FontId {
     FontId::proportional(size)
@@ -457,7 +464,15 @@ impl Theme {
         // Rows size themselves from their content; a tall value here would pad every
         // label in a horizontal row. Controls set their own height.
         style.spacing.interact_size.y = 18.0;
-        style.spacing.scroll.bar_width = 8.0;
+        // A scroll bar is a target like any other, 24 points across where it is grabbed (WCAG 2.5.8). It is drawn
+        // thin, in room of its own, until the pointer is over it.
+        style.spacing.scroll = egui::style::ScrollStyle {
+            bar_width: SMALLEST_TARGET,
+            floating_width: SCROLL_BAR_AT_REST,
+            floating_allocated_width: SCROLL_BAR_AT_REST,
+            dormant_handle_opacity: SCROLL_HANDLE_AT_REST,
+            ..egui::style::ScrollStyle::floating()
+        };
 
         let mut text_styles = BTreeMap::new();
         text_styles.insert(TextStyle::Heading, semibold(20.0));

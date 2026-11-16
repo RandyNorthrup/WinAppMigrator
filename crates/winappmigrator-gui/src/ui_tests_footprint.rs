@@ -345,19 +345,22 @@ pub(crate) fn sample_report(app: &InstalledApp) -> ScanReport {
         near_matches: vec![
             near_match(
                 "Fabrikam Data Sync Tools",
-                "Its name starts with this app's name.",
+                &winappmigrator_i18n::t!("core-near-starts-with-app-name"),
                 false,
                 NearMatchKind::Folder,
             ),
             near_match(
                 "Fabrikam Updater",
-                "A part hidden from the list of apps, from the same publisher, Fabrikam Inc.",
+                &winappmigrator_i18n::t!(
+                    "core-near-hidden-part-publisher",
+                    publisher = "Fabrikam Inc."
+                ),
                 false,
                 NearMatchKind::HiddenEntry,
             ),
             near_match(
                 "Fabrikam-1de4eec8",
-                "Its name starts with the publisher's name, Fabrikam.",
+                &winappmigrator_i18n::t!("core-near-starts-with-publisher", publisher = "Fabrikam"),
                 true,
                 NearMatchKind::Folder,
             ),

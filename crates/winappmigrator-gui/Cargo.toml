@@ -30,6 +30,7 @@ winappmigrator-link.workspace = true
 
 [dev-dependencies]
 egui_kittest.workspace = true
+winappmigrator-ui = { workspace = true, features = ["test-support"] }
 winappmigrator-client.workspace = true
 tempfile.workspace = true
 

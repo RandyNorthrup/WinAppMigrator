@@ -1282,7 +1282,7 @@ impl InstallerApp {
             let cancelling = self.is_cancelling();
             let (label, fraction) = step_label(self.step, self.applied_now, cancelling);
             ui.horizontal(|ui| {
-                widgets::label(ui, RichText::new(label).size(13.0).color(theme.text));
+                widgets::status_line(ui, RichText::new(label).size(13.0).color(theme.text));
                 widgets::trailing(ui, |ui| {
                     widgets::label(
                         ui,
@@ -3116,5 +3116,164 @@ mod tests {
                 .query_by_label_contains("carries no application")
                 .is_some()
         );
+    }
+
+    // ---- Every screen as a screen reader, a keyboard, and another language meet it ----
+
+    /// The installer's screens, by name.
+    fn screens() -> Vec<(&'static str, InstallerApp)> {
+        let ready = sample_installer(ThemeMode::Dark);
+        let mut running = sample_installer(ThemeMode::Dark);
+        running.phase = Phase::Running;
+        running.applied_now = true;
+        running.step = Some(InstallStep::new(InstallPhase::Files, 40, 200));
+        running.monitor = Some(InstallMonitor::default());
+        let mut done = sample_installer(ThemeMode::Dark);
+        done.phase = Phase::Done;
+        done.outcome = Some(sample_outcome(true, 0));
+        let mut failed = sample_installer(ThemeMode::Dark);
+        failed.phase = Phase::Done;
+        failed.outcome = Some(sample_outcome(true, 1));
+        let mut unreadable = InstallerApp::blank();
+        unreadable.screen = Screen::Failed(t!("installer-check-stopped"));
+        vec![
+            ("ready", ready),
+            ("running", running),
+            ("done", done),
+            ("failed", failed),
+            ("unreadable", unreadable),
+            ("no package", InstallerApp::blank()),
+        ]
+    }
+
+    /// What the tests put on screen themselves: names, paths, and the words of a sample list of what an install sets
+    /// up, which the core writes from the catalog in a real installer.
+    const DATA: &[&str] = &[
+        "Fabrikam Data Sync",
+        "Fabrikam Inc.",
+        "1.7.3",
+        "OLD-LAPTOP",
+        r"C:\Program Files\Fabrikam Data Sync\Fabrikam.exe",
+        r"C:\Program Files\Fabrikam Data Sync",
+        r"HKLM\SOFTWARE\Fabrikam\InstallPath",
+        "Microsoft Visual C++ Redistributable",
+        ".NET Framework 4.8",
+        "Included",
+        "Built into Windows",
+        "Fabrikam Sync Service",
+        r"Runs FabrikamSync.exe as NT AUTHORITY\LocalService, starts now and each time this PC starts",
+        "Fabrikam Tray",
+        "Runs when you sign in",
+        "Opens Fabrikam.exe, for everyone on this PC",
+        "Adds to Path",
+        r"The install folder\bin",
+        "Could not write a file: access denied.",
+        "copy",
+        "set",
+    ];
+
+    fn arabic() -> &'static winappmigrator_i18n::Language {
+        winappmigrator_i18n::language("ar-SA").unwrap_or_else(|| panic!("Arabic is in the table"))
+    }
+
+    /// AC-A11Y-NAMES.
+    #[test]
+    fn every_control_has_a_name_a_role_and_its_state() {
+        for language in [winappmigrator_i18n::ENGLISH, arabic()] {
+            with_language(language, || {
+                for (screen, app) in screens() {
+                    let harness = harness_for(app);
+                    let problems = winappmigrator_ui::checks::interactive_problems(&harness.root());
+                    assert!(
+                        problems.is_empty(),
+                        "{} {screen}: {problems:#?}",
+                        language.tag
+                    );
+                }
+            });
+        }
+    }
+
+    /// AC-A11Y-TARGET.
+    #[test]
+    fn nothing_clickable_is_too_small_to_hit() {
+        for (screen, app) in screens() {
+            let harness = harness_for(app);
+            let problems = winappmigrator_ui::checks::small_targets(&harness.root());
+            assert!(problems.is_empty(), "{screen}: {problems:#?}");
+        }
+    }
+
+    /// AC-I18N-NOHARDCODE.
+    #[test]
+    fn every_word_on_every_screen_is_from_the_catalog() {
+        with_language(&PSEUDO_LONG, || {
+            for (screen, app) in screens() {
+                let harness = harness_for(app);
+                let problems = winappmigrator_ui::checks::unmarked(&harness.root(), DATA);
+                assert!(problems.is_empty(), "{screen}: {problems:#?}");
+            }
+        });
+    }
+
+    /// AC-A11Y-KEYBOARD: the Tab key reaches every button on the screen, Install among them.
+    #[test]
+    fn the_tab_key_reaches_every_control() {
+        let mut harness = harness_for(sample_installer(ThemeMode::Dark));
+        let order = winappmigrator_ui::checks::tab_order(&mut harness, 200);
+        let buttons: Vec<String> = winappmigrator_ui::checks::all_nodes(&harness.root())
+            .iter()
+            .filter(|node| {
+                node.accesskit_node().role() == egui::accesskit::Role::Button
+                    && !node.accesskit_node().is_disabled()
+            })
+            .map(winappmigrator_ui::checks::name_of)
+            .collect();
+        assert!(buttons.contains(&t!("installer-install")), "{buttons:#?}");
+        for button in &buttons {
+            assert!(
+                order.contains(button),
+                "{button} is never reached: {order:#?}"
+            );
+        }
+    }
+
+    /// AC-RTL-MIRROR: Install starts its row of actions, at the left, or at the right in a right-to-left language.
+    #[test]
+    fn a_right_to_left_window_is_the_mirror_image() {
+        let install_x = |language: &'static winappmigrator_i18n::Language| -> (f32, f32) {
+            with_language(language, || {
+                let harness = harness_for(sample_installer(ThemeMode::Dark));
+                let install = harness.get_by_label(&t!("installer-install")).rect();
+                (install.center().x, harness.ctx.content_rect().width())
+            })
+        };
+        let (x, width) = install_x(winappmigrator_i18n::ENGLISH);
+        assert!(x < width / 2.0, "{x} of {width}");
+        let (x, width) = install_x(&winappmigrator_i18n::PSEUDO_RTL);
+        assert!(x > width / 2.0, "{x} of {width}");
+    }
+
+    /// AC-A11Y-LIVE: how an install is going is said as it changes, and a failure at once.
+    #[test]
+    fn progress_and_problems_are_said_as_they_change() {
+        let mut running = sample_installer(ThemeMode::Dark);
+        running.phase = Phase::Running;
+        running.applied_now = true;
+        running.step = Some(InstallStep::new(InstallPhase::Files, 40, 200));
+        running.monitor = Some(InstallMonitor::default());
+        let harness = harness_for(running);
+        let live = winappmigrator_ui::checks::live_regions(&harness.root());
+        assert!(
+            live.iter()
+                .any(|(name, urgent)| name.contains("40") && !urgent),
+            "{live:#?}"
+        );
+        let mut failed = sample_installer(ThemeMode::Dark);
+        failed.phase = Phase::Done;
+        failed.outcome = Some(sample_outcome(true, 1));
+        let harness = harness_for(failed);
+        let live = winappmigrator_ui::checks::live_regions(&harness.root());
+        assert!(live.iter().any(|(_, urgent)| *urgent), "{live:#?}");
     }
 }

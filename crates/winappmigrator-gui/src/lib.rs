@@ -9,6 +9,8 @@ mod worker;
 #[cfg(test)]
 mod ui_tests;
 #[cfg(test)]
+mod ui_tests_a11y;
+#[cfg(test)]
 mod ui_tests_footprint;
 #[cfg(test)]
 mod ui_tests_network;

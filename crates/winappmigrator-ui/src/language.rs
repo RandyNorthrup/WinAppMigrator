@@ -43,7 +43,8 @@ pub fn language_menu(ui: &mut Ui, fonts_dir: &Path) -> Option<LanguageAction> {
                 fonts_dir,
                 winappmigrator_i18n::shipped().map(|language| language.native_name),
             ) {
-                ui.ctx().request_discard("the fonts for the languages' names");
+                ui.ctx()
+                    .request_discard("the fonts for the languages' names");
                 return;
             }
             for language in winappmigrator_i18n::shipped() {

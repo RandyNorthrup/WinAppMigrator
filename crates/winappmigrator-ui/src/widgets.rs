@@ -167,6 +167,26 @@ pub fn truncated_label(ui: &mut Ui, text: impl Into<RichText>) -> Response {
     }
 }
 
+/// A line that says how something is going. A screen reader says it again when it changes, once it has finished what
+/// it is saying.
+pub fn status_line(ui: &mut Ui, text: impl Into<RichText>) -> Response {
+    let response = label(ui, text);
+    mark_live(ui, &response, false);
+    response
+}
+
+/// Have a screen reader say what `response` says whenever it changes: at once if `urgent`, else when it is free to.
+fn mark_live(ui: &Ui, response: &Response, urgent: bool) {
+    let live = if urgent {
+        egui::accesskit::Live::Assertive
+    } else {
+        egui::accesskit::Live::Polite
+    };
+    let _marked = ui
+        .ctx()
+        .accesskit_node_builder(response.id, |node| node.set_live(live));
+}
+
 /// A tooltip, read in the direction of the language in use.
 pub fn tooltip(response: Response, text: impl Into<String>) -> Response {
     let text = text.into();
@@ -762,7 +782,9 @@ pub fn notice(ui: &mut Ui, theme: &Theme, role: Role, message: &str) {
                 let (rect, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
                 let icon_rect = Rect::from_center_size(rect.center(), vec2(15.0, 15.0));
                 paint_icon(ui.painter(), role_icon(role), icon_rect, color);
-                wrapped_label(ui, RichText::new(message).size(13.0).color(theme.text));
+                let said = wrapped_label(ui, RichText::new(message).size(13.0).color(theme.text));
+                // It is news when it appears or changes; a problem is said at once.
+                mark_live(ui, &said, role == Role::Danger);
             });
         });
 }
