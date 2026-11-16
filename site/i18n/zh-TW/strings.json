@@ -1,0 +1,14 @@
+{
+  "language_name": "中文（繁體）",
+  "language": "語言",
+  "s_skip": "跳至主要內容",
+  "s_site": "網站",
+  "s_docs": "說明文件",
+  "s_download": "下載",
+  "s_all_pages": "所有頁面",
+  "s_documentation": "說明文件",
+  "s_updated": "上次變更於 {date}。本頁說明的是 WinAppMigrator 最新版本 {version} 的內容。",
+  "s_built": "本網站由專案的 <a href=\"{wiki}\">wiki</a> 建置而成。WinAppMigrator 是免費的開放原始碼軟體，採用 <a href=\"{license}\">MIT 授權</a>。",
+  "notice": "本頁由機器從英文翻譯而成，可能有錯誤。<a href=\"{english}\">閱讀英文頁面</a>，或<a href=\"{report}\">回報翻譯問題</a>。",
+  "full_guide": "完整指南（英文）"
+}

@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="th-TH" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – ย้ายโปรแกรม Windows ที่ติดตั้งไว้ไปยังพีซีเครื่องใหม่</title>
+  <meta name="description" content="เครื่องมือฟรีและโอเพนซอร์ส ที่เปลี่ยนแอป Windows ที่ติดตั้งไว้ให้เป็นตัวติดตั้งเดียวสำหรับพีซีเครื่องอื่น แม้จากไดรฟ์ของพีซีที่เสีย อิมเมจดิสก์ หรือพีซี Windows 7 เครื่องเก่า">
+  <link rel="canonical" href="${base_url}/th-TH/">
+${alternates}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – ย้ายโปรแกรม Windows ที่ติดตั้งไว้ไปยังพีซีเครื่องใหม่">
+  <meta property="og:description" content="เปลี่ยนแอป Windows ที่ติดตั้งไว้ให้เป็นตัวติดตั้งเดียว ที่คุณเรียกใช้บนพีซีเครื่องอื่นได้ แม้ตัวติดตั้งดั้งเดิมจะหายไปนานแล้วก็ตาม">
+  <meta property="og:url" content="${base_url}/th-TH/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "เปลี่ยนแอปเดสก์ท็อป Windows ที่ติดตั้งไว้ให้เป็นตัวติดตั้งแบบแตกไฟล์ได้เองเพียงไฟล์เดียวสำหรับพีซีเครื่องอื่น ได้จากพีซีเครื่องนี้ ไดรฟ์ที่ถอดออกมาจากเครื่องที่เสีย อิมเมจดิสก์ หรือพีซี Windows 7 ขึ้นไปเครื่องเก่าผ่านเครือข่ายของคุณ",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">ข้ามไปยังเนื้อหาของหน้า</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="ไซต์">
+        <a href="Home">เอกสารประกอบ</a>
+        <a href="https://github.com/${repository}/releases/latest">ดาวน์โหลด</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+${languages}
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>ย้ายโปรแกรม Windows ที่ติดตั้งไว้ไปยังพีซีเครื่องใหม่</h1>
+      <p class="lede">WinAppMigrator เปลี่ยนแอปที่ติดตั้งไว้บนพีซี Windows เครื่องหนึ่ง ให้เป็นตัวติดตั้งเดียวที่คุณเรียกใช้บนอีกเครื่องหนึ่งได้
+        แม้แอปจะอยู่บนพีซี Windows 7 เครื่องเก่าในเครือข่ายของคุณ บนไดรฟ์ที่ถอดออกมาจากเครื่องที่กำลังจะเสีย หรือบนอิมเมจของไดรฟ์นั้น
+        และตัวติดตั้งดั้งเดิมหายไปนานแล้วก็ตาม</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">ดาวน์โหลด ${version}</a>
+        <a class="button" href="Getting-Started">เริ่มต้นใช้งาน</a>
+      </p>
+      <p class="facts">ฟรีและโอเพนซอร์ส สัญญาอนุญาต MIT · Windows 10 และ 11, x64 · 24 ภาษา · ลงนามโดย Randy Northrup</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="WinAppMigrator ที่เลือกแอปไว้ แสดงขนาดที่ตัวติดตั้งอาจมี พื้นที่เพียงพอหรือไม่ และสิ่งที่รวมอยู่ในตัวติดตั้ง">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">สถานการณ์ที่ช่วยได้</h2>
+      <div class="cards">
+        <article>
+          <h3>ย้ายไปยังพีซีเครื่องใหม่</h3>
+          <p>แอปจะย้ายมาได้โดยไม่ต้องตามหาไฟล์ติดตั้ง ไฟล์สิทธิ์การใช้งาน หรือการตั้งค่าของแอป</p>
+          <a href="Getting-Started">เริ่มต้นใช้งาน</a>
+        </article>
+        <article>
+          <h3>พีซีเครื่องเก่าเปิดไม่ติด</h3>
+          <p>ถอดไดรฟ์ออกมา เชื่อมต่อกับพีซีที่ใช้งานได้ แล้วสร้างตัวติดตั้งจากแอปบนไดรฟ์นั้น หากไดรฟ์อาจกำลังจะเสีย
+            ให้สร้างอิมเมจของไดรฟ์ก่อน แล้วสร้างตัวติดตั้งจากอิมเมจ เนื่องจากการอ่านไดรฟ์ที่กำลังจะเสียอาจทำให้ไดรฟ์เสียสนิท</p>
+          <a href="Moving-from-a-Connected-Drive">จากไดรฟ์หรืออิมเมจดิสก์</a>
+        </article>
+        <article>
+          <h3>ย้ายออกจาก Windows 7, Vista, 8 หรือ 8.1</h3>
+          <p>แอปจาก Windows เหล่านี้ย้ายไปอยู่บน Windows 10 หรือ 11 ได้ โดยจัดการสิ่งที่แตกต่างไว้ให้: Windows แบบ 32 บิต
+            <code>VirtualStore</code> และรันไทม์ DirectX 9</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">แอปจาก Windows รุ่นเก่า</a>
+        </article>
+        <article>
+          <h3>พีซีเครื่องเก่ายังทำงานอยู่ในเครือข่ายของคุณ</h3>
+          <p>เรียกใช้ WinAppMigrator Client ซึ่งเป็นโปรแกรมขนาดเล็กที่ลงนามแล้วบนเครื่องนั้น พิมพ์รหัสที่โปรแกรมแสดง แล้วเลือกแอป
+            เฉพาะสิ่งที่การสร้างต้องใช้เท่านั้นที่ส่งผ่านเครือข่าย โดยเข้ารหัสไว้ ไม่ต้องถอดสิ่งใดออกจากพีซี</p>
+          <a href="Moving-over-the-Network">จากพีซีผ่านเครือข่าย</a>
+        </article>
+        <article>
+          <h3>ไฟล์ติดตั้งหายไป หรือบริษัทผู้ผลิตไม่อยู่แล้ว</h3>
+          <p>WinAppMigrator ทำงานย้อนกลับจากสิ่งที่ติดตั้งไว้: ไฟล์ของแอป รายการรีจิสทรี บริการ
+            และรันไทม์ของ Microsoft ที่แอปต้องใช้</p>
+          <a href="How-It-Works">วิธีการทำงาน</a>
+        </article>
+        <article>
+          <h3>แอปเดียวกันบนพีซีหลายเครื่อง</h3>
+          <p>ตัวติดตั้งที่สร้างขึ้นสามารถแสดงตัวอย่าง ติดตั้ง และถอนการติดตั้งจากพร้อมท์คำสั่งได้
+            สคริปต์จึงติดตั้งแอปเดียวกันบนพีซีแต่ละเครื่องได้</p>
+          <a href="Command-Line">บรรทัดคำสั่ง</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">วิธีการทำงาน</h2>
+      <ol class="steps">
+        <li>
+          <h3>เลือกแอป</h3>
+          <p>จากพีซีเครื่องนี้ ไดรฟ์จากพีซีเครื่องอื่นที่เสียบเข้ากับเครื่องนี้ อิมเมจ <code>.vhd</code> หรือ <code>.vhdx</code>
+            ที่แอปแนบแบบอ่านอย่างเดียว หรือพีซีเครื่องอื่นในเครือข่ายของคุณ</p>
+        </li>
+        <li>
+          <h3>ดูสิ่งที่จะรวมไว้</h3>
+          <p>หน้าจอจะบอกว่าตัวติดตั้งอาจมีขนาดเท่าใด พื้นที่เพียงพอหรือไม่ และมีอะไรอยู่ภายใน ยกเลิกการทำเครื่องหมายสิ่งที่คุณไม่ต้องการ
+            และทำเครื่องหมายสิ่งที่ดูเกี่ยวข้อง ซึ่งการจับคู่ชื่อแบบตรงตัวมองข้ามไป</p>
+        </li>
+        <li>
+          <h3>สร้างตัวติดตั้ง</h3>
+          <p>คุณจะได้ไฟล์ <code>.exe</code> เพียงไฟล์เดียว ซึ่งตั้งชื่อตามสิ่งที่อยู่ภายใน แอปที่ใหญ่เกินกว่าจะอยู่ในไฟล์เดียว
+            จะมาเป็นไฟล์ <code>.exe</code> และไฟล์ข้อมูลที่ต้องอยู่ด้วยกัน</p>
+        </li>
+        <li>
+          <h3>เรียกใช้บนพีซีเครื่องอื่น</h3>
+          <p>ตัวติดตั้งจะตรวจสอบแฮชของแพคเกจก่อนเขียนสิ่งใด จากนั้นติดตั้ง แล้วอ่านสิ่งที่ติดตั้งกลับมาตรวจสอบอีกครั้ง
+            หากเกิดข้อผิดพลาด หรือคุณยกเลิก ตัวติดตั้งจะย้อนกลับสิ่งที่ทำไป ยกเว้นรันไทม์ที่ติดตั้งไว้
+            และจะทิ้งตัวถอนการติดตั้งไว้ในการตั้งค่า</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="ตัวติดตั้ง แสดงตำแหน่งที่ติดตั้ง ลงนามหรือไม่ และสิ่งที่ตั้งค่านอกเหนือจากไฟล์">
+      </picture>
+      <p class="more"><a href="How-It-Works">ขั้นตอนทั้งหมดตั้งแต่ต้นจนจบ</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">สิ่งที่อยู่ในตัวติดตั้ง</h2>
+      <ul class="checks">
+        <li><strong>ไฟล์ของโปรแกรม</strong> ซึ่งค้นพบผ่านบันทึกของ MSI และ Inno Setup ไฟล์บันทึกของ NSIS, App Paths
+          และโฟลเดอร์ที่ตั้งชื่อตรงกับผลิตภัณฑ์</li>
+        <li><strong>รายการรีจิสทรี</strong>: คีย์ระดับเครื่องของแอป คลาส COM ชนิดไฟล์ โพรโทคอลลิงก์ คำสั่งเมนู
+          และส่วนขยายเชลล์</li>
+        <li><strong>บริการและไดรเวอร์ งานที่จัดกำหนดการไว้ ทางลัด</strong> กฎไฟร์วอลล์ ฟอนต์
+          และตัวแปรสภาพแวดล้อมที่เก็บเส้นทางของแอป</li>
+        <li><strong>รันไทม์</strong>: รันไทม์ Visual C++ และ .NET รุ่นใหม่ที่แอปต้องใช้ ซึ่งจะดาวน์โหลดเมื่อคุณสร้างตัวติดตั้ง
+          แล้วใส่ไว้ภายใน จึงติดตั้งได้โดยไม่ต้องใช้อินเทอร์เน็ต เว้นแต่ในตอนนั้นจะดาวน์โหลดรันไทม์บางรายการไม่ได้</li>
+        <li><strong>ข้อมูลผู้ใช้และข้อมูลสิทธิ์การใช้งาน หากคุณเลือก</strong> WinAppMigrator ไม่เคยหลบเลี่ยงการเปิดใช้งาน
+          และสิทธิ์การใช้งานที่ผูกกับเครื่องเก่าอาจต้องเปิดใช้งานใหม่</li>
+        <li><strong>ไม่รวมข้อมูลประจำตัวเด็ดขาด</strong> ค่าและไฟล์ที่ดูเหมือนรหัสผ่าน โทเค็น หรือคีย์ส่วนตัว จะไม่รวมไว้
+          และจะแจ้งชื่อให้ทราบก่อนที่คุณจะสร้าง</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">ทุกสิ่งที่รวมไว้ และสิ่งที่ไม่รวมไว้</a></p>
+    </section>
+
+    <section aria-labelledby="everyone">
+      <h2 id="everyone">ในภาษาของคุณ สำหรับทุกคน</h2>
+      <p>แอป ตัวติดตั้งทุกตัวที่แอปสร้าง และไคลเอ็นต์สำหรับพีซีเครื่องเก่า รองรับ 24 ภาษา โดยเริ่มต้นด้วยภาษาที่ Windows ใช้อยู่
+        ตัวติดตั้งจะใช้ภาษาของพีซีที่เรียกใช้ ไม่ใช่ภาษาของพีซีที่สร้างตัวติดตั้ง และภาษาอาหรับ เปอร์เซีย อูรดู
+        และฮีบรู จะจัดวางจากขวาไปซ้าย ทุกภาษายกเว้นภาษาอังกฤษแปลด้วยเครื่อง หากภาษาใดอ่านแล้วไม่ถูกต้อง
+        <a href="https://github.com/${repository}/issues/new?template=translation-problem.yml">โปรดแจ้งให้ทราบ</a></p>
+      <p>ตัวควบคุมทุกตัวเข้าถึงได้ด้วยแป้นพิมพ์ และมีชื่อสำหรับโปรแกรมอ่านหน้าจอ และหน้าต่างจะเป็นไปตามธีมความคมชัด
+        ขนาดข้อความ และเอฟเฟกต์ภาพเคลื่อนไหวของ Windows หน้าต่างเหล่านี้ได้รับการตรวจสอบตาม WCAG 2.2 AA
+        และรายงานความสอดคล้องจะอธิบายวิธีการตรวจสอบ</p>
+      <p class="more"><a href="Languages-and-Accessibility">ภาษาและการช่วยสำหรับการเข้าถึง</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">ก่อนที่คุณจะพึ่งพา</h2>
+      <p>ทุกครั้งที่มีการพุชไปยังโปรเจกต์ จะมีการย้ายแอปโอเพนซอร์สจริงห้าแอป ได้แก่ 7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter
+        และ Git LFS จากเครื่องทดสอบเครื่องหนึ่งไปยังเครื่องใหม่ และให้ Windows เองใช้งานสิ่งที่คืนค่าแล้ว แอปเหล่านั้นเป็นแอปขนาดเล็ก
+        ที่ทำงานเรียบร้อยบนเครื่องที่สะอาด การทดสอบเหล่านั้นยังไม่เคยเรียกใช้บน Windows 10 และ 11 รุ่นเดสก์ท็อปบน x64
+        และยังไม่เคยลองแอปที่ต้องเปิดใช้งานแบบออนไลน์ การโหลดไดรเวอร์ และการเริ่มระบบใหม่หลังติดตั้งเลย</p>
+      <p>ดังนั้น โปรดลองใช้ตัวติดตั้งก่อนที่จะพึ่งพา และสร้างอิมเมจของไดรฟ์ที่กำลังจะเสียก่อนที่จะอ่าน
+        WinAppMigrator มีไว้สำหรับซอฟต์แวร์ที่คุณได้รับอนุญาตให้ย้ายเท่านั้น</p>
+      <p class="more"><a href="Limitations">ข้อจำกัด</a> · <a href="Requirements-and-Testing">ข้อกำหนดและการทดสอบ</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">รับ WinAppMigrator</h2>
+      <ol class="plain">
+        <li>ดาวน์โหลด <code>WinAppMigrator-v${version}.exe</code> จาก
+          <a href="https://github.com/${repository}/releases/latest">รุ่นล่าสุดที่เผยแพร่</a> ไม่ต้องติดตั้งสิ่งใด</li>
+        <li>เรียกใช้ไฟล์ Windows จะขออนุมัติจากผู้ดูแลระบบ เนื่องจากทั้งการอ่านไดรฟ์อื่นและการติดตั้งบริการต้องใช้สิทธิ์นี้
+          ลายเซ็นของไฟล์ระบุชื่อ Randy Northrup</li>
+        <li>เลือกแอป แล้วหน้าจอจะแสดงสิ่งที่จะรวมไว้ในตัวติดตั้งของแอปนั้น ก่อนที่คุณจะคลิกสิ่งใด</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">ดาวน์โหลด ${version}</a>
+        <a class="button" href="Getting-Started">วิธีตรวจสอบไฟล์ที่ดาวน์โหลด</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version} เผยแพร่เมื่อ ${release_date} ฟรีและโอเพนซอร์ส ภายใต้
+        <a href="https://github.com/${repository}/blob/main/LICENSE">สัญญาอนุญาต MIT</a></p>
+      <p><a href="Home">เอกสารประกอบ</a> · <a href="https://github.com/${repository}">ซอร์สโค้ด</a> ·
+        <a href="https://github.com/${repository}/issues">รายงานปัญหา</a> ·
+        <a href="https://github.com/${repository}/security/policy">ความปลอดภัย</a></p>
+    </div>
+  </footer>
+</body>
+</html>

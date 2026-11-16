@@ -1,0 +1,14 @@
+{
+  "language_name": "Bahasa Indonesia",
+  "language": "Bahasa",
+  "s_skip": "Lompat ke isi halaman",
+  "s_site": "Situs",
+  "s_docs": "Dokumentasi",
+  "s_download": "Unduh",
+  "s_all_pages": "Semua halaman",
+  "s_documentation": "Dokumentasi",
+  "s_updated": "Terakhir diubah {date}. Menjelaskan WinAppMigrator sesuai rilis terbarunya, {version}.",
+  "s_built": "Situs ini dibuat dari <a href=\"{wiki}\">wiki</a> proyek. WinAppMigrator gratis dan sumber terbuka, dengan <a href=\"{license}\">lisensi MIT</a>.",
+  "notice": "Halaman ini diterjemahkan oleh mesin dari bahasa Inggris, dan mungkin berisi kesalahan. <a href=\"{english}\">Baca halaman dalam bahasa Inggris</a>, atau <a href=\"{report}\">laporkan masalah terjemahan</a>.",
+  "full_guide": "Panduan lengkap, dalam bahasa Inggris"
+}

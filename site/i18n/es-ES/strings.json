@@ -1,0 +1,14 @@
+{
+  "language_name": "Español",
+  "language": "Idioma",
+  "s_skip": "Ir al contenido",
+  "s_site": "Sitio",
+  "s_docs": "Documentación",
+  "s_download": "Descargar",
+  "s_all_pages": "Todas las páginas",
+  "s_documentation": "Documentación",
+  "s_updated": "Última modificación: {date}. Describe WinAppMigrator en su versión más reciente, {version}.",
+  "s_built": "Este sitio se genera a partir de la <a href=\"{wiki}\">wiki</a> del proyecto. WinAppMigrator es gratuito y de código abierto, con la <a href=\"{license}\">licencia MIT</a>.",
+  "notice": "Esta página se ha traducido automáticamente del inglés y puede contener errores. <a href=\"{english}\">Lee la página en inglés</a> o <a href=\"{report}\">notifica un problema con la traducción</a>.",
+  "full_guide": "La guía completa, en inglés"
+}

@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="id-ID" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – Pindahkan program Windows yang diinstal ke PC baru</title>
+  <meta name="description" content="Alat gratis dan sumber terbuka yang mengubah aplikasi Windows yang diinstal menjadi satu penginstal untuk PC lain, bahkan dari drive PC yang mati, citra disk, atau PC Windows 7 lama.">
+  <link rel="canonical" href="${base_url}/id-ID/">
+${alternates}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – Pindahkan program Windows yang diinstal ke PC baru">
+  <meta property="og:description" content="Ubah aplikasi Windows yang diinstal menjadi satu penginstal yang dapat Anda jalankan di PC lain, bahkan ketika penginstal aslinya sudah lama hilang.">
+  <meta property="og:url" content="${base_url}/id-ID/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "Mengubah aplikasi desktop Windows yang diinstal menjadi satu penginstal yang mengekstrak sendiri untuk PC lain: dari PC ini, drive yang dicabut dari mesin yang mati, citra disk, atau PC lama dengan Windows 7 atau yang lebih baru melalui jaringan Anda.",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">Lompat ke isi halaman</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="Situs">
+        <a href="Home">Dokumentasi</a>
+        <a href="https://github.com/${repository}/releases/latest">Unduh</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+${languages}
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>Pindahkan program Windows yang diinstal ke PC baru</h1>
+      <p class="lede">WinAppMigrator mengubah aplikasi yang diinstal di satu PC Windows menjadi satu penginstal yang dapat Anda jalankan di PC lain.
+        Bahkan ketika aplikasi itu berada di PC Windows 7 lama di jaringan Anda, di drive yang dicabut dari mesin yang hampir rusak, atau di
+        citra drive tersebut, dan penginstal aslinya sudah lama hilang.</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">Unduh ${version}</a>
+        <a class="button" href="Getting-Started">Mulai</a>
+      </p>
+      <p class="facts">Gratis dan sumber terbuka, lisensi MIT · Windows 10 dan 11, x64 · 24 bahasa · Ditandatangani oleh Randy Northrup</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="WinAppMigrator dengan sebuah aplikasi dipilih, menampilkan seberapa besar penginstalnya nanti, apakah muat, dan apa saja isinya">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">Kapan alat ini membantu</h2>
+      <div class="cards">
+        <article>
+          <h3>Pindah ke PC baru</h3>
+          <p>Aplikasi ikut pindah tanpa Anda perlu mencari file setup, file lisensi, atau pengaturannya.</p>
+          <a href="Getting-Started">Memulai</a>
+        </article>
+        <article>
+          <h3>PC lama tidak mau menyala</h3>
+          <p>Lepaskan drive-nya, sambungkan ke PC yang berfungsi, lalu buat penginstal dari aplikasi di drive itu. Jika drive itu mungkin
+            hampir rusak, buat citranya terlebih dahulu lalu buat penginstal dari citra itu, karena membaca drive yang hampir rusak dapat merusaknya sama sekali.</p>
+          <a href="Moving-from-a-Connected-Drive">Dari drive atau citra disk</a>
+        </article>
+        <article>
+          <h3>Meninggalkan Windows 7, Vista, 8, atau 8.1</h3>
+          <p>Aplikasi dari salah satunya dapat dipindahkan ke Windows 10 atau 11, dengan hal-hal yang berbeda di sana sudah ditangani: Windows 32-bit,
+            <code>VirtualStore</code>, dan runtime DirectX 9.</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">Aplikasi dari Windows lama</a>
+        </article>
+        <article>
+          <h3>PC lama masih berjalan, di jaringan Anda</h3>
+          <p>Jalankan WinAppMigrator Client yang kecil dan ditandatangani di PC itu, ketik kode yang ditampilkannya, lalu pilih aplikasi. Hanya yang
+            diperlukan untuk pembuatan penginstal yang dikirim melalui jaringan, dalam keadaan terenkripsi. Tidak ada yang perlu dilepas dari PC itu.</p>
+          <a href="Moving-over-the-Network">Dari PC melalui jaringan</a>
+        </article>
+        <article>
+          <h3>File setup sudah hilang, atau perusahaannya sudah tidak ada</h3>
+          <p>Alat ini bekerja mundur dari apa yang terinstal: file aplikasi, entri registrinya, layanannya, dan runtime
+            Microsoft yang diperlukannya.</p>
+          <a href="How-It-Works">Cara kerjanya</a>
+        </article>
+        <article>
+          <h3>Aplikasi yang sama di beberapa PC</h3>
+          <p>Penginstal yang dibuatnya dapat melakukan pratinjau, menginstal, dan menghapus instalan dari prompt perintah, sehingga skrip dapat menginstal
+            aplikasi yang sama di setiap PC.</p>
+          <a href="Command-Line">Baris perintah</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">Cara kerjanya</h2>
+      <ol class="steps">
+        <li>
+          <h3>Pilih aplikasi</h3>
+          <p>Dari PC ini, drive dari PC lain yang dicolokkan ke PC ini, citra <code>.vhd</code> atau <code>.vhdx</code>
+            yang dilampirkan aplikasi dalam mode baca-saja, atau PC lain di jaringan Anda.</p>
+        </li>
+        <li>
+          <h3>Lihat apa yang disertakan</h3>
+          <p>Layar menunjukkan seberapa besar penginstalnya nanti, apakah muat, dan apa isinya. Hapus centang pada yang tidak Anda inginkan,
+            dan centang yang tampak terkait tetapi terlewat oleh pencocokan nama persis.</p>
+        </li>
+        <li>
+          <h3>Buat penginstal</h3>
+          <p>Anda mendapatkan satu <code>.exe</code>, yang diberi nama sesuai isinya. Aplikasi yang terlalu besar untuk satu file menjadi sebuah <code>.exe</code>
+            dan sebuah file data yang harus tetap bersama.</p>
+        </li>
+        <li>
+          <h3>Jalankan di PC lain</h3>
+          <p>Penginstal memeriksa hash paketnya sebelum menulis apa pun, menginstal, lalu membaca kembali apa yang diinstalnya dan memeriksanya.
+            Jika terjadi kesalahan, atau Anda membatalkan, penginstal mengembalikan apa yang telah dilakukannya, kecuali runtime yang diinstalnya.
+            Penginstal meninggalkan penghapus instalan di Pengaturan.</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="Penginstal, menampilkan lokasi instalasi, apakah penginstal ditandatangani, dan apa yang disiapkannya selain file">
+      </picture>
+      <p class="more"><a href="How-It-Works">Seluruh perjalanannya, langkah demi langkah</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">Apa saja yang ada dalam penginstal</h2>
+      <ul class="checks">
+        <li><strong>File program</strong>, yang ditemukan melalui catatan MSI dan Inno Setup, log NSIS, App Paths, dan folder yang diberi nama
+          persis sesuai produknya.</li>
+        <li><strong>Entri registri</strong>: kunci aplikasi untuk seluruh mesin, kelas COM-nya, jenis file, protokol tautan, perintah
+          menu, dan ekstensi shell.</li>
+        <li><strong>Layanan dan driver, tugas terjadwal, pintasan</strong>, aturan firewall, font, dan variabel lingkungan
+          yang menyimpan jalur aplikasi.</li>
+        <li><strong>Runtime</strong>: runtime Visual C++ dan .NET modern yang diperlukannya, diunduh saat Anda membuat penginstal lalu dimasukkan
+          ke dalamnya, sehingga dapat diinstal tanpa internet, kecuali jika ada yang tidak dapat diunduh saat itu.</li>
+        <li><strong>Data pengguna dan data lisensi, jika Anda memilihnya.</strong> Alat ini tidak pernah melewati aktivasi, dan lisensi yang terikat
+          ke mesin lama mungkin perlu diaktifkan ulang.</li>
+        <li><strong>Tidak pernah kredensial.</strong> Nilai dan file yang tampak seperti kata sandi, token, atau kunci privat tidak disertakan
+          dan disebutkan sebelum Anda membuat penginstal.</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">Semua yang disertakan, dan yang tidak</a></p>
+    </section>
+
+    <section aria-labelledby="everyone">
+      <h2 id="everyone">Dalam bahasa Anda, untuk semua orang</h2>
+      <p>Aplikasi, setiap penginstal yang dibuatnya, dan kliennya untuk PC lama tersedia dalam 24 bahasa, dimulai dengan bahasa yang digunakan
+        Windows. Penginstal menggunakan bahasa PC tempatnya dijalankan, bukan PC tempatnya dibuat, dan bahasa Arab, Persia, Urdu,
+        serta Ibrani ditata dari kanan ke kiri. Semua bahasa selain bahasa Inggris diterjemahkan oleh mesin; jika ada terjemahan yang keliru,
+        <a href="https://github.com/${repository}/issues/new?template=translation-problem.yml">beri tahu kami</a>.</p>
+      <p>Setiap kontrol dapat dijangkau dengan keyboard dan memiliki nama untuk pembaca layar, dan jendelanya mengikuti
+        Tema kontras, Ukuran teks, dan Efek animasi Windows. Semuanya diperiksa terhadap WCAG 2.2 AA, dan laporan
+        kesesuaiannya menjelaskan caranya.</p>
+      <p class="more"><a href="Languages-and-Accessibility">Bahasa dan aksesibilitas</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">Sebelum Anda mengandalkannya</h2>
+      <p>Setiap push ke proyek ini memindahkan lima aplikasi sumber terbuka sungguhan, 7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter, dan
+        Git LFS, dari satu mesin uji ke mesin-mesin baru, dan meminta Windows sendiri menggunakan apa yang dipulihkan. Itu adalah aplikasi kecil yang
+        berperilaku baik di mesin yang bersih. Windows 10 dan 11 desktop pada x64 belum dijalankan dalam pengujian tersebut, dan aplikasi dengan aktivasi
+        online, driver yang dimuat, serta memulai ulang PC setelahnya sama sekali belum dicoba.</p>
+      <p>Jadi, cobalah penginstal sebelum Anda mengandalkannya, dan buat citra drive yang hampir rusak sebelum Anda membacanya. Alat ini hanya
+        untuk perangkat lunak yang boleh Anda pindahkan.</p>
+      <p class="more"><a href="Limitations">Keterbatasan</a> · <a href="Requirements-and-Testing">Persyaratan dan pengujian</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">Dapatkan</h2>
+      <ol class="plain">
+        <li>Unduh <code>WinAppMigrator-v${version}.exe</code> dari
+          <a href="https://github.com/${repository}/releases/latest">rilis terbaru</a>. Tidak ada yang perlu diinstal.</li>
+        <li>Jalankan. Windows meminta persetujuan administrator, karena membaca drive lain dan menginstal layanan sama-sama
+          memerlukannya. Tanda tangannya menyebutkan nama Randy Northrup.</li>
+        <li>Pilih aplikasi, dan layar menunjukkan apa yang akan masuk ke penginstalnya sebelum Anda mengklik apa pun.</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">Unduh ${version}</a>
+        <a class="button" href="Getting-Started">Cara memeriksa unduhan</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version}, dirilis ${release_date}. Gratis dan sumber terbuka, dengan
+        <a href="https://github.com/${repository}/blob/main/LICENSE">lisensi MIT</a>.</p>
+      <p><a href="Home">Dokumentasi</a> · <a href="https://github.com/${repository}">Sumber</a> ·
+        <a href="https://github.com/${repository}/issues">Laporkan masalah</a> ·
+        <a href="https://github.com/${repository}/security/policy">Keamanan</a></p>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "language_name": "日本語",
+  "language": "言語",
+  "s_skip": "本文へスキップ",
+  "s_site": "サイト",
+  "s_docs": "ドキュメント",
+  "s_download": "ダウンロード",
+  "s_all_pages": "すべてのページ",
+  "s_documentation": "ドキュメント",
+  "s_updated": "最終更新日：{date}。最新リリース {version} 時点の WinAppMigrator について説明しています。",
+  "s_built": "このサイトは、プロジェクトの <a href=\"{wiki}\">wiki</a> から作成されています。WinAppMigrator は、<a href=\"{license}\">MIT ライセンス</a>の下で提供される無料のオープンソース ソフトウェアです。",
+  "notice": "このページは英語版から機械翻訳されたもので、誤りが含まれている可能性があります。<a href=\"{english}\">英語版のページを読む</a>か、<a href=\"{report}\">翻訳の問題を報告</a>してください。",
+  "full_guide": "完全なガイド（英語）"
+}

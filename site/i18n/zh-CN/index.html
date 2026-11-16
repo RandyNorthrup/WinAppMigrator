@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – 将已安装的 Windows 程序迁移到新电脑</title>
+  <meta name="description" content="免费的开源工具，可将已安装的 Windows 应用转换为一个安装程序，供另一台电脑使用；即使应用位于无法启动的电脑的驱动器上、磁盘映像中或旧的 Windows 7 电脑上也可以。">
+  <link rel="canonical" href="${base_url}/zh-CN/">
+${alternates}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – 将已安装的 Windows 程序迁移到新电脑">
+  <meta property="og:description" content="将已安装的 Windows 应用转换为一个可在另一台电脑上运行的安装程序，即使原始安装程序早已不见。">
+  <meta property="og:url" content="${base_url}/zh-CN/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "将已安装的 Windows 桌面应用转换为一个自解压安装程序，供另一台电脑使用：应用可以来自此电脑、从无法启动的电脑中取出的驱动器、磁盘映像，或通过网络连接的 Windows 7 或更高版本的旧电脑。",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">跳到正文</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="网站">
+        <a href="Home">文档</a>
+        <a href="https://github.com/${repository}/releases/latest">下载</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+${languages}
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>将已安装的 Windows 程序迁移到新电脑</h1>
+      <p class="lede">WinAppMigrator 可将一台 Windows 电脑上安装的应用转换为一个安装程序，供你在另一台电脑上运行。即使该应用位于网络中另一台旧的 Windows 7 电脑上、从即将损坏的电脑中取出的驱动器上或这种驱动器的映像中，而且原始安装程序早已不见，也同样可以。</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">下载 ${version}</a>
+        <a class="button" href="Getting-Started">开始使用</a>
+      </p>
+      <p class="facts">免费开源，MIT 许可证 · Windows 10 和 11，x64 · 24 种语言 · 由 Randy Northrup 签名</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="WinAppMigrator 中选中了一个应用，显示其安装程序最大可能有多大、空间是否够用，以及其中包含哪些内容">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">适用场景</h2>
+      <div class="cards">
+        <article>
+          <h3>迁移到新电脑</h3>
+          <p>应用随之迁移，你无需四处寻找它的安装文件、许可证文件或设置。</p>
+          <a href="Getting-Started">入门</a>
+        </article>
+        <article>
+          <h3>旧电脑无法启动</h3>
+          <p>取出它的驱动器，连接到一台能正常工作的电脑，然后从其中的某个应用生成安装程序。如果驱动器可能即将损坏，请先为它创建映像，再从映像生成，因为读取即将损坏的驱动器可能会让它彻底报废。</p>
+          <a href="Moving-from-a-Connected-Drive">从驱动器或磁盘映像迁移</a>
+        </article>
+        <article>
+          <h3>告别 Windows 7、Vista、8 或 8.1</h3>
+          <p>这些系统上的应用可以迁移到 Windows 10 或 11，旧系统的不同之处也会一并处理：32 位 Windows、<code>VirtualStore</code> 以及 DirectX 9 运行时。</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">来自旧版 Windows 的应用</a>
+        </article>
+        <article>
+          <h3>旧电脑仍能运行，且在你的网络中</h3>
+          <p>在旧电脑上运行小巧且已签名的 WinAppMigrator Client，输入它显示的代码，然后选择一个应用。只有生成所需的内容才会通过网络传输，并且经过加密。无需从电脑中拆出任何东西。</p>
+          <a href="Moving-over-the-Network">通过网络从电脑迁移</a>
+        </article>
+        <article>
+          <h3>安装文件不见了，或者公司已经不在了</h3>
+          <p>它从已安装的内容反向推导：应用的文件、注册表项、服务，以及它需要的
+            Microsoft 运行时。</p>
+          <a href="How-It-Works">工作原理</a>
+        </article>
+        <article>
+          <h3>在多台电脑上安装同一个应用</h3>
+          <p>它生成的安装程序可以在命令提示符中预览、安装和卸载，因此可以用脚本在每台电脑上安装同一个应用。</p>
+          <a href="Command-Line">命令行</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">工作原理</h2>
+      <ol class="steps">
+        <li>
+          <h3>选择应用</h3>
+          <p>应用可以来自此电脑、插入此电脑的另一台电脑的驱动器、WinAppMigrator 以只读方式附加的 <code>.vhd</code> 或 <code>.vhdx</code> 映像，或网络中的另一台电脑。</p>
+        </li>
+        <li>
+          <h3>查看包含的内容</h3>
+          <p>屏幕会显示安装程序最大可能有多大、空间是否够用，以及其中包含哪些内容。取消勾选你不需要的内容，并勾选按确切名称没有找到、但看起来相关的内容。</p>
+        </li>
+        <li>
+          <h3>生成安装程序</h3>
+          <p>你会得到一个 <code>.exe</code>，以其中包含的内容命名。对于一个文件装不下的大型应用，会生成一个 <code>.exe</code>
+            和一个数据文件，两者必须放在一起。</p>
+        </li>
+        <li>
+          <h3>在另一台电脑上运行</h3>
+          <p>它在写入任何内容之前先检查程序包的哈希，然后安装，再读回已安装的内容并进行检查。如果出现任何问题，或者你取消了安装，它会恢复所做的更改，但它安装的运行时除外。它会在“设置”中留下卸载程序。</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="安装程序，显示安装位置、是否已签名，以及除文件之外还会设置的内容">
+      </picture>
+      <p class="more"><a href="How-It-Works">完整流程，分步说明</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">安装程序中包含哪些内容</h2>
+      <ul class="checks">
+        <li><strong>程序文件</strong>：通过 MSI 和 Inno Setup 的记录、NSIS 日志、App Paths，以及与产品名称完全一致的文件夹找到。</li>
+        <li><strong>注册表项</strong>：应用适用于整台电脑的注册表项、COM 类、文件类型、链接协议、菜单命令和外壳扩展。</li>
+        <li><strong>服务和驱动程序、计划任务、快捷方式</strong>，以及防火墙规则、字体和保存应用路径的环境变量。</li>
+        <li><strong>运行时</strong>：它需要的 Visual C++ 和新式 .NET 运行时，在生成时下载并放入安装程序中，因此无需联网即可安装；除非当时某个运行时无法下载。</li>
+        <li><strong>用户数据和许可证数据（如果你选择包含）。</strong>它绝不会绕过激活；与旧电脑绑定的许可证可能需要重新激活。</li>
+        <li><strong>绝不包含凭据。</strong>看起来像密码、令牌或私钥的值和文件会被排除，并在你生成之前列出。</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">包含的全部内容，以及不包含的内容</a></p>
+    </section>
+
+    <section aria-labelledby="everyone">
+      <h2 id="everyone">使用你的语言，人人可用</h2>
+      <p>本应用、它生成的每个安装程序，以及用于旧电脑的客户端，都支持 24 种语言，并首先使用 Windows 当前的语言。安装程序使用其所运行的电脑的语言，而不是生成它的电脑的语言；阿拉伯语、波斯语、乌尔都语和希伯来语采用从右到左的布局。除英语外，其他语言均由机器翻译；如果哪里读起来不对，<a href="https://github.com/${repository}/issues/new?template=translation-problem.yml">请告诉我们</a>。</p>
+      <p>每个控件都可以通过键盘访问，并且有供屏幕阅读器读出的名称；窗口会遵循
+        Windows 的对比度主题、文本大小和动画效果设置。它们按照 WCAG 2.2 AA 进行检查，一致性报告说明了检查方式。</p>
+      <p class="more"><a href="Languages-and-Accessibility">语言和辅助功能</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">在依赖它之前</h2>
+      <p>项目每次推送更改时，都会将五个真实的开源应用（7-Zip、PuTTY、Eclipse Mosquitto、windows_exporter 和
+        Git LFS）从一台测试机迁移到全新的测试机上，并让 Windows 本身使用还原的内容。这些都是在干净的计算机上运行、表现良好的小型应用。这些测试尚未在 x64 上的桌面版 Windows 10 和 11 中运行过；带联机激活的应用、加载驱动程序以及之后重启，则完全没有试过。</p>
+      <p>因此，在依赖安装程序之前请先试用，并在读取即将损坏的驱动器之前先为它创建映像。它仅适用于你有权迁移的软件。</p>
+      <p class="more"><a href="Limitations">限制</a> · <a href="Requirements-and-Testing">要求和测试</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">获取</h2>
+      <ol class="plain">
+        <li>下载 <code>WinAppMigrator-v${version}.exe</code>，它位于<a href="https://github.com/${repository}/releases/latest">最新版本</a>中。无需安装。</li>
+        <li>运行它。Windows 会请求管理员批准，因为读取其他驱动器和安装服务都需要管理员权限。它的签名者为 Randy Northrup。</li>
+        <li>选择一个应用，在你单击任何按钮之前，屏幕就会显示其安装程序中将包含的内容。</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">下载 ${version}</a>
+        <a class="button" href="Getting-Started">如何检查下载的文件</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version}，发布于 ${release_date}。免费开源，采用
+        <a href="https://github.com/${repository}/blob/main/LICENSE">MIT 许可证</a>。</p>
+      <p><a href="Home">文档</a> · <a href="https://github.com/${repository}">源代码</a> ·
+        <a href="https://github.com/${repository}/issues">报告问题</a> ·
+        <a href="https://github.com/${repository}/security/policy">安全</a></p>
+    </div>
+  </footer>
+</body>
+</html>

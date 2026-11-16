@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ko-KR" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – 설치된 Windows 프로그램을 새 PC로 옮기기</title>
+  <meta name="description" content="설치된 Windows 앱을 다른 PC용 설치 관리자 하나로 만드는 무료 오픈 소스 도구입니다. 고장 난 PC의 드라이브, 디스크 이미지, 오래된 Windows 7 PC에서도 만들 수 있습니다.">
+  <link rel="canonical" href="${base_url}/ko-KR/">
+${alternates}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – 설치된 Windows 프로그램을 새 PC로 옮기기">
+  <meta property="og:description" content="설치된 Windows 앱을 다른 PC에서 실행할 수 있는 설치 관리자 하나로 만듭니다. 원래 설치 관리자가 없어진 지 오래되었어도 가능합니다.">
+  <meta property="og:url" content="${base_url}/ko-KR/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "설치된 Windows 데스크톱 앱을 다른 PC용 자동 압축 풀기 설치 관리자 하나로 만듭니다. 이 PC, 고장 난 컴퓨터에서 꺼낸 드라이브, 디스크 이미지, 또는 네트워크에 있는 Windows 7 이상의 오래된 PC에서 만들 수 있습니다.",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">본문으로 건너뛰기</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="사이트">
+        <a href="Home">설명서</a>
+        <a href="https://github.com/${repository}/releases/latest">다운로드</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+${languages}
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>설치된 Windows 프로그램을 새 PC로 옮기기</h1>
+      <p class="lede">WinAppMigrator는 한 Windows PC에 설치된 앱을 다른 PC에서 실행할 수 있는 설치 관리자 하나로 만듭니다.
+        앱이 네트워크 건너편의 오래된 Windows 7 PC에 있거나, 고장 나기 시작한 컴퓨터에서 꺼낸 드라이브 또는 그 드라이브의
+        이미지에 있고, 원래 설치 관리자가 없어진 지 오래되었어도 가능합니다.</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">${version} 다운로드</a>
+        <a class="button" href="Getting-Started">시작하기</a>
+      </p>
+      <p class="facts">무료 오픈 소스, MIT 라이선스 · Windows 10 및 11, x64 · 24개 언어 · Randy Northrup 서명</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="앱을 하나 선택한 WinAppMigrator. 설치 관리자의 최대 크기, 공간이 충분한지, 무엇이 포함되는지 보여 줍니다">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">이럴 때 유용합니다</h2>
+      <div class="cards">
+        <article>
+          <h3>새 PC로 옮길 때</h3>
+          <p>설치 파일, 라이선스 파일, 설정을 찾아다니지 않아도 앱을 옮길 수 있습니다.</p>
+          <a href="Getting-Started">시작하기</a>
+        </article>
+        <article>
+          <h3>이전 PC가 시작되지 않을 때</h3>
+          <p>드라이브를 꺼내 정상적으로 작동하는 PC에 연결하고, 그 드라이브에 있는 앱으로 설치 관리자를 빌드하세요. 드라이브가
+            고장 나기 시작했을 수 있으면 먼저 드라이브의 이미지를 만들고 그 이미지에서 빌드하세요. 고장 나기 시작한 드라이브는 읽기만 해도
+            완전히 망가질 수 있습니다.</p>
+          <a href="Moving-from-a-Connected-Drive">드라이브 또는 디스크 이미지에서</a>
+        </article>
+        <article>
+          <h3>Windows 7, Vista, 8, 8.1에서 옮길 때</h3>
+          <p>이런 Windows의 앱을 Windows 10 또는 11로 옮기면서, 그곳에서 달랐던 부분을 처리합니다. 32비트 Windows,
+            <code>VirtualStore</code>, DirectX 9 런타임이 그렇습니다.</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">이전 Windows의 앱</a>
+        </article>
+        <article>
+          <h3>이전 PC가 아직 작동하고 네트워크에 있을 때</h3>
+          <p>그 PC에서 서명된 작은 WinAppMigrator Client를 실행하고, 표시되는 코드를 입력한 다음 앱을 선택하세요. 빌드에
+            필요한 항목만 암호화되어 네트워크로 전송됩니다. PC에서 아무것도 꺼낼 필요가 없습니다.</p>
+          <a href="Moving-over-the-Network">네트워크를 통해 PC에서</a>
+        </article>
+        <article>
+          <h3>설치 파일이 없거나 회사가 없어졌을 때</h3>
+          <p>설치되어 있는 항목을 거꾸로 추적합니다. 앱의 파일, 레지스트리 항목, 서비스, 앱에 필요한
+            Microsoft 런타임이 그 대상입니다.</p>
+          <a href="How-It-Works">작동 방식</a>
+        </article>
+        <article>
+          <h3>여러 PC에 같은 앱을 설치할 때</h3>
+          <p>WinAppMigrator로 빌드한 설치 관리자는 명령 프롬프트에서 미리 보기, 설치, 제거를 할 수 있으므로, 스크립트로 각 PC에
+            같은 앱을 설치할 수 있습니다.</p>
+          <a href="Command-Line">명령줄</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">작동 방식</h2>
+      <ol class="steps">
+        <li>
+          <h3>앱 선택</h3>
+          <p>이 PC, 이 PC에 연결한 다른 PC의 드라이브, 앱이 읽기 전용으로 연결하는 <code>.vhd</code> 또는 <code>.vhdx</code> 이미지,
+            또는 네트워크에 있는 다른 PC에서 앱을 선택합니다.</p>
+        </li>
+        <li>
+          <h3>포함되는 항목 확인</h3>
+          <p>설치 관리자의 최대 크기, 공간이 충분한지, 무엇이 들어가는지가 화면에 표시됩니다. 원하지 않는 항목은 선택을 취소하고,
+            이름이 정확히 일치하지 않아 빠졌지만 관련 있어 보이는 항목은 선택하세요.</p>
+        </li>
+        <li>
+          <h3>설치 관리자 빌드</h3>
+          <p>들어 있는 항목의 이름을 딴 <code>.exe</code> 파일 하나가 만들어집니다. 파일 하나에 담기에 너무 큰 앱은 <code>.exe</code> 파일과
+            데이터 파일로 만들어지며, 두 파일은 함께 있어야 합니다.</p>
+        </li>
+        <li>
+          <h3>다른 PC에서 실행</h3>
+          <p>아무것도 쓰기 전에 패키지의 해시를 확인하고, 설치한 다음, 설치한 내용을 다시 읽어 확인합니다. 문제가 생기거나
+            취소하면 수행한 작업을 되돌립니다. 단, 설치한 런타임은 그대로 둡니다. 설정에 제거 프로그램을
+            남깁니다.</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="설치 위치, 서명 여부, 파일 외에 설정되는 항목을 보여 주는 설치 관리자">
+      </picture>
+      <p class="more"><a href="How-It-Works">전체 과정을 단계별로 보기</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">설치 관리자에 포함되는 항목</h2>
+      <ul class="checks">
+        <li><strong>프로그램 파일</strong>: MSI 및 Inno Setup 기록, NSIS 로그, App Paths, 제품 이름과 정확히 일치하는 폴더를
+          통해 찾습니다.</li>
+        <li><strong>레지스트리 항목</strong>: 앱의 컴퓨터 전체 키, COM 클래스, 파일 형식, 링크 프로토콜, 메뉴
+          명령, 셸 확장.</li>
+        <li><strong>서비스 및 드라이버, 예약된 작업, 바로 가기</strong>, 방화벽 규칙, 글꼴, 앱 경로가 들어 있는 환경
+          변수.</li>
+        <li><strong>런타임</strong>: 앱에 필요한 Visual C++ 및 최신 .NET 런타임을 빌드할 때 다운로드하여 설치 관리자에
+          넣으므로, 인터넷 없이 설치됩니다. 단, 그때 다운로드할 수 없었던 런타임은 예외입니다.</li>
+        <li><strong>사용자 데이터 및 라이선스 데이터(선택한 경우).</strong> 정품 인증을 우회하지 않으며, 이전 컴퓨터에
+          종속된 라이선스는 다시 정품 인증해야 할 수 있습니다.</li>
+        <li><strong>자격 증명은 넣지 않습니다.</strong> 암호, 토큰, 개인 키처럼 보이는 값과 파일은 제외되며,
+          빌드하기 전에 이름이 표시됩니다.</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">포함되는 항목과 포함되지 않는 항목 전체</a></p>
+    </section>
+
+    <section aria-labelledby="everyone">
+      <h2 id="everyone">모든 사용자를 위해, 사용자의 언어로</h2>
+      <p>앱, 앱으로 빌드한 모든 설치 관리자, 오래된 PC용 클라이언트는 24개 언어를 지원하며, Windows에서 사용하는 언어로
+        시작합니다. 설치 관리자는 빌드한 PC가 아니라 실행하는 PC의 언어로 표시되며, 아랍어, 페르시아어, 우르두어,
+        히브리어는 오른쪽에서 왼쪽으로 배치됩니다. 영어를 제외한 모든 언어는 기계 번역되었습니다. 잘못된 번역이 있으면
+        <a href="https://github.com/${repository}/issues/new?template=translation-problem.yml">알려 주세요</a>.</p>
+      <p>모든 컨트롤은 키보드로 이동할 수 있고 화면 읽기 프로그램용 이름이 있으며, 창은 Windows의 대비 테마,
+        텍스트 크기, 애니메이션 효과 설정을 따릅니다. WCAG 2.2 AA 기준으로 확인했으며, 적합성 보고서에
+        확인 방법이 나와 있습니다.</p>
+      <p class="more"><a href="Languages-and-Accessibility">언어 및 접근성</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">믿고 사용하기 전에</h2>
+      <p>프로젝트에 푸시할 때마다 실제 오픈 소스 앱 다섯 개(7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter,
+        Git LFS)를 테스트 컴퓨터 한 대에서 새 컴퓨터로 옮기고, 복원된 앱을 Windows 자체에서 사용하게 합니다. 이 앱들은
+        깨끗한 컴퓨터에서 실행되는 작고 문제없는 앱입니다. 데스크톱용 Windows 10 및 11(x64)은 이 테스트에서 실행되지 않았으며,
+        온라인 정품 인증이 필요한 앱, 드라이버 로드, 설치 후 다시 시작은 전혀 시험하지 않았습니다.</p>
+      <p>따라서 설치 관리자를 믿고 사용하기 전에 먼저 시험해 보고, 고장 나기 시작한 드라이브는 읽기 전에 이미지를 만드세요.
+        옮길 권한이 있는 소프트웨어에만 사용하세요.</p>
+      <p class="more"><a href="Limitations">제한 사항</a> · <a href="Requirements-and-Testing">요구 사항 및 테스트</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">받기</h2>
+      <ol class="plain">
+        <li><code>WinAppMigrator-v${version}.exe</code> 파일을
+          <a href="https://github.com/${repository}/releases/latest">최신 릴리스</a>에서 다운로드하세요. 설치할 필요가 없습니다.</li>
+        <li>실행하세요. 다른 드라이브를 읽고 서비스를 설치하려면 관리자 권한이 필요하므로 Windows에서 관리자 승인을
+          요청합니다. 서명에는 Randy Northrup이 표시됩니다.</li>
+        <li>앱을 선택하면 아무것도 클릭하기 전에 그 앱의 설치 관리자에 들어갈 항목이 화면에 표시됩니다.</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">${version} 다운로드</a>
+        <a class="button" href="Getting-Started">다운로드 파일을 확인하는 방법</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version}, ${release_date} 릴리스. 무료 오픈 소스이며
+        <a href="https://github.com/${repository}/blob/main/LICENSE">MIT 라이선스</a>에 따라 제공됩니다.</p>
+      <p><a href="Home">설명서</a> · <a href="https://github.com/${repository}">소스</a> ·
+        <a href="https://github.com/${repository}/issues">문제 보고</a> ·
+        <a href="https://github.com/${repository}/security/policy">보안</a></p>
+    </div>
+  </footer>
+</body>
+</html>

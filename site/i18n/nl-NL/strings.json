@@ -1,0 +1,14 @@
+{
+  "language_name": "Nederlands",
+  "language": "Taal",
+  "s_skip": "Doorgaan naar de pagina",
+  "s_site": "Site",
+  "s_docs": "Documentatie",
+  "s_download": "Downloaden",
+  "s_all_pages": "Alle pagina's",
+  "s_documentation": "Documentatie",
+  "s_updated": "Laatst gewijzigd op {date}. Beschrijft WinAppMigrator zoals het is in de nieuwste release, {version}.",
+  "s_built": "Deze site is gemaakt op basis van de <a href=\"{wiki}\">wiki</a> van het project. WinAppMigrator is gratis en open source, onder de <a href=\"{license}\">MIT-licentie</a>.",
+  "notice": "Deze pagina is automatisch vertaald uit het Engels en kan fouten bevatten. <a href=\"{english}\">Lees de Engelse pagina</a> of <a href=\"{report}\">meld een probleem met de vertaling</a>.",
+  "full_guide": "De volledige handleiding, in het Engels"
+}

@@ -1,0 +1,14 @@
+{
+  "language_name": "中文（简体）",
+  "language": "语言",
+  "s_skip": "跳到正文",
+  "s_site": "网站",
+  "s_docs": "文档",
+  "s_download": "下载",
+  "s_all_pages": "所有页面",
+  "s_documentation": "文档",
+  "s_updated": "上次更改时间：{date}。所述内容适用于 WinAppMigrator 的最新版本 {version}。",
+  "s_built": "本网站根据项目的 <a href=\"{wiki}\">wiki</a> 生成。WinAppMigrator 是免费的开源软件，采用 <a href=\"{license}\">MIT 许可证</a>。",
+  "notice": "此页面由机器从英文翻译而来，可能存在错误。<a href=\"{english}\">阅读英文页面</a>，或<a href=\"{report}\">报告翻译问题</a>。",
+  "full_guide": "完整指南（英文）"
+}

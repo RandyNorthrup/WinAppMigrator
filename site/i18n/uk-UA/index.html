@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="uk-UA" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – перенесення інстальованих програм Windows на новий ПК</title>
+  <meta name="description" content="Безкоштовний інструмент із відкритим кодом, який перетворює інстальовану програму Windows на один інсталятор для іншого ПК — навіть із диска несправного ПК, з образу диска або зі старого ПК з Windows 7.">
+  <link rel="canonical" href="${base_url}/uk-UA/">
+${alternates}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – перенесення інстальованих програм Windows на новий ПК">
+  <meta property="og:description" content="Перетворіть інстальовану програму Windows на один інсталятор, який можна запустити на іншому ПК, навіть якщо оригінального інсталятора давно немає.">
+  <meta property="og:url" content="${base_url}/uk-UA/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "Перетворює інстальовану класичну програму Windows на один саморозпакувальний інсталятор для іншого ПК: з цього ПК, з диска, вийнятого з несправного комп'ютера, з образу диска або зі старого ПК з Windows 7 чи новішою версією через мережу.",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">Перейти до вмісту сторінки</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="Сайт">
+        <a href="Home">Документація</a>
+        <a href="https://github.com/${repository}/releases/latest">Завантажити</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+${languages}
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>Перенесення інстальованих програм Windows на новий ПК</h1>
+      <p class="lede">WinAppMigrator перетворює програму, інстальовану на одному ПК з Windows, на один інсталятор, який можна
+        запустити на іншому. Навіть якщо програма розміщена на старому ПК з Windows 7 у вашій мережі, на диску, вийнятому
+        з комп'ютера, що виходить з ладу, або на образі такого диска, а оригінального інсталятора давно немає.</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">Завантажити ${version}</a>
+        <a class="button" href="Getting-Started">Початок роботи</a>
+      </p>
+      <p class="facts">Безкоштовна програма з відкритим кодом, ліцензія MIT · Windows 10 і 11, x64 · 24 мови · Підписано: Randy Northrup</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="WinAppMigrator із вибраною програмою: видно, наскільки великим може бути її інсталятор, чи вистачить для нього місця і що до нього входить">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">Коли це допоможе</h2>
+      <div class="cards">
+        <article>
+          <h3>Перехід на новий ПК</h3>
+          <p>Програма переїжджає разом із вами, і не потрібно шукати її файл інсталяції, файл ліцензії чи параметри.</p>
+          <a href="Getting-Started">Початок роботи</a>
+        </article>
+        <article>
+          <h3>Старий ПК не запускається</h3>
+          <p>Вийміть із нього диск, підключіть його до справного ПК і створіть інсталятор програми, яка на ньому є. Якщо
+            диск, можливо, несправний, спершу створіть його образ і працюйте з образом, адже читання несправного диска може
+            остаточно його зіпсувати.</p>
+          <a href="Moving-from-a-Connected-Drive">З диска або образу диска</a>
+        </article>
+        <article>
+          <h3>Перехід із Windows 7, Vista, 8 або 8.1</h3>
+          <p>Програма з такої системи переходить на Windows 10 або 11, а все, що там було інакше, враховується: 32-розрядна
+            Windows, <code>VirtualStore</code> і середовище виконання DirectX 9.</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">Програми зі старіших версій Windows</a>
+        </article>
+        <article>
+          <h3>Старий ПК ще працює у вашій мережі</h3>
+          <p>Запустіть на ньому невеликий підписаний WinAppMigrator Client, введіть код, який він покаже, і виберіть
+            програму. Мережею в зашифрованому вигляді передається лише те, що потрібно для створення інсталятора. Нічого не
+            доведеться виймати з ПК.</p>
+          <a href="Moving-over-the-Network">З ПК через мережу</a>
+        </article>
+        <article>
+          <h3>Файлу інсталяції вже немає, або й самої компанії</h3>
+          <p>WinAppMigrator іде від того, що вже інстальовано: файлів програми, її записів у реєстрі, її служб і середовищ
+            виконання Microsoft, які їй потрібні.</p>
+          <a href="How-It-Works">Як це працює</a>
+        </article>
+        <article>
+          <h3>Одна програма на кількох ПК</h3>
+          <p>Створений інсталятор може з командного рядка показувати попередній перегляд, інсталювати й видаляти програму,
+            тож сценарій може інсталювати ту саму програму на кожному ПК.</p>
+          <a href="Command-Line">Командний рядок</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">Як це працює</h2>
+      <ol class="steps">
+        <li>
+          <h3>Виберіть програму</h3>
+          <p>З цього ПК, з диска іншого ПК, підключеного до цього, з образу <code>.vhd</code> або <code>.vhdx</code>, який
+            програма підключає лише для читання, або з іншого ПК у вашій мережі.</p>
+        </li>
+        <li>
+          <h3>Перегляньте, що ввійде</h3>
+          <p>На екрані видно, наскільки великим може бути інсталятор, чи вистачить для нього місця і що до нього входить.
+            Зніміть позначки з того, що вам не потрібно, і позначте схоже на пов'язане, яке не вдалося знайти за точними
+            назвами.</p>
+        </li>
+        <li>
+          <h3>Створіть інсталятор</h3>
+          <p>Ви отримаєте один файл <code>.exe</code>, названий за його вмістом. Для програми, завеликої для одного файлу,
+            створюються <code>.exe</code> і файл даних, які мають бути разом.</p>
+        </li>
+        <li>
+          <h3>Запустіть його на іншому ПК</h3>
+          <p>Перш ніж щось записати, інсталятор перевіряє хеші свого пакета, потім інсталює програму, знову читає
+            інстальоване й перевіряє його. Якщо щось піде не так або ви скасуєте інсталяцію, він поверне все, що зробив,
+            крім інстальованого середовища виконання. У «Параметрах» залишається програма видалення.</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="Інсталятор: видно розташування інсталяції, чи підписано інсталятор і що він налаштовує, крім файлів">
+      </picture>
+      <p class="more"><a href="How-It-Works">Увесь шлях крок за кроком</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">Що входить до інсталятора</h2>
+      <ul class="checks">
+        <li><strong>Файли програми</strong>, знайдені за записами MSI та Inno Setup, журналами NSIS, App Paths і папками,
+          назва яких точно збігається з назвою продукту.</li>
+        <li><strong>Записи реєстру</strong>: розділи програми для всього ПК, її класи COM, типи файлів, протоколи посилань,
+          команди меню та розширення оболонки.</li>
+        <li><strong>Служби та драйвери, заплановані завдання, ярлики</strong>, правила брандмауера, шрифти й змінні
+          середовища, які містять шлях до програми.</li>
+        <li><strong>Середовища виконання</strong>: потрібні програмі середовища виконання Visual C++ і сучасного .NET
+          завантажуються під час створення та вкладаються в інсталятор, тому інсталюються без інтернету, якщо тоді їх
+          вдалося завантажити.</li>
+        <li><strong>Дані користувача й дані ліцензії, якщо ви цього захочете.</strong> WinAppMigrator ніколи не обходить
+          активацію, і ліцензію, прив'язану до старого комп'ютера, можливо, доведеться активувати повторно.</li>
+        <li><strong>Облікові дані — ніколи.</strong> Значення й файли, схожі на паролі, маркери доступу або закриті ключі, не
+          включаються, і їх названо ще до створення інсталятора.</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">Усе, що входить до інсталятора, і що не входить</a></p>
+    </section>
+
+    <section aria-labelledby="everyone">
+      <h2 id="everyone">Вашою мовою, для всіх</h2>
+      <p>Програма, кожен створений нею інсталятор і її клієнт для старих ПК працюють 24 мовами й починають тією, якою
+        працює Windows. Інсталятор працює мовою ПК, на якому його запущено, а не того, на якому його створено, а арабська,
+        перська, урду та іврит відображаються справа наліво. Усі мови, крім англійської, перекладено автоматично; якщо
+        десь переклад звучить неправильно,
+        <a href="https://github.com/${repository}/issues/new?template=translation-problem.yml">повідомте про це</a>.</p>
+      <p>До кожного елемента керування можна перейти з клавіатури, і кожен має ім'я для засобів читання з екрана, а вікна
+        враховують контрастні теми Windows, розмір тексту й ефекти анімації. Їх перевірено на відповідність WCAG 2.2 AA, а
+        у звіті про відповідність описано, як саме.</p>
+      <p class="more"><a href="Languages-and-Accessibility">Мови та спеціальні можливості</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">Перш ніж покладатися на програму</h2>
+      <p>Після кожного надсилання змін до проєкту п'ять справжніх програм із відкритим кодом — 7-Zip, PuTTY, Eclipse
+        Mosquitto, windows_exporter і Git LFS — переносяться з одного тестового комп'ютера на чисті, а потім сама Windows
+        має скористатися відновленим. Це невеликі програми, що поводяться передбачувано, на чистих комп'ютерах. Настільні
+        Windows 10 і 11 на x64 у цих тестах не запускалися, а програму з онлайн-активацією, завантаження драйвера й
+        перезавантаження після інсталяції не перевіряли зовсім.</p>
+      <p>Тож випробуйте інсталятор, перш ніж на нього покладатися, і створіть образ несправного диска, перш ніж його
+        читати. Програма призначена лише для програмного забезпечення, яке вам дозволено переносити.</p>
+      <p class="more"><a href="Limitations">Обмеження</a> · <a href="Requirements-and-Testing">Вимоги та тестування</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">Як отримати</h2>
+      <ol class="plain">
+        <li>Завантажте <code>WinAppMigrator-v${version}.exe</code> з
+          <a href="https://github.com/${repository}/releases/latest">останнього випуску</a>. Інсталювати нічого не потрібно.</li>
+        <li>Запустіть файл. Windows попросить дозволу адміністратора, адже він потрібен і для читання іншого диска, і для
+          інсталяції служб. У підписі файлу вказано Randy Northrup.</li>
+        <li>Виберіть програму, і на екрані з'явиться, що ввійде до її інсталятора, ще до того, як ви щось натиснете.</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">Завантажити ${version}</a>
+        <a class="button" href="Getting-Started">Як перевірити завантажений файл</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version}, випуск від ${release_date}. Безкоштовна програма з відкритим кодом, що поширюється за
+        <a href="https://github.com/${repository}/blob/main/LICENSE">ліцензією MIT</a>.</p>
+      <p><a href="Home">Документація</a> · <a href="https://github.com/${repository}">Вихідний код</a> ·
+        <a href="https://github.com/${repository}/issues">Повідомити про проблему</a> ·
+        <a href="https://github.com/${repository}/security/policy">Безпека</a></p>
+    </div>
+  </footer>
+</body>
+</html>

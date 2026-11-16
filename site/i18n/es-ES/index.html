@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="es-ES" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – Mueve programas instalados en Windows a un PC nuevo</title>
+  <meta name="description" content="Herramienta gratuita y de código abierto que convierte una aplicación instalada en Windows en un único instalador para otro PC, incluso desde la unidad de un PC que ya no funciona, una imagen de disco o un PC antiguo con Windows 7.">
+  <link rel="canonical" href="${base_url}/es-ES/">
+${alternates}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – Mueve programas instalados en Windows a un PC nuevo">
+  <meta property="og:description" content="Convierte una aplicación instalada en Windows en un único instalador que puedes ejecutar en otro PC, aunque el instalador original ya no exista.">
+  <meta property="og:url" content="${base_url}/es-ES/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "Convierte una aplicación de escritorio instalada en Windows en un único instalador autoextraíble para otro PC: desde este PC, desde una unidad extraída de un equipo que ya no funciona, desde una imagen de disco o, a través de tu red, desde un PC antiguo con Windows 7 o posterior.",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">Ir al contenido</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="Sitio">
+        <a href="Home">Documentación</a>
+        <a href="https://github.com/${repository}/releases/latest">Descargar</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+${languages}
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>Mueve programas instalados en Windows a un PC nuevo</h1>
+      <p class="lede">WinAppMigrator convierte una aplicación instalada en un PC con Windows en un único instalador que puedes ejecutar en otro.
+        Incluso cuando la aplicación está en un PC antiguo con Windows 7 de tu red, en una unidad extraída de un equipo que está fallando o
+        en una imagen de esa unidad, y el instalador original ya no existe.</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">Descargar ${version}</a>
+        <a class="button" href="Getting-Started">Empezar</a>
+      </p>
+      <p class="facts">Gratuito y de código abierto, licencia MIT · Windows 10 y 11, x64 · 24 idiomas · Firmado por Randy Northrup</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="WinAppMigrator con una aplicación seleccionada, que muestra el tamaño que puede tener su instalador, si cabe y qué incluye">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">Cuándo es útil</h2>
+      <div class="cards">
+        <article>
+          <h3>Cambiar a un PC nuevo</h3>
+          <p>La aplicación se viene contigo sin que tengas que buscar su archivo de instalación, su archivo de licencia ni su configuración.</p>
+          <a href="Getting-Started">Primeros pasos</a>
+        </article>
+        <article>
+          <h3>El PC antiguo no arranca</h3>
+          <p>Saca su unidad, conéctala a un PC que funcione y crea un instalador a partir de una aplicación que haya en ella. Si la unidad
+            puede estar fallando, crea primero una imagen de ella y crea el instalador a partir de la imagen, porque leer una unidad que
+            está fallando puede acabar de estropearla.</p>
+          <a href="Moving-from-a-Connected-Drive">Desde una unidad o una imagen de disco</a>
+        </article>
+        <article>
+          <h3>Dejar atrás Windows 7, Vista, 8 u 8.1</h3>
+          <p>Una aplicación de cualquiera de ellos pasa a Windows 10 u 11, y se resuelve lo que allí era distinto: Windows de 32 bits,
+            <code>VirtualStore</code> y el entorno de ejecución de DirectX 9.</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">Aplicaciones de versiones anteriores de Windows</a>
+        </article>
+        <article>
+          <h3>El PC antiguo aún funciona y está en tu red</h3>
+          <p>Ejecuta en él WinAppMigrator Client, un programa pequeño y firmado, escribe el código que muestra y elige una aplicación.
+            Solo pasa por la red lo que necesita la creación del instalador, y va cifrado. No hay que sacar nada del PC.</p>
+          <a href="Moving-over-the-Network">Desde un PC a través de la red</a>
+        </article>
+        <article>
+          <h3>Ya no está el archivo de instalación, o ya no existe la empresa</h3>
+          <p>Trabaja a la inversa a partir de lo que está instalado: los archivos de la aplicación, sus entradas del Registro, sus
+            servicios y los entornos de ejecución de Microsoft que necesita.</p>
+          <a href="How-It-Works">Cómo funciona</a>
+        </article>
+        <article>
+          <h3>La misma aplicación en varios PC</h3>
+          <p>Un instalador creado con WinAppMigrator puede mostrar una vista previa, instalar y desinstalar desde un símbolo del sistema,
+            así que un script puede instalar la misma aplicación en cada PC.</p>
+          <a href="Command-Line">Línea de comandos</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">Cómo funciona</h2>
+      <ol class="steps">
+        <li>
+          <h3>Elige una aplicación</h3>
+          <p>De este PC, de una unidad de otro PC conectada a este, de una imagen <code>.vhd</code> o <code>.vhdx</code> que la
+            aplicación monta en modo de solo lectura, o de otro PC de tu red.</p>
+        </li>
+        <li>
+          <h3>Mira qué se incluye</h3>
+          <p>La pantalla indica el tamaño que puede tener el instalador, si cabe y qué contiene. Desmarca lo que no quieras y marca lo
+            que parezca relacionado aunque no coincida exactamente por nombre.</p>
+        </li>
+        <li>
+          <h3>Crea el instalador</h3>
+          <p>Obtienes un único <code>.exe</code>, con el nombre de lo que contiene. Una aplicación demasiado grande para un solo archivo
+            se entrega como un <code>.exe</code> y un archivo de datos que deben ir juntos.</p>
+        </li>
+        <li>
+          <h3>Ejecútalo en el otro PC</h3>
+          <p>Comprueba los hashes de su paquete antes de escribir nada, instala y, después, vuelve a leer lo que ha instalado y lo
+            comprueba. Si algo sale mal, o si cancelas, revierte lo que ha hecho, excepto un entorno de ejecución que haya instalado.
+            Deja un desinstalador en Configuración.</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="El instalador, que muestra la ubicación de instalación, si está firmado y qué configura además de los archivos">
+      </picture>
+      <p class="more"><a href="How-It-Works">Todo el proceso, paso a paso</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">Qué incluye un instalador</h2>
+      <ul class="checks">
+        <li><strong>Archivos de programa</strong>, que se encuentran a través de la información de instalación de MSI e Inno Setup,
+          los archivos de registro de NSIS, App Paths y las carpetas que llevan exactamente el nombre del producto.</li>
+        <li><strong>Entradas del Registro</strong>: las claves de la aplicación para todo el equipo, sus clases COM, tipos de archivo,
+          protocolos de vínculo, comandos de menú y extensiones del shell.</li>
+        <li><strong>Servicios y controladores, tareas programadas, accesos directos</strong>, reglas de firewall, fuentes y las variables
+          de entorno que contienen la ruta de acceso de la aplicación.</li>
+        <li><strong>Entornos de ejecución</strong>: los de Visual C++ y .NET moderno que necesita, que se descargan al crear el
+          instalador y se incluyen en él para que se instalen sin internet, salvo si alguno no se pudo descargar en ese momento.</li>
+        <li><strong>Datos de usuario y datos de licencia, si lo eliges.</strong> Nunca elude la activación, y puede que haya que volver
+          a activar una licencia vinculada al equipo antiguo.</li>
+        <li><strong>Nunca credenciales.</strong> Los valores y archivos que parecen contraseñas, tokens o claves privadas se excluyen y
+          se indican antes de crear el instalador.</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">Todo lo que se incluye y lo que no</a></p>
+    </section>
+
+    <section aria-labelledby="everyone">
+      <h2 id="everyone">En tu idioma, para todos</h2>
+      <p>La aplicación, todos los instaladores que crea y su cliente para PC antiguos hablan 24 idiomas, empezando por el de Windows.
+        Un instalador habla el idioma del PC en el que se ejecuta, no el del PC en el que se creó, y el árabe, el persa, el urdu y el
+        hebreo se muestran de derecha a izquierda. Todos, salvo el inglés, se han traducido automáticamente; si alguno no se lee bien,
+        <a href="https://github.com/${repository}/issues/new?template=translation-problem.yml">avísanos</a>.</p>
+      <p>Todos los controles se pueden usar con el teclado y tienen un nombre para los lectores de pantalla, y las ventanas siguen los
+        temas de contraste de Windows y su configuración de Tamaño del texto y Efectos de animación. Se comprueban con WCAG 2.2 AA, y
+        el informe de conformidad explica cómo.</p>
+      <p class="more"><a href="Languages-and-Accessibility">Idiomas y accesibilidad</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">Antes de confiar en él</h2>
+      <p>Cada vez que se envían cambios al proyecto, se mueven cinco aplicaciones reales de código abierto, 7-Zip, PuTTY, Eclipse
+        Mosquitto, windows_exporter y Git LFS, de un equipo de prueba a otros recién instalados, y se pide al propio Windows que use
+        lo que se ha restaurado. Son aplicaciones pequeñas y que se comportan bien, en equipos limpios. Windows 10 y 11 de escritorio
+        en x64 no se han ejecutado en esas pruebas, y no se ha probado en absoluto una aplicación con activación en línea, la carga de
+        un controlador ni un reinicio posterior.</p>
+      <p>Así que prueba un instalador antes de confiar en él, y crea una imagen de una unidad que esté fallando antes de leerla. Es
+        solo para software que tienes permiso para mover.</p>
+      <p class="more"><a href="Limitations">Limitaciones</a> · <a href="Requirements-and-Testing">Requisitos y pruebas</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">Consíguelo</h2>
+      <ol class="plain">
+        <li>Descarga <code>WinAppMigrator-v${version}.exe</code> de la
+          <a href="https://github.com/${repository}/releases/latest">última versión</a>. No hay nada que instalar.</li>
+        <li>Ejecútalo. Windows pide la aprobación de un administrador, porque tanto leer otra unidad como instalar servicios la
+          requieren. Su firma lleva el nombre de Randy Northrup.</li>
+        <li>Elige una aplicación, y la pantalla te muestra qué incluiría su instalador antes de que hagas clic en nada.</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">Descargar ${version}</a>
+        <a class="button" href="Getting-Started">Cómo comprobar la descarga</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version}, publicado el ${release_date}. Gratuito y de código abierto, con la
+        <a href="https://github.com/${repository}/blob/main/LICENSE">licencia MIT</a>.</p>
+      <p><a href="Home">Documentación</a> · <a href="https://github.com/${repository}">Código fuente</a> ·
+        <a href="https://github.com/${repository}/issues">Notificar un problema</a> ·
+        <a href="https://github.com/${repository}/security/policy">Seguridad</a></p>
+    </div>
+  </footer>
+</body>
+</html>

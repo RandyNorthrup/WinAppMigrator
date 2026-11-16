@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="he-IL" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – העברת תוכניות Windows מותקנות למחשב חדש</title>
+  <meta name="description" content="כלי חינמי בקוד פתוח שהופך אפליקציית Windows מותקנת לתוכנית התקנה אחת עבור מחשב אחר, גם מהכונן של מחשב שהפסיק לעבוד, מתמונת דיסק או ממחשב ישן עם Windows 7.">
+  <link rel="canonical" href="${base_url}/he-IL/">
+${alternates}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – העברת תוכניות Windows מותקנות למחשב חדש">
+  <meta property="og:description" content="הפיכת אפליקציית Windows מותקנת לתוכנית התקנה אחת שניתן להפעיל במחשב אחר, גם כשתוכנית ההתקנה המקורית כבר מזמן איננה.">
+  <meta property="og:url" content="${base_url}/he-IL/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "הופך אפליקציית שולחן עבודה מותקנת של Windows לתוכנית התקנה אחת עם חילוץ עצמי עבור מחשב אחר: ממחשב זה, מכונן שהוצא ממחשב שהפסיק לעבוד, מתמונת דיסק, או ממחשב ישן עם Windows 7 ואילך דרך הרשת.",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">דילוג אל תוכן הדף</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="אתר">
+        <a href="Home">תיעוד</a>
+        <a href="https://github.com/${repository}/releases/latest">הורדה</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+${languages}
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>העברת תוכניות Windows מותקנות למחשב חדש</h1>
+      <p class="lede">WinAppMigrator הופך אפליקציה שמותקנת במחשב Windows אחד לתוכנית התקנה אחת שניתן להפעיל במחשב אחר.
+        גם כשהאפליקציה נמצאת במחשב ישן עם Windows 7 ברשת, בכונן שהוצא ממחשב שעומד לקרוס, או בתמונה של כונן כזה,
+        ותוכנית ההתקנה המקורית כבר מזמן איננה.</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">הורדת גרסה ${version}</a>
+        <a class="button" href="Getting-Started">תחילת העבודה</a>
+      </p>
+      <p class="facts">חינמי ובקוד פתוח, רישיון MIT · Windows 10 ו-11, x64 · 24 שפות · חתום על ידי Randy Northrup</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="החלון של WinAppMigrator כשנבחרה בו אפליקציה, ומוצג בו כמה גדולה עשויה להיות תוכנית ההתקנה שלה, אם יש לה מקום, ומה נכלל בה">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">מתי זה עוזר</h2>
+      <div class="cards">
+        <article>
+          <h3>מעבר למחשב חדש</h3>
+          <p>האפליקציה עוברת איתך בלי לחפש את קובץ ההתקנה שלה, את קובץ הרישיון שלה או את ההגדרות שלה.</p>
+          <a href="Getting-Started">תחילת העבודה</a>
+        </article>
+        <article>
+          <h3>המחשב הישן לא עולה</h3>
+          <p>יש להוציא ממנו את הכונן, לחבר אותו למחשב תקין ולבנות תוכנית התקנה מאפליקציה שבו. אם ייתכן שהכונן כושל,
+            יש ליצור ממנו תמונה תחילה ולבנות מהתמונה, כי קריאה מכונן כושל עלולה לגמור אותו סופית.</p>
+          <a href="Moving-from-a-Connected-Drive">מכונן או מתמונת דיסק</a>
+        </article>
+        <article>
+          <h3>יציאה מ-Windows 7, Vista, 8 או 8.1</h3>
+          <p>אפליקציה מאחת מהן עוברת ל-Windows 10 או 11, ומה שהיה שונה שם מטופל: Windows של 32 סיביות,
+            <code>VirtualStore</code> ורכיב זמן הריצה DirectX 9.</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">אפליקציות מגרסאות Windows ישנות יותר</a>
+        </article>
+        <article>
+          <h3>המחשב הישן עדיין פועל, ברשת שלך</h3>
+          <p>יש להפעיל בו את WinAppMigrator Client, הקטן והחתום, להקליד את הקוד שהוא מציג ולבחור אפליקציה. רק מה שהבנייה
+            צריכה עובר ברשת, מוצפן. אין צורך להוציא דבר מהמחשב.</p>
+          <a href="Moving-over-the-Network">ממחשב דרך הרשת</a>
+        </article>
+        <article>
+          <h3>קובץ ההתקנה נעלם, או שהחברה נעלמה</h3>
+          <p>הכלי עובד לאחור ממה שמותקן: הקבצים של האפליקציה, ערכי הרישום שלה, השירותים שלה ורכיבי זמן הריצה של
+            Microsoft שהיא צריכה.</p>
+          <a href="How-It-Works">איך זה עובד</a>
+        </article>
+        <article>
+          <h3>אותה אפליקציה בכמה מחשבים</h3>
+          <p>תוכנית התקנה שהוא בונה יכולה להציג תצוגה מקדימה, להתקין ולהסיר את ההתקנה משורת הפקודה, כך שסקריפט יכול להתקין
+            את אותה אפליקציה בכל מחשב.</p>
+          <a href="Command-Line">שורת הפקודה</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">איך זה עובד</h2>
+      <ol class="steps">
+        <li>
+          <h3>בחירת אפליקציה</h3>
+          <p>ממחשב זה, מכונן של מחשב אחר שחובר למחשב זה, מתמונת <code>.vhd</code> או <code>.vhdx</code> שהאפליקציה
+            מצרפת לקריאה בלבד, או ממחשב אחר ברשת שלך.</p>
+        </li>
+        <li>
+          <h3>מה נכלל</h3>
+          <p>המסך מציין כמה גדולה עשויה להיות תוכנית ההתקנה, אם יש לה מקום ומה היא מכילה. ניתן לבטל את הסימון של מה שאינו
+            רצוי, ולסמן פריטים שנראים קשורים אך לא נמצאו לפי השמות המדויקים.</p>
+        </li>
+        <li>
+          <h3>בניית תוכנית ההתקנה</h3>
+          <p>התוצאה היא קובץ <code>.exe</code> אחד, שנקרא על שם מה שהוא מכיל. אפליקציה גדולה מדי לקובץ אחד מגיעה כקובץ
+            <code>.exe</code> וקובץ נתונים שנשארים יחד.</p>
+        </li>
+        <li>
+          <h3>הפעלה במחשב האחר</h3>
+          <p>תוכנית ההתקנה בודקת את ערכי הגיבוב של החבילה שלה לפני שהיא כותבת משהו, מתקינה, ולאחר מכן קוראת שוב את מה
+            שהתקינה ובודקת גם אותו. אם משהו משתבש, או אם ההתקנה מבוטלת, היא מחזירת את מה שעשתה, פרט לרכיב זמן ריצה
+            שהתקינה. היא משאירה תוכנית הסרת התקנה בהגדרות.</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="תוכנית ההתקנה, ומוצגים בה מיקום ההתקנה, האם היא חתומה, ומה היא מגדירה מלבד קבצים">
+      </picture>
+      <p class="more"><a href="How-It-Works">התהליך כולו, שלב אחר שלב</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">מה נכלל בתוכנית התקנה</h2>
+      <ul class="checks">
+        <li><strong>קובצי התוכנית</strong>, שנמצאים לפי רשומות של MSI ושל Inno Setup, יומני NSIS, App Paths ותיקיות
+          שנקראות בדיוק בשם המוצר.</li>
+        <li><strong>ערכי רישום</strong>: המפתחות של האפליקציה ברמת המחשב כולו, מחלקות ה-COM שלה, סוגי קבצים, פרוטוקולי
+          קישורים, פקודות תפריט והרחבות מעטפת.</li>
+        <li><strong>שירותים ומנהלי התקנים, משימות מתוזמנות, קיצורי דרך</strong>, כללי חומת אש, גופנים, ומשתני הסביבה
+          שמכילים את הנתיב של האפליקציה.</li>
+        <li><strong>רכיבי זמן ריצה</strong>: רכיבי זמן הריצה של Visual C++ ושל .NET המודרני שהיא צריכה, שמורדים בזמן הבנייה
+          ומוכנסים פנימה, כך שהם מותקנים בלי אינטרנט, אלא אם לא ניתן היה להוריד אחד מהם באותו זמן.</li>
+        <li><strong>נתוני משתמש ונתוני רישיון, אם בוחרים בכך.</strong> הכלי לעולם אינו עוקף הפעלה, ורישיון שקשור
+          למחשב הישן עשוי לדרוש הפעלה חוזרת.</li>
+        <li><strong>אף פעם לא פרטי כניסה.</strong> ערכים וקבצים שנראים כמו סיסמאות, אסימונים או מפתחות פרטיים מושמטים,
+          ושמם מוצג לפני הבנייה.</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">כל מה שנכלל, ומה לא</a></p>
+    </section>
+
+    <section aria-labelledby="everyone">
+      <h2 id="everyone">בשפה שלך, לכולם</h2>
+      <p>האפליקציה, כל תוכנית התקנה שהיא בונה והלקוח שלה למחשבים ישנים מדברים 24 שפות, ומתחילים בשפה של Windows.
+        תוכנית התקנה מדברת בשפה של המחשב שבו היא פועלת, ולא של המחשב שבו היא נבנתה, וערבית, פרסית, אורדו ועברית
+        מוצגות מימין לשמאל. כל השפות מלבד אנגלית תורגמו בתרגום מכונה; כשמשהו נקרא לא נכון,
+        <a href="https://github.com/${repository}/issues/new?template=translation-problem.yml">אפשר לדווח על כך</a>.</p>
+      <p>לכל פקד ניתן להגיע באמצעות המקלדת, ולכל פקד יש שם עבור קוראי מסך, והחלונות פועלים לפי ערכות הנושא של
+        ניגודיות, גודל הטקסט ואפקטי ההנפשה של Windows. הם נבדקים מול WCAG 2.2 AA, ודוח התאימות מסביר כיצד.</p>
+      <p class="more"><a href="Languages-and-Accessibility">שפות ונגישות</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">לפני שסומכים עליו</h2>
+      <p>בכל שינוי שנדחף לפרויקט, חמש אפליקציות קוד פתוח אמיתיות, 7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter
+        ו-Git LFS, מועברות ממכונת בדיקה אחת למכונות חדשות, ו-Windows עצמו מתבקש להשתמש במה ששוחזר. אלה אפליקציות קטנות
+        ומסודרות במכונות נקיות. גרסאות שולחן העבודה של Windows 10 ו-11 על x64 לא הורצו בבדיקות אלה, ואפליקציה עם הפעלה
+        מקוונת, טעינה של מנהל התקן והפעלה מחדש לאחר מכן עוד לא נוסו כלל.</p>
+      <p>לכן כדאי לנסות תוכנית התקנה לפני שסומכים עליה, וליצור תמונה של כונן כושל לפני שקוראים ממנו. הכלי מיועד רק
+        לתוכנות שמותר לך להעביר.</p>
+      <p class="more"><a href="Limitations">מגבלות</a> · <a href="Requirements-and-Testing">דרישות ובדיקות</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">השגת התוכנה</h2>
+      <ol class="plain">
+        <li>יש להוריד את <code>WinAppMigrator-v${version}.exe</code> מתוך
+          <a href="https://github.com/${repository}/releases/latest">הגרסה האחרונה</a>. אין צורך להתקין דבר.</li>
+        <li>יש להפעיל אותו. Windows מבקש אישור של מנהל מערכת, מכיוון שקריאה מכונן אחר והתקנת שירותים דורשות זאת. החתימה
+          שלו נושאת את השם Randy Northrup.</li>
+        <li>יש לבחור אפליקציה, והמסך מציג מה ייכלל בתוכנית ההתקנה שלה עוד לפני שלוחצים על משהו.</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">הורדת גרסה ${version}</a>
+        <a class="button" href="Getting-Started">איך לבדוק את ההורדה</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version}, שפורסם ב-${release_date}. חינמי ובקוד פתוח, לפי
+        <a href="https://github.com/${repository}/blob/main/LICENSE">רישיון MIT</a>.</p>
+      <p><a href="Home">תיעוד</a> · <a href="https://github.com/${repository}">קוד מקור</a> ·
+        <a href="https://github.com/${repository}/issues">דיווח על בעיה</a> ·
+        <a href="https://github.com/${repository}/security/policy">אבטחה</a></p>
+    </div>
+  </footer>
+</body>
+</html>

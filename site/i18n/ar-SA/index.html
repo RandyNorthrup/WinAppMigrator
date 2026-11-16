@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ar-SA" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – نقل برامج Windows المثبتة إلى كمبيوتر جديد</title>
+  <meta name="description" content="أداة مجانية ومفتوحة المصدر تحوّل تطبيق Windows مثبتًا إلى برنامج تثبيت واحد لكمبيوتر آخر، حتى من محرك أقراص كمبيوتر لا يعمل، أو من صورة قرص، أو من كمبيوتر قديم يعمل بنظام Windows 7.">
+  <link rel="canonical" href="${base_url}/ar-SA/">
+${alternates}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – نقل برامج Windows المثبتة إلى كمبيوتر جديد">
+  <meta property="og:description" content="حوّل تطبيق Windows مثبتًا إلى برنامج تثبيت واحد يمكنك تشغيله على كمبيوتر آخر، حتى عندما يكون برنامج التثبيت الأصلي قد فُقد منذ زمن طويل.">
+  <meta property="og:url" content="${base_url}/ar-SA/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "يحوّل تطبيق سطح مكتب Windows مثبتًا إلى برنامج تثبيت واحد ذاتي الاستخراج لكمبيوتر آخر: من هذا الكمبيوتر، أو من محرك أقراص أُخرج من جهاز لا يعمل، أو من صورة قرص، أو من كمبيوتر قديم يعمل بنظام Windows 7 أو أحدث عبر شبكتك.",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">الانتقال إلى محتوى الصفحة</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="الموقع">
+        <a href="Home">الوثائق</a>
+        <a href="https://github.com/${repository}/releases/latest">تنزيل</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+${languages}
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>نقل برامج Windows المثبتة إلى كمبيوتر جديد</h1>
+      <p class="lede">يحوّل WinAppMigrator تطبيقًا مثبتًا على كمبيوتر يعمل بنظام Windows إلى برنامج تثبيت واحد يمكنك تشغيله على كمبيوتر آخر.
+        حتى عندما يكون التطبيق على كمبيوتر قديم يعمل بنظام Windows 7 عبر شبكتك، أو على محرك أقراص أُخرج من جهاز يتعطل، أو على
+        صورة لمحرك أقراص كهذا، ويكون برنامج التثبيت الأصلي قد فُقد منذ زمن طويل.</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">تنزيل ${version}</a>
+        <a class="button" href="Getting-Started">البدء</a>
+      </p>
+      <p class="facts">مجاني ومفتوح المصدر، بترخيص MIT · Windows 10 و11، x64 · 24 لغة · موقّع من Randy Northrup</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="WinAppMigrator وقد حُدد فيه تطبيق، ويعرض الحجم الذي قد يبلغه برنامج التثبيت الخاص به، وما إذا كان سيتسع، وما الذي يتضمنه">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">متى يفيدك</h2>
+      <div class="cards">
+        <article>
+          <h3>الانتقال إلى كمبيوتر جديد</h3>
+          <p>ينتقل التطبيق معك دون أن تبحث عن ملف الإعداد الخاص به، أو ملف الترخيص، أو إعداداته.</p>
+          <a href="Getting-Started">بدء الاستخدام</a>
+        </article>
+        <article>
+          <h3>الكمبيوتر القديم لا يبدأ التشغيل</h3>
+          <p>أخرج محرك الأقراص منه، وقم بتوصيله بكمبيوتر يعمل، وأنشئ برنامج تثبيت من تطبيق موجود عليه. إذا كان محرك الأقراص قد
+            يكون على وشك التعطل، فأنشئ صورة له أولاً وأنشئ برنامج التثبيت من الصورة، لأن القراءة من محرك أقراص يتعطل قد تقضي عليه نهائيًا.</p>
+          <a href="Moving-from-a-Connected-Drive">من محرك أقراص أو صورة قرص</a>
+        </article>
+        <article>
+          <h3>الانتقال من Windows 7 أو Vista أو 8 أو 8.1</h3>
+          <p>ينتقل التطبيق من أحدها إلى Windows 10 أو 11، مع معالجة ما كان مختلفًا هناك: Windows 32 بت،
+            و<code>VirtualStore</code>، ومكتبة وقت التشغيل DirectX 9.</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">التطبيقات من إصدارات Windows الأقدم</a>
+        </article>
+        <article>
+          <h3>الكمبيوتر القديم لا يزال يعمل، على شبكتك</h3>
+          <p>شغّل عليه WinAppMigrator Client الصغير الموقّع، واكتب الرمز الذي يعرضه، واختر تطبيقًا. لا يعبر الشبكة إلا ما يحتاج
+            إليه الإنشاء، وهو مشفّر. ولا حاجة إلى إخراج أي شيء من الكمبيوتر.</p>
+          <a href="Moving-over-the-Network">من كمبيوتر عبر الشبكة</a>
+        </article>
+        <article>
+          <h3>ملف الإعداد مفقود، أو الشركة لم تعد موجودة</h3>
+          <p>يعمل بشكل عكسي انطلاقًا مما هو مثبت: ملفات التطبيق، وإدخالات السجل الخاصة به، وخدماته، ومكتبات وقت التشغيل من
+            Microsoft التي يحتاج إليها.</p>
+          <a href="How-It-Works">كيف يعمل</a>
+        </article>
+        <article>
+          <h3>التطبيق نفسه على عدة أجهزة كمبيوتر</h3>
+          <p>يمكن لبرنامج التثبيت الذي ينشئه إجراء المعاينة والتثبيت وإلغاء التثبيت من موجه الأوامر، لذا يمكن لبرنامج نصي تثبيت
+            التطبيق نفسه على كل كمبيوتر.</p>
+          <a href="Command-Line">سطر الأوامر</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">كيف يعمل</h2>
+      <ol class="steps">
+        <li>
+          <h3>اختيار تطبيق</h3>
+          <p>من هذا الكمبيوتر، أو من محرك أقراص من كمبيوتر آخر موصول بهذا الكمبيوتر، أو من صورة <code>.vhd</code> أو <code>.vhdx</code>
+            يرفقها التطبيق للقراءة فقط، أو من كمبيوتر آخر على شبكتك.</p>
+        </li>
+        <li>
+          <h3>معرفة ما يتم تضمينه</h3>
+          <p>تعرض الشاشة الحجم الذي قد يبلغه برنامج التثبيت، وما إذا كان سيتسع، وما الذي يحتويه. ألغِ تحديد ما لا تريده،
+            وحدد ما يبدو مرتبطًا به مما فاتته مطابقة الأسماء الدقيقة.</p>
+        </li>
+        <li>
+          <h3>إنشاء برنامج التثبيت</h3>
+          <p>تحصل على ملف <code>.exe</code> واحد، يحمل اسم ما يحتويه. أما التطبيق الأكبر من أن يتسع له ملف واحد فيأتي في صورة ملف <code>.exe</code>
+            وملف بيانات يبقيان معًا.</p>
+        </li>
+        <li>
+          <h3>تشغيله على الكمبيوتر الآخر</h3>
+          <p>يتحقق من تجزئات حزمته قبل كتابة أي شيء، ثم يثبّت، ثم يعيد قراءة ما ثبّته ويتحقق منه. إذا حدث أي خطأ، أو ألغيت
+            العملية، فإنه يعيد ما فعله إلى ما كان عليه، باستثناء مكتبة وقت تشغيل ثبّتها. ويترك برنامج إلغاء تثبيت في "الإعدادات".</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="برنامج التثبيت، ويعرض موقع التثبيت، وما إذا كان موقّعًا، وما يُعدّه إلى جانب الملفات">
+      </picture>
+      <p class="more"><a href="How-It-Works">الرحلة كاملة، خطوة بخطوة</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">ما يتضمنه برنامج التثبيت</h2>
+      <ul class="checks">
+        <li><strong>ملفات البرنامج</strong>، التي يُعثر عليها من خلال سجلات MSI وInno Setup، وسجلات NSIS، وApp Paths، والمجلدات التي
+          تحمل اسم المنتج تمامًا.</li>
+        <li><strong>إدخالات السجل</strong>: مفاتيح التطبيق على مستوى الجهاز، وفئات COM الخاصة به، وأنواع الملفات، وبروتوكولات
+          الارتباطات، وأوامر القوائم، وملحقات Shell.</li>
+        <li><strong>الخدمات وبرامج التشغيل، والمهام المجدولة، والاختصارات</strong>، وقواعد جدار الحماية، والخطوط، ومتغيرات البيئة
+          التي تحتوي على مسار التطبيق.</li>
+        <li><strong>مكتبات وقت التشغيل</strong>: مكتبات وقت تشغيل Visual C++ و.NET الحديثة التي يحتاج إليها، والتي يتم تنزيلها عند
+          الإنشاء ووضعها داخله، لكي تُثبَّت دون إنترنت، إلا إذا تعذر تنزيل إحداها حينها.</li>
+        <li><strong>بيانات المستخدم وبيانات الترخيص، إذا اخترت ذلك.</strong> لا يتحايل أبدًا على التنشيط، وقد يحتاج الترخيص المرتبط
+          بالجهاز القديم إلى إعادة التنشيط.</li>
+        <li><strong>بيانات الاعتماد أبدًا.</strong> القيم والملفات التي تبدو ككلمات مرور أو رموز مميزة أو مفاتيح خاصة يتم استبعادها
+          وتُذكر بأسمائها قبل الإنشاء.</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">كل ما يتم تضمينه، وما لا يتم تضمينه</a></p>
+    </section>
+
+    <section aria-labelledby="everyone">
+      <h2 id="everyone">بلغتك، وللجميع</h2>
+      <p>يتوفر التطبيق، وكل برنامج تثبيت ينشئه، والعميل الخاص به للأجهزة القديمة بـ 24 لغة، بدءًا باللغة التي يستخدمها
+        Windows. يستخدم برنامج التثبيت لغة الكمبيوتر الذي يعمل عليه، لا لغة الكمبيوتر الذي أُنشئ عليه، وتُعرض العربية والفارسية
+        والأردية والعبرية من اليمين إلى اليسار. تُرجمت كل اللغات عدا الإنجليزية آليًا؛ وإذا وجدت ترجمة غير صحيحة،
+        <a href="https://github.com/${repository}/issues/new?template=translation-problem.yml">فأخبرنا بذلك</a>.</p>
+      <p>يمكن الوصول إلى كل عنصر تحكم باستخدام لوحة المفاتيح، ولكل منها اسم لقارئات الشاشة، وتتبع النوافذ نُسق التباين
+        و"حجم النص" و"تأثيرات الحركة" في Windows. ويتم التحقق منها وفق WCAG 2.2 AA، ويوضح تقرير المطابقة كيفية ذلك.</p>
+      <p class="more"><a href="Languages-and-Accessibility">اللغات وإمكانية الوصول</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">قبل أن تعتمد عليه</h2>
+      <p>مع كل تحديث يُدفع إلى المشروع، تُنقل خمسة تطبيقات حقيقية مفتوحة المصدر، هي 7-Zip وPuTTY وEclipse Mosquitto وwindows_exporter
+        وGit LFS، من جهاز اختبار إلى أجهزة جديدة، ويُطلب من Windows نفسه استخدام ما تمت استعادته. هذه تطبيقات صغيرة حسنة السلوك
+        على أجهزة نظيفة. لم يتم تشغيل إصدارات سطح المكتب من Windows 10 و11 على x64 في تلك الاختبارات، ولم تتم على الإطلاق تجربة
+        تطبيق يتطلب التنشيط عبر الإنترنت، أو تحميل برنامج تشغيل، أو إعادة التشغيل بعد ذلك.</p>
+      <p>لذا جرّب برنامج التثبيت قبل أن تعتمد عليه، وأنشئ صورة لمحرك الأقراص الذي يتعطل قبل القراءة منه. وهو مخصص فقط
+        للبرامج المسموح لك بنقلها.</p>
+      <p class="more"><a href="Limitations">القيود</a> · <a href="Requirements-and-Testing">المتطلبات والاختبار</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">الحصول عليه</h2>
+      <ol class="plain">
+        <li>نزّل <code>WinAppMigrator-v${version}.exe</code> من
+          <a href="https://github.com/${repository}/releases/latest">أحدث إصدار</a>. لا يوجد ما يلزم تثبيته.</li>
+        <li>شغّله. يطلب Windows موافقة المسؤول، لأن قراءة محرك أقراص آخر وتثبيت الخدمات يتطلبان ذلك. ويحمل توقيعه
+          اسم Randy Northrup.</li>
+        <li>اختر تطبيقًا، وستعرض لك الشاشة ما سيتم تضمينه في برنامج التثبيت الخاص به قبل أن تنقر فوق أي شيء.</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">تنزيل ${version}</a>
+        <a class="button" href="Getting-Started">كيفية التحقق من التنزيل</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version}، صدر في ${release_date}. مجاني ومفتوح المصدر، بموجب
+        <a href="https://github.com/${repository}/blob/main/LICENSE">ترخيص MIT</a>.</p>
+      <p><a href="Home">الوثائق</a> · <a href="https://github.com/${repository}">المصدر</a> ·
+        <a href="https://github.com/${repository}/issues">الإبلاغ عن مشكلة</a> ·
+        <a href="https://github.com/${repository}/security/policy">الأمان</a></p>
+    </div>
+  </footer>
+</body>
+</html>

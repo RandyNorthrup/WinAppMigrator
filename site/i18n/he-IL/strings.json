@@ -1,0 +1,14 @@
+{
+  "language_name": "עברית",
+  "language": "שפה",
+  "s_skip": "דילוג אל תוכן הדף",
+  "s_site": "אתר",
+  "s_docs": "תיעוד",
+  "s_download": "הורדה",
+  "s_all_pages": "כל הדפים",
+  "s_documentation": "תיעוד",
+  "s_updated": "שונה לאחרונה ב-{date}. מתאר את WinAppMigrator כפי שהוא בגרסה האחרונה שלו, {version}.",
+  "s_built": "אתר זה נבנה מתוך <a href=\"{wiki}\">הוויקי</a> של הפרויקט. התוכנה WinAppMigrator חינמית ובקוד פתוח, לפי <a href=\"{license}\">רישיון MIT</a>.",
+  "notice": "דף זה תורגם מאנגלית בתרגום מכונה, וייתכן שיש בו שגיאות. ניתן <a href=\"{english}\">לקרוא את הדף באנגלית</a>, או <a href=\"{report}\">לדווח על בעיה בתרגום</a>.",
+  "full_guide": "המדריך המלא, באנגלית"
+}

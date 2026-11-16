@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="hi-IN" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – इंस्टॉल किए गए Windows प्रोग्राम नए PC पर ले जाएँ</title>
+  <meta name="description" content="निःशुल्क, ओपन-सोर्स टूल, जो इंस्टॉल किए गए Windows ऐप को किसी अन्य PC के लिए एक इंस्टॉलर में बदल देता है, चाहे ऐप किसी खराब PC की ड्राइव पर हो, डिस्क छवि में हो, या किसी पुराने Windows 7 PC पर।">
+  <link rel="canonical" href="${base_url}/hi-IN/">
+${alternates}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – इंस्टॉल किए गए Windows प्रोग्राम नए PC पर ले जाएँ">
+  <meta property="og:description" content="किसी इंस्टॉल किए गए Windows ऐप को एक ऐसे इंस्टॉलर में बदलें जिसे आप किसी अन्य PC पर चला सकें, तब भी जब मूल इंस्टॉलर कब का खो चुका हो।">
+  <meta property="og:url" content="${base_url}/hi-IN/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "किसी इंस्टॉल किए गए Windows डेस्कटॉप ऐप को किसी अन्य PC के लिए एक सेल्फ़-एक्सट्रैक्टिंग इंस्टॉलर में बदलता है: इस PC से, किसी खराब मशीन से निकाली गई ड्राइव से, डिस्क छवि से, या आपके नेटवर्क पर किसी पुराने Windows 7 या बाद के PC से।",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">सीधे पृष्ठ पर जाएँ</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="साइट">
+        <a href="Home">दस्तावेज़</a>
+        <a href="https://github.com/${repository}/releases/latest">डाउनलोड करें</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+${languages}
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>इंस्टॉल किए गए Windows प्रोग्राम नए PC पर ले जाएँ</h1>
+      <p class="lede">WinAppMigrator किसी Windows PC पर इंस्टॉल किए गए ऐप को एक ऐसे इंस्टॉलर में बदल देता है जिसे आप किसी अन्य PC पर चला
+        सकते हैं। तब भी, जब ऐप आपके नेटवर्क पर किसी पुराने Windows 7 PC पर हो, खराब हो रही मशीन से निकाली गई ड्राइव पर हो, या
+        ऐसी ड्राइव की छवि में हो, और मूल इंस्टॉलर कब का खो चुका हो।</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">${version} डाउनलोड करें</a>
+        <a class="button" href="Getting-Started">शुरू करें</a>
+      </p>
+      <p class="facts">निःशुल्क और ओपन सोर्स, MIT लाइसेंस · Windows 10 और 11, x64 · 24 भाषाएँ · Randy Northrup द्वारा हस्ताक्षरित</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="WinAppMigrator, जिसमें एक ऐप चुना गया है, और जो दिखा रहा है कि उसका इंस्टॉलर कितना बड़ा हो सकता है, क्या उसके लिए स्थान है, और उसमें क्या जाता है">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">यह कब काम आता है</h2>
+      <div class="cards">
+        <article>
+          <h3>नए PC पर जाते समय</h3>
+          <p>ऐप साथ आ जाता है, उसकी सेटअप फ़ाइल, लाइसेंस फ़ाइल या सेटिंग्स खोजे बिना।</p>
+          <a href="Getting-Started">शुरुआत करना</a>
+        </article>
+        <article>
+          <h3>पुराना PC प्रारंभ नहीं होता</h3>
+          <p>उसकी ड्राइव निकालें, उसे किसी चालू PC से कनेक्ट करें, और उस पर मौजूद किसी ऐप से इंस्टॉलर बनाएँ। अगर ड्राइव खराब हो
+            रही हो, तो पहले उसकी छवि बनाएँ और छवि से इंस्टॉलर बनाएँ, क्योंकि खराब हो रही ड्राइव को पढ़ने से वह पूरी तरह खराब हो सकती है।</p>
+          <a href="Moving-from-a-Connected-Drive">ड्राइव या डिस्क छवि से</a>
+        </article>
+        <article>
+          <h3>Windows 7, Vista, 8 या 8.1 छोड़ते समय</h3>
+          <p>इनमें से किसी पर चल रहा ऐप Windows 10 या 11 पर जाता है, और वहाँ जो अलग था, उसका ध्यान रखा जाता है: 32-बिट Windows,
+            <code>VirtualStore</code>, और DirectX 9 रनटाइम।</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">पुराने Windows के ऐप्स</a>
+        </article>
+        <article>
+          <h3>पुराना PC अब भी चलता है, आपके नेटवर्क पर</h3>
+          <p>उस पर छोटा, हस्ताक्षरित WinAppMigrator Client चलाएँ, वह जो कोड दिखाता है उसे टाइप करें, और एक ऐप चुनें। नेटवर्क पर केवल
+            वही जाता है जिसकी बिल्ड को आवश्यकता है, और वह भी एन्क्रिप्ट किया हुआ। PC से कुछ भी निकालना नहीं पड़ता।</p>
+          <a href="Moving-over-the-Network">नेटवर्क पर किसी PC से</a>
+        </article>
+        <article>
+          <h3>सेटअप फ़ाइल खो गई है, या कंपनी ही नहीं रही</h3>
+          <p>यह इंस्टॉल की गई चीज़ों से उल्टी दिशा में काम करता है: ऐप की फ़ाइलें, उसकी रजिस्ट्री प्रविष्टियाँ, उसकी सेवाएँ, और उसे
+            आवश्यक Microsoft रनटाइम।</p>
+          <a href="How-It-Works">यह कैसे काम करता है</a>
+        </article>
+        <article>
+          <h3>कई PC पर एक ही ऐप</h3>
+          <p>इसके द्वारा बनाया गया इंस्टॉलर कमांड प्रॉम्प्ट से पूर्वावलोकन, इंस्टॉल और अनइंस्टॉल कर सकता है, इसलिए एक स्क्रिप्ट हर
+            PC पर वही ऐप इंस्टॉल कर सकती है।</p>
+          <a href="Command-Line">कमांड लाइन</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">यह कैसे काम करता है</h2>
+      <ol class="steps">
+        <li>
+          <h3>एक ऐप चुनें</h3>
+          <p>इस PC से, इस PC में लगाई गई किसी अन्य PC की ड्राइव से, किसी <code>.vhd</code> या <code>.vhdx</code> छवि से, जिसे ऐप
+            केवल पढ़ने के लिए संलग्न करता है, या आपके नेटवर्क पर किसी अन्य PC से।</p>
+        </li>
+        <li>
+          <h3>देखें कि इसमें क्या जाता है</h3>
+          <p>स्क्रीन बताती है कि इंस्टॉलर कितना बड़ा हो सकता है, क्या उसके लिए स्थान है, और उसमें क्या है। जो आप नहीं चाहते,
+            उसका चयन हटाएँ, और जो संबंधित दिखता है पर सटीक नामों के आधार पर छूट गया, उसे चुनें।</p>
+        </li>
+        <li>
+          <h3>इंस्टॉलर बनाएँ</h3>
+          <p>आपको एक <code>.exe</code> मिलती है, जिसका नाम उसमें मौजूद ऐप पर होता है। एक फ़ाइल के लिए बहुत बड़ा ऐप एक <code>.exe</code>
+            और एक डेटा फ़ाइल के रूप में आता है, जिन्हें साथ रहना होता है।</p>
+        </li>
+        <li>
+          <h3>इसे दूसरे PC पर चलाएँ</h3>
+          <p>कुछ भी लिखने से पहले यह अपने पैकेज के हैश की जाँच करता है, इंस्टॉल करता है, फिर जो इंस्टॉल किया उसे वापस पढ़कर उसकी जाँच
+            करता है। अगर कुछ गलत होता है, या आप रद्द करते हैं, तो इसने जो किया उसे पहले जैसा कर देता है, सिवाय उस रनटाइम के जो इसने
+            इंस्टॉल किया। यह सेटिंग्स में एक अनइंस्टॉलर छोड़ता है।</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="इंस्टॉलर, जो इंस्टॉल स्थान, यह कि वह हस्ताक्षरित है या नहीं, और फ़ाइलों के अलावा वह क्या सेट अप करता है, दिखा रहा है">
+      </picture>
+      <p class="more"><a href="How-It-Works">पूरी प्रक्रिया, चरण दर चरण</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">इंस्टॉलर में क्या जाता है</h2>
+      <ul class="checks">
+        <li><strong>प्रोग्राम फ़ाइलें</strong>, जो MSI और Inno Setup के रिकॉर्ड, NSIS लॉग, App Paths, और ठीक उत्पाद के नाम वाले
+          फ़ोल्डरों से मिलती हैं।</li>
+        <li><strong>रजिस्ट्री प्रविष्टियाँ</strong>: ऐप की मशीन-व्यापी कुंजियाँ, उसकी COM क्लास, फ़ाइल प्रकार, लिंक प्रोटोकॉल, मेनू
+          कमांड और शेल एक्सटेंशन।</li>
+        <li><strong>सेवाएँ और ड्राइवर, शेड्यूल किए गए कार्य, शॉर्टकट</strong>, फ़ायरवॉल नियम, फ़ॉन्ट, और वे परिवेश चर जिनमें
+          ऐप का पथ होता है।</li>
+        <li><strong>रनटाइम</strong>: उसे आवश्यक Visual C++ और आधुनिक .NET रनटाइम, जो इंस्टॉलर बनाते समय डाउनलोड करके उसके अंदर
+          रखे जाते हैं, ताकि वे इंटरनेट के बिना इंस्टॉल हों, जब तक कि उस समय कोई डाउनलोड न हो सका हो।</li>
+        <li><strong>उपयोगकर्ता डेटा और लाइसेंस डेटा, अगर आप चुनें।</strong> यह सक्रियण को कभी बायपास नहीं करता, और पुरानी मशीन से
+          जुड़े लाइसेंस को फिर से सक्रिय करने की आवश्यकता हो सकती है।</li>
+        <li><strong>क्रेडेंशियल कभी नहीं।</strong> पासवर्ड, टोकन या निजी कुंजियों जैसे दिखने वाले मान और फ़ाइलें छोड़ दी जाती हैं,
+          और इंस्टॉलर बनाने से पहले उनके नाम बताए जाते हैं।</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">इसमें जो कुछ जाता है, और जो नहीं जाता</a></p>
+    </section>
+
+    <section aria-labelledby="everyone">
+      <h2 id="everyone">आपकी भाषा में, सभी के लिए</h2>
+      <p>ऐप, इसके द्वारा बनाया गया हर इंस्टॉलर, और पुराने PC के लिए इसका क्लाइंट 24 भाषाएँ बोलते हैं, और शुरुआत उस भाषा से करते हैं
+        जिसमें Windows है। इंस्टॉलर उस PC की भाषा बोलता है जिस पर वह चलता है, न कि उस PC की जिस पर उसे बनाया गया था, और अरबी,
+        फ़ारसी, उर्दू और हिब्रू दाएँ से बाएँ दिखाई जाती हैं। अंग्रेज़ी को छोड़कर सभी का अनुवाद मशीन द्वारा किया गया है; जहाँ कुछ
+        गलत लगे, <a href="https://github.com/${repository}/issues/new?template=translation-problem.yml">हमें बताएँ</a>।</p>
+      <p>हर नियंत्रण तक कीबोर्ड से पहुँचा जा सकता है और स्क्रीन रीडर के लिए उसका एक नाम है, और विंडो Windows की कंट्रास्ट थीम,
+        टेक्स्ट आकार, और एनिमेशन प्रभाव का पालन करती हैं। उनकी जाँच WCAG 2.2 AA के अनुसार की जाती है, और अनुरूपता रिपोर्ट बताती है
+        कि कैसे।</p>
+      <p class="more"><a href="Languages-and-Accessibility">भाषाएँ और पहुँच-योग्यता</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">इस पर निर्भर होने से पहले</h2>
+      <p>प्रोजेक्ट में हर पुश पाँच वास्तविक ओपन-सोर्स ऐप्स, 7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter और
+        Git LFS, को एक परीक्षण मशीन से नई मशीनों पर ले जाता है, और स्वयं Windows से पुनर्स्थापित चीज़ों का उपयोग करवाकर देखता है। ये
+        साफ़ मशीनों पर छोटे, ठीक से काम करने वाले ऐप्स हैं। x64 पर डेस्कटॉप Windows 10 और 11 इन परीक्षणों में नहीं चलाए गए हैं, और
+        ऑनलाइन सक्रियण वाला ऐप, लोड होता ड्राइवर, और बाद में पुनः प्रारंभ, इन्हें बिल्कुल भी नहीं आज़माया गया है।</p>
+      <p>इसलिए किसी इंस्टॉलर पर निर्भर होने से पहले उसे आज़माएँ, और खराब हो रही ड्राइव को पढ़ने से पहले उसकी छवि बनाएँ। यह केवल
+        उसी सॉफ़्टवेयर के लिए है जिसे ले जाने की आपको अनुमति है।</p>
+      <p class="more"><a href="Limitations">सीमाएँ</a> · <a href="Requirements-and-Testing">आवश्यकताएँ और परीक्षण</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">इसे प्राप्त करें</h2>
+      <ol class="plain">
+        <li><code>WinAppMigrator-v${version}.exe</code> को
+          <a href="https://github.com/${repository}/releases/latest">नवीनतम रिलीज़</a> से डाउनलोड करें। इंस्टॉल करने के लिए कुछ भी नहीं है।</li>
+        <li>इसे चलाएँ। Windows व्यवस्थापक की स्वीकृति माँगता है, क्योंकि किसी अन्य ड्राइव को पढ़ने और सेवाएँ इंस्टॉल करने, दोनों के
+          लिए इसकी आवश्यकता होती है। इसके हस्ताक्षर में Randy Northrup का नाम है।</li>
+        <li>एक ऐप चुनें, और कुछ भी क्लिक करने से पहले ही स्क्रीन आपको दिखाती है कि उसके इंस्टॉलर में क्या जाएगा।</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">${version} डाउनलोड करें</a>
+        <a class="button" href="Getting-Started">डाउनलोड की जाँच कैसे करें</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version}, ${release_date} को रिलीज़ किया गया। निःशुल्क और ओपन सोर्स,
+        <a href="https://github.com/${repository}/blob/main/LICENSE">MIT लाइसेंस</a> के अंतर्गत।</p>
+      <p><a href="Home">दस्तावेज़ीकरण</a> · <a href="https://github.com/${repository}">स्रोत कोड</a> ·
+        <a href="https://github.com/${repository}/issues">समस्या की रिपोर्ट करें</a> ·
+        <a href="https://github.com/${repository}/security/policy">सुरक्षा</a></p>
+    </div>
+  </footer>
+</body>
+</html>

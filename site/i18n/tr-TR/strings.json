@@ -1,0 +1,14 @@
+{
+  "language_name": "Türkçe",
+  "language": "Dil",
+  "s_skip": "Sayfaya atla",
+  "s_site": "Site",
+  "s_docs": "Belgeler",
+  "s_download": "İndir",
+  "s_all_pages": "Tüm sayfalar",
+  "s_documentation": "Belgeler",
+  "s_updated": "Son değişiklik: {date}. WinAppMigrator'ı en son sürümü olan {version} itibarıyla anlatır.",
+  "s_built": "Bu site, projenin <a href=\"{wiki}\">wiki</a> sayfalarından oluşturulur. WinAppMigrator, <a href=\"{license}\">MIT lisansı</a> altında ücretsiz ve açık kaynaklıdır.",
+  "notice": "Bu sayfa İngilizce aslından makine tarafından çevrildi ve hatalar içerebilir. <a href=\"{english}\">İngilizce sayfayı okuyun</a> veya <a href=\"{report}\">çeviriyle ilgili bir sorun bildirin</a>.",
+  "full_guide": "Kılavuzun tamamı (İngilizce)"
+}

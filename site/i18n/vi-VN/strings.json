@@ -1,0 +1,14 @@
+{
+  "language_name": "Tiếng Việt",
+  "language": "Ngôn ngữ",
+  "s_skip": "Chuyển đến nội dung trang",
+  "s_site": "Trang web",
+  "s_docs": "Tài liệu",
+  "s_download": "Tải xuống",
+  "s_all_pages": "Tất cả các trang",
+  "s_documentation": "Tài liệu",
+  "s_updated": "Thay đổi lần cuối vào {date}. Mô tả WinAppMigrator tính đến bản phát hành mới nhất, {version}.",
+  "s_built": "Trang web này được tạo từ <a href=\"{wiki}\">wiki</a> của dự án. WinAppMigrator là phần mềm miễn phí và mã nguồn mở, theo <a href=\"{license}\">giấy phép MIT</a>.",
+  "notice": "Trang này được dịch bằng máy từ tiếng Anh và có thể có lỗi. <a href=\"{english}\">Đọc trang tiếng Anh</a>, hoặc <a href=\"{report}\">báo cáo lỗi bản dịch</a>.",
+  "full_guide": "Hướng dẫn đầy đủ, bằng tiếng Anh"
+}

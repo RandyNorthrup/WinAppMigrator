@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ja-JP" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – インストールされている Windows プログラムを新しい PC に移行</title>
+  <meta name="description" content="インストールされている Windows アプリを、別の PC 用の 1 つのインストーラーにする無料のオープンソース ツールです。起動しなくなった PC のドライブ、ディスク イメージ、古い Windows 7 PC からも作成できます。">
+  <link rel="canonical" href="${base_url}/ja-JP/">
+${alternates}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – インストールされている Windows プログラムを新しい PC に移行">
+  <meta property="og:description" content="インストールされている Windows アプリを、別の PC で実行できる 1 つのインストーラーにします。元のインストーラーがとうになくなっていても使えます。">
+  <meta property="og:url" content="${base_url}/ja-JP/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "インストールされている Windows デスクトップ アプリを、別の PC 用の 1 つの自己解凍形式のインストーラーにします。この PC、起動しなくなったコンピューターから取り外したドライブ、ディスク イメージ、またはネットワーク上の Windows 7 以降の古い PC から作成できます。",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">本文へスキップ</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="サイト">
+        <a href="Home">ドキュメント</a>
+        <a href="https://github.com/${repository}/releases/latest">ダウンロード</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+${languages}
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>インストールされている Windows プログラムを新しい PC に移行</h1>
+      <p class="lede">WinAppMigrator は、ある Windows PC にインストールされているアプリを、別の PC で実行できる 1 つのインストーラーにします。アプリがネットワーク上の古い Windows 7 PC にある場合も、故障しかけたコンピューターから取り外したドライブやそのイメージにある場合も、元のインストーラーがとうになくなっていても使えます。</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">${version} をダウンロード</a>
+        <a class="button" href="Getting-Started">はじめに</a>
+      </p>
+      <p class="facts">無料のオープンソース、MIT ライセンス · Windows 10 および 11、x64 · 24 言語 · Randy Northrup による署名</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="アプリを選択した WinAppMigrator。インストーラーの最大サイズ、空き領域が足りるかどうか、含まれる内容が表示されています">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">役立つ場面</h2>
+      <div class="cards">
+        <article>
+          <h3>新しい PC への移行</h3>
+          <p>セットアップ ファイル、ライセンス ファイル、設定を探し回らなくても、アプリを移行できます。</p>
+          <a href="Getting-Started">はじめに</a>
+        </article>
+        <article>
+          <h3>古い PC が起動しない</h3>
+          <p>ドライブを取り外して正常に動作する PC に接続し、そこにあるアプリからインストーラーを作成します。ドライブが故障しかけている可能性がある場合は、先にそのイメージを作成し、イメージから作成してください。故障しかけたドライブを読み取ると、とどめを刺すおそれがあるためです。</p>
+          <a href="Moving-from-a-Connected-Drive">ドライブまたはディスク イメージから</a>
+        </article>
+        <article>
+          <h3>Windows 7、Vista、8、8.1 からの移行</h3>
+          <p>これらの Windows のアプリを Windows 10 または 11 に移行できます。32 ビット Windows、<code>VirtualStore</code>、DirectX 9 ランタイムなど、古い Windows で異なっていた点にも対応します。</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">古い Windows のアプリ</a>
+        </article>
+        <article>
+          <h3>古い PC がネットワーク上でまだ動作している</h3>
+          <p>古い PC で署名済みの小さな WinAppMigrator Client を実行し、表示されたコードを入力して、アプリを選択します。ネットワークを経由するのは作成に必要なものだけで、暗号化されます。PC から何かを取り外す必要はありません。</p>
+          <a href="Moving-over-the-Network">ネットワーク経由で PC から</a>
+        </article>
+        <article>
+          <h3>セットアップ ファイルがない、または開発元がもうない</h3>
+          <p>インストールされているものから逆にたどります。アプリのファイル、レジストリ エントリ、サービス、アプリに必要な
+            Microsoft のランタイムです。</p>
+          <a href="How-It-Works">しくみ</a>
+        </article>
+        <article>
+          <h3>同じアプリを複数の PC に</h3>
+          <p>作成したインストーラーは、コマンド プロンプトからプレビュー、インストール、アンインストールができるため、スクリプトで各 PC に同じアプリをインストールできます。</p>
+          <a href="Command-Line">コマンド ライン</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">しくみ</h2>
+      <ol class="steps">
+        <li>
+          <h3>アプリを選択</h3>
+          <p>この PC、この PC に接続した別の PC のドライブ、アプリが読み取り専用でアタッチする <code>.vhd</code> または <code>.vhdx</code>
+            イメージ、またはネットワーク上の別の PC から選択します。</p>
+        </li>
+        <li>
+          <h3>含まれる内容を確認</h3>
+          <p>インストーラーの最大サイズ、収まるかどうか、含まれる内容が画面に表示されます。不要なもののチェックを外し、名前の完全一致では見つからなかった関連のありそうなものにチェックを付けます。</p>
+        </li>
+        <li>
+          <h3>インストーラーを作成</h3>
+          <p>含まれる内容にちなんだ名前の <code>.exe</code> が 1 つ作成されます。1 つに収まらない大きなアプリの場合は、<code>.exe</code>
+            と、それと一緒に置いておくデータ ファイルになります。</p>
+        </li>
+        <li>
+          <h3>別の PC で実行</h3>
+          <p>何かを書き込む前にパッケージのハッシュを確認してからインストールし、インストールした内容を読み戻して確認します。問題が発生した場合やキャンセルした場合は、インストールしたランタイムを除き、行った変更を元に戻します。「設定」にアンインストーラーが残ります。</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="インストール先、署名の有無、ファイル以外に設定される内容を表示しているインストーラー">
+      </picture>
+      <p class="more"><a href="How-It-Works">全体の流れを順を追って説明</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">インストーラーに含まれるもの</h2>
+      <ul class="checks">
+        <li><strong>プログラム ファイル</strong>：MSI と Inno Setup の記録、NSIS のログ、App Paths、製品名と完全に一致する名前のフォルダーから見つけます。</li>
+        <li><strong>レジストリ エントリ</strong>：アプリの PC 全体のキー、COM クラス、ファイルの種類、リンク プロトコル、メニュー コマンド、シェル拡張です。</li>
+        <li><strong>サービスとドライバー、スケジュールされたタスク、ショートカット</strong>、ファイアウォール規則、フォント、アプリのパスを保持する環境変数。</li>
+        <li><strong>ランタイム</strong>：アプリに必要な Visual C++ ランタイムと最新の .NET ランタイムです。作成時にダウンロードして中に入れるため、インターネットなしでインストールできます。ただし、作成時にダウンロードできなかったものは除きます。</li>
+        <li><strong>ユーザー データとライセンス データ（選択した場合）。</strong>ライセンス認証を回避することはありません。古い PC に関連付けられたライセンスは、再度ライセンス認証が必要になる場合があります。</li>
+        <li><strong>資格情報は含めません。</strong>パスワード、トークン、秘密キーのように見える値やファイルは除外され、作成前に表示されます。</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">含まれるもの、含まれないもののすべて</a></p>
+    </section>
+
+    <section aria-labelledby="everyone">
+      <h2 id="everyone">あなたの言語で、すべての人に</h2>
+      <p>アプリ、アプリが作成するすべてのインストーラー、古い PC 用のクライアントは 24 の言語に対応しており、最初は Windows の言語で表示されます。インストーラーは、作成された PC ではなく、実行される PC の言語で表示されます。アラビア語、ペルシア語、ウルドゥー語、ヘブライ語は右から左にレイアウトされます。英語以外はすべて機械翻訳です。おかしな箇所があれば、<a href="https://github.com/${repository}/issues/new?template=translation-problem.yml">お知らせください</a>。</p>
+      <p>すべてのコントロールはキーボードで操作でき、スクリーン リーダー用の名前が付いています。ウィンドウは Windows のコントラスト テーマ、テキストのサイズ、アニメーション効果に従います。WCAG 2.2 AA に照らして確認されており、その方法は適合性レポートに記載されています。</p>
+      <p class="more"><a href="Languages-and-Accessibility">言語とアクセシビリティ</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">使用する前に</h2>
+      <p>プロジェクトへのプッシュのたびに、実際のオープンソース アプリ 5 つ（7-Zip、PuTTY、Eclipse Mosquitto、windows_exporter、Git LFS）を 1 台のテスト マシンから新しいマシンに移行し、復元したものを Windows 自体に使わせて確認しています。これらは、クリーンなマシン上の、小さく素直なアプリです。デスクトップ版の Windows 10 および 11（x64）はこれらのテストで実行されておらず、オンライン ライセンス認証のあるアプリ、ドライバーの読み込み、その後の再起動はまったく試されていません。</p>
+      <p>そのため、インストーラーは使用する前に試してください。また、故障しかけたドライブは、読み取る前にイメージを作成してください。移行が許可されているソフトウェアにのみ使用してください。</p>
+      <p class="more"><a href="Limitations">制限事項</a> · <a href="Requirements-and-Testing">要件とテスト</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">入手方法</h2>
+      <ol class="plain">
+        <li><code>WinAppMigrator-v${version}.exe</code> を<a href="https://github.com/${repository}/releases/latest">最新リリース</a>からダウンロードします。インストールは不要です。</li>
+        <li>実行します。別のドライブの読み取りとサービスのインストールにはどちらも管理者の承認が必要なため、Windows が承認を求めます。署名には Randy Northrup の名前が表示されます。</li>
+        <li>アプリを選択すると、何かをクリックする前に、そのインストーラーに含まれる内容が画面に表示されます。</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">${version} をダウンロード</a>
+        <a class="button" href="Getting-Started">ダウンロードの確認方法</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version}、${release_date} リリース。<a href="https://github.com/${repository}/blob/main/LICENSE">MIT ライセンス</a>の下で提供される無料のオープンソース ソフトウェアです。</p>
+      <p><a href="Home">ドキュメント</a> · <a href="https://github.com/${repository}">ソース</a> ·
+        <a href="https://github.com/${repository}/issues">問題を報告</a> ·
+        <a href="https://github.com/${repository}/security/policy">セキュリティ</a></p>
+    </div>
+  </footer>
+</body>
+</html>

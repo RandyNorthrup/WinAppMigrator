@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="nl-NL" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <title>WinAppMigrator – Geïnstalleerde Windows-programma's naar een nieuwe pc verplaatsen</title>
+  <meta name="description" content="Gratis opensourcetool die van een geïnstalleerde Windows-app één installatieprogramma voor een andere pc maakt, zelfs vanaf het station van een kapotte pc, een schijfkopie of een oude Windows 7-pc.">
+  <link rel="canonical" href="${base_url}/nl-NL/">
+${alternates}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="WinAppMigrator">
+  <meta property="og:title" content="WinAppMigrator – Geïnstalleerde Windows-programma's naar een nieuwe pc verplaatsen">
+  <meta property="og:description" content="Maak van een geïnstalleerde Windows-app één installatieprogramma dat je op een andere pc kunt uitvoeren, zelfs als het oorspronkelijke installatieprogramma al lang weg is.">
+  <meta property="og:url" content="${base_url}/nl-NL/">
+  <meta property="og:image" content="${base_url}/images/app-pick-light.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "WinAppMigrator",
+    "description": "Maakt van een geïnstalleerde Windows-bureaublad-app één zelfuitpakkend installatieprogramma voor een andere pc: vanaf deze pc, een station uit een kapotte computer, een schijfkopie of via je netwerk vanaf een oude pc met Windows 7 of later.",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "softwareVersion": "${version}",
+    "dateModified": "${release_date}",
+    "url": "${base_url}/",
+    "downloadUrl": "https://github.com/${repository}/releases/latest",
+    "screenshot": "${base_url}/images/app-pick-light.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Randy Northrup", "url": "https://github.com/RandyNorthrup" }
+  }
+  </script>
+</head>
+<body class="landing">
+  <a class="skip" href="#content">Doorgaan naar de pagina</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./" aria-current="page"><img src="icon.png" alt="" width="28" height="28">WinAppMigrator</a>
+      <nav class="top-links" aria-label="Site">
+        <a href="Home">Documentatie</a>
+        <a href="https://github.com/${repository}/releases/latest">Downloaden</a>
+        <a href="https://github.com/${repository}">GitHub</a>
+${languages}
+      </nav>
+    </div>
+  </header>
+
+  <main id="content">
+    <section class="hero">
+      <h1>Geïnstalleerde Windows-programma's naar een nieuwe pc verplaatsen</h1>
+      <p class="lede">WinAppMigrator maakt van een app die op een Windows-pc is geïnstalleerd, één installatieprogramma dat je op een
+        andere pc kunt uitvoeren. Ook als de app op een oude Windows 7-pc in je netwerk staat, op een station uit een computer
+        die het begeeft, of op een schijfkopie daarvan, en het oorspronkelijke installatieprogramma al lang weg is.</p>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">${version} downloaden</a>
+        <a class="button" href="Getting-Started">Aan de slag</a>
+      </p>
+      <p class="facts">Gratis en open source, MIT-licentie · Windows 10 en 11, x64 · 24 talen · Ondertekend door Randy Northrup</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/app-pick-dark.png">
+        <img class="shot" src="images/app-pick-light.png" width="1240" height="780"
+             alt="WinAppMigrator met een geselecteerde app: hoe groot het installatieprogramma kan worden, of dat past en wat erin gaat">
+      </picture>
+    </section>
+
+    <section aria-labelledby="when">
+      <h2 id="when">Wanneer het helpt</h2>
+      <div class="cards">
+        <article>
+          <h3>Overstappen op een nieuwe pc</h3>
+          <p>Een app gaat mee zonder dat je hoeft te zoeken naar het installatiebestand, het licentiebestand of de instellingen.</p>
+          <a href="Getting-Started">Aan de slag</a>
+        </article>
+        <article>
+          <h3>De oude pc start niet meer</h3>
+          <p>Haal het station eruit, sluit het aan op een werkende pc en maak een installatieprogramma van een app die erop staat.
+            Als het station mogelijk defect raakt, maak je er eerst een schijfkopie van en gebruik je die, omdat lezen een station
+            dat het begeeft de genadeslag kan geven.</p>
+          <a href="Moving-from-a-Connected-Drive">Vanaf een station of een schijfkopie</a>
+        </article>
+        <article>
+          <h3>Weg van Windows 7, Vista, 8 of 8.1</h3>
+          <p>Een app van een van deze versies gaat naar Windows 10 of 11, en wat daar anders was, wordt geregeld: 32-bits Windows,
+            <code>VirtualStore</code> en de DirectX 9-runtime.</p>
+          <a href="Moving-from-a-Connected-Drive#apps-from-windows-7-vista-8-or-81">Apps van oudere Windows-versies</a>
+        </article>
+        <article>
+          <h3>De oude pc werkt nog, in je netwerk</h3>
+          <p>Voer daar de kleine, ondertekende WinAppMigrator Client uit, typ de code die deze weergeeft en kies een app. Alleen
+            wat nodig is om het installatieprogramma te maken, gaat versleuteld over het netwerk. Er hoeft niets uit de pc te worden
+            gehaald.</p>
+          <a href="Moving-over-the-Network">Vanaf een pc via het netwerk</a>
+        </article>
+        <article>
+          <h3>Het installatiebestand is weg, of het bedrijf</h3>
+          <p>Het werkt terug vanuit wat er is geïnstalleerd: de bestanden van de app, de registervermeldingen, de services en de
+            Microsoft-runtimes die de app nodig heeft.</p>
+          <a href="How-It-Works">Hoe het werkt</a>
+        </article>
+        <article>
+          <h3>Dezelfde app op meerdere pc's</h3>
+          <p>Een installatieprogramma dat het maakt, kan vanaf een opdrachtprompt een voorbeeld tonen, installeren en verwijderen,
+            zodat een script dezelfde app op elke pc kan installeren.</p>
+          <a href="Command-Line">Opdrachtregel</a>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="steps">
+      <h2 id="steps">Hoe het werkt</h2>
+      <ol class="steps">
+        <li>
+          <h3>Kies een app</h3>
+          <p>Vanaf deze pc, een station van een andere pc dat op deze pc is aangesloten, een <code>.vhd</code>- of
+            <code>.vhdx</code>-schijfkopie die de app alleen-lezen koppelt, of een andere pc in je netwerk.</p>
+        </li>
+        <li>
+          <h3>Zie wat erin gaat</h3>
+          <p>Het scherm laat zien hoe groot het installatieprogramma kan worden, of het past en wat erin zit. Vink uit wat je
+            niet wilt, en vink aan wat erbij lijkt te horen maar niet via de exacte naam is gevonden.</p>
+        </li>
+        <li>
+          <h3>Maak het installatieprogramma</h3>
+          <p>Je krijgt één <code>.exe</code>, genoemd naar wat erin zit. Een app die te groot is voor één bestand, komt als een
+            <code>.exe</code> en een gegevensbestand die bij elkaar blijven.</p>
+        </li>
+        <li>
+          <h3>Voer het uit op de andere pc</h3>
+          <p>Het controleert de hashes van het pakket voordat het iets schrijft, installeert, leest daarna terug wat het heeft
+            geïnstalleerd en controleert dat. Als er iets misgaat of als je annuleert, zet het terug wat het heeft gedaan, behalve
+            een runtime die het heeft geïnstalleerd. Het laat een verwijderprogramma achter in Instellingen.</p>
+        </li>
+      </ol>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="images/installer-dark.png">
+        <img class="shot narrow" src="images/installer-light.png" width="760" height="720" loading="lazy"
+             alt="Het installatieprogramma, met de installatielocatie, of het is ondertekend en wat het naast bestanden instelt">
+      </picture>
+      <p class="more"><a href="How-It-Works">De hele route, stap voor stap</a></p>
+    </section>
+
+    <section aria-labelledby="what">
+      <h2 id="what">Wat er in een installatieprogramma gaat</h2>
+      <ul class="checks">
+        <li><strong>Programmabestanden</strong>, gevonden via gegevens van MSI en Inno Setup, logboeken van NSIS, App Paths en
+          mappen die precies naar het product zijn genoemd.</li>
+        <li><strong>Registervermeldingen</strong>: de sleutels van de app voor de hele computer, de COM-klassen, bestandstypen,
+          koppelingsprotocollen, menuopdrachten en shell-extensies.</li>
+        <li><strong>Services en stuurprogramma's, geplande taken, snelkoppelingen</strong>, firewallregels, lettertypen en de
+          omgevingsvariabelen die het pad van de app bevatten.</li>
+        <li><strong>Runtimes</strong>: de Visual C++- en moderne .NET-runtimes die de app nodig heeft, gedownload wanneer je het
+          installatieprogramma maakt en erin opgenomen, zodat ze zonder internet worden geïnstalleerd, tenzij er toen een niet
+          kon worden gedownload.</li>
+        <li><strong>Gebruikersgegevens en licentiegegevens, als je dat kiest.</strong> Activering wordt nooit omzeild, en een
+          licentie die aan de oude computer is gebonden, moet mogelijk opnieuw worden geactiveerd.</li>
+        <li><strong>Nooit referenties.</strong> Waarden en bestanden die op wachtwoorden, tokens of persoonlijke sleutels lijken,
+          worden weggelaten en vermeld voordat je het installatieprogramma maakt.</li>
+      </ul>
+      <p class="more"><a href="What-Goes-in-an-Installer">Alles wat erin gaat, en wat niet</a></p>
+    </section>
+
+    <section aria-labelledby="everyone">
+      <h2 id="everyone">In je eigen taal, voor iedereen</h2>
+      <p>De app, elk installatieprogramma dat deze maakt en de client voor oude pc's spreken 24 talen, te beginnen met de taal
+        van Windows. Een installatieprogramma spreekt de taal van de pc waarop het wordt uitgevoerd, niet die van de pc waarop het
+        is gemaakt, en Arabisch, Perzisch, Urdu en Hebreeuws worden van rechts naar links weergegeven. Alle talen behalve Engels
+        zijn automatisch vertaald; als er iets verkeerd staat,
+        <a href="https://github.com/${repository}/issues/new?template=translation-problem.yml">laat het dan weten</a>.</p>
+      <p>Elk besturingselement is met het toetsenbord te bereiken en heeft een naam voor schermlezers, en de vensters volgen de
+        contrastthema's, Tekstgrootte en Animatie-effecten van Windows. Ze worden getoetst aan WCAG 2.2 AA, en het
+        conformiteitsrapport beschrijft hoe.</p>
+      <p class="more"><a href="Languages-and-Accessibility">Talen en toegankelijkheid</a></p>
+    </section>
+
+    <section aria-labelledby="rely">
+      <h2 id="rely">Voordat je erop vertrouwt</h2>
+      <p>Bij elke push naar het project worden vijf echte opensource-apps, 7-Zip, PuTTY, Eclipse Mosquitto, windows_exporter en
+        Git LFS, van één testcomputer naar nieuwe computers verplaatst, en wordt Windows zelf gevraagd te gebruiken wat is hersteld.
+        Dat zijn kleine, goed werkende apps op schone computers. De desktopversies van Windows 10 en 11 op x64 zijn in die tests
+        niet uitgevoerd, en een app met online activering, een stuurprogramma dat wordt geladen en daarna opnieuw opstarten zijn
+        helemaal nog niet geprobeerd.</p>
+      <p>Probeer een installatieprogramma dus uit voordat je erop vertrouwt, en maak een schijfkopie van een station dat het
+        begeeft voordat je het leest. Het is alleen bedoeld voor software die je mag verplaatsen.</p>
+      <p class="more"><a href="Limitations">Beperkingen</a> · <a href="Requirements-and-Testing">Vereisten en tests</a></p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">Downloaden</h2>
+      <ol class="plain">
+        <li>Download <code>WinAppMigrator-v${version}.exe</code> van de
+          <a href="https://github.com/${repository}/releases/latest">nieuwste release</a>. Er hoeft niets te worden geïnstalleerd.</li>
+        <li>Voer het uit. Windows vraagt om goedkeuring van een administrator, omdat het lezen van een ander station en het
+          installeren van services daar allebei om vragen. De handtekening vermeldt Randy Northrup.</li>
+        <li>Kies een app, en het scherm laat zien wat er in het installatieprogramma zou gaan voordat je ergens op klikt.</li>
+      </ol>
+      <p class="actions">
+        <a class="button primary" href="https://github.com/${repository}/releases/latest">${version} downloaden</a>
+        <a class="button" href="Getting-Started">Zo controleer je de download</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="bottom-inner">
+      <p>WinAppMigrator ${version}, uitgebracht op ${release_date}. Gratis en open source, onder de
+        <a href="https://github.com/${repository}/blob/main/LICENSE">MIT-licentie</a>.</p>
+      <p><a href="Home">Documentatie</a> · <a href="https://github.com/${repository}">Broncode</a> ·
+        <a href="https://github.com/${repository}/issues">Een probleem melden</a> ·
+        <a href="https://github.com/${repository}/security/policy">Beveiliging</a></p>
+    </div>
+  </footer>
+</body>
+</html>
