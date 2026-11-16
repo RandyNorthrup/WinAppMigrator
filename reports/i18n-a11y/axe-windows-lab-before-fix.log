@@ -1,0 +1,14 @@
+Axe.Windows 2.4.2 on testpc1, 2026-11-15, the 0.7.0 app and installer built before commit fca2162
+(AxeWindowsCLI --processid <pid> --outputdirectory ... --scanid <name> --alwayssavetestfile; exit 1 for each)
+== app: 4 errors were found
+  error: An on-screen element must not have a null BoundingRectangle property. (region '')
+  error: An on-screen element must not have a null BoundingRectangle property. (region '')
+  error: An on-screen element must not have a null BoundingRectangle property. (region '')
+  error: The Name property of a focusable element must not be null. (edit '')
+== uninstaller-no-record: 3 errors were found
+  error: An on-screen element must not have a null BoundingRectangle property. (region '')
+  error: An on-screen element must not have a null BoundingRectangle property. (region '')
+  error: An on-screen element must not have a null BoundingRectangle property. (region '')
+== stub-no-package: 2 errors were found
+  error: An on-screen element must not have a null BoundingRectangle property. (region '')
+  error: An on-screen element must not have a null BoundingRectangle property. (region '')

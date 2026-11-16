@@ -2,7 +2,7 @@
 
 All notable project changes are tracked here.
 
-## 0.7.0 — Unreleased
+## 0.7.0 — 2026-11-15
 
 WinAppMigrator now speaks 24 languages, and can be used with a keyboard alone, with a screen reader, and with Windows'
 accessibility settings. The app, every installer it builds, and WinAppMigrator Client start in the language Windows is
