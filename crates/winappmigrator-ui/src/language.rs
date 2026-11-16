@@ -81,7 +81,7 @@ mod tests {
     use std::path::PathBuf;
 
     use egui_kittest::Harness;
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{NodeT, Queryable};
     use winappmigrator_i18n::{LANGUAGES, PSEUDO_LONG, is_isolation_mark, with_language};
 
     use super::*;
@@ -195,5 +195,65 @@ mod tests {
         assert!(url.contains("template=translation-problem.yml"));
         assert!(url.contains("&language=it-IT&"));
         assert!(url.ends_with("title=%5Bit-IT%5D%20"));
+    }
+
+    // ---- AC-I18N-PICKER ----
+
+    /// The Language menu, open, with what a person chose in it kept as the harness's state.
+    fn menu_that_says_what_was_chosen() -> Harness<'static, Option<LanguageAction>> {
+        let mut harness = Harness::new_ui_state(
+            |ui, chosen: &mut Option<LanguageAction>| {
+                with_language(ENGLISH, || {
+                    if let Some(action) = language_menu(ui, &windows_fonts()) {
+                        *chosen = Some(action);
+                    }
+                });
+            },
+            None,
+        );
+        theme::install_fonts(&harness.ctx, &windows_fonts());
+        harness.run();
+        harness
+    }
+
+    fn italian() -> &'static Language {
+        winappmigrator_i18n::language("it-IT").unwrap_or_else(|| panic!("Italian is in the table"))
+    }
+
+    #[test]
+    fn a_language_is_chosen_by_clicking_it() {
+        let mut harness = menu_that_says_what_was_chosen();
+        harness.get_by_role(egui::accesskit::Role::ComboBox).click();
+        harness.run();
+        // A click, as egui is told of one by a mouse, a pen, or a screen reader.
+        harness.get_by_label("Italiano").click_accesskit();
+        harness.run();
+        assert_eq!(harness.state(), &Some(LanguageAction::Choose(italian())));
+    }
+
+    #[test]
+    fn a_language_is_chosen_with_the_keyboard() {
+        let mut harness = menu_that_says_what_was_chosen();
+        // Tab to the menu, and open it with the space bar.
+        harness.key_press(egui::Key::Tab);
+        harness.run();
+        harness.key_press(egui::Key::Space);
+        harness.run();
+        let mut reached = false;
+        for _ in 0..40 {
+            harness.key_press(egui::Key::Tab);
+            harness.run();
+            if harness
+                .query_by_label("Italiano")
+                .is_some_and(|node| node.accesskit_node().is_focused())
+            {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "the Tab key reaches Italiano in the open menu");
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(harness.state(), &Some(LanguageAction::Choose(italian())));
     }
 }
