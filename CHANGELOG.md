@@ -2,6 +2,58 @@
 
 All notable project changes are tracked here.
 
+## 0.7.0 — Unreleased
+
+WinAppMigrator now speaks 24 languages, and can be used with a keyboard alone, with a screen reader, and with Windows'
+accessibility settings. The app, every installer it builds, and WinAppMigrator Client start in the language Windows is
+in, and an installer speaks the language of the PC it runs on, not the one it was built on. Arabic, Persian, Urdu and
+Hebrew are laid out right to left. Every language but English was translated by machine and checked by a second,
+independent machine pass; the project has no native speakers yet, and a form in the Language menu asks for corrections.
+
+### Languages
+
+- **24 languages:** English, Spanish, Portuguese (Brazil), French, German, Italian, Dutch, Polish, Russian, Ukrainian,
+  Turkish, Chinese (Simplified and Traditional), Japanese, Korean, Hindi, Bengali, Indonesian, Vietnamese, Thai, Arabic,
+  Persian, Urdu and Hebrew. Each part starts in the first of Windows' display languages it has, else English.
+- **A Language menu** in the app and on an installer's first screen lists them by their own names and changes the window
+  at once. The app remembers the choice; an installer keeps it for that run. In any language but English, it says the
+  translation is by machine and offers **Report a Translation Problem**, which opens a form with the language filled in.
+- **An installer speaks the new PC's language.** A package now records its notes as messages with their values, so the
+  installer shows them in its own language; one built by 0.6 or older shows them in the English it was written in.
+- **Right to left.** In Arabic, Persian, Urdu and Hebrew each window is the mirror image of the English one, and text
+  that mixes directions, such as a sentence with a path in it, reads in Unicode bidirectional order.
+- **Numbers and sizes** use Windows' own decimal and grouping marks, and each language's units and plural forms.
+- **WinAppMigrator Client** speaks the old PC's display language, or the one `--lang` names. A Windows 7 console cannot
+  show right-to-left text in order, so in those languages it prints English and says why.
+- **What scripts read stays English.** A quiet install or uninstall from a command line prints English, with English
+  number marks, on every PC.
+- **Names keep their letters.** An installer for an app named in any script, such as "日本語エディタ", is named after it
+  with those letters, where they used to become underscores.
+- **Fonts.** Each script is drawn with the font Windows has for it, loaded only when a language or an app's name needs it.
+
+### Accessibility
+
+- **Screen readers.** Every control has a name, a role and its state; headings are headings; each window says which
+  language it is in. How a build, install or uninstall is going is announced as it changes, and a problem at once.
+- **Keyboard.** The Tab key reaches every control in reading order. A tooltip, which holds the whole of text cut short,
+  also shows while its control has the focus.
+- **Targets** are at least 24 by 24 points. Scroll bars are that wide where they are grabbed, and drawn thin until the
+  pointer is over them.
+- **Windows' settings.** Contrast themes are drawn in their own colors, and the app no longer offers its light or dark
+  theme in one. Text size, up to 225%, makes everything larger. With Animation effects off, nothing moves by itself.
+- **An Accessibility Conformance Report**, [`docs/ACCESSIBILITY.md`](docs/ACCESSIBILITY.md), goes through WCAG 2.2 A
+  and AA and EN 301 549 for the app, the installers and the website. It is self-assessed. An **Accessibility Problem**
+  form joins the Translation Problem one.
+- **Checked on every build.** UI tests walk each screen's accessibility tree in English, Arabic and two test languages;
+  Axe.Windows, Microsoft's accessibility rules, scans the real windows on three versions of Windows; axe-core checks every
+  page of the website.
+
+### Website
+
+- **The landing page and Getting Started, Installing on the New PC and Troubleshooting** are on the website in every
+  language, with a language switcher and links between the translations for search engines. The rest of the guide stays
+  in English, and says so. A new page, Languages and Accessibility, says what each part does.
+
 ## 0.6.2 — 2026-11-15
 
 The installer now says why it cannot install an app, instead of leaving its buttons greyed out with no clear reason. Most

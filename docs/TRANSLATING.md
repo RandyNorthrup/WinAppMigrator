@@ -1,7 +1,9 @@
 # Translating WinAppMigrator
 
 WinAppMigrator speaks 24 languages. English is written by hand; the other 23 were first made by machine, then reviewed
-by a second machine pass, because the project had no native speakers to ask. They will have mistakes. If you speak one of
+by a second machine pass, because the project had no native speakers to ask. What each review found, and what it could
+not settle, is in [`reports/i18n-a11y/review`](../reports/i18n-a11y/review): the open questions there are a good place
+to start. They will have mistakes. If you speak one of
 these languages, you can make it better, and every fix helps everyone who reads it.
 
 ## Report a problem
@@ -48,6 +50,17 @@ installer-location-in-use = This folder cannot be used: { $path }
 - **The `#` lines** explain a message: what fills each placeholder, and where the words appear. Do not translate them.
 - Read [`locales/glossary.md`](../crates/winappmigrator-i18n/locales/glossary.md) first: it says which words stay as they
   are, and how Windows itself names what the app refers to.
+
+Before you open a pull request, check your language with `scripts/ftl-tool.py` (it needs `pip install fluent.syntax`):
+
+```text
+python scripts/ftl-tool.py check crates/winappmigrator-i18n/locales it-IT
+```
+
+It reports what the project's own test would fail on (a message missing, a placeholder lost or added, a file that does
+not parse), and warns of a plural form your language needs that a message lacks, and of text still in English. Each
+language folder also has a `terms.md`, the words its translation uses for the program's terms; keep to them, or change
+them there and everywhere they appear.
 
 Then open a pull request with your change. The checks fail if a message is missing, a placeholder is lost or added, or a
 file does not parse, and say which.
