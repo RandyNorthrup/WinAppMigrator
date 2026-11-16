@@ -7,6 +7,9 @@ mod views;
 mod worker;
 
 #[cfg(test)]
+#[path = "../../winappmigrator-ui/src/checks.rs"]
+mod checks;
+#[cfg(test)]
 mod ui_tests;
 #[cfg(test)]
 mod ui_tests_a11y;

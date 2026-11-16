@@ -6,14 +6,19 @@
 //!   (WCAG 2.5.8, AC-A11Y-TARGET).
 //! - [`tab_order`]: the controls the Tab key reaches, in order (AC-A11Y-KEYBOARD).
 //! - [`unmarked`]: in a test language, the words that are not from the catalog (AC-I18N-NOHARDCODE).
+//!
+//! Test code only. The app's and the installer's tests include this file by path, each with its own dev-dependency on
+//! egui_kittest, so that no program that ships depends on egui_kittest, even optionally.
 
-use eframe::egui::accesskit::{Action, Role, Toggled};
+use eframe::egui::accesskit::{Action, Role};
 use eframe::egui::{self, Rect};
 use egui_kittest::kittest::NodeT;
 use egui_kittest::{Harness, Node};
 use winappmigrator_i18n::{PSEUDO_END, PSEUDO_START, is_isolation_mark};
 
-use crate::theme::SMALLEST_TARGET;
+/// The least a target may measure across, in points, by WCAG 2.5.8: `theme::SMALLEST_TARGET`, which a test holds
+/// them to.
+pub const SMALLEST_TARGET: f32 = 24.0;
 
 /// Roles a control has that a person works.
 const CONTROL_ROLES: &[Role] = &[
@@ -88,14 +93,8 @@ pub fn interactive_problems(root: &Node<'_>) -> Vec<String> {
     problems
 }
 
-/// Whether a checkbox node says it is ticked.
-pub fn is_ticked(node: &Node<'_>) -> bool {
-    node.accesskit_node().toggled() == Some(Toggled::True)
-}
-
 /// AC-A11Y-TARGET: clickable nodes smaller than 24 by 24 points, unless a 24-point circle on each touches no other
-/// target (WCAG 2.5.8's spacing exception). A node inside another clickable one, such as a button in a text field, is
-/// measured against its neighbours, not the one it is in.
+/// target (WCAG 2.5.8's spacing exception). A button inside a text field counts the field as a neighbour.
 pub fn small_targets(root: &Node<'_>) -> Vec<String> {
     let targets: Vec<(String, Rect)> = all_nodes(root)
         .iter()
@@ -109,9 +108,10 @@ pub fn small_targets(root: &Node<'_>) -> Vec<String> {
             continue;
         }
         let circle = Rect::from_center_size(rect.center(), egui::Vec2::splat(SMALLEST_TARGET));
-        let crowded = targets.iter().enumerate().any(|(other, (_, its))| {
-            other != index && !its.contains_rect(*rect) && its.intersects(circle)
-        });
+        let crowded = targets
+            .iter()
+            .enumerate()
+            .any(|(other, (_, its))| other != index && its.intersects(circle));
         if crowded {
             problems.push(format!(
                 "{name:?} is {:.0} by {:.0} points, with other targets within reach",

@@ -89,6 +89,17 @@ pub fn mark_pane(ui: &Ui) {
     });
 }
 
+/// A text field's hint, laid out in both directions when it needs to be: egui would lay "Search (Ctrl+F)" in Arabic
+/// as one right-to-left run, and turn the Latin letters around.
+fn field_hint(ui: &Ui, hint: &str) -> egui::WidgetText {
+    if !bidi::needs_bidi(hint, winappmigrator_i18n::direction()) {
+        return hint.into();
+    }
+    let font = TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().weak_text_color();
+    bidi::visual_job(ui.painter(), hint, font, color).into()
+}
+
 /// Give a control the name a screen reader says for it.
 fn name_control(ui: &Ui, response: &Response, name: &str) {
     if name.is_empty() {
@@ -1240,7 +1251,7 @@ pub fn disclosure_row(
 pub fn text_field(ui: &mut Ui, value: &mut String, hint: &str, width: f32) -> Response {
     let response = ui.add(
         egui::TextEdit::singleline(value)
-            .hint_text(hint)
+            .hint_text(field_hint(ui, hint))
             .desired_width(width)
             .min_size(vec2(width, CONTROL_HEIGHT))
             .margin(Margin::symmetric(TEXT_FIELD_MARGIN_X, 8)),
@@ -1270,7 +1281,7 @@ pub fn search_field(
     let response = ui.add(
         egui::TextEdit::singleline(value)
             .id(id)
-            .hint_text(hint)
+            .hint_text(field_hint(ui, hint))
             .desired_width(width)
             .min_size(vec2(width, CONTROL_HEIGHT))
             .margin(Margin {
@@ -1292,7 +1303,7 @@ pub fn search_field(
     if !value.is_empty() {
         let clear_rect = mirror.rect(Rect::from_center_size(
             pos2(response.rect.right() - 16.0, center_y),
-            vec2(20.0, 20.0),
+            vec2(theme::SMALLEST_TARGET, theme::SMALLEST_TARGET),
         ));
         let clear = tooltip(
             ui.interact(clear_rect, id.with("clear"), Sense::click())
@@ -1307,7 +1318,7 @@ pub fn search_field(
         paint_icon(
             ui.painter(),
             Icon::Close,
-            clear_rect.shrink(5.0),
+            clear_rect.shrink(7.0),
             theme.text_muted,
         );
         if clear.clicked() {

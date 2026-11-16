@@ -132,7 +132,8 @@ const NAMED_ONLY_FOR_THE_PUBLISHER: &str =
 /// Why else something is not offered, or not taken. Each is said in English here, and by its key
 /// in a warning, which reads it from the catalog in the reader's language: see [`refusal_key`].
 const RECORD_IS_ANOTHER_APPS: &str = "its install record is another app's";
-const MAY_NOT_BE_READ: &str = "it may not be read";
+const MAY_NOT_BE_READ: &str =
+    "its path leaves the drive or goes through a link, so it cannot safely be read";
 const GOES_THROUGH_A_LINK: &str = "it goes through a link";
 const NOT_WRITTEN_AS_CALLED: &str = "it is not written the way it is really called";
 const IN_ANOTHER_ACCOUNTS_FOLDERS: &str = "it is in another account's folders";

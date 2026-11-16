@@ -6,3 +6,7 @@ pub mod gui;
 pub mod headless;
 pub mod uninstall;
 mod uninstall_gui;
+
+#[cfg(test)]
+#[path = "../../winappmigrator-ui/src/checks.rs"]
+mod checks;

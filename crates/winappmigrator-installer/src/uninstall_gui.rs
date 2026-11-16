@@ -870,7 +870,7 @@ mod tests {
             winappmigrator_i18n::with_language(language, || {
                 for (screen, app) in screens() {
                     let harness = harness_for(app);
-                    let problems = winappmigrator_ui::checks::interactive_problems(&harness.root());
+                    let problems = crate::checks::interactive_problems(&harness.root());
                     assert!(
                         problems.is_empty(),
                         "{} {screen}: {problems:#?}",
@@ -886,7 +886,7 @@ mod tests {
     fn nothing_clickable_is_too_small_to_hit() {
         for (screen, app) in screens() {
             let harness = harness_for(app);
-            let problems = winappmigrator_ui::checks::small_targets(&harness.root());
+            let problems = crate::checks::small_targets(&harness.root());
             assert!(problems.is_empty(), "{screen}: {problems:#?}");
         }
     }
@@ -897,7 +897,7 @@ mod tests {
         winappmigrator_i18n::with_language(&winappmigrator_i18n::PSEUDO_LONG, || {
             for (screen, app) in screens() {
                 let harness = harness_for(app);
-                let problems = winappmigrator_ui::checks::unmarked(&harness.root(), DATA);
+                let problems = crate::checks::unmarked(&harness.root(), DATA);
                 assert!(problems.is_empty(), "{screen}: {problems:#?}");
             }
         });
@@ -907,14 +907,14 @@ mod tests {
     #[test]
     fn the_tab_key_reaches_every_control() {
         let mut harness = harness_for(sample(ThemeMode::Dark));
-        let order = winappmigrator_ui::checks::tab_order(&mut harness, 100);
-        let buttons: Vec<String> = winappmigrator_ui::checks::all_nodes(&harness.root())
+        let order = crate::checks::tab_order(&mut harness, 100);
+        let buttons: Vec<String> = crate::checks::all_nodes(&harness.root())
             .iter()
             .filter(|node| {
                 node.accesskit_node().role() == egui::accesskit::Role::Button
                     && !node.accesskit_node().is_disabled()
             })
-            .map(winappmigrator_ui::checks::name_of)
+            .map(crate::checks::name_of)
             .collect();
         assert!(
             buttons.contains(&winappmigrator_i18n::t!("uninstaller-uninstall")),
@@ -955,7 +955,7 @@ mod tests {
         running.stage = Stage::Running;
         running.step = Some(InstallStep::new(InstallPhase::Uninstalling, 40, 200));
         let harness = harness_for(running);
-        let live = winappmigrator_ui::checks::live_regions(&harness.root());
+        let live = crate::checks::live_regions(&harness.root());
         assert!(
             live.iter()
                 .any(|(name, urgent)| name.contains("40") && !urgent),
@@ -988,7 +988,7 @@ mod tests {
         let size = egui::vec2(1024.0 / 1.5, 697.0 / 1.5);
         let mut harness = harness_sized(sample(ThemeMode::Dark), size);
         let window = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-        let hidden = winappmigrator_ui::checks::hidden_when_focused(&mut harness, window, 200);
+        let hidden = crate::checks::hidden_when_focused(&mut harness, window, 200);
         assert!(hidden.is_empty(), "{hidden:#?}");
     }
 }

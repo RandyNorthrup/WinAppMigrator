@@ -1,10 +1,10 @@
 //! Every screen of the app as a screen reader, a keyboard, and another language meet it: AC-A11Y-NAMES,
 //! AC-A11Y-TARGET, AC-A11Y-KEYBOARD, AC-I18N-NOHARDCODE, and AC-RTL-MIRROR.
 
+use crate::checks;
 use egui_kittest::kittest::{NodeT, Queryable};
 use winappmigrator_core::BuildStep;
 use winappmigrator_i18n::{ENGLISH, Language, PSEUDO_LONG, PSEUDO_RTL, t, with_language};
-use winappmigrator_ui::checks;
 
 use crate::theme::ThemeMode;
 use crate::ui_tests::{

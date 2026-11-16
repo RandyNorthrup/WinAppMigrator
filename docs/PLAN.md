@@ -103,11 +103,15 @@ reverse-engineering, footprint discovery, packaging, restore, verification).
   `runtimeconfig.json` and its own metadata, telling .NET Framework from modern .NET.
 - Dev/release build profiles tuned (deps + first-party optimized in dev for fast
   tests; LTO + single codegen unit + strip in release).
+- **Languages and accessibility (0.7.0):** 24 languages, machine-translated and independently reviewed, right to left
+  included, with an installer speaking the language of the PC it runs on; keyboard, screen readers, contrast themes,
+  Text size and Animation effects; WCAG 2.2 AA as the aim, with a self-assessed conformance report
+  ([ACCESSIBILITY.md](ACCESSIBILITY.md)); the website's key pages in every language. Its plan, requirements, tasks, and
+  evidence: [plans/i18n-a11y.md](plans/i18n-a11y.md).
 
 ## In progress
 
-- **Languages and accessibility, for 0.7.0:** 24 languages (machine-translated, right-to-left included), WCAG 2.2 AA, and
-  a translated website. Its own plan, with requirements, tasks, and evidence: [plans/i18n-a11y.md](plans/i18n-a11y.md).
+Nothing.
 
 ## Definition of done (every change)
 

@@ -10,10 +10,6 @@ publish = false
 [lints]
 workspace = true
 
-[features]
-# Accessibility-tree checks for the UI tests of the app, the installer, and the uninstaller.
-test-support = ["dep:egui_kittest"]
-
 [dependencies]
 winappmigrator-i18n.workspace = true
 unicode-bidi.workspace = true
@@ -21,7 +17,6 @@ windows.workspace = true
 eframe.workspace = true
 # Not called directly: selects the Direct3D 12 backend for eframe's renderer.
 wgpu.workspace = true
-egui_kittest = { workspace = true, optional = true }
 
 [dev-dependencies]
 egui_kittest.workspace = true

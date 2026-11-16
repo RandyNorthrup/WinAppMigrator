@@ -648,6 +648,12 @@ mod tests {
         }
     }
 
+    /// The accessibility checks measure targets against the size the widgets are made to.
+    #[test]
+    fn targets_are_checked_against_the_size_they_are_made_to() {
+        assert_eq!(crate::checks::SMALLEST_TARGET, super::SMALLEST_TARGET);
+    }
+
     fn hex(value: u32) -> Color32 {
         Color32::from_rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
     }

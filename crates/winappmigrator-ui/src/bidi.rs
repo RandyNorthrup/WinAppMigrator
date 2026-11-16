@@ -31,10 +31,35 @@ pub fn is_right_to_left_letter(c: char) -> bool {
     matches!(bidi_class(c), BidiClass::R | BidiClass::AL)
 }
 
-/// Whether text has to be laid out bidirectionally: in a right-to-left window always, and otherwise only when it holds
-/// right-to-left letters, so English text keeps egui's own layout.
-pub fn needs_bidi(text: &str, base: Direction) -> bool {
-    base == Direction::RightToLeft || text.chars().any(is_right_to_left_letter)
+/// Whether text has to be laid out bidirectionally: only when it holds right-to-left letters. Text with none, such as
+/// an app's name, a version, or a path in a right-to-left window, is laid out left to right by egui, as it reads.
+pub fn needs_bidi(text: &str, _base: Direction) -> bool {
+    text.chars().any(is_right_to_left_letter)
+}
+
+/// One line of text in the order it is seen, as egui is given it: each run a piece of its own. Text with line breaks
+/// keeps them.
+pub fn visual_job(painter: &Painter, text: &str, font: FontId, color: Color32) -> LayoutJob {
+    let base = winappmigrator_i18n::direction();
+    if !needs_bidi(text, base) {
+        return LayoutJob::simple_singleline(text.to_owned(), font, color);
+    }
+    let lines = visual_lines(text, base, None, |piece| {
+        painter
+            .layout_no_wrap(piece.to_owned(), font.clone(), color)
+            .size()
+            .x
+    });
+    let mut job = LayoutJob::default();
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            job.append("\n", 0.0, TextFormat::simple(font.clone(), color));
+        }
+        for run in line {
+            job.append(&run.text, 0.0, TextFormat::simple(font.clone(), color));
+        }
+    }
+    job
 }
 
 /// `text` broken into lines no wider than `wrap_width`, at spaces, in the order it is read, with each line's runs in
@@ -245,26 +270,10 @@ impl TextBlock {
 
 /// One line of text as it is drawn, in the order it is seen. Text with line breaks keeps them.
 pub fn line_galley(painter: &Painter, text: &str, font: FontId, color: Color32) -> Arc<Galley> {
-    let base = winappmigrator_i18n::direction();
-    if !needs_bidi(text, base) {
+    if !needs_bidi(text, winappmigrator_i18n::direction()) {
         return painter.layout_no_wrap(text.to_owned(), font, color);
     }
-    let lines = visual_lines(text, base, None, |piece| {
-        painter
-            .layout_no_wrap(piece.to_owned(), font.clone(), color)
-            .size()
-            .x
-    });
-    let mut job = LayoutJob::default();
-    for (index, line) in lines.iter().enumerate() {
-        if index > 0 {
-            job.append("\n", 0.0, TextFormat::simple(font.clone(), color));
-        }
-        for run in line {
-            job.append(&run.text, 0.0, TextFormat::simple(font.clone(), color));
-        }
-    }
-    painter.layout_job(job)
+    painter.layout_job(visual_job(painter, text, font, color))
 }
 
 /// What ends text that was cut short to fit.
@@ -400,6 +409,15 @@ mod tests {
             .map(|run| run.text.as_str())
             .collect();
         assert!(last.contains("خمسة"), "{last}");
+    }
+
+    /// Seen on a real Windows: "7-Zip 26.05 (x64)" in an Arabic window read "Zip 26.05 (x64)-7".
+    #[test]
+    fn latin_text_in_a_right_to_left_window_keeps_its_own_order() {
+        for text in ["7-Zip 26.05 (x64)", "C:\\Program Files\\App", "(Ctrl+F)"] {
+            assert!(!needs_bidi(text, Direction::RightToLeft), "{text}");
+        }
+        assert!(needs_bidi("ابحث (Ctrl+F)", Direction::RightToLeft));
     }
 
     #[test]
