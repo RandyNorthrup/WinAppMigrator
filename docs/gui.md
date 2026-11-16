@@ -331,6 +331,37 @@ English in `en-US` the source of every other. See [TRANSLATING.md](TRANSLATING.m
   on screen, when the language changes. Each window calls `language::declare_language` every frame, so screen readers read
   it in the right voice.
 
+## Right to left
+
+In Arabic, Persian, Urdu and Hebrew a window is the mirror image of the English one. The shared UI crate does it, so a
+screen needs only to use what it gives:
+
+- **Text:** `widgets::label`, `wrapped_label`, `truncated_label`, and `tooltip`, never `ui.label` or `on_hover_text`. They
+  lay text out in Unicode bidirectional order (`bidi.rs`) when it needs it, and leave English to egui.
+- **Layout:** each panel's contents go in `widgets::page`, whose lines start at the side reading starts from, and in which
+  `ui.horizontal` runs that way too. Use `widgets::column` for `ui.vertical`, and `widgets::trailing` for what goes at
+  the far end of a row, never `Layout::right_to_left` or `Layout::left_to_right` directly.
+- **Painting by hand:** work positions out as for a left-to-right window and pass them through `widgets::Mirror::of(rect)`;
+  draw text with `bidi::line_galley`, `bidi::elided_galley`, or `TextBlock`, from the reading start. Chevrons that point
+  the way one reads turn around (`Icon::ChevronLeft`).
+- **Arguments:** Fluent isolates each value it is given. A value that is mostly right-to-left text, such as a translated
+  reason, is kept right to left as a whole by `winappmigrator-i18n`, so it reads right even when it starts with "Windows".
+
+## Accessibility
+
+- Every control is drawn through `widgets`, which names it, gives it a role and its state, makes it at least 24 by 24
+  points, draws a focus outline, scrolls it into view when the Tab key reaches it (`bring_into_view_on_focus`), and shows
+  its tooltip on focus as well as on hover. A custom control that does not go through `allocate_control` has to do the
+  same.
+- Section titles use `widgets::heading`, which screen readers list as headings. A line saying how a long job is going
+  uses `widgets::status_line`, a polite live region; a `notice` is one too, and an assertive one for a problem.
+- Colors come from the theme, whose tests hold text to 4.5:1 and outlines and the focus ring to 3:1 on every surface. A
+  Windows contrast theme replaces the palette with its system colors, and the app then offers no light or dark theme.
+- `winappmigrator_ui::checks` (feature `test-support`) walks a window's accessibility tree: names, roles and states;
+  target sizes; the Tab order and whether what has the focus can be seen; live regions; and, in the pseudo language,
+  any word not from the catalog. Each window's tests run it on every screen; a new screen gets added to them.
+- CI's real-windows job also scans the real windows with Axe.Windows.
+
 ## Validation
 
 Do **not** drive the live window with scripted mouse clicks or `SendKeys` (it is flaky

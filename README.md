@@ -67,6 +67,13 @@ services, and runtimes, and packs them into a single `.exe`, or two files if it 
 - **Can be undone.** If anything goes wrong, or you cancel, what it did is put back, but for a runtime it installed, and it
   says if anything could not be. Later, you can uninstall it from Settings like any other app, and a file it replaced comes back, or goes beside what has
   changed since.
+- **Speaks 24 languages.** The app, every installer and the client start in the language Windows is in, and an installer
+  speaks the language of the PC it runs on. Arabic, Persian, Urdu and Hebrew are laid out right to left. All but English
+  were translated by machine and reviewed by a second machine pass; **Language**, **Report a Translation Problem** asks
+  for corrections. See [Translating](docs/TRANSLATING.md).
+- **Works with a keyboard, a screen reader, and Windows' accessibility settings.** Contrast themes, Text size up to
+  225%, and Animation effects are followed, and WCAG 2.2 AA is the aim; the
+  [Accessibility Conformance Report](docs/ACCESSIBILITY.md) says how far it gets, self-assessed.
 
 ## How It Works
 
@@ -519,6 +526,8 @@ authority, and win if the two ever disagree.
 | [Discovery](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/discovery.md) | How an app's footprint is found, from a connected drive, an image, or another PC over the network |
 | [Interface](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/gui.md) | How the screens are built, and the design conventions |
 | [Signing](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/signing.md) | What is signed, what must never be, and how |
+| [Translating](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/TRANSLATING.md) | How the 24 languages are kept, and how to correct one |
+| [Accessibility](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/ACCESSIBILITY.md) | The conformance report: WCAG 2.2 and EN 301 549, criterion by criterion |
 | [Plan](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/docs/PLAN.md) | Scope, and open issues in priority order |
 | [Security](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/SECURITY.md) | The trust model, and how to report a vulnerability |
 | [Contributing](https://github.com/RandyNorthrup/WinAppMigrator/blob/main/CONTRIBUTING.md) | The project's rules and checks |
