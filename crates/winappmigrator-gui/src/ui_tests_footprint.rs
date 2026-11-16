@@ -1478,3 +1478,32 @@ fn nothing_of_a_real_pc_is_in_what_these_show() {
         .collect();
     assert!(named.is_empty(), "{named:?}");
 }
+
+/// Seen on testpc1 in Italian: "Contenuto del programma di installazione" ran under "Analizza di nuovo". In every
+/// language, at the smallest window, the heading of what goes in the installer is shortened to the room its button
+/// leaves, and they do not overlap.
+#[test]
+fn the_heading_of_what_goes_in_leaves_room_for_its_button_in_every_language() {
+    for language in winappmigrator_i18n::LANGUAGES {
+        winappmigrator_i18n::with_language(language, || {
+            let mut harness = harness_sized(ThemeMode::Light, egui::vec2(1000.0, 640.0), ready_app);
+            harness.run_steps(2);
+            let heading = harness
+                .get_by_role_and_label(
+                    egui::accesskit::Role::Label,
+                    &winappmigrator_i18n::without_isolation(&winappmigrator_i18n::t!(
+                        "app-footprint-heading"
+                    )),
+                )
+                .rect();
+            let button = harness
+                .get_by_label(&winappmigrator_i18n::t!("app-scan-look-again"))
+                .rect();
+            assert!(
+                !heading.shrink(0.5).intersects(button),
+                "{}: {heading:?} runs under {button:?}",
+                language.tag
+            );
+        });
+    }
+}

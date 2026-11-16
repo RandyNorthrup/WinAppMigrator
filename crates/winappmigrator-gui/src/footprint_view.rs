@@ -147,18 +147,28 @@ impl WinAppMigratorApp {
         };
         // Beside its heading, for looking again at what has been looked at.
         let can_look_again = matches!(look, Look::Ready) && !self.is_building();
+        let look_again = t!("app-scan-look-again");
         widgets::control_row(ui, |ui| {
-            widgets::field_label(ui, theme, &t!("app-footprint-heading"));
+            // The heading gets the room the button leaves, and is shortened to it, with the whole of it on hover:
+            // in Italian it ran under the button.
+            let button = if can_look_again {
+                widgets::button_width(ui, ButtonKind::Ghost, &look_again)
+                    + ui.spacing().item_spacing.x
+            } else {
+                0.0
+            };
+            let room = (ui.available_width() - button).max(0.0);
+            ui.allocate_ui(egui::vec2(room, ui.available_height()), |ui| {
+                widgets::truncated_label(
+                    ui,
+                    RichText::new(t!("app-footprint-heading"))
+                        .font(theme::semibold(12.5))
+                        .color(theme.text_muted),
+                );
+            });
             widgets::trailing(ui, |ui| {
                 if can_look_again
-                    && widgets::button(
-                        ui,
-                        theme,
-                        ButtonKind::Ghost,
-                        &t!("app-scan-look-again"),
-                        true,
-                    )
-                    .clicked()
+                    && widgets::button(ui, theme, ButtonKind::Ghost, &look_again, true).clicked()
                 {
                     self.scan_again();
                 }

@@ -580,6 +580,25 @@ fn paint_focus_ring(ui: &Ui, theme: &Theme, rect: Rect, response: &Response) {
     }
 }
 
+/// Room between a button's edge and its text.
+const BUTTON_PADDING: f32 = 14.0;
+
+fn button_font(kind: ButtonKind) -> FontId {
+    if kind == ButtonKind::Primary {
+        theme::semibold(14.0)
+    } else {
+        theme::regular(14.0)
+    }
+}
+
+/// How wide a [`button`] with this label is, so that what shares its row can be given the room it leaves.
+pub fn button_width(ui: &Ui, kind: ButtonKind, label: &str) -> f32 {
+    bidi::line_galley(ui.painter(), label, button_font(kind), Color32::PLACEHOLDER)
+        .size()
+        .x
+        + BUTTON_PADDING * 2.0
+}
+
 fn draw_button(
     ui: &mut Ui,
     theme: &Theme,
@@ -591,19 +610,13 @@ fn draw_button(
 ) -> Response {
     const ICON_SIZE: f32 = 15.0;
     const ICON_GAP: f32 = 7.0;
-    const PADDING: f32 = 14.0;
 
-    let font = if kind == ButtonKind::Primary {
-        theme::semibold(14.0)
-    } else {
-        theme::regular(14.0)
-    };
     let ink = button_ink(theme, kind, enabled);
     let text = label.unwrap_or_default();
-    let galley = bidi::line_galley(ui.painter(), text, font, ink);
+    let galley = bidi::line_galley(ui.painter(), text, button_font(kind), ink);
     let icon_width = icon.map_or(0.0, |_| ICON_SIZE + ICON_GAP);
     let content_width = icon_width + galley.size().x;
-    let desired_width = width.unwrap_or(content_width + PADDING * 2.0);
+    let desired_width = width.unwrap_or(content_width + BUTTON_PADDING * 2.0);
 
     let (rect, response) = allocate_control(ui, vec2(desired_width, CONTROL_HEIGHT), enabled);
     response.widget_info(|| WidgetInfo::labeled(A11yRole::Button, enabled, text));
