@@ -24,8 +24,8 @@ Accédez à la [dernière version](https://github.com/RandyNorthrup/WinAppMigrat
 
 | Fichier | De quoi il s'agit | À prendre si |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.0.exe` | L'application elle-même. Un seul fichier, sans rien à installer. | Vous voulez simplement l'utiliser. C'est celui que veulent la plupart des gens. |
-| `WinAppMigrator-v0.7.0-windows-x64.zip` | La même application, sous le nom `winappmigrator.exe`, avec le fichier README, le journal des modifications, la licence et les licences tierces | Vous voulez aussi les documents qui l'accompagnent |
+| `WinAppMigrator-v0.7.1.exe` | L'application elle-même. Un seul fichier, sans rien à installer. | Vous voulez simplement l'utiliser. C'est celui que veulent la plupart des gens. |
+| `WinAppMigrator-v0.7.1-windows-x64.zip` | La même application, sous le nom `winappmigrator.exe`, avec le fichier README, le journal des modifications, la licence et les licences tierces | Vous voulez aussi les documents qui l'accompagnent |
 | `SHA256SUMS.txt` | Les sommes de contrôle des deux fichiers ci-dessus | Vous voulez vérifier votre téléchargement |
 
 La partie qui se trouve dans chaque programme d'installation, le [stub du programme d'installation](Glossary#installer-stub), n'est jamais publiée seule. Elle est déjà incluse dans l'application.
@@ -39,7 +39,7 @@ Cette étape est facultative, mais elle en vaut la peine. Chacune des vérificat
 **1. La somme de contrôle.** Un [hachage](Glossary#hash) est l'empreinte d'un fichier. Si un seul octet du fichier change, le hachage change.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.0.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Le long nombre affiché par `Get-FileHash` doit correspondre à celui de la lign
 **2. La signature.** Une [signature](Glossary#signature) indique qui a créé le fichier, et qu'il n'a pas été modifié depuis.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.0.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ Vous pouvez aussi cliquer avec le bouton droit sur le fichier, choisir **Propri�
 **3. Où il a été généré.** Chaque version à partir de la 0.5.0 enregistre qu'elle a été générée par le workflow de publication de GitHub lui-même, à partir de ce dépôt. Cet enregistrement s'appelle une [attestation](Glossary#attestation). Si vous avez [GitHub CLI](https://cli.github.com/), exécutez :
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.0.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 La même commande fonctionne pour le fichier zip.
@@ -67,7 +67,7 @@ La même commande fonctionne pour le fichier zip.
 
 ## Démarrer l'application
 
-1. **Double-cliquez** sur `WinAppMigrator-v0.7.0.exe`. Il n'y a rien à installer. L'application s'exécute depuis l'emplacement où vous l'avez enregistrée.
+1. **Double-cliquez** sur `WinAppMigrator-v0.7.1.exe`. Il n'y a rien à installer. L'application s'exécute depuis l'emplacement où vous l'avez enregistrée.
 2. **SmartScreen.** Windows [SmartScreen](Glossary#smartscreen) peut afficher un écran « Windows a protégé votre ordinateur » pour un fichier qu'il n'a pas souvent vu. Dans ce cas, choisissez **Informations complémentaires** et vérifiez que l'éditeur est Randy Northrup avant de choisir **Exécuter quand même**.
 3. **L'invite d'administrateur.** Windows vous demande si vous voulez autoriser l'application à apporter des modifications. Il s'agit de l'[invite du Contrôle de compte d'utilisateur](Glossary#uac-prompt) (UAC). L'application affiche toujours cette invite, car la lecture du lecteur d'un autre PC, et des fichiers que seuls les administrateurs peuvent lire, nécessite des droits d'administrateur. Pour le téléchargement signé, l'invite indique **Randy Northrup** comme éditeur vérifié. Si elle indique « Éditeur inconnu » pour ce fichier, ce n'est pas le fichier signé de la version publiée : ne l'exécutez pas.
 4. **La fenêtre s'ouvre.** Si vous voyez à la place un message indiquant que la fenêtre n'a pas pu s'ouvrir et qu'elle a besoin de Direct3D 12, consultez [Résolution des problèmes](Troubleshooting#the-window-could-not-open). L'application ne peut pas s'exécuter sans sa fenêtre.

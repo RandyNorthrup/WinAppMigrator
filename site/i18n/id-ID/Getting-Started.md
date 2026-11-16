@@ -24,8 +24,8 @@ Buka [rilis terbaru](https://github.com/RandyNorthrup/WinAppMigrator/releases/la
 
 | File | Apa itu | Ambil jika |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.0.exe` | Aplikasi itu sendiri. Satu file, tanpa ada yang perlu diinstal. | Anda hanya ingin menggunakannya. Inilah file yang diinginkan kebanyakan orang. |
-| `WinAppMigrator-v0.7.0-windows-x64.zip` | Aplikasi yang sama, sebagai `winappmigrator.exe`, dengan README, log perubahan, lisensi, dan lisensi pihak ketiga | Anda juga menginginkan dokumen-dokumennya |
+| `WinAppMigrator-v0.7.1.exe` | Aplikasi itu sendiri. Satu file, tanpa ada yang perlu diinstal. | Anda hanya ingin menggunakannya. Inilah file yang diinginkan kebanyakan orang. |
+| `WinAppMigrator-v0.7.1-windows-x64.zip` | Aplikasi yang sama, sebagai `winappmigrator.exe`, dengan README, log perubahan, lisensi, dan lisensi pihak ketiga | Anda juga menginginkan dokumen-dokumennya |
 | `SHA256SUMS.txt` | Checksum dari dua file di atas | Anda ingin memeriksa unduhan Anda |
 
 Bagian penginstal yang masuk ke dalam setiap penginstal, yaitu [stub penginstal](Glossary#installer-stub), tidak pernah diterbitkan tersendiri. Bagian itu sudah ada di dalam aplikasi.
@@ -39,7 +39,7 @@ Ini opsional, tetapi layak dilakukan. Setiap pemeriksaan di bawah berdiri sendir
 **1. Checksum.** [Hash](Glossary#hash) adalah sidik jari sebuah file. Jika satu byte saja berubah, hash-nya ikut berubah.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.0.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Angka panjang dari `Get-FileHash` harus sama dengan angka di baris untuk file te
 **2. Tanda tangan.** [Tanda tangan](Glossary#signature) menyatakan siapa yang membuat file, dan bahwa file itu tidak berubah sejak saat itu.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.0.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ Anda juga dapat mengklik kanan file, memilih **Properti**, lalu melihat tab **Ta
 **3. Tempat pembuatannya.** Setiap rilis sejak 0.5.0 mencatat bahwa alur kerja rilis milik GitHub sendiri yang membuatnya, dari repositori ini. Catatan ini disebut [atestasi](Glossary#attestation). Jika Anda memiliki [GitHub CLI](https://cli.github.com/), jalankan:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.0.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 Hal yang sama berlaku untuk file zip.
@@ -67,7 +67,7 @@ Hal yang sama berlaku untuk file zip.
 
 ## Jalankan
 
-1. **Klik dua kali** `WinAppMigrator-v0.7.0.exe`. Tidak ada yang perlu diinstal. Aplikasi berjalan dari mana pun Anda menyimpannya.
+1. **Klik dua kali** `WinAppMigrator-v0.7.1.exe`. Tidak ada yang perlu diinstal. Aplikasi berjalan dari mana pun Anda menyimpannya.
 2. **SmartScreen.** [SmartScreen](Glossary#smartscreen) Windows mungkin menampilkan layar "Windows melindungi PC Anda" untuk file yang jarang dilihatnya. Jika demikian, pilih **Info selengkapnya** dan pastikan penerbitnya adalah Randy Northrup sebelum Anda memilih **Tetap jalankan**.
 3. **Permintaan administrator.** Windows menanyakan apakah aplikasi boleh membuat perubahan. Ini adalah [permintaan UAC](Glossary#uac-prompt). Aplikasi selalu meminta, karena membaca drive PC lain, dan file yang hanya boleh dibaca administrator, memerlukan hak administrator. Untuk unduhan yang ditandatangani, permintaan itu menyebutkan **Randy Northrup** sebagai penerbit terverifikasi. Jika tertulis "Penerbit tidak dikenal" untuk file ini, file itu bukan file rilis yang ditandatangani, jadi jangan jalankan.
 4. **Jendela terbuka.** Jika Anda malah melihat pesan bahwa jendela tidak dapat dibuka dan memerlukan Direct3D 12, lihat [Pemecahan masalah](Troubleshooting#the-window-could-not-open). Aplikasi tidak dapat berjalan tanpa jendelanya.

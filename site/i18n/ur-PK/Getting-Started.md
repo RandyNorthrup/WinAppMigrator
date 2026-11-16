@@ -24,8 +24,8 @@
 
 | فائل | یہ کیا ہے | اسے لیں اگر |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.0.exe` | خود ایپ۔ ایک فائل، جسے انسٹال کرنے کی ضرورت نہیں۔ | آپ بس اسے استعمال کرنا چاہتے ہیں۔ زیادہ تر لوگوں کو یہی چاہیے۔ |
-| `WinAppMigrator-v0.7.0-windows-x64.zip` | وہی ایپ، `winappmigrator.exe` کی صورت میں، README، تبدیلیوں کی فہرست (changelog)، لائسنس، اور فریق ثالث کے لائسنسز کے ساتھ | آپ کو کاغذات بھی چاہئیں |
+| `WinAppMigrator-v0.7.1.exe` | خود ایپ۔ ایک فائل، جسے انسٹال کرنے کی ضرورت نہیں۔ | آپ بس اسے استعمال کرنا چاہتے ہیں۔ زیادہ تر لوگوں کو یہی چاہیے۔ |
+| `WinAppMigrator-v0.7.1-windows-x64.zip` | وہی ایپ، `winappmigrator.exe` کی صورت میں، README، تبدیلیوں کی فہرست (changelog)، لائسنس، اور فریق ثالث کے لائسنسز کے ساتھ | آپ کو کاغذات بھی چاہئیں |
 | `SHA256SUMS.txt` | اوپر کی دونوں فائلوں کے چیک سمز | آپ اپنے ڈاؤن لوڈ کی جانچ کرنا چاہتے ہیں |
 
 انسٹالر کا وہ حصہ جو ہر انسٹالر کے اندر جاتا ہے، یعنی [انسٹالر اسٹب](Glossary#installer-stub)، کبھی الگ سے شائع نہیں کیا جاتا۔ یہ پہلے سے ایپ کے اندر ہے۔
@@ -39,7 +39,7 @@
 **1. چیک سم۔** [ہیش](Glossary#hash) کسی فائل کا فنگر پرنٹ ہوتا ہے۔ اگر ایک بائٹ بھی بدل جائے، تو ہیش بدل جاتا ہے۔
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.0.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. دستخط۔** [دستخط](Glossary#signature) بتاتے ہیں کہ فائل کس نے بنائی، اور یہ کہ تب سے اسے تبدیل نہیں کیا گیا۔
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.0.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. یہ کہاں بنایا گیا۔** 0.5.0 سے ہر ریلیز یہ ریکارڈ رکھتی ہے کہ اسے GitHub کے اپنے ریلیز ورک فلو نے، اسی ریپوزٹری سے، بنایا۔ اس ریکارڈ کو [تصدیق نامہ (attestation)](Glossary#attestation) کہتے ہیں۔ اگر آپ کے پاس [GitHub CLI](https://cli.github.com/) ہے، تو یہ چلائیں:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.0.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 zip فائل کے لیے بھی یہی طریقہ کام کرتا ہے۔
@@ -67,7 +67,7 @@ zip فائل کے لیے بھی یہی طریقہ کام کرتا ہے۔
 
 ## اسے شروع کریں
 
-1. `WinAppMigrator-v0.7.0.exe` پر **ڈبل کلک کریں**۔ انسٹال کرنے کو کچھ نہیں ہے۔ یہ وہیں سے چلتی ہے جہاں آپ نے اسے محفوظ کیا۔
+1. `WinAppMigrator-v0.7.1.exe` پر **ڈبل کلک کریں**۔ انسٹال کرنے کو کچھ نہیں ہے۔ یہ وہیں سے چلتی ہے جہاں آپ نے اسے محفوظ کیا۔
 2. **SmartScreen۔** جس فائل کو Windows [SmartScreen](Glossary#smartscreen) نے زیادہ نہ دیکھا ہو، اس کے لیے یہ "Windows نے آپ کے PC کی حفاظت کی" (Windows protected your PC) والی اسکرین دکھا سکتا ہے۔ اگر ایسا ہو، تو **مزید معلومات** (More info) منتخب کریں، اور **پھر بھی چلائیں** (Run anyway) منتخب کرنے سے پہلے جانچ لیں کہ ناشر Randy Northrup ہے۔
 3. **منتظم کا پرامپٹ۔** Windows پوچھتا ہے کہ کیا ایپ کو تبدیلیاں کرنے دی جائیں۔ یہ [UAC پرامپٹ](Glossary#uac-prompt) ہے۔ ایپ ہمیشہ پوچھتی ہے، کیونکہ کسی دوسرے PC کی ڈرائیو پڑھنے کے لیے، اور ان فائلوں کو پڑھنے کے لیے جنہیں صرف منتظمین پڑھ سکتے ہیں، منتظم کے حقوق درکار ہیں۔ دستخط شدہ ڈاؤن لوڈ کے لیے، پرامپٹ میں تصدیق شدہ ناشر کے طور پر **Randy Northrup** کا نام ہوتا ہے۔ اگر اس فائل کے لیے یہ "نامعلوم ناشر" کہے، تو یہ دستخط شدہ ریلیز فائل نہیں ہے، اس لیے اسے نہ چلائیں۔
 4. **ونڈو کھل جاتی ہے۔** اگر اس کے بجائے آپ کو یہ پیغام نظر آئے کہ ونڈو نہیں کھل سکی اور اسے Direct3D 12 درکار ہے، تو دیکھیں [خرابیوں کا ازالہ](Troubleshooting#the-window-could-not-open)۔ ایپ اپنی ونڈو کے بغیر نہیں چل سکتی۔

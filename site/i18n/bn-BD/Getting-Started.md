@@ -24,8 +24,8 @@
 
 | ফাইল | এটি কী | এটি নিন যদি |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.0.exe` | অ্যাপটি নিজেই। একটিমাত্র ফাইল, ইনস্টল করার কিছু নেই। | আপনি শুধু এটি ব্যবহার করতে চান। বেশিরভাগ মানুষ এটিই চান। |
-| `WinAppMigrator-v0.7.0-windows-x64.zip` | একই অ্যাপ, `winappmigrator.exe` হিসেবে, সঙ্গে README, চেঞ্জলগ, লাইসেন্স ও তৃতীয় পক্ষের লাইসেন্সগুলো | আপনি কাগজপত্রগুলোও চান |
+| `WinAppMigrator-v0.7.1.exe` | অ্যাপটি নিজেই। একটিমাত্র ফাইল, ইনস্টল করার কিছু নেই। | আপনি শুধু এটি ব্যবহার করতে চান। বেশিরভাগ মানুষ এটিই চান। |
+| `WinAppMigrator-v0.7.1-windows-x64.zip` | একই অ্যাপ, `winappmigrator.exe` হিসেবে, সঙ্গে README, চেঞ্জলগ, লাইসেন্স ও তৃতীয় পক্ষের লাইসেন্সগুলো | আপনি কাগজপত্রগুলোও চান |
 | `SHA256SUMS.txt` | উপরের দুটি ফাইলের চেকসাম | আপনি আপনার ডাউনলোড যাচাই করতে চান |
 
 প্রতিটি ইনস্টলারের ভিতরে যে ইনস্টলার অংশটি যায়, অর্থাৎ [ইনস্টলার স্টাব](Glossary#installer-stub), তা কখনো আলাদাভাবে প্রকাশ করা হয় না। এটি আগে থেকেই অ্যাপের ভিতরে আছে।
@@ -39,7 +39,7 @@
 **1. চেকসাম।** একটি [হ্যাশ](Glossary#hash) হলো ফাইলের আঙুলের ছাপ। ফাইলের একটি বাইটও বদলালে, হ্যাশ বদলে যায়।
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.0.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. স্বাক্ষর।** একটি [স্বাক্ষর](Glossary#signature) জানায় ফাইলটি কে তৈরি করেছে, এবং তারপর থেকে এটি বদলায়নি।
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.0.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. কোথায় তৈরি হয়েছে।** 0.5.0 থেকে প্রতিটি রিলিজ রেকর্ড রাখে যে GitHub-এর নিজস্ব রিলিজ ওয়ার্কফ্লো এই রিপোজিটরি থেকে এটি তৈরি করেছে। এই রেকর্ডকে বলা হয় [অ্যাটেস্টেশন](Glossary#attestation)। আপনার কাছে [GitHub CLI](https://cli.github.com/) থাকলে, চালান:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.0.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 zip ফাইলের ক্ষেত্রেও একইভাবে কাজ করে।
@@ -67,7 +67,7 @@ zip ফাইলের ক্ষেত্রেও একইভাবে কা�
 
 ## চালু করা
 
-1. `WinAppMigrator-v0.7.0.exe`-এ **ডাবল-ক্লিক করুন**। ইনস্টল করার কিছু নেই। আপনি যেখানে সংরক্ষণ করেছেন, সেখান থেকেই এটি চলে।
+1. `WinAppMigrator-v0.7.1.exe`-এ **ডাবল-ক্লিক করুন**। ইনস্টল করার কিছু নেই। আপনি যেখানে সংরক্ষণ করেছেন, সেখান থেকেই এটি চলে।
 2. **SmartScreen।** Windows [SmartScreen](Glossary#smartscreen) যে ফাইল বেশি দেখেনি, তার জন্য “Windows আপনার পিসি সুরক্ষিত করেছে” (Windows protected your PC) স্ক্রিন দেখাতে পারে। দেখালে, **আরও তথ্য** (More info) বেছে নিন, এবং **তবুও চালান** (Run anyway) বেছে নেওয়ার আগে দেখে নিন প্রকাশক Randy Northrup কি না।
 3. **প্রশাসকের অনুমতির প্রম্পট।** Windows জানতে চায় অ্যাপটিকে পরিবর্তন করতে দেবে কি না। এটিই [UAC প্রম্পট](Glossary#uac-prompt) (ব্যবহারকারী অ্যাকাউন্ট নিয়ন্ত্রণ)। অ্যাপটি সবসময় এটি চায়, কারণ অন্য পিসির ড্রাইভ পড়তে, এবং কেবল প্রশাসকেরা পড়তে পারেন এমন ফাইল পড়তে, প্রশাসকের অধিকার প্রয়োজন। স্বাক্ষরিত ডাউনলোডের ক্ষেত্রে, প্রম্পটে যাচাইকৃত প্রকাশক হিসেবে **Randy Northrup**-এর নাম থাকে। এই ফাইলের জন্য যদি “অজানা প্রকাশক” দেখায়, তবে এটি স্বাক্ষরিত রিলিজ ফাইল নয়, তাই এটি চালাবেন না।
 4. **উইন্ডো খোলে।** এর বদলে যদি এমন বার্তা দেখেন যে উইন্ডোটি খোলা যায়নি এবং এর Direct3D 12 প্রয়োজন, তাহলে [সমস্যা সমাধান](Troubleshooting#the-window-could-not-open) দেখুন। উইন্ডো ছাড়া অ্যাপটি চালানোর কোনো উপায় নেই।

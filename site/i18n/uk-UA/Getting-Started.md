@@ -24,8 +24,8 @@
 
 | Файл | Що це | Беріть його, якщо |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.0.exe` | Сама програма. Один файл, який не потрібно інсталювати. | Ви просто хочете нею користуватися. Цей файл потрібен більшості. |
-| `WinAppMigrator-v0.7.0-windows-x64.zip` | Та сама програма у вигляді `winappmigrator.exe` разом із README, журналом змін, ліцензією та ліцензіями сторонніх компонентів | Вам потрібна ще й супровідна документація |
+| `WinAppMigrator-v0.7.1.exe` | Сама програма. Один файл, який не потрібно інсталювати. | Ви просто хочете нею користуватися. Цей файл потрібен більшості. |
+| `WinAppMigrator-v0.7.1-windows-x64.zip` | Та сама програма у вигляді `winappmigrator.exe` разом із README, журналом змін, ліцензією та ліцензіями сторонніх компонентів | Вам потрібна ще й супровідна документація |
 | `SHA256SUMS.txt` | Контрольні суми двох наведених вище файлів | Ви хочете перевірити завантажений файл |
 
 Частина, яка входить до кожного інсталятора, — [заглушка інсталятора](Glossary#installer-stub) — ніколи не публікується окремо. Вона вже є всередині програми.
@@ -39,7 +39,7 @@
 **1. Контрольна сума.** [Хеш](Glossary#hash) — це відбиток файлу. Якщо змінити бодай один байт, хеш теж зміниться.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.0.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. Підпис.** [Підпис](Glossary#signature) показує, хто створив файл і що відтоді його не змінювали.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.0.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. Де його створено.** Для кожного випуску, починаючи з 0.5.0, записано, що його створив власний робочий процес випусків GitHub із цього репозиторію. Такий запис називається [атестацією](Glossary#attestation). Якщо у вас є [GitHub CLI](https://cli.github.com/), виконайте:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.0.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 Так само можна перевірити й архів zip.
@@ -67,7 +67,7 @@ gh attestation verify .\WinAppMigrator-v0.7.0.exe --repo RandyNorthrup/WinAppMig
 
 ## Запуск
 
-1. **Двічі клацніть** `WinAppMigrator-v0.7.0.exe`. Інсталювати нічого не потрібно. Програма запускається з того місця, куди ви її зберегли.
+1. **Двічі клацніть** `WinAppMigrator-v0.7.1.exe`. Інсталювати нічого не потрібно. Програма запускається з того місця, куди ви її зберегли.
 2. **SmartScreen.** Для файлу, який [SmartScreen](Glossary#smartscreen) у Windows бачив нечасто, може з'явитися екран «Windows захистила ваш ПК» (англійською — "Windows protected your PC"). Якщо так, виберіть **Докладніше** (More info) і перевірте, що видавцем указано Randy Northrup, перш ніж вибрати **Усе одно запустити** (Run anyway).
 3. **Запит адміністратора.** Windows запитує, чи дозволити програмі вносити зміни. Це [запит UAC](Glossary#uac-prompt). Програма завжди його показує, оскільки для читання диска іншого ПК і файлів, які можуть читати лише адміністратори, потрібні права адміністратора. Для підписаного файлу з випуску в запиті як перевіреного видавця вказано **Randy Northrup**. Якщо для цього файлу там написано «Невідомий видавець», це не підписаний файл випуску, тому не запускайте його.
 4. **Відкривається вікно.** Якщо натомість з'явилося повідомлення, що вікно не вдалося відкрити і потрібен Direct3D 12, див. [Усунення неполадок](Troubleshooting#the-window-could-not-open). Без свого вікна програма працювати не може.

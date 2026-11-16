@@ -24,8 +24,8 @@ Ve a la [última versión](https://github.com/RandyNorthrup/WinAppMigrator/relea
 
 | Archivo | Qué es | Descárgalo si |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.0.exe` | La aplicación en sí. Un solo archivo, sin nada que instalar. | Solo quieres usarla. Es el que quiere la mayoría de la gente. |
-| `WinAppMigrator-v0.7.0-windows-x64.zip` | La misma aplicación, como `winappmigrator.exe`, con el README, el registro de cambios, la licencia y las licencias de terceros | También quieres la documentación |
+| `WinAppMigrator-v0.7.1.exe` | La aplicación en sí. Un solo archivo, sin nada que instalar. | Solo quieres usarla. Es el que quiere la mayoría de la gente. |
+| `WinAppMigrator-v0.7.1-windows-x64.zip` | La misma aplicación, como `winappmigrator.exe`, con el README, el registro de cambios, la licencia y las licencias de terceros | También quieres la documentación |
 | `SHA256SUMS.txt` | Las sumas de comprobación de los dos archivos anteriores | Quieres comprobar la descarga |
 
 La parte que va dentro de cada instalador, el [programa base del instalador](Glossary#installer-stub), nunca se publica por separado. Ya está dentro de la aplicación.
@@ -39,7 +39,7 @@ Es opcional, pero merece la pena. Cada una de las comprobaciones siguientes es i
 **1. La suma de comprobación.** Un [hash](Glossary#hash) es una huella digital de un archivo. Si cambia aunque sea un solo byte, el hash cambia.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.0.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ El número largo que muestra `Get-FileHash` debe coincidir con el de la línea d
 **2. La firma.** Una [firma](Glossary#signature) indica quién creó el archivo y que no ha cambiado desde entonces.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.0.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ También puedes hacer clic con el botón derecho en el archivo, elegir **Propied
 **3. Dónde se creó.** Cada versión a partir de la 0.5.0 deja constancia de que la creó el propio flujo de trabajo de publicación de GitHub, a partir de este repositorio. Esa constancia se llama [atestación](Glossary#attestation). Si tienes la [CLI de GitHub](https://cli.github.com/), ejecuta:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.0.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 Lo mismo sirve para el zip.
@@ -67,7 +67,7 @@ Lo mismo sirve para el zip.
 
 ## Iniciarla
 
-1. **Haz doble clic** en `WinAppMigrator-v0.7.0.exe`. No hay nada que instalar. Se ejecuta desde donde la hayas guardado.
+1. **Haz doble clic** en `WinAppMigrator-v0.7.1.exe`. No hay nada que instalar. Se ejecuta desde donde la hayas guardado.
 2. **SmartScreen.** [SmartScreen](Glossary#smartscreen) de Windows puede mostrar una pantalla "Windows protegió tu PC" para un archivo que no ha visto a menudo. Si lo hace, elige **Más información** y comprueba que el editor es Randy Northrup antes de elegir **Ejecutar de todas formas**.
 3. **La solicitud de administrador.** Windows pregunta si quieres permitir que la aplicación haga cambios. Es la [solicitud de UAC](Glossary#uac-prompt). La aplicación siempre la muestra, porque para leer la unidad de otro PC, y los archivos que solo pueden leer los administradores, se necesitan permisos de administrador. En la descarga firmada, la solicitud indica **Randy Northrup** como editor comprobado. Si para este archivo indica "Editor desconocido", no es el archivo firmado de la versión publicada, así que no lo ejecutes.
 4. **Se abre la ventana.** Si en su lugar ves un mensaje que dice que no se ha podido abrir la ventana y que se necesita Direct3D 12, consulta [Solución de problemas](Troubleshooting#the-window-could-not-open). La aplicación no puede ejecutarse sin su ventana.

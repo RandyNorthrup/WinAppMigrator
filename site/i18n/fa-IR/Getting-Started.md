@@ -24,8 +24,8 @@
 
 | فایل | چیست | مناسب شماست اگر |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.0.exe` | خود برنامه. یک فایل، بدون نیاز به نصب. | فقط می‌خواهید از آن استفاده کنید. بیشتر افراد همین را می‌خواهند. |
-| `WinAppMigrator-v0.7.0-windows-x64.zip` | همان برنامه، به‌صورت `winappmigrator.exe`، همراه با README، فهرست تغییرات، مجوز و مجوزهای اشخاص ثالث | مدارک همراه را هم می‌خواهید |
+| `WinAppMigrator-v0.7.1.exe` | خود برنامه. یک فایل، بدون نیاز به نصب. | فقط می‌خواهید از آن استفاده کنید. بیشتر افراد همین را می‌خواهند. |
+| `WinAppMigrator-v0.7.1-windows-x64.zip` | همان برنامه، به‌صورت `winappmigrator.exe`، همراه با README، فهرست تغییرات، مجوز و مجوزهای اشخاص ثالث | مدارک همراه را هم می‌خواهید |
 | `SHA256SUMS.txt` | چکسام‌های دو فایل بالا | می‌خواهید فایل بارگیری‌شده را بررسی کنید |
 
 بخشی از نصب‌کننده که درون هر نصب‌کننده قرار می‌گیرد، یعنی [پایه نصب‌کننده](Glossary#installer-stub)، هرگز به‌تنهایی منتشر نمی‌شود. از قبل درون برنامه است.
@@ -39,7 +39,7 @@
 **1. چکسام.** [هش](Glossary#hash) اثر انگشت یک فایل است. اگر حتی یک بایت تغییر کند، هش هم تغییر می‌کند.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.0.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. امضا.** [امضا](Glossary#signature) نشان می‌دهد چه کسی فایل را ساخته است و اینکه از آن زمان تغییر نکرده است.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.0.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. محل ساخت.** هر انتشار از 0.5.0 به بعد ثبت می‌کند که گردش کار انتشار خود GitHub آن را از همین مخزن ساخته است. این سابقه [تصدیق (attestation)](Glossary#attestation) نام دارد. اگر [GitHub CLI](https://cli.github.com/) را دارید، این را اجرا کنید:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.0.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 همین کار برای فایل zip هم انجام می‌شود.
@@ -67,7 +67,7 @@ gh attestation verify .\WinAppMigrator-v0.7.0.exe --repo RandyNorthrup/WinAppMig
 
 ## اجرای برنامه
 
-1. روی `WinAppMigrator-v0.7.0.exe` **دوبار کلیک کنید**. چیزی برای نصب وجود ندارد. از همان جایی که ذخیره‌اش کرده‌اید اجرا می‌شود.
+1. روی `WinAppMigrator-v0.7.1.exe` **دوبار کلیک کنید**. چیزی برای نصب وجود ندارد. از همان جایی که ذخیره‌اش کرده‌اید اجرا می‌شود.
 2. **SmartScreen.** [SmartScreen](Glossary#smartscreen) در Windows ممکن است برای فایلی که زیاد ندیده است، صفحه «Windows از رایانه شما محافظت کرد» را نشان دهد. در این صورت، **اطلاعات بیشتر** را انتخاب کنید و پیش از انتخاب **در هر صورت اجرا شود**، بررسی کنید که ناشر Randy Northrup باشد.
 3. **درخواست سرپرست.** Windows می‌پرسد آیا به برنامه اجازه داده شود تغییراتی ایجاد کند. این همان [درخواست UAC](Glossary#uac-prompt) است. برنامه همیشه این را می‌پرسد، زیرا خواندن درایو رایانه دیگر، و فایل‌هایی که فقط سرپرستان می‌توانند بخوانند، به حقوق سرپرستی نیاز دارد. برای فایل امضاشده‌ای که بارگیری کرده‌اید، این درخواست **Randy Northrup** را به‌عنوان ناشر تأییدشده نام می‌برد. اگر برای این فایل «ناشر ناشناخته» نوشته شده باشد، این فایل همان فایل امضاشده انتشار نیست، پس آن را اجرا نکنید.
 4. **پنجره باز می‌شود.** اگر به‌جای آن پیامی می‌بینید که پنجره باز نشد و به Direct3D 12 نیاز دارد، [عیب‌یابی](Troubleshooting#the-window-could-not-open) را ببینید. برنامه بدون پنجره خود راهی برای اجرا ندارد.
