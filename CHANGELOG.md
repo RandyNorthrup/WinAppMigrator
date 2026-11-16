@@ -2,7 +2,10 @@
 
 All notable project changes are tracked here.
 
-## Unreleased
+## 0.7.1 — 2026-11-15
+
+A fix for the windows in languages with longer words. In Italian, the heading of what goes in an installer ran under its
+Look Again button once an app was picked; it is now shortened to the room the button leaves.
 
 ### Fixed
 
