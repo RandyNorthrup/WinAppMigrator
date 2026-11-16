@@ -1,0 +1,134 @@
+drill a11y-axe
+file crates/winappmigrator-ui/src/widgets.rs
+mutation: '        .find(|frame| frame.kind().is_some_and(|kind| kind.is_panel()))' -> '        .find(|_frame| false)'
+expect: An on-screen element must not have a null BoundingRectangle property.
+===== baseline (sha256 833fd743e41834570538e4585c9be127792ab4e9af2372549bfe5eccf0f29abf)
+warning: winappmigrator-gui@0.7.0: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.78s
+task state: Ready, result: 0
+stage baseline, from C:\WamRepro\dl\axe-drill\baseline
+== app (pid 11952, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = WinAppMigrator-drill, Process ID = 11952
+  Scan Id = app
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-baseline\app_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-baseline\app_2_of_2.a11ytest"
+  exit 0
+== uninstaller-no-record (pid 3856, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 3856
+  Scan Id = uninstaller-no-record
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-baseline\uninstaller-no-record_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-baseline\uninstaller-no-record_2_of_2.a11ytest"
+  exit 0
+== stub-no-package (pid 18652, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 18652
+  Scan Id = stub-no-package
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-baseline\stub-no-package_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-baseline\stub-no-package_2_of_2.a11ytest"
+  exit 0
+baseline exit 0
+===== mutated (sha256 b2eceb0960e3898b7234d64353b52b17a1b448eb184e2d37960777c45cea0d1d)
+   Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 7.09s
+task state: Ready, result: 0
+stage mutated, from C:\WamRepro\dl\axe-drill\mutated
+== app (pid 11528, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = WinAppMigrator-drill, Process ID = 11528
+  Scan Id = app
+  3 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-mutated\app_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-mutated\app_2_of_2.a11ytest"
+  exit 1
+== uninstaller-no-record (pid 16512, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 16512
+  Scan Id = uninstaller-no-record
+  3 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-mutated\uninstaller-no-record_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-mutated\uninstaller-no-record_2_of_2.a11ytest"
+  exit 1
+== stub-no-package (pid 19344, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 19344
+  Scan Id = stub-no-package
+  2 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-mutated\stub-no-package_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-mutated\stub-no-package_2_of_2.a11ytest"
+  exit 1
+mutated exit 1
+===== restored (sha256 833fd743e41834570538e4585c9be127792ab4e9af2372549bfe5eccf0f29abf)
+   Compiling winappmigrator-installer v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-installer)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 17.36s
+task state: Ready, result: 0
+stage restored, from C:\WamRepro\dl\axe-drill\restored
+== app (pid 8260, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = WinAppMigrator-drill, Process ID = 8260
+  Scan Id = app
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-restored\app_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-restored\app_2_of_2.a11ytest"
+  exit 0
+== uninstaller-no-record (pid 13116, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 13116
+  Scan Id = uninstaller-no-record
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-restored\uninstaller-no-record_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-restored\uninstaller-no-record_2_of_2.a11ytest"
+  exit 0
+== stub-no-package (pid 16732, running: True)
+  Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 16732
+  Scan Id = stub-no-package
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-restored\stub-no-package_1_of_2.a11ytest"
+  0 errors were found
+  Results were written to "C:\WamRepro\logs\axe-drill-restored\stub-no-package_2_of_2.a11ytest"
+  exit 0
+restored exit 0
+drill a11y-axe passed=false: baseline 0, mutated 1 with '', restored 0
+===== what Axe.Windows recorded, read from each scan's .a11ytest file (python -I axe-errors.py)
+--- baseline
+app_1_of_2.a11ytest: 0 error(s)
+app_2_of_2.a11ytest: 0 error(s)
+stub-no-package_1_of_2.a11ytest: 0 error(s)
+stub-no-package_2_of_2.a11ytest: 0 error(s)
+uninstaller-no-record_1_of_2.a11ytest: 0 error(s)
+uninstaller-no-record_2_of_2.a11ytest: 0 error(s)
+--- mutated
+app_1_of_2.a11ytest: 3 error(s)
+  error: An on-screen element must not have a null BoundingRectangle property.
+  error: An on-screen element must not have a null BoundingRectangle property.
+  error: An on-screen element must not have a null BoundingRectangle property.
+app_2_of_2.a11ytest: 0 error(s)
+stub-no-package_1_of_2.a11ytest: 2 error(s)
+  error: An on-screen element must not have a null BoundingRectangle property.
+  error: An on-screen element must not have a null BoundingRectangle property.
+stub-no-package_2_of_2.a11ytest: 0 error(s)
+uninstaller-no-record_1_of_2.a11ytest: 3 error(s)
+  error: An on-screen element must not have a null BoundingRectangle property.
+  error: An on-screen element must not have a null BoundingRectangle property.
+  error: An on-screen element must not have a null BoundingRectangle property.
+uninstaller-no-record_2_of_2.a11ytest: 0 error(s)
+--- restored
+app_1_of_2.a11ytest: 0 error(s)
+app_2_of_2.a11ytest: 0 error(s)
+stub-no-package_1_of_2.a11ytest: 0 error(s)
+stub-no-package_2_of_2.a11ytest: 0 error(s)
+uninstaller-no-record_1_of_2.a11ytest: 0 error(s)
+uninstaller-no-record_2_of_2.a11ytest: 0 error(s)

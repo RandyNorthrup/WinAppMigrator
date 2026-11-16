@@ -1081,6 +1081,11 @@ mod tests {
     /// Seen in CI: WScript.Shell could not make a shortcut to "WAM E2E Über 日本 Café", and one named in Japanese
     /// read as empty. Each is made and read back through PowerShell, and its bytes are read as well, by this crate's
     /// own reader, which does not go through Windows.
+    /// Where a path leads, with its short names made long; nothing when it leads nowhere.
+    fn place(path: Option<&str>) -> Option<PathBuf> {
+        path.and_then(|path| std::fs::canonicalize(path).ok())
+    }
+
     #[test]
     fn a_shortcut_named_and_pointing_in_any_script_is_made_and_read_as_it_is() {
         let Ok(work) = tempfile::tempdir() else {
@@ -1121,28 +1126,42 @@ mod tests {
             let Some(read) = read.first() else {
                 panic!("{name}: PowerShell said {said}");
             };
+            // The shell gives a path in its long form, where TEMP may be given short, as "RUNNER~1" on CI's
+            // runners: each is compared as the place it names.
             assert_eq!(
-                read.target_path.as_deref(),
-                Some(target_text.as_str()),
-                "{name}"
+                place(read.target_path.as_deref()),
+                place(Some(&target_text)),
+                "{name}: {:?}",
+                read.target_path
             );
             assert_eq!(read.arguments.as_deref(), Some(arguments), "{name}");
             assert_eq!(
-                read.working_directory.as_deref(),
-                Some(folder_text.as_str()),
-                "{name}"
+                place(read.working_directory.as_deref()),
+                place(Some(&folder_text)),
+                "{name}: {:?}",
+                read.working_directory
             );
+            let icon = read
+                .icon_location
+                .as_deref()
+                .and_then(|icon| icon.rsplit_once(','));
             assert_eq!(
-                read.icon_location.as_deref(),
-                Some(icon_location.as_str()),
-                "{name}"
+                icon.map(|(file, index)| (place(Some(file)), index)),
+                Some((place(Some(&target_text)), "1")),
+                "{name}: {:?}",
+                read.icon_location
             );
 
             let bytes = read_shortcut_file(&lnk).unwrap_or_default();
             let Some(file) = read_lnk(&bytes) else {
                 panic!("{name}: its bytes do not read as a shortcut");
             };
-            assert_eq!(&file.target, target, "{name}");
+            assert_eq!(
+                place(file.target.to_str()),
+                place(target.to_str()),
+                "{name}: {:?}",
+                file.target
+            );
             assert_eq!(
                 file.arguments.as_deref().filter(|given| !given.is_empty()),
                 Some(arguments).filter(|given| !given.is_empty()),

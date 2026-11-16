@@ -1,0 +1,16 @@
+{
+  "name": "web-axe",
+  "file": "site/style.css",
+  "mutation": "  --muted: #5a6478; ->   --muted: #b8c0cc;",
+  "command": "Remove-Item -Recurse -Force C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\site-drill -ErrorAction SilentlyContinue; python -I .github/scripts/build-site.py --wiki C:\\Users\\Randy\\Coding\\WinAppMigrator.wiki --out C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\site-drill --base-url https://randynorthrup.github.io/WinAppMigrator; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; node C:\\Users\\Randy\\Coding\\win-app-migrator\\.github\\axe\\scan-site.mjs C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\site-drill https://randynorthrup.github.io/WinAppMigrator",
+  "expected_diagnostic": "color-contrast",
+  "before": "ae3523aed038c952fb41ede7cb1d799c4337f68f5fd9ed0337892c04d4c42111",
+  "mutated": "b054900342d1e30d43d689b4518875ef0b9d9192c35b085b2917f8f2309aa0ac",
+  "after": "ae3523aed038c952fb41ede7cb1d799c4337f68f5fd9ed0337892c04d4c42111",
+  "baseline_exit": 0,
+  "mutated_exit": 1,
+  "restored_exit": 0,
+  "observed_diagnostic": "404.html (light): color-contrast [serious] Elements must meet minimum color contrast ratio thresholds",
+  "failure": null,
+  "passed": true
+}

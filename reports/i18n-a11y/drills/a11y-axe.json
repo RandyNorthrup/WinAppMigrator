@@ -1,0 +1,16 @@
+{
+  "name": "a11y-axe",
+  "file": "crates/winappmigrator-ui/src/widgets.rs",
+  "mutation": "        .find(|frame| frame.kind().is_some_and(|kind| kind.is_panel())) ->         .find(|_frame| false)",
+  "command": "cargo build -p winappmigrator-installer -p winappmigrator-gui; on testpc1, as the signed-in user: axe-lab.ps1 (AxeWindowsCLI 2.4.2 --processid <pid> --outputdirectory <dir> --scanid <name> --alwayssavetestfile) on the app, the uninstaller with no record, and the installer with no package",
+  "expected_diagnostic": "An on-screen element must not have a null BoundingRectangle property.",
+  "before": "833fd743e41834570538e4585c9be127792ab4e9af2372549bfe5eccf0f29abf",
+  "mutated": "b2eceb0960e3898b7234d64353b52b17a1b448eb184e2d37960777c45cea0d1d",
+  "after": "833fd743e41834570538e4585c9be127792ab4e9af2372549bfe5eccf0f29abf",
+  "baseline_exit": 0,
+  "mutated_exit": 1,
+  "restored_exit": 0,
+  "observed_diagnostic": "app_1_of_2.a11ytest: error: An on-screen element must not have a null BoundingRectangle property. (3 in the app, 2 in the installer, 3 in the uninstaller)",
+  "failure": null,
+  "passed": true
+}
