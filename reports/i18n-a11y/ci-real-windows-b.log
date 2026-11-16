@@ -1,0 +1,532 @@
+GitHub Actions run 43804075617 (https://github.com/RandyNorthrup/WinAppMigrator/actions/runs/43804075617), commit 1e0f2fd
+===== job: Real windows on windows-latest (133095547763), success
+  ok: The app: a window opened
+  ok: The app: it is still running
+  ok: The app: its window is called what it should be
+  ok: The app: it has a place on the screen
+  ok: The app: it is big enough to be a window
+  ok: The app: all of it is on the screen, clear of the taskbar
+  ok: The app: what it drew is not blank
+  ok: The app: it is in light mode
+  Axe.Windows: Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Axe.Windows: Scan Target: Process Name = winappmigrator, Process ID = 5204
+  Axe.Windows: Scan Id = The-app
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-app_1_of_2.a11ytest"
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-app_2_of_2.a11ytest"
+  ok: The app: Axe.Windows finds no errors
+  ok: The app: it closes when asked
+  ok: The app: and exits with 0
+  ok: The app: it says which graphics adapter it picked
+  ok: The installer: a window opened
+  ok: The installer: it is still running
+  ok: The installer: its window is called what it should be
+  ok: The installer: it has a place on the screen
+  ok: The installer: it is big enough to be a window
+  ok: The installer: all of it is on the screen, clear of the taskbar
+  ok: The installer: what it drew is not blank
+  ok: The installer: it is in light mode
+  Axe.Windows: Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Axe.Windows: Scan Target: Process Name = main_installer, Process ID = 2888
+  Axe.Windows: Scan Id = The-installer
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-installer_1_of_2.a11ytest"
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-installer_2_of_2.a11ytest"
+  ok: The installer: Axe.Windows finds no errors
+  ok: The installer: it closes when asked
+  ok: The installer: and exits with 0
+  ok: The installer: it installed nothing
+  ok: The uninstaller: a window opened
+  ok: The uninstaller: it is still running
+  ok: The uninstaller: its window is called what it should be
+  ok: The uninstaller: it has a place on the screen
+  ok: The uninstaller: it is big enough to be a window
+  ok: The uninstaller: all of it is on the screen, clear of the taskbar
+  ok: The uninstaller: what it drew is not blank
+  ok: The uninstaller: it is in light mode
+  Axe.Windows: Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Axe.Windows: Scan Target: Process Name = main_installer, Process ID = 8404
+  Axe.Windows: Scan Id = The-uninstaller
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-uninstaller_1_of_2.a11ytest"
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-uninstaller_2_of_2.a11ytest"
+  ok: The uninstaller: Axe.Windows finds no errors
+  ok: The uninstaller: it closes when asked
+  ok: The uninstaller: and exits with 0
+  ok: The app, Windows dark: a window opened
+  ok: The app, Windows dark: it is still running
+  ok: The app, Windows dark: its window is called what it should be
+  ok: The app, Windows dark: it has a place on the screen
+  ok: The app, Windows dark: it is big enough to be a window
+  ok: The app, Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The app, Windows dark: what it drew is not blank
+  ok: The app, Windows dark: it is in dark mode
+  ok: The app, Windows dark: it closes when asked
+  ok: The app, Windows dark: and exits with 0
+  ok: The installer, Windows dark: a window opened
+  ok: The installer, Windows dark: it is still running
+  ok: The installer, Windows dark: its window is called what it should be
+  ok: The installer, Windows dark: it has a place on the screen
+  ok: The installer, Windows dark: it is big enough to be a window
+  ok: The installer, Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The installer, Windows dark: what it drew is not blank
+  ok: The installer, Windows dark: it is in dark mode
+  ok: The installer, Windows dark: it closes when asked
+  ok: The installer, Windows dark: and exits with 0
+  ok: The uninstaller, Windows dark: a window opened
+  ok: The uninstaller, Windows dark: it is still running
+  ok: The uninstaller, Windows dark: its window is called what it should be
+  ok: The uninstaller, Windows dark: it has a place on the screen
+  ok: The uninstaller, Windows dark: it is big enough to be a window
+  ok: The uninstaller, Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The uninstaller, Windows dark: what it drew is not blank
+  ok: The uninstaller, Windows dark: it is in dark mode
+  ok: The uninstaller, Windows dark: it closes when asked
+  ok: The uninstaller, Windows dark: and exits with 0
+  ok: The app, chosen light with Windows dark: a window opened
+  ok: The app, chosen light with Windows dark: it is still running
+  ok: The app, chosen light with Windows dark: its window is called what it should be
+  ok: The app, chosen light with Windows dark: it has a place on the screen
+  ok: The app, chosen light with Windows dark: it is big enough to be a window
+  ok: The app, chosen light with Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The app, chosen light with Windows dark: what it drew is not blank
+  ok: The app, chosen light with Windows dark: it is in light mode
+  ok: The app, chosen light with Windows dark: it closes when asked
+  ok: The app, chosen light with Windows dark: and exits with 0
+  ok: The installer, chosen light with Windows dark: a window opened
+  ok: The installer, chosen light with Windows dark: it is still running
+  ok: The installer, chosen light with Windows dark: its window is called what it should be
+  ok: The installer, chosen light with Windows dark: it has a place on the screen
+  ok: The installer, chosen light with Windows dark: it is big enough to be a window
+  ok: The installer, chosen light with Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The installer, chosen light with Windows dark: what it drew is not blank
+  ok: The installer, chosen light with Windows dark: it is in light mode
+  ok: The installer, chosen light with Windows dark: it closes when asked
+  ok: The installer, chosen light with Windows dark: and exits with 0
+  ok: The uninstaller, chosen light with Windows dark: a window opened
+  ok: The uninstaller, chosen light with Windows dark: it is still running
+  ok: The uninstaller, chosen light with Windows dark: its window is called what it should be
+  ok: The uninstaller, chosen light with Windows dark: it has a place on the screen
+  ok: The uninstaller, chosen light with Windows dark: it is big enough to be a window
+  ok: The uninstaller, chosen light with Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The uninstaller, chosen light with Windows dark: what it drew is not blank
+  ok: The uninstaller, chosen light with Windows dark: it is in light mode
+  ok: The uninstaller, chosen light with Windows dark: it closes when asked
+  ok: The uninstaller, chosen light with Windows dark: and exits with 0
+  ok: The app, with no graphics: a window opened
+  ok: The app, with no graphics: it is still running
+  ok: The app, with no graphics: its window is called what it should be
+  ok: The app, with no graphics: it has a place on the screen
+  ok: The app, with no graphics: it is big enough to be a window
+  ok: The app, with no graphics: what it drew is not blank
+  ok: The app, with no graphics: it says [Direct3D 12]
+  ok: The app, with no graphics: it closes when asked
+  ok: The app, with no graphics: and exits with 1
+  ok: The installer, with no graphics: a window opened
+  ok: The installer, with no graphics: it is still running
+  ok: The installer, with no graphics: its window is called what it should be
+  ok: The installer, with no graphics: it has a place on the screen
+  ok: The installer, with no graphics: it is big enough to be a window
+  ok: The installer, with no graphics: what it drew is not blank
+  ok: The installer, with no graphics: it says [Direct3D 12]
+  ok: The installer, with no graphics: it says [--apply]
+  ok: The installer, with no graphics: it says [--target-root]
+  ok: The installer, with no graphics: it closes when asked
+  ok: The installer, with no graphics: and exits with 1
+  ok: The uninstaller, with no graphics: a window opened
+  ok: The uninstaller, with no graphics: it is still running
+  ok: The uninstaller, with no graphics: its window is called what it should be
+  ok: The uninstaller, with no graphics: it has a place on the screen
+  ok: The uninstaller, with no graphics: it is big enough to be a window
+  ok: The uninstaller, with no graphics: what it drew is not blank
+  ok: The uninstaller, with no graphics: it says [Direct3D 12]
+  ok: The uninstaller, with no graphics: it says [--uninstall no-such-install --quiet]
+  ok: The uninstaller, with no graphics: it closes when asked
+  ok: The uninstaller, with no graphics: and exits with 1
+  ok: The app, told to run planted code: a window opened
+  ok: The app, told to run planted code: it is still running
+  ok: The app, told to run planted code: its window is called what it should be
+  ok: The app, told to run planted code: it has a place on the screen
+  ok: The app, told to run planted code: it is big enough to be a window
+  ok: The app, told to run planted code: what it drew is not blank
+  ok: The app, told to run planted code: none of it ran
+  ok: The app, told to run planted code: none of what it has loaded is from that folder
+  ok: The app, told to run planted code: it closes when asked
+  ok: The app, told to run planted code: and exits with 0
+  ok: The installer, told to run planted code: a window opened
+  ok: The installer, told to run planted code: it is still running
+  ok: The installer, told to run planted code: its window is called what it should be
+  ok: The installer, told to run planted code: it has a place on the screen
+  ok: The installer, told to run planted code: it is big enough to be a window
+  ok: The installer, told to run planted code: what it drew is not blank
+  ok: The installer, told to run planted code: none of it ran
+  ok: The installer, told to run planted code: none of what it has loaded is from that folder
+  ok: The installer, told to run planted code: it closes when asked
+  ok: The installer, told to run planted code: and exits with 0
+  ok: The uninstaller, told to run planted code: a window opened
+  ok: The uninstaller, told to run planted code: it is still running
+  ok: The uninstaller, told to run planted code: its window is called what it should be
+  ok: The uninstaller, told to run planted code: it has a place on the screen
+  ok: The uninstaller, told to run planted code: it is big enough to be a window
+  ok: The uninstaller, told to run planted code: what it drew is not blank
+  ok: The uninstaller, told to run planted code: none of it ran
+  ok: The uninstaller, told to run planted code: none of what it has loaded is from that folder
+  ok: The uninstaller, told to run planted code: it closes when asked
+  ok: The uninstaller, told to run planted code: and exits with 0
+===== job: Real windows on windows-2022 (133095547789), success
+  ok: The app: a window opened
+  ok: The app: it is still running
+  ok: The app: its window is called what it should be
+  ok: The app: it has a place on the screen
+  ok: The app: it is big enough to be a window
+  ok: The app: all of it is on the screen, clear of the taskbar
+  ok: The app: what it drew is not blank
+  ok: The app: it is in light mode
+  Axe.Windows: Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Axe.Windows: Scan Target: Process Name = winappmigrator, Process ID = 6164
+  Axe.Windows: Scan Id = The-app
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-app_1_of_2.a11ytest"
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-app_2_of_2.a11ytest"
+  ok: The app: Axe.Windows finds no errors
+  ok: The app: it closes when asked
+  ok: The app: and exits with 0
+  ok: The app: it says which graphics adapter it picked
+  ok: The installer: a window opened
+  ok: The installer: it is still running
+  ok: The installer: its window is called what it should be
+  ok: The installer: it has a place on the screen
+  ok: The installer: it is big enough to be a window
+  ok: The installer: all of it is on the screen, clear of the taskbar
+  ok: The installer: what it drew is not blank
+  ok: The installer: it is in light mode
+  Axe.Windows: Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Axe.Windows: Scan Target: Process Name = main_installer, Process ID = 7232
+  Axe.Windows: Scan Id = The-installer
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-installer_1_of_2.a11ytest"
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-installer_2_of_2.a11ytest"
+  ok: The installer: Axe.Windows finds no errors
+  ok: The installer: it closes when asked
+  ok: The installer: and exits with 0
+  ok: The installer: it installed nothing
+  ok: The uninstaller: a window opened
+  ok: The uninstaller: it is still running
+  ok: The uninstaller: its window is called what it should be
+  ok: The uninstaller: it has a place on the screen
+  ok: The uninstaller: it is big enough to be a window
+  ok: The uninstaller: all of it is on the screen, clear of the taskbar
+  ok: The uninstaller: what it drew is not blank
+  ok: The uninstaller: it is in light mode
+  Axe.Windows: Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Axe.Windows: Scan Target: Process Name = main_installer, Process ID = 576
+  Axe.Windows: Scan Id = The-uninstaller
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-uninstaller_1_of_2.a11ytest"
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "D:\a\_temp\wam-pictures\accessibility\The-uninstaller_2_of_2.a11ytest"
+  ok: The uninstaller: Axe.Windows finds no errors
+  ok: The uninstaller: it closes when asked
+  ok: The uninstaller: and exits with 0
+  ok: The app, Windows dark: a window opened
+  ok: The app, Windows dark: it is still running
+  ok: The app, Windows dark: its window is called what it should be
+  ok: The app, Windows dark: it has a place on the screen
+  ok: The app, Windows dark: it is big enough to be a window
+  ok: The app, Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The app, Windows dark: what it drew is not blank
+  ok: The app, Windows dark: it is in dark mode
+  ok: The app, Windows dark: it closes when asked
+  ok: The app, Windows dark: and exits with 0
+  ok: The installer, Windows dark: a window opened
+  ok: The installer, Windows dark: it is still running
+  ok: The installer, Windows dark: its window is called what it should be
+  ok: The installer, Windows dark: it has a place on the screen
+  ok: The installer, Windows dark: it is big enough to be a window
+  ok: The installer, Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The installer, Windows dark: what it drew is not blank
+  ok: The installer, Windows dark: it is in dark mode
+  ok: The installer, Windows dark: it closes when asked
+  ok: The installer, Windows dark: and exits with 0
+  ok: The uninstaller, Windows dark: a window opened
+  ok: The uninstaller, Windows dark: it is still running
+  ok: The uninstaller, Windows dark: its window is called what it should be
+  ok: The uninstaller, Windows dark: it has a place on the screen
+  ok: The uninstaller, Windows dark: it is big enough to be a window
+  ok: The uninstaller, Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The uninstaller, Windows dark: what it drew is not blank
+  ok: The uninstaller, Windows dark: it is in dark mode
+  ok: The uninstaller, Windows dark: it closes when asked
+  ok: The uninstaller, Windows dark: and exits with 0
+  ok: The app, chosen light with Windows dark: a window opened
+  ok: The app, chosen light with Windows dark: it is still running
+  ok: The app, chosen light with Windows dark: its window is called what it should be
+  ok: The app, chosen light with Windows dark: it has a place on the screen
+  ok: The app, chosen light with Windows dark: it is big enough to be a window
+  ok: The app, chosen light with Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The app, chosen light with Windows dark: what it drew is not blank
+  ok: The app, chosen light with Windows dark: it is in light mode
+  ok: The app, chosen light with Windows dark: it closes when asked
+  ok: The app, chosen light with Windows dark: and exits with 0
+  ok: The installer, chosen light with Windows dark: a window opened
+  ok: The installer, chosen light with Windows dark: it is still running
+  ok: The installer, chosen light with Windows dark: its window is called what it should be
+  ok: The installer, chosen light with Windows dark: it has a place on the screen
+  ok: The installer, chosen light with Windows dark: it is big enough to be a window
+  ok: The installer, chosen light with Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The installer, chosen light with Windows dark: what it drew is not blank
+  ok: The installer, chosen light with Windows dark: it is in light mode
+  ok: The installer, chosen light with Windows dark: it closes when asked
+  ok: The installer, chosen light with Windows dark: and exits with 0
+  ok: The uninstaller, chosen light with Windows dark: a window opened
+  ok: The uninstaller, chosen light with Windows dark: it is still running
+  ok: The uninstaller, chosen light with Windows dark: its window is called what it should be
+  ok: The uninstaller, chosen light with Windows dark: it has a place on the screen
+  ok: The uninstaller, chosen light with Windows dark: it is big enough to be a window
+  ok: The uninstaller, chosen light with Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The uninstaller, chosen light with Windows dark: what it drew is not blank
+  ok: The uninstaller, chosen light with Windows dark: it is in light mode
+  ok: The uninstaller, chosen light with Windows dark: it closes when asked
+  ok: The uninstaller, chosen light with Windows dark: and exits with 0
+  ok: The app, with no graphics: a window opened
+  ok: The app, with no graphics: it is still running
+  ok: The app, with no graphics: its window is called what it should be
+  ok: The app, with no graphics: it has a place on the screen
+  ok: The app, with no graphics: it is big enough to be a window
+  ok: The app, with no graphics: what it drew is not blank
+  ok: The app, with no graphics: it says [Direct3D 12]
+  ok: The app, with no graphics: it closes when asked
+  ok: The app, with no graphics: and exits with 1
+  ok: The installer, with no graphics: a window opened
+  ok: The installer, with no graphics: it is still running
+  ok: The installer, with no graphics: its window is called what it should be
+  ok: The installer, with no graphics: it has a place on the screen
+  ok: The installer, with no graphics: it is big enough to be a window
+  ok: The installer, with no graphics: what it drew is not blank
+  ok: The installer, with no graphics: it says [Direct3D 12]
+  ok: The installer, with no graphics: it says [--apply]
+  ok: The installer, with no graphics: it says [--target-root]
+  ok: The installer, with no graphics: it closes when asked
+  ok: The installer, with no graphics: and exits with 1
+  ok: The uninstaller, with no graphics: a window opened
+  ok: The uninstaller, with no graphics: it is still running
+  ok: The uninstaller, with no graphics: its window is called what it should be
+  ok: The uninstaller, with no graphics: it has a place on the screen
+  ok: The uninstaller, with no graphics: it is big enough to be a window
+  ok: The uninstaller, with no graphics: what it drew is not blank
+  ok: The uninstaller, with no graphics: it says [Direct3D 12]
+  ok: The uninstaller, with no graphics: it says [--uninstall no-such-install --quiet]
+  ok: The uninstaller, with no graphics: it closes when asked
+  ok: The uninstaller, with no graphics: and exits with 1
+  ok: The app, told to run planted code: a window opened
+  ok: The app, told to run planted code: it is still running
+  ok: The app, told to run planted code: its window is called what it should be
+  ok: The app, told to run planted code: it has a place on the screen
+  ok: The app, told to run planted code: it is big enough to be a window
+  ok: The app, told to run planted code: what it drew is not blank
+  ok: The app, told to run planted code: none of it ran
+  ok: The app, told to run planted code: none of what it has loaded is from that folder
+  ok: The app, told to run planted code: it closes when asked
+  ok: The app, told to run planted code: and exits with 0
+  ok: The installer, told to run planted code: a window opened
+  ok: The installer, told to run planted code: it is still running
+  ok: The installer, told to run planted code: its window is called what it should be
+  ok: The installer, told to run planted code: it has a place on the screen
+  ok: The installer, told to run planted code: it is big enough to be a window
+  ok: The installer, told to run planted code: what it drew is not blank
+  ok: The installer, told to run planted code: none of it ran
+  ok: The installer, told to run planted code: none of what it has loaded is from that folder
+  ok: The installer, told to run planted code: it closes when asked
+  ok: The installer, told to run planted code: and exits with 0
+  ok: The uninstaller, told to run planted code: a window opened
+  ok: The uninstaller, told to run planted code: it is still running
+  ok: The uninstaller, told to run planted code: its window is called what it should be
+  ok: The uninstaller, told to run planted code: it has a place on the screen
+  ok: The uninstaller, told to run planted code: it is big enough to be a window
+  ok: The uninstaller, told to run planted code: what it drew is not blank
+  ok: The uninstaller, told to run planted code: none of it ran
+  ok: The uninstaller, told to run planted code: none of what it has loaded is from that folder
+  ok: The uninstaller, told to run planted code: it closes when asked
+  ok: The uninstaller, told to run planted code: and exits with 0
+===== job: Real windows on windows-11-arm (133095547742), success
+  ok: The app: a window opened
+  ok: The app: it is still running
+  ok: The app: its window is called what it should be
+  ok: The app: it has a place on the screen
+  ok: The app: it is big enough to be a window
+  ok: The app: all of it is on the screen, clear of the taskbar
+  ok: The app: what it drew is not blank
+  ok: The app: it is in light mode
+  Axe.Windows: Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Axe.Windows: Scan Target: Process Name = winappmigrator, Process ID = 5284
+  Axe.Windows: Scan Id = The-app
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "C:\a\_temp\wam-pictures\accessibility\The-app_1_of_2.a11ytest"
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "C:\a\_temp\wam-pictures\accessibility\The-app_2_of_2.a11ytest"
+  ok: The app: Axe.Windows finds no errors
+  ok: The app: it closes when asked
+  ok: The app: and exits with 0
+  ok: The app: it says which graphics adapter it picked
+  ok: The installer: a window opened
+  ok: The installer: it is still running
+  ok: The installer: its window is called what it should be
+  ok: The installer: it has a place on the screen
+  ok: The installer: it is big enough to be a window
+  ok: The installer: all of it is on the screen, clear of the taskbar
+  ok: The installer: what it drew is not blank
+  ok: The installer: it is in light mode
+  Axe.Windows: Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Axe.Windows: Scan Target: Process Name = main_installer, Process ID = 11080
+  Axe.Windows: Scan Id = The-installer
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "C:\a\_temp\wam-pictures\accessibility\The-installer_1_of_2.a11ytest"
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "C:\a\_temp\wam-pictures\accessibility\The-installer_2_of_2.a11ytest"
+  ok: The installer: Axe.Windows finds no errors
+  ok: The installer: it closes when asked
+  ok: The installer: and exits with 0
+  ok: The installer: it installed nothing
+  ok: The uninstaller: a window opened
+  ok: The uninstaller: it is still running
+  ok: The uninstaller: its window is called what it should be
+  ok: The uninstaller: it has a place on the screen
+  ok: The uninstaller: it is big enough to be a window
+  ok: The uninstaller: all of it is on the screen, clear of the taskbar
+  ok: The uninstaller: what it drew is not blank
+  ok: The uninstaller: it is in light mode
+  Axe.Windows: Axe.Windows Accessibility Scanner CLI (version 2.4.2)
+  Axe.Windows: Scan Target: Process Name = main_installer, Process ID = 1256
+  Axe.Windows: Scan Id = The-uninstaller
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "C:\a\_temp\wam-pictures\accessibility\The-uninstaller_1_of_2.a11ytest"
+  Axe.Windows: 0 errors were found
+  Axe.Windows: Results were written to "C:\a\_temp\wam-pictures\accessibility\The-uninstaller_2_of_2.a11ytest"
+  ok: The uninstaller: Axe.Windows finds no errors
+  ok: The uninstaller: it closes when asked
+  ok: The uninstaller: and exits with 0
+  ok: The app, Windows dark: a window opened
+  ok: The app, Windows dark: it is still running
+  ok: The app, Windows dark: its window is called what it should be
+  ok: The app, Windows dark: it has a place on the screen
+  ok: The app, Windows dark: it is big enough to be a window
+  ok: The app, Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The app, Windows dark: what it drew is not blank
+  ok: The app, Windows dark: it is in dark mode
+  ok: The app, Windows dark: it closes when asked
+  ok: The app, Windows dark: and exits with 0
+  ok: The installer, Windows dark: a window opened
+  ok: The installer, Windows dark: it is still running
+  ok: The installer, Windows dark: its window is called what it should be
+  ok: The installer, Windows dark: it has a place on the screen
+  ok: The installer, Windows dark: it is big enough to be a window
+  ok: The installer, Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The installer, Windows dark: what it drew is not blank
+  ok: The installer, Windows dark: it is in dark mode
+  ok: The installer, Windows dark: it closes when asked
+  ok: The installer, Windows dark: and exits with 0
+  ok: The uninstaller, Windows dark: a window opened
+  ok: The uninstaller, Windows dark: it is still running
+  ok: The uninstaller, Windows dark: its window is called what it should be
+  ok: The uninstaller, Windows dark: it has a place on the screen
+  ok: The uninstaller, Windows dark: it is big enough to be a window
+  ok: The uninstaller, Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The uninstaller, Windows dark: what it drew is not blank
+  ok: The uninstaller, Windows dark: it is in dark mode
+  ok: The uninstaller, Windows dark: it closes when asked
+  ok: The uninstaller, Windows dark: and exits with 0
+  ok: The app, chosen light with Windows dark: a window opened
+  ok: The app, chosen light with Windows dark: it is still running
+  ok: The app, chosen light with Windows dark: its window is called what it should be
+  ok: The app, chosen light with Windows dark: it has a place on the screen
+  ok: The app, chosen light with Windows dark: it is big enough to be a window
+  ok: The app, chosen light with Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The app, chosen light with Windows dark: what it drew is not blank
+  ok: The app, chosen light with Windows dark: it is in light mode
+  ok: The app, chosen light with Windows dark: it closes when asked
+  ok: The app, chosen light with Windows dark: and exits with 0
+  ok: The installer, chosen light with Windows dark: a window opened
+  ok: The installer, chosen light with Windows dark: it is still running
+  ok: The installer, chosen light with Windows dark: its window is called what it should be
+  ok: The installer, chosen light with Windows dark: it has a place on the screen
+  ok: The installer, chosen light with Windows dark: it is big enough to be a window
+  ok: The installer, chosen light with Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The installer, chosen light with Windows dark: what it drew is not blank
+  ok: The installer, chosen light with Windows dark: it is in light mode
+  ok: The installer, chosen light with Windows dark: it closes when asked
+  ok: The installer, chosen light with Windows dark: and exits with 0
+  ok: The uninstaller, chosen light with Windows dark: a window opened
+  ok: The uninstaller, chosen light with Windows dark: it is still running
+  ok: The uninstaller, chosen light with Windows dark: its window is called what it should be
+  ok: The uninstaller, chosen light with Windows dark: it has a place on the screen
+  ok: The uninstaller, chosen light with Windows dark: it is big enough to be a window
+  ok: The uninstaller, chosen light with Windows dark: all of it is on the screen, clear of the taskbar
+  ok: The uninstaller, chosen light with Windows dark: what it drew is not blank
+  ok: The uninstaller, chosen light with Windows dark: it is in light mode
+  ok: The uninstaller, chosen light with Windows dark: it closes when asked
+  ok: The uninstaller, chosen light with Windows dark: and exits with 0
+  ok: The app, with no graphics: a window opened
+  ok: The app, with no graphics: it is still running
+  ok: The app, with no graphics: its window is called what it should be
+  ok: The app, with no graphics: it has a place on the screen
+  ok: The app, with no graphics: it is big enough to be a window
+  ok: The app, with no graphics: what it drew is not blank
+  ok: The app, with no graphics: it says [Direct3D 12]
+  ok: The app, with no graphics: it closes when asked
+  ok: The app, with no graphics: and exits with 1
+  ok: The installer, with no graphics: a window opened
+  ok: The installer, with no graphics: it is still running
+  ok: The installer, with no graphics: its window is called what it should be
+  ok: The installer, with no graphics: it has a place on the screen
+  ok: The installer, with no graphics: it is big enough to be a window
+  ok: The installer, with no graphics: what it drew is not blank
+  ok: The installer, with no graphics: it says [Direct3D 12]
+  ok: The installer, with no graphics: it says [--apply]
+  ok: The installer, with no graphics: it says [--target-root]
+  ok: The installer, with no graphics: it closes when asked
+  ok: The installer, with no graphics: and exits with 1
+  ok: The uninstaller, with no graphics: a window opened
+  ok: The uninstaller, with no graphics: it is still running
+  ok: The uninstaller, with no graphics: its window is called what it should be
+  ok: The uninstaller, with no graphics: it has a place on the screen
+  ok: The uninstaller, with no graphics: it is big enough to be a window
+  ok: The uninstaller, with no graphics: what it drew is not blank
+  ok: The uninstaller, with no graphics: it says [Direct3D 12]
+  ok: The uninstaller, with no graphics: it says [--uninstall no-such-install --quiet]
+  ok: The uninstaller, with no graphics: it closes when asked
+  ok: The uninstaller, with no graphics: and exits with 1
+  ok: The app, told to run planted code: a window opened
+  ok: The app, told to run planted code: it is still running
+  ok: The app, told to run planted code: its window is called what it should be
+  ok: The app, told to run planted code: it has a place on the screen
+  ok: The app, told to run planted code: it is big enough to be a window
+  ok: The app, told to run planted code: what it drew is not blank
+  ok: The app, told to run planted code: none of it ran
+  ok: The app, told to run planted code: none of what it has loaded is from that folder
+  ok: The app, told to run planted code: it closes when asked
+  ok: The app, told to run planted code: and exits with 0
+  ok: The installer, told to run planted code: a window opened
+  ok: The installer, told to run planted code: it is still running
+  ok: The installer, told to run planted code: its window is called what it should be
+  ok: The installer, told to run planted code: it has a place on the screen
+  ok: The installer, told to run planted code: it is big enough to be a window
+  ok: The installer, told to run planted code: what it drew is not blank
+  ok: The installer, told to run planted code: none of it ran
+  ok: The installer, told to run planted code: none of what it has loaded is from that folder
+  ok: The installer, told to run planted code: it closes when asked
+  ok: The installer, told to run planted code: and exits with 0
+  ok: The uninstaller, told to run planted code: a window opened
+  ok: The uninstaller, told to run planted code: it is still running
+  ok: The uninstaller, told to run planted code: its window is called what it should be
+  ok: The uninstaller, told to run planted code: it has a place on the screen
+  ok: The uninstaller, told to run planted code: it is big enough to be a window
+  ok: The uninstaller, told to run planted code: what it drew is not blank
+  ok: The uninstaller, told to run planted code: none of it ran
+  ok: The uninstaller, told to run planted code: none of what it has loaded is from that folder
+  ok: The uninstaller, told to run planted code: it closes when asked
+  ok: The uninstaller, told to run planted code: and exits with 0

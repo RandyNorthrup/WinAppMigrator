@@ -2,6 +2,14 @@
 
 All notable project changes are tracked here.
 
+## Unreleased
+
+### Fixed
+
+- **A heading no longer runs under its button.** In Italian, "Contenuto del programma di installazione" ran under
+  "Analizza di nuovo" once an app was picked. The heading is now shortened to the room the button leaves, with the whole
+  of it on hover and for screen readers, in every language.
+
 ## 0.7.0 — 2026-11-15
 
 WinAppMigrator now speaks 24 languages, and can be used with a keyboard alone, with a screen reader, and with Windows'

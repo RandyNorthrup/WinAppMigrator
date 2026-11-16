@@ -1,0 +1,16 @@
+{
+  "name": "i18n-heading-room",
+  "file": "crates/winappmigrator-gui/src/footprint_view.rs",
+  "mutation": "            let room = (ui.available_width() - button).max(0.0); ->             let room = ui.available_width() + 0.0 * button;",
+  "command": "$env:PATH = \"C:\\Users\\Randy\\.cargo\\bin;$env:PATH\"; $env:CARGO_TARGET_DIR = 'C:\\Users\\Randy\\AppData\\Local\\Temp\\claude\\9b6bfcf6d6737e8e\\28316fa3-07c3-42a6-9952-23884d58bf11\\scratchpad\\drill-target'; cargo test -p winappmigrator-gui --lib ui_tests_footprint::the_heading_of_what_goes_in_leaves_room_for_its_button_in_every_language -- --exact",
+  "expected_diagnostic": "runs under",
+  "before": "09237171806204d3b96085690bdf253911e04ef678113885fa444fce56bca96a",
+  "mutated": "a3a38f2b7e257441044edaceb0daeaec98ff02ba2f000d7fb94e3e02d28df9a5",
+  "after": "09237171806204d3b96085690bdf253911e04ef678113885fa444fce56bca96a",
+  "baseline_exit": 0,
+  "mutated_exit": 101,
+  "restored_exit": 0,
+  "observed_diagnostic": "it-IT: [[617.0 181.5] - [856.5 198.5]] runs under [[839.1 173.0] - [976.0 207.0]]",
+  "failure": null,
+  "passed": true
+}

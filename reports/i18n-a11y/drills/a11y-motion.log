@@ -8,20 +8,20 @@ command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DI
 expect: it holds still
 ===== baseline
    Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
-    Finished `test` profile [optimized + debuginfo] target(s) in 9.54s
+    Finished `test` profile [optimized + debuginfo] target(s) in 3.21s
      Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-a84449a8eabd6251.exe)
 
 running 1 test
 test widgets::tests::a_progress_bar_of_unknown_length_holds_still_when_nothing_may_move ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.00s
 
 
 
 exit 0
 ===== mutated
    Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
-    Finished `test` profile [optimized + debuginfo] target(s) in 10.23s
+    Finished `test` profile [optimized + debuginfo] target(s) in 5.58s
      Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-a84449a8eabd6251.exe)
 
 running 1 test
@@ -31,7 +31,7 @@ failures:
 
 ---- widgets::tests::a_progress_bar_of_unknown_length_holds_still_when_nothing_may_move stdout ----
 
-thread 'widgets::tests::a_progress_bar_of_unknown_length_holds_still_when_nothing_may_move' (45472) panicked at crates\winappmigrator-ui\src\widgets.rs:1639:9:
+thread 'widgets::tests::a_progress_bar_of_unknown_length_holds_still_when_nothing_may_move' (52184) panicked at crates\winappmigrator-ui\src\widgets.rs:1652:9:
 assertion `left == right` failed: it holds still
   left: "[ClippedShape { clip_rect: [[0.0 0.0] - [10000.0 10000.0]], shape: Rect(RectShape { rect: [[0.0 0.0] - [10000.0 6.0]], corner_radius: CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, fill: #30_36_47_FF, stroke: Stroke { width: 0.0, color: #00_00_00_00 }, stroke_kind: Outside, round_to_pixels: None, blur_width: 0.0, brush: None, angle: 0.0 }), transform_after_tessellation: TSTransform { scaling: 1.0, translation: [0.0 0.0] } }, ClippedShape { clip_rect: [[0.0 0.0] - [10000.0 10000.0]], shape: Rect(RectShape { rect: [[0.0 0.0] - [10000.0 6.0]], corner_radius: CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, fill: #27_2C_65_6E, stroke: Stroke { width: 0.0, color: #00_00_00_00 }, stroke_kind: Outside, round_to_pixels: None, blur_width: 0.0, brush: None, angle: 0.0 }), transform_after_tessellation: TSTransform { scaling: 1.0, translation: [0.0 0.0] } }, ClippedShape { clip_rect: [[0.0 0.0] - [10000.0 10000.0]], shape: Rect(RectShape { rect: [[0.0 0.0] - [1820.0 6.0]], corner_radius: CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, fill: #5A_67_EA_FF, stroke: Stroke { width: 0.0, color: #00_00_00_00 }, stroke_kind: Outside, round_to_pixels: None, blur_width: 0.0, brush: None, angle: 0.0 }), transform_after_tessellation: TSTransform { scaling: 1.0, translation: [0.0 0.0] } }]"
  right: "[ClippedShape { clip_rect: [[0.0 0.0] - [10000.0 10000.0]], shape: Rect(RectShape { rect: [[0.0 0.0] - [10000.0 6.0]], corner_radius: CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, fill: #30_36_47_FF, stroke: Stroke { width: 0.0, color: #00_00_00_00 }, stroke_kind: Outside, round_to_pixels: None, blur_width: 0.0, brush: None, angle: 0.0 }), transform_after_tessellation: TSTransform { scaling: 1.0, translation: [0.0 0.0] } }, ClippedShape { clip_rect: [[0.0 0.0] - [10000.0 10000.0]], shape: Rect(RectShape { rect: [[0.0 0.0] - [10000.0 6.0]], corner_radius: CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, fill: #27_2C_65_6E, stroke: Stroke { width: 0.0, color: #00_00_00_00 }, stroke_kind: Outside, round_to_pixels: None, blur_width: 0.0, brush: None, angle: 0.0 }), transform_after_tessellation: TSTransform { scaling: 1.0, translation: [0.0 0.0] } }, ClippedShape { clip_rect: [[0.0 0.0] - [10000.0 10000.0]], shape: Rect(RectShape { rect: [[5190.0 0.0] - [8190.0 6.0]], corner_radius: CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, fill: #5A_67_EA_FF, stroke: Stroke { width: 0.0, color: #00_00_00_00 }, stroke_kind: Outside, round_to_pixels: None, blur_width: 0.0, brush: None, angle: 0.0 }), transform_after_tessellation: TSTransform { scaling: 1.0, translation: [0.0 0.0] } }]"
@@ -49,7 +49,7 @@ error: test failed, to rerun pass `-p winappmigrator-ui --lib`
 exit 101
 ===== restored
    Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
-    Finished `test` profile [optimized + debuginfo] target(s) in 9.08s
+    Finished `test` profile [optimized + debuginfo] target(s) in 5.84s
      Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-a84449a8eabd6251.exe)
 
 running 1 test

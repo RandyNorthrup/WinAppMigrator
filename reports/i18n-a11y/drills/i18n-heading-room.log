@@ -1,0 +1,64 @@
+drill i18n-heading-room
+file crates/winappmigrator-gui/src/footprint_view.rs
+mutation: '            let room = (ui.available_width() - button).max(0.0);' -> '            let room = ui.available_width() + 0.0 * button;'
+command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-gui --lib ui_tests_footprint::the_heading_of_what_goes_in_leaves_room_for_its_button_in_every_language -- --exact
+expect: runs under
+===== baseline
+   Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
+warning: winappmigrator-gui@0.7.0: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.7.0: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 17.02s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-d49089e5507f5a90.exe)
+
+running 1 test
+test ui_tests_footprint::the_heading_of_what_goes_in_leaves_room_for_its_button_in_every_language ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 1.14s
+
+
+
+exit 0
+===== mutated
+warning: winappmigrator-gui@0.7.0: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.7.0: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 12.14s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-d49089e5507f5a90.exe)
+
+running 1 test
+test ui_tests_footprint::the_heading_of_what_goes_in_leaves_room_for_its_button_in_every_language ... FAILED
+
+failures:
+
+---- ui_tests_footprint::the_heading_of_what_goes_in_leaves_room_for_its_button_in_every_language stdout ----
+
+thread 'ui_tests_footprint::the_heading_of_what_goes_in_leaves_room_for_its_button_in_every_language' (13432) panicked at crates\winappmigrator-gui\src\ui_tests_footprint.rs:1502:13:
+it-IT: [[617.0 181.5] - [856.5 198.5]] runs under [[839.1 173.0] - [976.0 207.0]]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    ui_tests_footprint::the_heading_of_what_goes_in_leaves_room_for_its_button_in_every_language
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.30s
+
+error: test failed, to rerun pass `-p winappmigrator-gui --lib`
+
+
+exit 101
+===== restored
+warning: winappmigrator-gui@0.7.0: no installer stub is embedded in this build: there is no winappmigrator-installer.exe. Build it first: cargo build --release -p winappmigrator-installer
+warning: winappmigrator-gui@0.7.0: no client is embedded in this build: it has not been built: run scripts/build-client.ps1
+   Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `test` profile [optimized + debuginfo] target(s) in 8.51s
+     Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_gui-d49089e5507f5a90.exe)
+
+running 1 test
+test ui_tests_footprint::the_heading_of_what_goes_in_leaves_room_for_its_button_in_every_language ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 1.11s
+
+
+
+exit 0

@@ -2,32 +2,32 @@ drill a11y-axe
 file crates/winappmigrator-ui/src/widgets.rs
 mutation: '        .find(|frame| frame.kind().is_some_and(|kind| kind.is_panel()))' -> '        .find(|_frame| false)'
 expect: An on-screen element must not have a null BoundingRectangle property.
-===== baseline (sha256 bf77bca8fc092b65dbe272551935e97a779ff499c60e272287d489faf4c3e826)
-   Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
-    Finished `dev` profile [optimized + debuginfo] target(s) in 24.04s
+===== baseline (sha256 39b13a97e4a790d7148700a018c4eb3055283656051c39889e29b5be8037c0e3)
+   Compiling winappmigrator-installer v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-installer)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 10.11s
 task state: Ready, result: 0
 stage baseline, from C:\WamRepro\dl\axe-drill\baseline
-== app (pid 16708, running: True)
+== app (pid 17948, running: True)
   Axe.Windows Accessibility Scanner CLI (version 2.4.2)
-  Scan Target: Process Name = WinAppMigrator-drill, Process ID = 16708
+  Scan Target: Process Name = WinAppMigrator-drill, Process ID = 17948
   Scan Id = app
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-baseline\app_1_of_2.a11ytest"
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-baseline\app_2_of_2.a11ytest"
   exit 0
-== uninstaller-no-record (pid 14528, running: True)
+== uninstaller-no-record (pid 12612, running: True)
   Axe.Windows Accessibility Scanner CLI (version 2.4.2)
-  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 14528
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 12612
   Scan Id = uninstaller-no-record
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-baseline\uninstaller-no-record_1_of_2.a11ytest"
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-baseline\uninstaller-no-record_2_of_2.a11ytest"
   exit 0
-== stub-no-package (pid 7092, running: True)
+== stub-no-package (pid 2808, running: True)
   Axe.Windows Accessibility Scanner CLI (version 2.4.2)
-  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 7092
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 2808
   Scan Id = stub-no-package
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-baseline\stub-no-package_1_of_2.a11ytest"
@@ -35,32 +35,32 @@ stage baseline, from C:\WamRepro\dl\axe-drill\baseline
   Results were written to "C:\WamRepro\logs\axe-drill-baseline\stub-no-package_2_of_2.a11ytest"
   exit 0
 baseline exit 0
-===== mutated (sha256 59b5900e9f7498929df34f6322d627603ffbc0f88d3072946afc69e56f3c5e01)
-   Compiling winappmigrator-installer v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-installer)
-    Finished `dev` profile [optimized + debuginfo] target(s) in 15.02s
+===== mutated (sha256 b7e9152d9b958034a02f37785aeb6a8dc452d9f9adcb4982d55d81c9b10f2b86)
+   Compiling winappmigrator-gui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-gui)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 7.27s
 task state: Ready, result: 0
 stage mutated, from C:\WamRepro\dl\axe-drill\mutated
-== app (pid 8532, running: True)
+== app (pid 6468, running: True)
   Axe.Windows Accessibility Scanner CLI (version 2.4.2)
-  Scan Target: Process Name = WinAppMigrator-drill, Process ID = 8532
+  Scan Target: Process Name = WinAppMigrator-drill, Process ID = 6468
   Scan Id = app
   3 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-mutated\app_1_of_2.a11ytest"
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-mutated\app_2_of_2.a11ytest"
   exit 1
-== uninstaller-no-record (pid 19356, running: True)
+== uninstaller-no-record (pid 19028, running: True)
   Axe.Windows Accessibility Scanner CLI (version 2.4.2)
-  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 19356
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 19028
   Scan Id = uninstaller-no-record
   3 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-mutated\uninstaller-no-record_1_of_2.a11ytest"
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-mutated\uninstaller-no-record_2_of_2.a11ytest"
   exit 1
-== stub-no-package (pid 4292, running: True)
+== stub-no-package (pid 3576, running: True)
   Axe.Windows Accessibility Scanner CLI (version 2.4.2)
-  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 4292
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 3576
   Scan Id = stub-no-package
   2 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-mutated\stub-no-package_1_of_2.a11ytest"
@@ -68,32 +68,32 @@ stage mutated, from C:\WamRepro\dl\axe-drill\mutated
   Results were written to "C:\WamRepro\logs\axe-drill-mutated\stub-no-package_2_of_2.a11ytest"
   exit 1
 mutated exit 1
-===== restored (sha256 bf77bca8fc092b65dbe272551935e97a779ff499c60e272287d489faf4c3e826)
+===== restored (sha256 39b13a97e4a790d7148700a018c4eb3055283656051c39889e29b5be8037c0e3)
    Compiling winappmigrator-installer v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-installer)
-    Finished `dev` profile [optimized + debuginfo] target(s) in 12.35s
+    Finished `dev` profile [optimized + debuginfo] target(s) in 6.09s
 task state: Ready, result: 0
 stage restored, from C:\WamRepro\dl\axe-drill\restored
-== app (pid 9592, running: True)
+== app (pid 17340, running: True)
   Axe.Windows Accessibility Scanner CLI (version 2.4.2)
-  Scan Target: Process Name = WinAppMigrator-drill, Process ID = 9592
+  Scan Target: Process Name = WinAppMigrator-drill, Process ID = 17340
   Scan Id = app
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-restored\app_1_of_2.a11ytest"
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-restored\app_2_of_2.a11ytest"
   exit 0
-== uninstaller-no-record (pid 13464, running: True)
+== uninstaller-no-record (pid 14932, running: True)
   Axe.Windows Accessibility Scanner CLI (version 2.4.2)
-  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 13464
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 14932
   Scan Id = uninstaller-no-record
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-restored\uninstaller-no-record_1_of_2.a11ytest"
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-restored\uninstaller-no-record_2_of_2.a11ytest"
   exit 0
-== stub-no-package (pid 10332, running: True)
+== stub-no-package (pid 10316, running: True)
   Axe.Windows Accessibility Scanner CLI (version 2.4.2)
-  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 10332
+  Scan Target: Process Name = winappmigrator-installer-drill, Process ID = 10316
   Scan Id = stub-no-package
   0 errors were found
   Results were written to "C:\WamRepro\logs\axe-drill-restored\stub-no-package_1_of_2.a11ytest"

@@ -4,7 +4,7 @@ mutation: 'Mirror::of(rect).rect(box_rect),' -> 'box_rect,'
 command: $env:PATH = "C:\Users\Randy\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = 'C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target'; cargo test -p winappmigrator-ui --lib widgets::tests::a_checkbox_is_where_reading_starts -- --exact
 expect: test widgets::tests::a_checkbox_is_where_reading_starts ... FAILED
 ===== baseline
-    Finished `test` profile [optimized + debuginfo] target(s) in 0.56s
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.40s
      Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-a84449a8eabd6251.exe)
 
 running 1 test
@@ -17,7 +17,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; fin
 exit 0
 ===== mutated
    Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
-    Finished `test` profile [optimized + debuginfo] target(s) in 14.16s
+    Finished `test` profile [optimized + debuginfo] target(s) in 6.16s
      Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-a84449a8eabd6251.exe)
 
 running 1 test
@@ -27,7 +27,7 @@ failures:
 
 ---- widgets::tests::a_checkbox_is_where_reading_starts stdout ----
 
-thread 'widgets::tests::a_checkbox_is_where_reading_starts' (53004) panicked at crates\winappmigrator-ui\src\widgets.rs:1748:9:
+thread 'widgets::tests::a_checkbox_is_where_reading_starts' (33820) panicked at crates\winappmigrator-ui\src\widgets.rs:1761:9:
 [[[4.0 6.0] - [20.0 22.0]]]
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
@@ -35,7 +35,7 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 failures:
     widgets::tests::a_checkbox_is_where_reading_starts
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.03s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.01s
 
 error: test failed, to rerun pass `-p winappmigrator-ui --lib`
 
@@ -43,7 +43,7 @@ error: test failed, to rerun pass `-p winappmigrator-ui --lib`
 exit 101
 ===== restored
    Compiling winappmigrator-ui v0.7.0 (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drills-wt\crates\winappmigrator-ui)
-    Finished `test` profile [optimized + debuginfo] target(s) in 13.06s
+    Finished `test` profile [optimized + debuginfo] target(s) in 6.39s
      Running unittests src\lib.rs (C:\Users\Randy\AppData\Local\Temp\claude\9b6bfcf6d6737e8e\28316fa3-07c3-42a6-9952-23884d58bf11\scratchpad\drill-target\debug\deps\winappmigrator_ui-a84449a8eabd6251.exe)
 
 running 1 test
