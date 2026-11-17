@@ -33,7 +33,7 @@ from pathlib import Path
 
 API = "https://api.github.com"
 DEFAULT_REPOSITORY = "RandyNorthrup/WinAppMigrator"
-DEFAULT_BASE_URL = "https://randynorthrup.github.io/WinAppMigrator"
+DEFAULT_BASE_URL = "https://winappmigrator.com"
 SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
 
 # Mermaid draws the two diagrams in the wiki. Pinned, and checked by the browser against this hash, which was
@@ -358,6 +358,45 @@ def write_sitemap(path: Path, entries: dict[str, str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+# Search engines, and the crawlers of AI search and assistants, are all welcome: the site is the project's guide.
+AI_CRAWLERS = (
+    "GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "Claude-SearchBot", "Claude-User", "PerplexityBot",
+    "Perplexity-User", "Google-Extended", "Applebot-Extended", "Amazonbot", "DuckAssistBot", "Meta-ExternalAgent",
+    "MistralAI-User",
+)
+
+
+def write_robots(path: Path, base_url: str) -> None:
+    lines = ["User-agent: *", "Allow: /", "", "# AI search and agent crawlers are welcome. Plain-text guides: "
+             "/llms.txt and /llms-full.txt"]
+    lines += [f"User-agent: {name}" for name in AI_CRAWLERS]
+    lines += ["Allow: /", "", f"Sitemap: {base_url}/sitemap.xml", ""]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_llms(
+    out: Path,
+    template: Path,
+    common: dict[str, str],
+    guide: list[tuple[str, str, str, str]],
+    languages: list[str],
+    names: dict[str, str],
+) -> None:
+    """llms.txt, what the project is and where its guide's pages are, and llms-full.txt, the whole guide as written."""
+    summary = string.Template(template.read_text(encoding="utf-8")).substitute(
+        {key: html.unescape(value) for key, value in common.items()}
+    )
+    pages = "\n".join(f"- [{title}]({url}): {description}" for title, url, description, _ in guide)
+    spoken = ", ".join(names[tag] for tag in languages)
+    (out / "llms.txt").write_text(
+        f"{summary.rstrip()}\n\n## Languages\n\nThe app, its installers and the website's key pages are in: {spoken}.\n\n"
+        f"## Guide\n\n{pages}\n",
+        encoding="utf-8",
+    )
+    full = "\n\n".join(f"<!-- {url} -->\n\n{text.strip()}" for _, url, _, text in guide)
+    (out / "llms-full.txt").write_text(f"{summary.rstrip()}\n\n{full}\n", encoding="utf-8")
+
+
 def build(args: argparse.Namespace) -> None:
     root: Path = args.repo_root
     wiki: Path = args.wiki
@@ -470,6 +509,7 @@ def build(args: argparse.Namespace) -> None:
         return plain(heading.group(1)), description
 
     pages = sorted(p for p in wiki.glob("*.md") if not p.name.startswith("_"))
+    guide: list[tuple[str, str, str, str]] = []
     for page in pages:
         name = page.stem
         rendered = render_markdown(page.read_text(encoding="utf-8"))
@@ -496,6 +536,7 @@ def build(args: argparse.Namespace) -> None:
         )
         (out / f"{name}.html").write_text(document, encoding="utf-8")
         sitemap[url] = iso(changed)
+        guide.append((heading, url, description, page.read_text(encoding="utf-8")))
 
     for tag in languages:
         folder = out / tag
@@ -544,6 +585,8 @@ def build(args: argparse.Namespace) -> None:
             sitemap[page_url(base_url, tag, page)] = iso(changed)
 
     write_sitemap(out / "sitemap.xml", sitemap)
+    write_robots(out / "robots.txt", base_url)
+    write_llms(out, source / "llms.txt.in", common, guide, landing_languages, names)
 
     problems = check_links(out, base_url)
     if problems:

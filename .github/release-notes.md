@@ -13,4 +13,4 @@ Every change is in the [changelog](https://github.com/RandyNorthrup/WinAppMigrat
 - **`WinAppMigrator-v{{VERSION}}.exe`**: the app. One file, with nothing to install, for Windows 10 and 11, x64.
 - **`WinAppMigrator-v{{VERSION}}-windows-x64.zip`**: the same app, with the README, the changelog, and the licenses.
 
-[Getting started](https://randynorthrup.github.io/WinAppMigrator/Getting-Started) says how to use it.
+[Getting started](https://winappmigrator.com/Getting-Started) says how to use it.

@@ -2,6 +2,14 @@
 
 All notable project changes are tracked here.
 
+## Unreleased
+
+### Website
+
+- **The website is at <https://winappmigrator.com/>.** The old address redirects there, page for page. It now has a
+  `robots.txt` that welcomes search engines and AI search crawlers, and `llms.txt` and `llms-full.txt`: what
+  WinAppMigrator is, and the whole guide, as plain text.
+
 ## 0.7.1 — 2026-11-15
 
 A fix for the windows in languages with longer words. In Italian, the heading of what goes in an installer ran under its

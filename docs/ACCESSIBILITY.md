@@ -1,7 +1,7 @@
 # Accessibility Conformance Report
 
 **WinAppMigrator 0.7.1**: the app (`WinAppMigrator-v0.7.1.exe`), the installers it builds (with their uninstaller), and
-WinAppMigrator Client. The website, <https://randynorthrup.github.io/WinAppMigrator/>, has its own section at the end.
+WinAppMigrator Client. The website, <https://winappmigrator.com/>, has its own section at the end.
 
 | | |
 | --- | --- |

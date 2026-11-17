@@ -1,0 +1,19 @@
+# WinAppMigrator
+
+> WinAppMigrator is a free, open-source Windows tool that turns an installed desktop app into one self-extracting installer you can run on another PC, even when the original installer is long gone. It reads the app from this PC, from a drive pulled out of a dead machine, from a .vhd or .vhdx image of one, or from an old Windows 7 or later PC over the network through the signed WinAppMigrator Client.
+
+Key facts:
+
+- Platform: Windows 10 and 11, 64-bit; it runs elevated. WinAppMigrator Client runs on Windows 7 and later.
+- Price and license: free, MIT license, source at https://github.com/${repository}.
+- Current version: ${version}, released ${release_date}. Download: https://github.com/${repository}/releases/latest
+  (`WinAppMigrator-v${version}.exe`, a single portable program, Authenticode-signed, with SHA-256 checksums and
+  GitHub build-provenance attestations).
+- What it captures: the app's files, registry entries, services, drivers, scheduled tasks, shortcuts, file types,
+  firewall rules and the runtimes it needs; the user's data and license or activation data only when chosen.
+- What the installer does: checks every file's hash before and after it writes, lists everything it will change
+  first, can preview without changing anything, and every install can be undone from Settings or by its own
+  uninstaller.
+- Accessibility: usable with a keyboard alone, a screen reader, Windows' contrast themes and larger text; a
+  self-assessed WCAG 2.2 AA conformance report is at https://github.com/${repository}/blob/main/docs/ACCESSIBILITY.md
+- Website: ${base_url}/ (this guide), with the landing page and key pages in 24 languages.

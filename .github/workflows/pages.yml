@@ -1,6 +1,6 @@
 name: Website
 
-# Builds https://randynorthrup.github.io/WinAppMigrator from the wiki and site/, and publishes it with GitHub Pages.
+# Builds https://winappmigrator.com from the wiki and site/, and publishes it with GitHub Pages.
 # Search engines do not read a GitHub wiki until its repository has 500 stars, so this is where they find the docs.
 # It runs when the site's own files change, when the wiki is edited, after a release is published, once a day, and by
 # hand.
@@ -37,7 +37,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SITE_URL: https://randynorthrup.github.io/WinAppMigrator
+  SITE_URL: https://winappmigrator.com
   # IndexNow tells Bing, and the search engines that share its index, which pages changed. The key is public by design:
   # site/<key>.txt holds it, to show that whoever sends it owns the site.
   INDEXNOW_KEY: 4da2307d903eb83c021e02170dbdc170
