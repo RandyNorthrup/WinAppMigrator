@@ -24,8 +24,8 @@
 
 | ไฟล์ | คืออะไร | เลือกไฟล์นี้หาก |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.1.exe` | ตัวแอปเอง เป็นไฟล์เดียวที่ไม่ต้องติดตั้ง | คุณต้องการเพียงใช้งาน ผู้ใช้ส่วนใหญ่ต้องการไฟล์นี้ |
-| `WinAppMigrator-v0.7.1-windows-x64.zip` | แอปเดียวกันในชื่อ `winappmigrator.exe` พร้อม README บันทึกการเปลี่ยนแปลง สัญญาอนุญาต และสัญญาอนุญาตของบุคคลที่สาม | คุณต้องการเอกสารเหล่านี้ด้วย |
+| `WinAppMigrator-v0.7.2.exe` | ตัวแอปเอง เป็นไฟล์เดียวที่ไม่ต้องติดตั้ง | คุณต้องการเพียงใช้งาน ผู้ใช้ส่วนใหญ่ต้องการไฟล์นี้ |
+| `WinAppMigrator-v0.7.2-windows-x64.zip` | แอปเดียวกันในชื่อ `winappmigrator.exe` พร้อม README บันทึกการเปลี่ยนแปลง สัญญาอนุญาต และสัญญาอนุญาตของบุคคลที่สาม | คุณต้องการเอกสารเหล่านี้ด้วย |
 | `SHA256SUMS.txt` | ค่าตรวจสอบ (checksum) ของสองไฟล์ด้านบน | คุณต้องการตรวจสอบไฟล์ที่ดาวน์โหลด |
 
 ส่วนของตัวติดตั้งที่อยู่ภายในตัวติดตั้งทุกตัว ซึ่งก็คือ[สตับตัวติดตั้ง](Glossary#installer-stub) จะไม่เผยแพร่แยกต่างหาก เนื่องจากอยู่ภายในแอปแล้ว
@@ -39,7 +39,7 @@
 **1. ค่าตรวจสอบ** [แฮช](Glossary#hash) คือลายนิ้วมือของไฟล์ หากไฟล์เปลี่ยนไปแม้เพียงไบต์เดียว แฮชก็จะเปลี่ยนไปด้วย
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. ลายเซ็น** [ลายเซ็น](Glossary#signature) บอกว่าใครเป็นผู้สร้างไฟล์ และไฟล์ไม่ได้เปลี่ยนแปลงตั้งแต่นั้น
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. แหล่งที่สร้าง** ทุกรุ่นตั้งแต่ 0.5.0 เป็นต้นไปมีบันทึกว่าเวิร์กโฟลว์การเผยแพร่ของ GitHub เองเป็นผู้สร้างรุ่นนั้น จากที่เก็บ (repository) นี้ บันทึกนี้เรียกว่า[การรับรองแหล่งที่มา](Glossary#attestation) (attestation) หากคุณมี [GitHub CLI](https://cli.github.com/) ให้เรียกใช้:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 ใช้วิธีเดียวกันกับไฟล์ zip ได้
@@ -67,7 +67,7 @@ gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMig
 
 ## เริ่มแอป
 
-1. **ดับเบิลคลิก** `WinAppMigrator-v0.7.1.exe` ไม่ต้องติดตั้งสิ่งใด แอปจะทำงานจากตำแหน่งที่คุณบันทึกไว้
+1. **ดับเบิลคลิก** `WinAppMigrator-v0.7.2.exe` ไม่ต้องติดตั้งสิ่งใด แอปจะทำงานจากตำแหน่งที่คุณบันทึกไว้
 2. **SmartScreen** [SmartScreen](Glossary#smartscreen) ของ Windows อาจแสดงหน้าจอ “Windows ปกป้องพีซีของคุณ” (Windows protected your PC) สำหรับไฟล์ที่ไม่ค่อยพบ หากเป็นเช่นนั้น ให้เลือก **ข้อมูลเพิ่มเติม** (More info) แล้วตรวจสอบว่าผู้เผยแพร่คือ Randy Northrup ก่อนเลือก **เรียกใช้ต่อไป** (Run anyway)
 3. **ข้อความแจ้งของผู้ดูแลระบบ** Windows จะถามว่าจะอนุญาตให้แอปทำการเปลี่ยนแปลงหรือไม่ นี่คือ[ข้อความแจ้ง UAC](Glossary#uac-prompt) แอปจะถามทุกครั้ง เนื่องจากการอ่านไดรฟ์ของพีซีเครื่องอื่น และไฟล์ที่เฉพาะผู้ดูแลระบบอ่านได้ ต้องใช้สิทธิ์ของผู้ดูแลระบบ สำหรับไฟล์ที่ดาวน์โหลดซึ่งลงนามแล้ว ข้อความแจ้งจะระบุ **Randy Northrup** เป็นผู้เผยแพร่ที่ได้รับการตรวจสอบ หากข้อความแจ้งระบุ “ผู้เผยแพร่ที่ไม่รู้จัก” สำหรับไฟล์นี้ แสดงว่าไม่ใช่ไฟล์รุ่นที่ลงนามแล้ว อย่าเรียกใช้
 4. **หน้าต่างจะเปิดขึ้น** หากคุณเห็นข้อความว่าไม่สามารถเปิดหน้าต่างได้ และต้องใช้ Direct3D 12 แทน โปรดดู[การแก้ไขปัญหา](Troubleshooting#the-window-could-not-open) แอปไม่มีวิธีทำงานโดยไม่มีหน้าต่าง

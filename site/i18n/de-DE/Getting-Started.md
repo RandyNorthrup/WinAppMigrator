@@ -24,8 +24,8 @@ Weitere Details, auch dazu, was getestet wurde und was nicht, finden Sie unter [
 
 | Datei | Was sie ist | Die richtige Wahl, wenn |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.1.exe` | Die App selbst. Eine einzige Datei, ohne Installation. | Sie die App einfach verwenden möchten. Das ist die Datei, die die meisten brauchen. |
-| `WinAppMigrator-v0.7.1-windows-x64.zip` | Dieselbe App als `winappmigrator.exe`, mit README, Änderungsprotokoll, Lizenz und den Lizenzen von Drittanbietern | Sie auch die Begleitdokumente möchten |
+| `WinAppMigrator-v0.7.2.exe` | Die App selbst. Eine einzige Datei, ohne Installation. | Sie die App einfach verwenden möchten. Das ist die Datei, die die meisten brauchen. |
+| `WinAppMigrator-v0.7.2-windows-x64.zip` | Dieselbe App als `winappmigrator.exe`, mit README, Änderungsprotokoll, Lizenz und den Lizenzen von Drittanbietern | Sie auch die Begleitdokumente möchten |
 | `SHA256SUMS.txt` | Die Prüfsummen der beiden obigen Dateien | Sie Ihren Download überprüfen möchten |
 
 Der Teil, der in jedem Installationsprogramm steckt, der [Installationsprogramm-Stub](Glossary#installer-stub), wird nie einzeln veröffentlicht. Er ist bereits in der App enthalten.
@@ -39,7 +39,7 @@ Das ist optional, lohnt sich aber. Jede der folgenden Prüfungen ist von den and
 **1. Die Prüfsumme.** Ein [Hash](Glossary#hash) ist der Fingerabdruck einer Datei. Ändert sich auch nur ein Byte, ändert sich der Hash.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Die lange Zahl von `Get-FileHash` sollte mit der in der Zeile für diese Datei �
 **2. Die Signatur.** Eine [Signatur](Glossary#signature) gibt an, wer die Datei erstellt hat und dass sie seitdem nicht geändert wurde.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ Sie können auch mit der rechten Maustaste auf die Datei klicken, **Eigenschafte
 **3. Wo sie erstellt wurde.** Für jedes Release ab 0.5.0 ist festgehalten, dass der Release-Workflow von GitHub selbst es aus diesem Repository erstellt hat. Dieser Nachweis heißt [Attestierung](Glossary#attestation). Wenn Sie die [GitHub CLI](https://cli.github.com/) installiert haben, führen Sie Folgendes aus:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 Dasselbe funktioniert für die ZIP-Datei.
@@ -67,7 +67,7 @@ Dasselbe funktioniert für die ZIP-Datei.
 
 ## Starten
 
-1. **Doppelklicken** Sie auf `WinAppMigrator-v0.7.1.exe`. Es muss nichts installiert werden. Die App wird dort ausgeführt, wo Sie sie gespeichert haben.
+1. **Doppelklicken** Sie auf `WinAppMigrator-v0.7.2.exe`. Es muss nichts installiert werden. Die App wird dort ausgeführt, wo Sie sie gespeichert haben.
 2. **SmartScreen.** Windows [SmartScreen](Glossary#smartscreen) zeigt bei einer Datei, die es noch selten gesehen hat, möglicherweise den Bildschirm „Der Computer wurde durch Windows geschützt“ an. Wählen Sie in diesem Fall **Weitere Informationen**, und prüfen Sie, ob Randy Northrup als Herausgeber angegeben ist, bevor Sie **Trotzdem ausführen** wählen.
 3. **Die Administratoraufforderung.** Windows fragt, ob die App Änderungen vornehmen darf. Das ist die [Aufforderung der Benutzerkontensteuerung](Glossary#uac-prompt). Die App fragt immer, weil das Lesen des Laufwerks eines anderen PCs und von Dateien, die nur Administratoren lesen dürfen, Administratorrechte erfordert. Beim signierten Download nennt die Aufforderung **Randy Northrup** als verifizierten Herausgeber. Steht dort für diese Datei „Unbekannter Herausgeber“, ist es nicht die signierte Release-Datei. Führen Sie sie dann nicht aus.
 4. **Das Fenster wird geöffnet.** Wenn stattdessen eine Meldung erscheint, dass das Fenster nicht geöffnet werden konnte und Direct3D 12 benötigt wird, lesen Sie [Problembehandlung](Troubleshooting#the-window-could-not-open). Ohne ihr Fenster kann die App nicht ausgeführt werden.

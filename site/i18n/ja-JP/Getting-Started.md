@@ -24,8 +24,8 @@
 
 | ファイル | 内容 | 次の場合に選択 |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.1.exe` | アプリ本体です。インストール不要の 1 つのファイルです。 | 使用するだけの場合。ほとんどの人にはこちらが適しています。 |
-| `WinAppMigrator-v0.7.1-windows-x64.zip` | 同じアプリ（`winappmigrator.exe`）と、README、変更履歴、ライセンス、サードパーティのライセンス | 関連文書も必要な場合 |
+| `WinAppMigrator-v0.7.2.exe` | アプリ本体です。インストール不要の 1 つのファイルです。 | 使用するだけの場合。ほとんどの人にはこちらが適しています。 |
+| `WinAppMigrator-v0.7.2-windows-x64.zip` | 同じアプリ（`winappmigrator.exe`）と、README、変更履歴、ライセンス、サードパーティのライセンス | 関連文書も必要な場合 |
 | `SHA256SUMS.txt` | 上の 2 つのファイルのチェックサム | ダウンロードを確認したい場合 |
 
 すべてのインストーラーの中に入るインストーラー部分である[インストーラー スタブ](Glossary#installer-stub)は、単独では公開されません。既にアプリの中に含まれています。
@@ -39,7 +39,7 @@
 **1. チェックサム**：[ハッシュ](Glossary#hash)は、ファイルの指紋のようなものです。1 バイトでも変わると、ハッシュも変わります。
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. 署名**：[署名](Glossary#signature)は、誰がファイルを作成したか、そしてその後ファイルが変更されていないことを示します。
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. 作成された場所**：0.5.0 以降の各リリースには、このリポジトリから GitHub 自身のリリース ワークフローによって作成されたことが記録されています。この記録を[構成証明](Glossary#attestation)と呼びます。[GitHub CLI](https://cli.github.com/) がある場合は、次のコマンドを実行します。
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 zip ファイルでも同じように確認できます。
@@ -67,7 +67,7 @@ zip ファイルでも同じように確認できます。
 
 ## 起動
 
-1. `WinAppMigrator-v0.7.1.exe` を**ダブルクリック**します。インストールは不要です。保存した場所からそのまま実行されます。
+1. `WinAppMigrator-v0.7.2.exe` を**ダブルクリック**します。インストールは不要です。保存した場所からそのまま実行されます。
 2. **SmartScreen**：あまり見かけないファイルの場合、Windows の [SmartScreen](Glossary#smartscreen) が「Windows によって PC が保護されました」という画面を表示することがあります。表示された場合は、**詳細情報**を選択し、発行元が Randy Northrup であることを確認してから、**実行**を選択してください。
 3. **管理者の確認画面**：Windows は、アプリによる変更を許可するかどうかを確認します。これが [UAC プロンプト](Glossary#uac-prompt)です。別の PC のドライブや、管理者しか読み取れないファイルを読み取るには管理者権限が必要なため、アプリは必ず確認を求めます。署名済みのダウンロードでは、確認済みの発行元として **Randy Northrup** が表示されます。このファイルで「不明な発行元」と表示される場合は、署名済みのリリース ファイルではないため、実行しないでください。
 4. **ウィンドウが開きます**。代わりに、ウィンドウを開けなかったことと Direct3D 12 が必要であることを示すメッセージが表示された場合は、[トラブルシューティング](Troubleshooting#the-window-could-not-open)を参照してください。アプリはウィンドウなしでは実行できません。

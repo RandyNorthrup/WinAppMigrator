@@ -24,8 +24,8 @@
 
 | קובץ | מה זה | מתי לבחור בו |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.1.exe` | האפליקציה עצמה. קובץ אחד, ללא צורך בהתקנה. | כשרוצים פשוט להשתמש בה. זה הקובץ שרוב האנשים צריכים. |
-| `WinAppMigrator-v0.7.1-windows-x64.zip` | אותה אפליקציה, בשם `winappmigrator.exe`, עם קובץ ה-README, יומן השינויים, הרישיון והרישיונות של צד שלישי | כשרוצים גם את המסמכים הנלווים |
+| `WinAppMigrator-v0.7.2.exe` | האפליקציה עצמה. קובץ אחד, ללא צורך בהתקנה. | כשרוצים פשוט להשתמש בה. זה הקובץ שרוב האנשים צריכים. |
+| `WinAppMigrator-v0.7.2-windows-x64.zip` | אותה אפליקציה, בשם `winappmigrator.exe`, עם קובץ ה-README, יומן השינויים, הרישיון והרישיונות של צד שלישי | כשרוצים גם את המסמכים הנלווים |
 | `SHA256SUMS.txt` | סכומי הביקורת של שני הקבצים שלמעלה | כשרוצים לבדוק את ההורדה |
 
 החלק שנכנס לתוך כל תוכנית התקנה, [שלד תוכנית ההתקנה](Glossary#installer-stub), אף פעם אינו מתפרסם בנפרד. הוא כבר נמצא בתוך האפליקציה.
@@ -39,7 +39,7 @@
 **1. סכום הביקורת.** [גיבוב](Glossary#hash) הוא טביעת אצבע של קובץ. אם אפילו בית אחד בקובץ משתנה, גם הגיבוב משתנה.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. החתימה.** [חתימה](Glossary#signature) מציינת מי יצר את הקובץ, ושהקובץ לא השתנה מאז.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. היכן הוא נבנה.** כל גרסה מ-0.5.0 ואילך מתעדת שזרימת העבודה של GitHub עצמה לפרסום גרסאות בנתה אותה, ממאגר זה. תיעוד זה נקרא [הצהרת מקור](Glossary#attestation). אם [GitHub CLI](https://cli.github.com/) מותקן, יש להריץ:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 אותה פקודה פועלת גם עבור קובץ ה-zip.
@@ -67,7 +67,7 @@ gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMig
 
 ## הפעלה
 
-1. **יש ללחוץ לחיצה כפולה** על `WinAppMigrator-v0.7.1.exe`. אין צורך להתקין דבר. האפליקציה פועלת מהמקום שבו היא נשמרה.
+1. **יש ללחוץ לחיצה כפולה** על `WinAppMigrator-v0.7.2.exe`. אין צורך להתקין דבר. האפליקציה פועלת מהמקום שבו היא נשמרה.
 2. **SmartScreen.** ייתכן שרכיב [SmartScreen](Glossary#smartscreen) של Windows יציג מסך "Windows הגן על המחשב שלך" עבור קובץ שהוא לא ראה לעתים קרובות. במקרה כזה, יש לבחור **מידע נוסף** ולוודא שהמפרסם הוא Randy Northrup לפני שבוחרים **הפעל בכל מקרה**.
 3. **בקשת מנהל המערכת.** Windows שואל אם לאפשר לאפליקציה לבצע שינויים. זוהי [בקשת בקרת חשבון משתמש](Glossary#uac-prompt). האפליקציה תמיד מבקשת זאת, מכיוון שקריאה מכונן של מחשב אחר, ומקבצים שרק מנהלי מערכת רשאים לקרוא, דורשת הרשאות מנהל מערכת. בהורדה החתומה, הבקשה מציינת את **Randy Northrup** כמפרסם המאומת. אם מופיע בה "מפרסם לא ידוע" עבור קובץ זה, זה אינו קובץ הגרסה החתום, ולכן אין להפעיל אותו.
 4. **החלון נפתח.** אם במקום זאת מופיעה הודעה שלא ניתן היה לפתוח את החלון ושנדרש Direct3D 12, יש לעיין ב[פתרון בעיות](Troubleshooting#the-window-could-not-open). לאפליקציה אין דרך לפעול בלי החלון שלה.

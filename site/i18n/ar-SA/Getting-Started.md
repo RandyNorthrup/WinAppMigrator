@@ -24,8 +24,8 @@
 
 | الملف | ما هو | اختره إذا |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.1.exe` | التطبيق نفسه. ملف واحد، ولا يحتاج إلى تثبيت. | كنت تريد استخدامه فقط. هذا هو الملف الذي يريده معظم الناس. |
-| `WinAppMigrator-v0.7.1-windows-x64.zip` | التطبيق نفسه، باسم `winappmigrator.exe`، مع ملف README وسجل التغييرات والترخيص وتراخيص الجهات الخارجية | كنت تريد المستندات المرافقة أيضًا |
+| `WinAppMigrator-v0.7.2.exe` | التطبيق نفسه. ملف واحد، ولا يحتاج إلى تثبيت. | كنت تريد استخدامه فقط. هذا هو الملف الذي يريده معظم الناس. |
+| `WinAppMigrator-v0.7.2-windows-x64.zip` | التطبيق نفسه، باسم `winappmigrator.exe`، مع ملف README وسجل التغييرات والترخيص وتراخيص الجهات الخارجية | كنت تريد المستندات المرافقة أيضًا |
 | `SHA256SUMS.txt` | المجاميع الاختبارية للملفين أعلاه | كنت تريد التحقق من التنزيل |
 
 جزء برنامج التثبيت الذي يدخل في كل برنامج تثبيت، أي [قالب برنامج التثبيت](Glossary#installer-stub)، لا يُنشر أبدًا بمفرده. فهو موجود بالفعل داخل التطبيق.
@@ -39,7 +39,7 @@
 **1. المجموع الاختباري.** [التجزئة](Glossary#hash) بصمة للملف. إذا تغيّر بايت واحد فقط، تتغير التجزئة.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. التوقيع.** يوضح [التوقيع](Glossary#signature) من أنشأ الملف، وأنه لم يتغير منذ ذلك الحين.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. مكان إنشائه.** يسجل كل إصدار بدءًا من 0.5.0 أن سير عمل الإصدار الخاص بـ GitHub نفسه هو الذي أنشأه، من هذا المستودع. يُسمى هذا السجل [تصديقًا](Glossary#attestation). إذا كان لديك [GitHub CLI](https://cli.github.com/)، فشغّل:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 ينطبق الأمر نفسه على ملف zip.
@@ -67,7 +67,7 @@ gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMig
 
 ## التشغيل
 
-1. **انقر نقرًا مزدوجًا** فوق `WinAppMigrator-v0.7.1.exe`. لا يوجد ما يلزم تثبيته. يعمل من أي مكان حفظته فيه.
+1. **انقر نقرًا مزدوجًا** فوق `WinAppMigrator-v0.7.2.exe`. لا يوجد ما يلزم تثبيته. يعمل من أي مكان حفظته فيه.
 2. **SmartScreen.** قد يعرض [SmartScreen](Glossary#smartscreen) في Windows شاشة "قام Windows بحماية الكمبيوتر الخاص بك" لملف لم يره كثيرًا. إذا حدث ذلك، فاختر **مزيد من المعلومات** وتحقق من أن الناشر هو Randy Northrup قبل أن تختار **تشغيل على أي حال**.
 3. **مطالبة المسؤول.** يسألك Windows ما إذا كنت تريد السماح للتطبيق بإجراء تغييرات. هذه هي [مطالبة التحكم في حساب المستخدم](Glossary#uac-prompt). يطلب التطبيق ذلك دائمًا، لأن قراءة محرك أقراص كمبيوتر آخر، والملفات التي لا يمكن قراءتها إلا للمسؤولين، تتطلب حقوق المسؤول. بالنسبة إلى التنزيل الموقّع، تذكر المطالبة **Randy Northrup** بوصفه الناشر الذي تم التحقق منه. إذا ذكرت "ناشر غير معروف" لهذا الملف، فهو ليس ملف الإصدار الموقّع، لذا لا تشغّله.
 4. **تُفتح النافذة.** إذا ظهرت لك بدلاً من ذلك رسالة تفيد بأنه تعذر فتح النافذة وأنها تحتاج إلى Direct3D 12، فراجع [استكشاف الأخطاء وإصلاحها](Troubleshooting#the-window-could-not-open). لا توجد طريقة لتشغيل التطبيق بدون نافذته.

@@ -24,8 +24,8 @@ Przejdź do [najnowszego wydania](https://github.com/RandyNorthrup/WinAppMigrato
 
 | Plik | Co to jest | Wybierz, jeśli |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.1.exe` | Sam program. Jeden plik, którego nie trzeba instalować. | Chcesz po prostu z niego korzystać. Tego pliku potrzebuje większość osób. |
-| `WinAppMigrator-v0.7.1-windows-x64.zip` | Ten sam program jako `winappmigrator.exe`, z plikiem README, listą zmian, licencją i licencjami innych firm | Chcesz mieć również dokumenty towarzyszące |
+| `WinAppMigrator-v0.7.2.exe` | Sam program. Jeden plik, którego nie trzeba instalować. | Chcesz po prostu z niego korzystać. Tego pliku potrzebuje większość osób. |
+| `WinAppMigrator-v0.7.2-windows-x64.zip` | Ten sam program jako `winappmigrator.exe`, z plikiem README, listą zmian, licencją i licencjami innych firm | Chcesz mieć również dokumenty towarzyszące |
 | `SHA256SUMS.txt` | Sumy kontrolne dwóch powyższych plików | Chcesz sprawdzić pobrany plik |
 
 Część umieszczana w każdym instalatorze, czyli [moduł startowy instalatora](Glossary#installer-stub), nigdy nie jest publikowana osobno. Jest już zawarta w programie.
@@ -39,7 +39,7 @@ Ten krok jest opcjonalny, ale warto go wykonać. Każde z poniższych sprawdzeń
 **1. Suma kontrolna.** [Skrót](Glossary#hash) to odcisk palca pliku. Jeśli zmieni się choćby jeden bajt, zmieni się również skrót.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Długa liczba wyświetlona przez polecenie `Get-FileHash` powinna być taka sama
 **2. Podpis.** [Podpis](Glossary#signature) informuje, kto utworzył plik i że plik od tego czasu się nie zmienił.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ Możesz też kliknąć plik prawym przyciskiem myszy, wybrać polecenie **Właś
 **3. Miejsce utworzenia.** Każde wydanie od wersji 0.5.0 zawiera zapis potwierdzający, że zostało utworzone przez własny przepływ pracy wydań serwisu GitHub, z tego repozytorium. Taki zapis nazywa się [atestacją](Glossary#attestation). Jeśli masz narzędzie [GitHub CLI](https://cli.github.com/), uruchom:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 Tak samo można sprawdzić plik zip.
@@ -67,7 +67,7 @@ Tak samo można sprawdzić plik zip.
 
 ## Uruchamianie programu
 
-1. **Kliknij dwukrotnie** plik `WinAppMigrator-v0.7.1.exe`. Nie trzeba niczego instalować. Program działa z miejsca, w którym go zapisano.
+1. **Kliknij dwukrotnie** plik `WinAppMigrator-v0.7.2.exe`. Nie trzeba niczego instalować. Program działa z miejsca, w którym go zapisano.
 2. **SmartScreen.** Filtr [SmartScreen](Glossary#smartscreen) systemu Windows może wyświetlić ekran „System Windows ochronił ten komputer” w przypadku pliku, z którym rzadko się spotykał. Jeśli tak się stanie, wybierz **Więcej informacji** i sprawdź, czy wydawcą jest Randy Northrup, zanim wybierzesz **Uruchom mimo to**.
 3. **Monit administratora.** System Windows pyta, czy zezwolić programowi na wprowadzanie zmian. Jest to [monit Kontroli konta użytkownika](Glossary#uac-prompt). Program zawsze o to prosi, ponieważ odczyt dysku innego komputera i plików, które mogą odczytywać tylko administratorzy, wymaga uprawnień administratora. W przypadku podpisanego pliku do pobrania monit wskazuje **Randy Northrup** jako zweryfikowanego wydawcę. Jeśli dla tego pliku wyświetla „Nieznany wydawca”, nie jest to podpisany plik wydania, więc go nie uruchamiaj.
 4. **Otwiera się okno.** Jeśli zamiast tego pojawi się komunikat, że nie można otworzyć okna i że wymagany jest Direct3D 12, zobacz [Rozwiązywanie problemów](Troubleshooting#the-window-could-not-open). Program nie może działać bez swojego okna.

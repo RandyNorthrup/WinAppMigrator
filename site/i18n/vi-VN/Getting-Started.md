@@ -24,8 +24,8 @@ Hãy truy cập [bản phát hành mới nhất](https://github.com/RandyNorthru
 
 | Tệp | Đây là gì | Chọn tệp này nếu |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.1.exe` | Chính ứng dụng. Một tệp duy nhất, không cần cài đặt. | Bạn chỉ muốn sử dụng. Đây là tệp mà hầu hết mọi người cần. |
-| `WinAppMigrator-v0.7.1-windows-x64.zip` | Cùng ứng dụng đó, dưới dạng `winappmigrator.exe`, kèm README, nhật ký thay đổi, giấy phép và giấy phép của bên thứ ba | Bạn cũng muốn có các giấy tờ đó |
+| `WinAppMigrator-v0.7.2.exe` | Chính ứng dụng. Một tệp duy nhất, không cần cài đặt. | Bạn chỉ muốn sử dụng. Đây là tệp mà hầu hết mọi người cần. |
+| `WinAppMigrator-v0.7.2-windows-x64.zip` | Cùng ứng dụng đó, dưới dạng `winappmigrator.exe`, kèm README, nhật ký thay đổi, giấy phép và giấy phép của bên thứ ba | Bạn cũng muốn có các giấy tờ đó |
 | `SHA256SUMS.txt` | Tổng kiểm tra của hai tệp ở trên | Bạn muốn kiểm tra bản tải xuống |
 
 Phần trình cài đặt nằm bên trong mọi trình cài đặt, tức [phần khởi chạy của trình cài đặt (stub)](Glossary#installer-stub), không bao giờ được phát hành riêng. Phần này đã nằm sẵn bên trong ứng dụng.
@@ -39,7 +39,7 @@ Việc này không bắt buộc, nhưng đáng làm. Mỗi bước kiểm tra d�
 **1. Tổng kiểm tra.** [Hàm băm](Glossary#hash) giống như dấu vân tay của một tệp. Chỉ cần một byte thay đổi, hàm băm cũng thay đổi.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Dãy số dài mà `Get-FileHash` in ra phải khớp với dãy trên dòng c�
 **2. Chữ ký.** [Chữ ký](Glossary#signature) cho biết ai đã tạo ra tệp, và tệp chưa bị thay đổi kể từ đó.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ Bạn cũng có thể bấm chuột phải vào tệp, chọn **Thuộc tính** 
 **3. Nơi tệp được tạo.** Mỗi bản phát hành từ 0.5.0 trở đi đều ghi lại rằng chính quy trình phát hành của GitHub đã tạo ra nó, từ kho mã này. Bản ghi này được gọi là [chứng thực](Glossary#attestation). Nếu bạn có [GitHub CLI](https://cli.github.com/), hãy chạy:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 Cách này cũng dùng được cho tệp zip.
@@ -67,7 +67,7 @@ Cách này cũng dùng được cho tệp zip.
 
 ## Khởi động ứng dụng
 
-1. **Bấm đúp** vào `WinAppMigrator-v0.7.1.exe`. Không cần cài đặt gì cả. Ứng dụng chạy từ bất cứ nơi nào bạn đã lưu nó.
+1. **Bấm đúp** vào `WinAppMigrator-v0.7.2.exe`. Không cần cài đặt gì cả. Ứng dụng chạy từ bất cứ nơi nào bạn đã lưu nó.
 2. **SmartScreen.** [SmartScreen](Glossary#smartscreen) của Windows có thể hiển thị màn hình “Windows đã bảo vệ PC của bạn” đối với một tệp mà nó ít gặp. Nếu vậy, hãy chọn **Thêm thông tin** (More info) và kiểm tra rằng nhà phát hành là Randy Northrup trước khi chọn **Vẫn chạy** (Run anyway).
 3. **Lời nhắc quản trị viên.** Windows hỏi có cho phép ứng dụng thực hiện thay đổi hay không. Đây là [lời nhắc UAC](Glossary#uac-prompt). Ứng dụng luôn yêu cầu, vì việc đọc ổ đĩa của PC khác, và các tệp mà chỉ quản trị viên mới được đọc, đều cần quyền quản trị viên. Với bản tải xuống đã được ký, lời nhắc ghi **Randy Northrup** là nhà phát hành đã xác minh. Nếu lời nhắc ghi “Nhà phát hành không xác định” cho tệp này, thì đó không phải tệp phát hành đã được ký, nên đừng chạy nó.
 4. **Cửa sổ mở ra.** Nếu thay vào đó bạn thấy thông báo rằng không thể mở cửa sổ và cần Direct3D 12, hãy xem [Khắc phục sự cố](Troubleshooting#the-window-could-not-open). Ứng dụng không có cách nào chạy mà không có cửa sổ.

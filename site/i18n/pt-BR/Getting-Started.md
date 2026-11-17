@@ -24,8 +24,8 @@ Acesse a [versão mais recente](https://github.com/RandyNorthrup/WinAppMigrator/
 
 | Arquivo | O que é | Baixe-o se |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.1.exe` | O próprio aplicativo. Um único arquivo, sem nada para instalar. | Você só quer usá-lo. É o que a maioria das pessoas quer. |
-| `WinAppMigrator-v0.7.1-windows-x64.zip` | O mesmo aplicativo, como `winappmigrator.exe`, com o README, o changelog, a licença e as licenças de terceiros | Você também quer a documentação |
+| `WinAppMigrator-v0.7.2.exe` | O próprio aplicativo. Um único arquivo, sem nada para instalar. | Você só quer usá-lo. É o que a maioria das pessoas quer. |
+| `WinAppMigrator-v0.7.2-windows-x64.zip` | O mesmo aplicativo, como `winappmigrator.exe`, com o README, o changelog, a licença e as licenças de terceiros | Você também quer a documentação |
 | `SHA256SUMS.txt` | As somas de verificação dos dois arquivos acima | Você quer verificar o download |
 
 A parte do instalador que vai dentro de cada instalador, o [stub do instalador](Glossary#installer-stub), nunca é publicada separadamente. Ela já está dentro do aplicativo.
@@ -39,7 +39,7 @@ Isto é opcional, e vale a pena. Cada verificação abaixo é independente. Exec
 **1. A soma de verificação.** Um [hash](Glossary#hash) é uma impressão digital de um arquivo. Se um único byte mudar, ele muda.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ O número longo exibido por `Get-FileHash` deve ser igual ao da linha desse arqu
 **2. A assinatura.** Uma [assinatura](Glossary#signature) diz quem criou o arquivo e que ele não foi alterado desde então.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ Você também pode clicar com o botão direito do mouse no arquivo, escolher **P
 **3. Onde ele foi compilado.** Cada versão a partir da 0.5.0 registra que o próprio fluxo de trabalho de lançamento do GitHub a compilou, a partir deste repositório. Esse registro se chama [atestado](Glossary#attestation). Se você tiver a [GitHub CLI](https://cli.github.com/), execute:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 O mesmo funciona para o zip.
@@ -67,7 +67,7 @@ O mesmo funciona para o zip.
 
 ## Iniciar o aplicativo
 
-1. **Clique duas vezes** em `WinAppMigrator-v0.7.1.exe`. Não há nada para instalar. Ele é executado de onde quer que você o tenha salvo.
+1. **Clique duas vezes** em `WinAppMigrator-v0.7.2.exe`. Não há nada para instalar. Ele é executado de onde quer que você o tenha salvo.
 2. **SmartScreen.** O [SmartScreen](Glossary#smartscreen) do Windows pode mostrar uma tela “O Windows protegeu o computador” para um arquivo que ele não viu muitas vezes. Se isso acontecer, escolha **Mais informações** e verifique se o editor é Randy Northrup antes de escolher **Executar assim mesmo**.
 3. **A solicitação de administrador.** O Windows pergunta se deseja permitir que o aplicativo faça alterações. Essa é a [solicitação do UAC](Glossary#uac-prompt). O aplicativo sempre pergunta, porque ler a unidade de outro PC, e arquivos que só administradores podem ler, exige direitos de administrador. No download assinado, a solicitação indica **Randy Northrup** como editor verificado. Se ela disser “Editor desconhecido” para este arquivo, ele não é o arquivo assinado da versão, então não o execute.
 4. **A janela se abre.** Se, em vez disso, você vir uma mensagem dizendo que não foi possível abrir a janela e que é necessário o Direct3D 12, consulte [Solução de problemas](Troubleshooting#the-window-could-not-open). O aplicativo não tem como ser executado sem a janela.

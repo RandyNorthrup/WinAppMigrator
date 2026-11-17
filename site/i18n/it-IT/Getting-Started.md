@@ -24,8 +24,8 @@ Vai alla [versione più recente](https://github.com/RandyNorthrup/WinAppMigrator
 
 | File | Che cos'è | Scaricalo se |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.1.exe` | L'app vera e propria. Un unico file, senza niente da installare. | Vuoi semplicemente usarla. È il file che serve alla maggior parte delle persone. |
-| `WinAppMigrator-v0.7.1-windows-x64.zip` | La stessa app, come `winappmigrator.exe`, con il file README, il registro delle modifiche, la licenza e le licenze di terze parti | Vuoi anche la documentazione |
+| `WinAppMigrator-v0.7.2.exe` | L'app vera e propria. Un unico file, senza niente da installare. | Vuoi semplicemente usarla. È il file che serve alla maggior parte delle persone. |
+| `WinAppMigrator-v0.7.2-windows-x64.zip` | La stessa app, come `winappmigrator.exe`, con il file README, il registro delle modifiche, la licenza e le licenze di terze parti | Vuoi anche la documentazione |
 | `SHA256SUMS.txt` | I checksum dei due file precedenti | Vuoi verificare il download |
 
 La parte di installazione inclusa in ogni programma di installazione, lo [stub del programma di installazione](Glossary#installer-stub), non viene mai pubblicata separatamente. È già inclusa nell'app.
@@ -39,7 +39,7 @@ Questo passaggio è facoltativo, ma vale la pena farlo. Ogni controllo seguente 
 **1. Il checksum.** Un [hash](Glossary#hash) è l'impronta digitale di un file. Se cambia anche un solo byte, cambia anche l'hash.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Il numero lungo restituito da `Get-FileHash` deve corrispondere a quello sulla r
 **2. La firma.** Una [firma](Glossary#signature) indica chi ha creato il file e che da allora non è stato modificato.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. Dove è stato creato.** Ogni versione a partire dalla 0.5.0 registra che è stata compilata dal flusso di lavoro di rilascio di GitHub, a partire da questo repository. Questa registrazione si chiama [attestazione](Glossary#attestation). Se hai [GitHub CLI](https://cli.github.com/), esegui:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 Lo stesso vale per il file zip.
@@ -67,7 +67,7 @@ Lo stesso vale per il file zip.
 
 ## Avvia l'app
 
-1. **Fai doppio clic** su `WinAppMigrator-v0.7.1.exe`. Non c'è niente da installare. L'app viene eseguita dal percorso in cui l'hai salvata.
+1. **Fai doppio clic** su `WinAppMigrator-v0.7.2.exe`. Non c'è niente da installare. L'app viene eseguita dal percorso in cui l'hai salvata.
 2. **SmartScreen.** [SmartScreen](Glossary#smartscreen) di Windows potrebbe mostrare la schermata "PC protetto da Windows" per un file che non ha visto spesso. In questo caso, scegli **Ulteriori informazioni** e verifica che l'autore sia Randy Northrup prima di scegliere **Esegui comunque**.
 3. **La richiesta di amministratore.** Windows chiede se consentire all'app di apportare modifiche. Si tratta della [richiesta di Controllo dell'account utente](Glossary#uac-prompt). L'app la mostra sempre, perché per leggere l'unità di un altro PC, e i file che solo gli amministratori possono leggere, servono i diritti di amministratore. Per il download firmato, la richiesta indica **Randy Northrup** come autore verificato. Se per questo file indica "Autore sconosciuto", non si tratta del file di rilascio firmato, quindi non eseguirlo.
 4. **La finestra si apre.** Se invece vedi un messaggio che indica che non è stato possibile aprire la finestra e che è necessario Direct3D 12, vedi [Risoluzione dei problemi](Troubleshooting#the-window-could-not-open). L'app non può essere eseguita senza la sua finestra.

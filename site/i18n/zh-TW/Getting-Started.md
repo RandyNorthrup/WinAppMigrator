@@ -24,8 +24,8 @@
 
 | 檔案 | 說明 | 適合下載的情況 |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.1.exe` | 應用程式本身。只有一個檔案，不需要安裝。 | 您只想使用它。大多數人需要的就是這個檔案。 |
-| `WinAppMigrator-v0.7.1-windows-x64.zip` | 同一個應用程式（檔名為 `winappmigrator.exe`），另附 README、變更記錄、授權條款和第三方授權條款 | 您也想要這些文件資料 |
+| `WinAppMigrator-v0.7.2.exe` | 應用程式本身。只有一個檔案，不需要安裝。 | 您只想使用它。大多數人需要的就是這個檔案。 |
+| `WinAppMigrator-v0.7.2-windows-x64.zip` | 同一個應用程式（檔名為 `winappmigrator.exe`），另附 README、變更記錄、授權條款和第三方授權條款 | 您也想要這些文件資料 |
 | `SHA256SUMS.txt` | 上面兩個檔案的總和檢查碼 | 您想檢查下載的檔案 |
 
 每個安裝程式內部都有的安裝程式部分，也就是[安裝程式空殼](Glossary#installer-stub)，從不單獨發佈。它已經包含在應用程式中。
@@ -39,7 +39,7 @@
 **1. 總和檢查碼**。[雜湊](Glossary#hash)就像檔案的指紋。只要有一個位元組改變，雜湊就會改變。
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.1.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. 簽章**。[簽章](Glossary#signature)說明檔案是誰製作的，以及檔案在那之後沒有被變更。
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.1.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. 建置的位置**。從 0.5.0 起的每個版本，都會記錄它是由 GitHub 本身的發行工作流程，從這個存放庫建置而成。這項記錄稱為[證明](Glossary#attestation)。如果您有 [GitHub CLI](https://cli.github.com/)，請執行：
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.1.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 zip 檔也可以用相同的方式檢查。
@@ -67,7 +67,7 @@ zip 檔也可以用相同的方式檢查。
 
 ## 啟動應用程式
 
-1. **按兩下** `WinAppMigrator-v0.7.1.exe`。不需要安裝。它會直接從您儲存它的位置執行。
+1. **按兩下** `WinAppMigrator-v0.7.2.exe`。不需要安裝。它會直接從您儲存它的位置執行。
 2. **SmartScreen**。對於不常見的檔案，Windows [SmartScreen](Glossary#smartscreen) 可能會顯示「Windows 已保護您的電腦」畫面。如果出現這個畫面，請選擇**其他資訊**，並在選擇**仍要執行**之前，確認發行者是 Randy Northrup。
 3. **系統管理員提示**。Windows 會詢問是否允許此應用程式進行變更。這就是 [UAC 提示](Glossary#uac-prompt)。應用程式每次都會要求，因為讀取另一台電腦的磁碟機，以及只有系統管理員才能讀取的檔案，都需要系統管理員權限。如果是已簽署的下載檔案，提示會將 **Randy Northrup** 列為已驗證的發行者。如果此檔案的提示顯示「未知的發行者」，表示它不是已簽署的發行檔案，請不要執行。
 4. **視窗開啟**。如果您看到的是無法開啟視窗、需要 Direct3D 12 的訊息，請參閱[疑難排解](Troubleshooting#the-window-could-not-open)。應用程式沒有視窗就無法執行。
