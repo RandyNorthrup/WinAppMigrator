@@ -11,7 +11,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 rust-version = "1.96.0"
 license = "MIT"
@@ -43,11 +43,11 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 walkdir = "2.5.0"
 winreg = "0.56.0"
 zip = { version = "9.2.1", default-features = false, features = ["deflate"] }
-winappmigrator-core = { version = "0.7.1", path = "crates/winappmigrator-core" }
-winappmigrator-ui = { version = "0.7.1", path = "crates/winappmigrator-ui" }
-winappmigrator-link = { version = "0.7.1", path = "crates/winappmigrator-link" }
-winappmigrator-client = { version = "0.7.1", path = "crates/winappmigrator-client" }
-winappmigrator-i18n = { version = "0.7.1", path = "crates/winappmigrator-i18n" }
+winappmigrator-core = { version = "0.7.2", path = "crates/winappmigrator-core" }
+winappmigrator-ui = { version = "0.7.2", path = "crates/winappmigrator-ui" }
+winappmigrator-link = { version = "0.7.2", path = "crates/winappmigrator-link" }
+winappmigrator-client = { version = "0.7.2", path = "crates/winappmigrator-client" }
+winappmigrator-i18n = { version = "0.7.2", path = "crates/winappmigrator-i18n" }
 # Catalogs of what is shown, one per language, with each language's plural rules.
 fluent-bundle = "0.16.0"
 fluent-syntax = "0.12.0"

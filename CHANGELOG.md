@@ -2,7 +2,28 @@
 
 All notable project changes are tracked here.
 
-## Unreleased
+## 0.7.2 — 2026-11-17
+
+Fixes for three problems reported from Italy: an installer that would not run after its records folder was opened in
+File Explorer, user data that stayed after an uninstall asked for it to go, and facts on the installer's first screen
+that ran into each other in Italian.
+
+### Fixed
+
+- **Opening `C:\ProgramData\WinAppMigrator` in File Explorer no longer stops installers**
+  ([#3](https://github.com/RandyNorthrup/WinAppMigrator/issues/3)). Asked to open it, Explorer offers **Continue**,
+  which gives your own account Full Control of the folder and everything in it. Installers then refused to use it,
+  saying "there is nowhere safe to keep the record that would let this install be undone". When what was added names
+  only administrators, the installer now takes that access back and goes on. Anyone else let in still stops it.
+- **"Also Remove User Data and License Data" removes them even if the app changed them**
+  ([#4](https://github.com/RandyNorthrup/WinAppMigrator/issues/4)). Using an app changes its settings, so after using
+  calibre its settings files stayed, with `.before-install` copies beside them, although the box was ticked. With the
+  box ticked, user data and license files and values now go, and any file one of them replaced comes back. Other files
+  that changed since still stay.
+- **The installer's facts keep to their columns in every language**
+  ([#5](https://github.com/RandyNorthrup/WinAppMigrator/issues/5)). In Italian, "Programma di installazione" ran into
+  "Non firmato". Each group of facts now gets a key column wide enough for its longest key, in the installer and the
+  uninstaller, and a test checks every language.
 
 ### Website
 
