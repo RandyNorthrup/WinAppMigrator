@@ -397,6 +397,16 @@ def write_llms(
     (out / "llms-full.txt").write_text(f"{summary.rstrip()}\n\n{full}\n", encoding="utf-8")
 
 
+# On the English guide's pages only: the translated pages are not cluttered with words in another language.
+SAK_PROMO = """      <aside class="promo-strip" aria-label="From the same developer">
+        <img src="sak-utility.png" alt="" width="48" height="48" loading="lazy">
+        <p><strong>S.A.K. Utility</strong>, from the same developer: a free, portable toolkit for PC technicians, with
+          profile backup, a partition manager, diagnostics and app deployment, and nothing to install.</p>
+        <a class="button" href="https://sakutility.com/">Visit sakutility.com</a>
+      </aside>
+"""
+
+
 def build(args: argparse.Namespace) -> None:
     root: Path = args.repo_root
     wiki: Path = args.wiki
@@ -418,7 +428,7 @@ def build(args: argparse.Namespace) -> None:
     (out / "images").mkdir(parents=True)
 
     for item in source.iterdir():
-        if item.is_file() and item.suffix in (".css", ".js", ".txt"):
+        if item.is_file() and item.suffix in (".css", ".js", ".txt", ".png"):
             shutil.copy2(item, out / item.name)
     for image in sorted((root / "docs" / "images").glob("*.png")):
         shutil.copy2(image, out / "images" / image.name)
@@ -533,6 +543,7 @@ def build(args: argparse.Namespace) -> None:
             sidebar=nav,
             footer=footer,
             scripts=scripts_for(rendered),
+            promo=SAK_PROMO,
         )
         (out / f"{name}.html").write_text(document, encoding="utf-8")
         sitemap[url] = iso(changed)
@@ -580,6 +591,7 @@ def build(args: argparse.Namespace) -> None:
                 sidebar=nav,
                 footer=footer,
                 scripts=scripts_for(rendered),
+                promo="",
             )
             (folder / f"{page}.html").write_text(relocate(document, kept), encoding="utf-8")
             sitemap[page_url(base_url, tag, page)] = iso(changed)

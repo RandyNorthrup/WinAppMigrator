@@ -719,3 +719,93 @@ kbd {
     background-color: var(--bg) !important;
   }
 }
+
+/* S.A.K. Utility, from the same developer: a card at the foot of the landing page, a strip under each guide page. */
+.promo-card {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 24px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, var(--accent-soft), var(--bg-soft));
+  box-shadow: var(--shadow);
+}
+
+.promo-card img {
+  border-radius: 18px;
+}
+
+.promo-body h3 {
+  margin: 0 0 6px;
+  font-size: 1.25rem;
+}
+
+.promo-body p {
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+
+.promo-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.promo-tags li {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  font-size: 0.85rem;
+}
+
+.promo-link {
+  white-space: nowrap;
+}
+
+.promo-strip {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 32px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+
+.promo-strip img {
+  flex: none;
+  border-radius: 10px;
+}
+
+.promo-strip p {
+  flex: 1;
+  margin: 0;
+  color: var(--muted);
+}
+
+.promo-strip strong {
+  color: var(--text);
+}
+
+.promo-strip .button {
+  flex: none;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .promo-card {
+    grid-template-columns: 1fr;
+    justify-items: start;
+  }
+
+  .promo-strip {
+    flex-wrap: wrap;
+  }
+}
