@@ -161,8 +161,21 @@ fn file_action(mode: UndoMode, item: ItemKind, facts: &FileFacts) -> FileAction 
     match mode {
         UndoMode::Rollback => replace_or_delete,
         _ if facts.unchanged == Some(true) => replace_or_delete,
+        // Someone asked for the app's settings, data and license to go. Using the app changes them,
+        // so a change since is what they asked to remove, not a reason to keep it (issue #4).
+        _ if removed_by_request(mode, item) => replace_or_delete,
         _ => FileAction::KeepChanged,
     }
+}
+
+/// True when this is an uninstall that was asked to take user data and licenses too, and this is one.
+fn removed_by_request(mode: UndoMode, item: ItemKind) -> bool {
+    matches!(
+        mode,
+        UndoMode::Uninstall {
+            remove_user_data: true
+        }
+    ) && matches!(item, ItemKind::UserData | ItemKind::License)
 }
 
 /// What to do about a registry value.
@@ -175,15 +188,20 @@ enum ValueAction {
     Keep,
 }
 
+/// `removed_by_request` says it is user data or a license that someone asked to remove, which goes
+/// back to what it was even if it has changed since.
 fn value_action(
     current: Option<&StoredValue>,
     written: &StoredValue,
     prior: Option<&StoredValue>,
+    removed_by_request: bool,
 ) -> ValueAction {
     if current == Some(written) {
         ValueAction::PutBack
     } else if current == prior {
         ValueAction::Nothing
+    } else if removed_by_request {
+        ValueAction::PutBack
     } else {
         ValueAction::Keep
     }
@@ -415,7 +433,8 @@ impl Undoer<'_> {
                     ));
                     return;
                 }
-                self.undo_value(hive, key, name, prior.as_ref(), written, &setting);
+                let asked = removed_by_request(self.mode, *item);
+                self.undo_value(hive, key, name, prior.as_ref(), written, &setting, asked);
             }
             Change::EnvironmentValue {
                 scope,
@@ -425,7 +444,7 @@ impl Undoer<'_> {
             } => {
                 let (hive, key) = environment_location(scope);
                 let setting = Setting::variable(scope, name);
-                self.undo_value(&hive, key, name, prior.as_ref(), written, &setting);
+                self.undo_value(&hive, key, name, prior.as_ref(), written, &setting, false);
             }
             Change::PathEntries {
                 scope,
@@ -931,6 +950,7 @@ impl Undoer<'_> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn undo_value(
         &mut self,
         hive: &RegistryHive,
@@ -939,6 +959,7 @@ impl Undoer<'_> {
         prior: Option<&StoredValue>,
         written: &StoredValue,
         setting: &Setting,
+        removed_by_request: bool,
     ) {
         let root = match self.hive_root(hive) {
             Ok(Some(root)) => root,
@@ -969,7 +990,7 @@ impl Undoer<'_> {
                 return;
             }
         };
-        match value_action(current.as_ref(), written, prior) {
+        match value_action(current.as_ref(), written, prior, removed_by_request) {
             ValueAction::Nothing => {}
             ValueAction::Keep => {
                 if let Some(Ok(value)) = current.as_ref().map(StoredValue::to_reg) {
@@ -1048,7 +1069,7 @@ impl Undoer<'_> {
         };
         // Exactly as written, so it can go back exactly as it was.
         if current == *written {
-            self.undo_value(&hive, key, name, prior, written, &setting);
+            self.undo_value(&hive, key, name, prior, written, &setting, false);
             return;
         }
         let current_value = match current.to_reg() {
@@ -2353,9 +2374,15 @@ mod tests {
                 file_action(REMOVE, item, &facts(false, false, true, Some(true))),
                 FileAction::Delete
             );
+            // Asked to go, it goes even though using the app changed it (issue #4), and what it
+            // replaced comes back.
             assert_eq!(
                 file_action(REMOVE, item, &facts(false, false, true, Some(false))),
-                FileAction::KeepChanged
+                FileAction::Delete
+            );
+            assert_eq!(
+                file_action(REMOVE, item, &facts(true, true, true, Some(false))),
+                FileAction::PutBackBackup
             );
         }
     }
@@ -2365,6 +2392,28 @@ mod tests {
             kind: 1,
             data_hex: text.to_owned(),
         }
+    }
+
+    /// Issue #4: asked to remove user data, a value the app changed since goes back to what it was.
+    #[test]
+    fn user_data_asked_to_go_goes_back_even_if_changed() {
+        let (before, written, other) = (stored("aa"), stored("bb"), stored("cc"));
+        assert_eq!(
+            value_action(Some(&other), &written, Some(&before), true),
+            ValueAction::PutBack
+        );
+        assert_eq!(
+            value_action(Some(&other), &written, None, true),
+            ValueAction::PutBack
+        );
+        assert_eq!(
+            value_action(Some(&before), &written, Some(&before), true),
+            ValueAction::Nothing
+        );
+        assert!(removed_by_request(REMOVE, ItemKind::UserData));
+        assert!(removed_by_request(REMOVE, ItemKind::License));
+        assert!(!removed_by_request(KEEP, ItemKind::UserData));
+        assert!(!removed_by_request(REMOVE, ItemKind::Program));
     }
 
     #[test]
@@ -2381,7 +2430,7 @@ mod tests {
             (Some(&other), None, ValueAction::Keep),
             (None, Some(&before), ValueAction::Keep),
         ] {
-            assert_eq!(value_action(current, &written, prior), expected);
+            assert_eq!(value_action(current, &written, prior, false), expected);
         }
     }
 
@@ -2548,7 +2597,7 @@ mod tests {
         for (item, mode) in [
             (ItemKind::UserData, KEEP),
             (ItemKind::Program, KEEP),
-            (ItemKind::License, REMOVE),
+            (ItemKind::Program, REMOVE),
         ] {
             let work = tempfile::tempdir()
                 .map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
@@ -2577,6 +2626,31 @@ mod tests {
                 "{:?}",
                 undoer.report.kept
             );
+        }
+        Ok(())
+    }
+
+    /// Issue #4: calibre's settings, changed by using it, stayed after an uninstall asked to remove user data.
+    /// Asked for, user data and licenses go even when changed, and what they replaced comes back.
+    #[test]
+    fn user_data_asked_to_go_goes_though_changed_and_what_it_replaced_comes_back() -> Result<()> {
+        for item in [ItemKind::UserData, ItemKind::License] {
+            let work = tempfile::tempdir()
+                .map_err(|error| WinAppMigratorError::io(Path::new("."), error))?;
+            let (journal, root, file, hash) = installed_over_a_file(work.path())?;
+            fs::write(&file, b"changed since")
+                .map_err(|error| WinAppMigratorError::io(&file, error))?;
+            let changes = journal.settled_changes();
+            let mut undoer = undoer_for(&journal, &changes, REMOVE);
+            undoer.undo_file(&file, &root, item, Some(1), Some(&hash), None);
+            assert!(
+                undoer.report.failed.is_empty(),
+                "{:?}",
+                undoer.report.failed
+            );
+            assert_eq!(read_text(&file)?, "what was there before");
+            assert!(!root.join("settings.ini.before-install").exists());
+            assert!(undoer.report.kept.is_empty(), "{:?}", undoer.report.kept);
         }
         Ok(())
     }

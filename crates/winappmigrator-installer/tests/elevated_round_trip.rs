@@ -3691,6 +3691,41 @@ fn a_state_folder_someone_else_made_is_not_used(checks: &mut Checks) -> TestResu
     let id = install_id_in(&run.output)?;
     let run = uninstall_quietly(checks, &id, "")?;
     checks.that("the uninstall succeeded", run.success, &run.output);
+
+    // Issue #3: an administrator opened the folder in File Explorer, which asked, and chose Continue.
+    // Explorer gives that account Full Control of the folder and all of it (KB 950934).
+    section("A state folder an administrator opened in File Explorer");
+    let me = powershell("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value")?;
+    let me = me.trim();
+    must(
+        "icacls",
+        &[
+            STATE_ROOT,
+            "/grant",
+            &format!("*{me}:(OI)(CI)F"),
+            "/T",
+            "/Q",
+        ],
+    )?;
+    let run = run_installer(&installer, &["--target-root", &target, "--apply"])?;
+    checks.that(
+        "an install goes ahead, as what Explorer added names only an administrator",
+        run.success,
+        &run.output,
+    );
+    check_is_protected(checks, STATE_ROOT)?;
+    let everything = powershell(&format!(
+        "@((Get-Acl -LiteralPath {root}).Sddl) + @(Get-ChildItem -LiteralPath {root} -Recurse -Force |          ForEach-Object {{ (Get-Acl -LiteralPath $_.FullName).Sddl }}) -join \"`n\"",
+        root = quoted(STATE_ROOT)
+    ))?;
+    checks.that(
+        "and Explorer's grant is gone from what is in it too",
+        !everything.contains(me),
+        me,
+    );
+    let id = install_id_in(&run.output)?;
+    let run = uninstall_quietly(checks, &id, "")?;
+    checks.that("the uninstall succeeded", run.success, &run.output);
     Ok(())
 }
 

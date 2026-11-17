@@ -1142,10 +1142,25 @@ impl InstallerApp {
         }
 
         widgets::card_titled(ui, theme, &title, subtitle.as_deref(), |ui| {
+            // One key column for the card's facts, wide enough for the longest key in this language.
+            let key_width = widgets::kv_key_width(
+                ui,
+                &[
+                    &t!("installer-captured-from"),
+                    &t!("installer-signature"),
+                    &t!("installer-room-needed"),
+                ],
+            );
             if !source_computer.is_empty() {
-                widgets::kv_row(ui, theme, &t!("installer-captured-from"), &source_computer);
+                widgets::kv_row_at(
+                    ui,
+                    theme,
+                    &t!("installer-captured-from"),
+                    &source_computer,
+                    key_width,
+                );
             }
-            signature_row(ui, theme, &self.signature);
+            signature_row(ui, theme, &self.signature, key_width);
             ui.add_space(SPACE_SM);
             widgets::path_field(
                 ui,
@@ -1169,7 +1184,13 @@ impl InstallerApp {
             }
             if let Some(room) = self.room_for_target() {
                 ui.add_space(SPACE_XS);
-                widgets::kv_row(ui, theme, &t!("installer-room-needed"), &room.summary());
+                widgets::kv_row_at(
+                    ui,
+                    theme,
+                    &t!("installer-room-needed"),
+                    &room.summary(),
+                    key_width,
+                );
                 for shortfall in room.shortfalls() {
                     ui.add_space(SPACE_XS);
                     widgets::notice(
@@ -1393,25 +1414,24 @@ impl InstallerApp {
 
 /// Whether this installer proves who made it. The name a package gives for its publisher
 /// comes from the package and proves nothing, so this is said separately.
-fn signature_row(ui: &mut egui::Ui, theme: &Theme, signature: &SignatureState) {
+fn signature_row(ui: &mut egui::Ui, theme: &Theme, signature: &SignatureState, key_width: f32) {
     let installer = t!("installer-signature");
     match signature {
         SignatureState::Checking => {
-            widgets::kv_row(ui, theme, &installer, &t!("installer-signature-checking"));
+            let checking = t!("installer-signature-checking");
+            widgets::kv_row_at(ui, theme, &installer, &checking, key_width);
         }
         SignatureState::Unsigned => {
-            widgets::kv_row(ui, theme, &installer, &t!("installer-signature-unsigned"));
+            let unsigned = t!("installer-signature-unsigned");
+            widgets::kv_row_at(ui, theme, &installer, &unsigned, key_width);
         }
         SignatureState::Signed(name) if name.is_empty() => {
-            widgets::kv_row(ui, theme, &installer, &t!("installer-signature-unnamed"));
+            let unnamed = t!("installer-signature-unnamed");
+            widgets::kv_row_at(ui, theme, &installer, &unnamed, key_width);
         }
         SignatureState::Signed(name) => {
-            widgets::kv_row(
-                ui,
-                theme,
-                &installer,
-                &t!("installer-signature-signed-by", publisher = name.as_str()),
-            );
+            let signed = t!("installer-signature-signed-by", publisher = name.as_str());
+            widgets::kv_row_at(ui, theme, &installer, &signed, key_width);
         }
         SignatureState::Invalid(reason) => {
             ui.add_space(SPACE_XS);
@@ -3293,6 +3313,71 @@ mod tests {
                 window.contains_rect(button),
                 "{percent}%: Install is at {button:?} in {size:?}"
             );
+        }
+    }
+
+    /// Issue #5: in Italian, "Programma di installazione" ran into "Non firmato". In every language, each of the
+    /// ready screen's facts has its key clear of its value, and the values line up.
+    #[test]
+    fn every_fact_s_key_leaves_room_for_its_value_in_every_language() {
+        for language in winappmigrator_i18n::LANGUAGES {
+            with_language(language, || {
+                let harness = harness_for(sample_installer(ThemeMode::Light));
+                let rows = [
+                    (
+                        winappmigrator_i18n::t!("installer-captured-from"),
+                        "OLD-LAPTOP".to_owned(),
+                    ),
+                    (
+                        winappmigrator_i18n::t!("installer-signature"),
+                        winappmigrator_i18n::without_isolation(&winappmigrator_i18n::t!(
+                            "installer-signature-unsigned"
+                        ))
+                        .into_owned(),
+                    ),
+                ];
+                let mut value_edges = Vec::new();
+                for (key, value) in rows {
+                    let key_text = winappmigrator_i18n::without_isolation(&key).into_owned();
+                    let key_rect = harness
+                        .get_by_role_and_label(egui::accesskit::Role::Label, &key_text)
+                        .rect();
+                    let value_rect = harness.get_by_label(&value).rect();
+                    // The key is painted, so its node is the room it was given: it has to fit that room on
+                    // one line, or have been wrapped to it.
+                    let painted = harness.ctx.fonts_mut(|fonts| {
+                        fonts
+                            .layout_no_wrap(
+                                key_text.clone(),
+                                theme::regular(13.0),
+                                egui::Color32::WHITE,
+                            )
+                            .size()
+                    });
+                    assert!(
+                        painted.x <= key_rect.width() || key_rect.height() > painted.y + 1.0,
+                        "{}: {key_text:?} is {painted:?} in {key_rect:?}",
+                        language.tag
+                    );
+                    assert!(
+                        !key_rect.shrink(0.5).intersects(value_rect),
+                        "{}: {key_text:?} {key_rect:?} runs into {value:?} {value_rect:?}",
+                        language.tag
+                    );
+                    value_edges.push(
+                        if language.direction == winappmigrator_i18n::Direction::RightToLeft {
+                            value_rect.right()
+                        } else {
+                            value_rect.left()
+                        },
+                    );
+                }
+                assert!(
+                    (value_edges[0] - value_edges[1]).abs() < 1.0,
+                    "{}: the values start at {value_edges:?}",
+                    language.tag
+                );
+            });
         }
     }
 

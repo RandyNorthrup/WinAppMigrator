@@ -298,22 +298,29 @@ impl UninstallApp {
             &t!("uninstaller-what-will-be-removed"),
             None,
             |ui| {
-                widgets::kv_row(
-                    ui,
-                    theme,
-                    &t!("uninstaller-install-location"),
-                    &summary.target_root.display().to_string(),
-                );
-                for (label, count) in [
+                let location = t!("uninstaller-install-location");
+                let counts = [
                     (t!("uninstaller-files"), summary.files),
                     (t!("uninstaller-registry-values"), summary.registry_values),
                     (t!("uninstaller-services"), summary.services),
                     (t!("uninstaller-drivers"), summary.drivers),
                     (t!("uninstaller-scheduled-tasks"), summary.tasks),
                     (t!("uninstaller-environment"), summary.environment),
-                ] {
-                    if count > 0 {
-                        widgets::kv_row(ui, theme, &label, &count_text(count));
+                ];
+                let keys: Vec<&str> = std::iter::once(location.as_str())
+                    .chain(counts.iter().map(|(label, _)| label.as_str()))
+                    .collect();
+                let key_width = widgets::kv_key_width(ui, &keys);
+                widgets::kv_row_at(
+                    ui,
+                    theme,
+                    &location,
+                    &summary.target_root.display().to_string(),
+                    key_width,
+                );
+                for (label, count) in &counts {
+                    if *count > 0 {
+                        widgets::kv_row_at(ui, theme, label, &count_text(*count), key_width);
                     }
                 }
                 ui.add_space(SPACE_SM);

@@ -830,29 +830,64 @@ fn metric_tile(ui: &mut Ui, theme: &Theme, metric: &Metric, size: TileSize) {
 
 /// A key column and a value column, for short facts in a detail panel.
 pub fn kv_row(ui: &mut Ui, theme: &Theme, key: &str, value: &str) {
-    const KEY_WIDTH: f32 = 96.0;
+    let key_width = kv_key_width(ui, &[key]);
+    kv_row_at(ui, theme, key, value, key_width);
+}
+
+/// The narrowest a key column is.
+const KV_KEY_LEAST: f32 = 96.0;
+/// Room between a key and its value.
+const KV_KEY_GAP: f32 = 12.0;
+/// The most of a row a key column takes; a longer key wraps.
+const KV_KEY_MOST: f32 = 0.4;
+const KV_LINE_HEIGHT: f32 = 18.0;
+
+fn kv_key_font() -> FontId {
+    theme::regular(13.0)
+}
+
+/// How wide the key column of a group of [`kv_row_at`] rows is: room for the longest key, so that
+/// no key runs into its value in a language that says more, as "Programma di installazione" did
+/// (issue #5), and their values line up.
+pub fn kv_key_width(ui: &Ui, keys: &[&str]) -> f32 {
+    let widest = keys
+        .iter()
+        .map(|key| {
+            TextBlock::new(ui.painter(), key, kv_key_font(), Color32::PLACEHOLDER, None)
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    let most = (ui.available_width() * KV_KEY_MOST).max(KV_KEY_LEAST);
+    (widest + KV_KEY_GAP).clamp(KV_KEY_LEAST, most)
+}
+
+/// A key and its value, with the key column `key_width` wide, from [`kv_key_width`]. A key too long
+/// for it wraps, and the row grows to hold it.
+pub fn kv_row_at(ui: &mut Ui, theme: &Theme, key: &str, value: &str, key_width: f32) {
     ui.horizontal_top(|ui| {
-        let (rect, response) = ui.allocate_exact_size(vec2(KEY_WIDTH, 18.0), Sense::hover());
-        // Painted, so it would otherwise not be there for a screen reader.
-        response.widget_info(|| WidgetInfo::labeled(A11yRole::Label, true, key));
         let key_text = TextBlock::new(
             ui.painter(),
             key,
-            theme::regular(13.0),
+            kv_key_font(),
             theme.text_muted,
-            None,
+            Some((key_width - KV_KEY_GAP).max(1.0)),
         );
+        let height = key_text.size().y.max(KV_LINE_HEIGHT);
+        let (rect, response) = ui.allocate_exact_size(vec2(key_width, height), Sense::hover());
+        // Painted, so it would otherwise not be there for a screen reader.
+        response.widget_info(|| WidgetInfo::labeled(A11yRole::Label, true, key));
         let start = if right_to_left() {
             rect.right()
         } else {
             rect.left()
         };
-        key_text.paint(
-            ui.painter(),
-            start,
-            rect.center().y - key_text.size().y / 2.0,
-            theme.text_muted,
-        );
+        let top = if key_text.size().y < KV_LINE_HEIGHT {
+            rect.top() + (KV_LINE_HEIGHT - key_text.size().y) / 2.0
+        } else {
+            rect.top()
+        };
+        key_text.paint(ui.painter(), start, top, theme.text_muted);
         wrapped_label(ui, RichText::new(value).size(13.0).color(theme.text));
     });
 }

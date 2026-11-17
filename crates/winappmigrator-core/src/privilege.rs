@@ -76,6 +76,27 @@ Where-Object { $_.AccessControlType -eq 'Allow' -and ([int]$_.FileSystemRights -
 $admins -notcontains $_.IdentityReference.Value }); \
 -not ($admins -contains $owner -and $others.Count -eq 0) }); \
 if ($bad.Count -eq 0) { 'yes' } else { 'no' }";
+/// The administrator accounts File Explorer added to a protected folder, one SID a line, or `no` if anything else
+/// about it is not as WinAppMigrator left it. Asked to open a folder it cannot, Explorer's **Continue** gives the
+/// account that clicked it Full Control of the folder and all of it (KB 950934); only an administrator can click
+/// it there. So this is `yes` only when administrators still own the folder, it inherits nothing, Administrators
+/// and SYSTEM have what they were given, and every other entry allows, and belongs to a member of
+/// Administrators or the account this runs as, elevated.
+const EXPLORER_GRANTS_SCRIPT: &str = "Import-Module Microsoft.PowerShell.LocalAccounts -ErrorAction Ignore; \
+$acl = Get-Acl -LiteralPath $env:WAM_ACL_PATH; \
+$admins = @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Ignore | ForEach-Object { $_.SID.Value }) + \
+@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value); \
+$owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; \
+$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])); \
+$full = [Security.AccessControl.FileSystemRights]::FullControl; \
+$both = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'; \
+$kept = @($rules | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.FileSystemRights -eq $full -and \
+$_.InheritanceFlags -eq $both -and @('S-1-5-32-544', 'S-1-5-18') -contains $_.IdentityReference.Value }); \
+$others = @($rules | Where-Object { @('S-1-5-32-544', 'S-1-5-18') -notcontains $_.IdentityReference.Value }); \
+$foreign = @($others | Where-Object { $_.AccessControlType -ne 'Allow' -or $admins -notcontains $_.IdentityReference.Value }); \
+if (@('S-1-5-32-544', 'S-1-5-18') -contains $owner -and $acl.AreAccessRulesProtected -and $kept.Count -eq 2 -and \
+$others.Count -gt 0 -and $foreign.Count -eq 0) { $others | ForEach-Object { $_.IdentityReference.Value } | \
+Select-Object -Unique } else { 'no' }";
 /// The owner a protected folder has in SDDL, the form that reads the same in any language.
 const SDDL_ADMINISTRATORS_OWNER: &str = "O:BA";
 const SDDL_GROUP_MARKER: &str = "G:";
@@ -234,7 +255,10 @@ pub fn ensure_protected_folder(folder: &Path) -> io::Result<()> {
         Some(false) => return Ok(()),
         None => return Err(unknown_elevation()),
     }
-    let is_protected = read_with_folder_pinned(folder, &hold).is_ok();
+    let mut is_protected = read_with_folder_pinned(folder, &hold).is_ok();
+    if !is_protected && take_back_what_explorer_gave(folder) {
+        is_protected = read_with_folder_pinned(folder, &hold).is_ok();
+    }
     drop(hold);
     if is_protected {
         return Ok(());
@@ -248,6 +272,52 @@ pub fn ensure_protected_folder(folder: &Path) -> io::Result<()> {
     })?;
     fs::create_dir(folder)?;
     protect_new_folder(folder)
+}
+
+/// Undo what File Explorer did to a protected folder when an administrator opened it and chose **Continue**
+/// (issue #3), if that is all that was done: see [`EXPLORER_GRANTS_SCRIPT`]. Each account it added is taken off
+/// the folder and everything in it. True when that happened and the folder is to be checked again.
+fn take_back_what_explorer_gave(folder: &Path) -> bool {
+    let text = folder.to_string_lossy();
+    let path = without_verbatim_prefix(&text);
+    let Ok(output) = powershell_command(format!(
+        "{POWERSHELL_IMPORT_SECURITY}{POWERSHELL_IMPORT_MANAGEMENT}{EXPLORER_GRANTS_SCRIPT}"
+    ))
+    .env(ACL_PATH_VARIABLE, path)
+    .output() else {
+        return false;
+    };
+    let said = String::from_utf8_lossy(&output.stdout);
+    let accounts: Vec<&str> = said
+        .lines()
+        .map(str::trim)
+        .filter(|line| is_account_sid(line))
+        .collect();
+    if !output.status.success()
+        || accounts.is_empty()
+        || said.lines().any(|line| line.trim() == "no")
+    {
+        return false;
+    }
+    accounts.iter().all(|account| {
+        hidden_command("icacls")
+            .arg(path)
+            .arg("/remove:g")
+            .arg(format!("*{account}"))
+            .args(["/T", "/C", "/Q"])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+}
+
+/// A local or domain account's SID, as `S-1-5-21-...`: never a group such as Users or Everyone.
+fn is_account_sid(text: &str) -> bool {
+    text.strip_prefix("S-1-5-21-").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .split('-')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    })
 }
 
 /// A folder this run just made, closed to everyone else. If that fails it is not left there to be
@@ -647,6 +717,24 @@ pub(crate) fn protected_temp_for_a_tool() -> io::Result<Option<ProtectedFolder>>
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_account_s_sid_is_taken_off_a_folder() {
+        assert!(is_account_sid(
+            "S-1-5-21-3500314360-248499555-2077542886-1001"
+        ));
+        for not in [
+            "S-1-5-32-545",
+            "S-1-1-0",
+            "S-1-5-18",
+            "S-1-5-21-",
+            "S-1-5-21-12-x",
+            "no",
+            "",
+        ] {
+            assert!(!is_account_sid(not), "{not}");
+        }
+    }
 
     #[test]
     fn asking_about_elevation_twice_spawns_nothing_the_second_time() {
