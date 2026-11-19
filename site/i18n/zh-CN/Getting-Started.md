@@ -24,8 +24,8 @@
 
 | 文件 | 它是什么 | 适用情况 |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.2.exe` | WinAppMigrator 本身。只有一个文件，无需安装。 | 你只是想使用它。大多数人需要的就是这个文件。 |
-| `WinAppMigrator-v0.7.2-windows-x64.zip` | 同一个程序，文件名为 `winappmigrator.exe`，附带 README、更改日志、许可证和第三方许可证 | 你还想要这些附带文档 |
+| `WinAppMigrator-v0.7.3.exe` | WinAppMigrator 本身。只有一个文件，无需安装。 | 你只是想使用它。大多数人需要的就是这个文件。 |
+| `WinAppMigrator-v0.7.3-windows-x64.zip` | 同一个程序，文件名为 `winappmigrator.exe`，附带 README、更改日志、许可证和第三方许可证 | 你还想要这些附带文档 |
 | `SHA256SUMS.txt` | 上面两个文件的校验和 | 你想检查下载的文件 |
 
 装入每个安装程序的那部分安装程序，即[安装程序存根](Glossary#installer-stub)，从不单独发布。它已经包含在 WinAppMigrator 中。
@@ -39,7 +39,7 @@
 **1. 校验和**。[哈希](Glossary#hash)就是文件的指纹。哪怕只改动一个字节，它也会改变。
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.3.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. 签名**。[签名](Glossary#signature)说明文件是谁制作的，以及文件此后没有被更改过。
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.3.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. 在哪里生成**。从 0.5.0 起，每个版本都会记录它是由 GitHub 自己的发布工作流从此存储库生成的。这一记录称为[证明](Glossary#attestation)。如果你装有 [GitHub CLI](https://cli.github.com/)，请运行：
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.3.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 对 zip 文件也可以这样检查。
@@ -67,7 +67,7 @@ gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMig
 
 ## 启动
 
-1. **双击** `WinAppMigrator-v0.7.2.exe`。无需安装。它在你保存它的位置直接运行。
+1. **双击** `WinAppMigrator-v0.7.3.exe`。无需安装。它在你保存它的位置直接运行。
 2. **SmartScreen**。对于不常见的文件，Windows [SmartScreen](Glossary#smartscreen) 可能会显示“Windows 已保护你的电脑”屏幕。如果出现此屏幕，请选择**更多信息**，确认发布者是 Randy Northrup，然后再选择**仍要运行**。
 3. **管理员提示**。Windows 会询问是否允许此应用进行更改。这就是 [UAC 提示](Glossary#uac-prompt)。WinAppMigrator 每次都会请求，因为读取另一台电脑的驱动器以及只有管理员才能读取的文件都需要管理员权限。对于已签名的下载文件，提示中会将 **Randy Northrup** 显示为已验证的发布者。如果此文件的提示显示“未知发布者”，那么它不是已签名的发布文件，请不要运行它。
 4. **窗口打开**。如果你看到的是一条消息，说无法打开窗口、需要 Direct3D 12，请参阅[疑难解答](Troubleshooting#the-window-could-not-open)。WinAppMigrator 没有窗口就无法运行。

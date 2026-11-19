@@ -24,8 +24,8 @@ Daha fazla ayrıntı ve nelerin test edilip nelerin edilmediği [Gereksinimler v
 
 | Dosya | Nedir | Şu durumda alın |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.2.exe` | Uygulamanın kendisi. Tek bir dosyadır ve yüklenecek bir şey yoktur. | Yalnızca kullanmak istiyorsanız. Çoğu kişinin istediği budur. |
-| `WinAppMigrator-v0.7.2-windows-x64.zip` | `winappmigrator.exe` olarak aynı uygulama; README, değişiklik günlüğü, lisans ve üçüncü taraf lisanslarıyla birlikte | Bu belgeleri de istiyorsanız |
+| `WinAppMigrator-v0.7.3.exe` | Uygulamanın kendisi. Tek bir dosyadır ve yüklenecek bir şey yoktur. | Yalnızca kullanmak istiyorsanız. Çoğu kişinin istediği budur. |
+| `WinAppMigrator-v0.7.3-windows-x64.zip` | `winappmigrator.exe` olarak aynı uygulama; README, değişiklik günlüğü, lisans ve üçüncü taraf lisanslarıyla birlikte | Bu belgeleri de istiyorsanız |
 | `SHA256SUMS.txt` | Yukarıdaki iki dosyanın sağlama toplamları | İndirdiğiniz dosyayı denetlemek istiyorsanız |
 
 Her yükleyicinin içine giren yükleyici parçası, yani [yükleyici gövdesi](Glossary#installer-stub), hiçbir zaman tek başına yayımlanmaz. Zaten uygulamanın içindedir.
@@ -39,7 +39,7 @@ Bu isteğe bağlıdır, ama yapmaya değer. Aşağıdaki denetimlerin her biri d
 **1. Sağlama toplamı.** [Karma](Glossary#hash), bir dosyanın parmak izidir. Dosyanın tek bir baytı bile değişse karma da değişir.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.3.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. İmza.** [İmza](Glossary#signature), dosyayı kimin yaptığını ve o zamandan beri değişmediğini gösterir.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.3.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ Dosyaya sağ tıklayıp **Özellikler** komutunu seçerek **Dijital İmzalar** s
 **3. Nerede oluşturulduğu.** 0.5.0 ve sonraki her sürüm, onu GitHub'ın kendi yayın iş akışının bu depodan oluşturduğunu kaydeder. Bu kayda [kanıtlama](Glossary#attestation) (attestation) denir. [GitHub CLI](https://cli.github.com/) yüklüyse şunu çalıştırın:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.3.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 Aynısı zip dosyası için de geçerlidir.
@@ -67,7 +67,7 @@ Aynısı zip dosyası için de geçerlidir.
 
 ## Başlatma
 
-1. `WinAppMigrator-v0.7.2.exe` dosyasına **çift tıklayın**. Yüklenecek bir şey yoktur. Dosyayı nereye kaydettiyseniz oradan çalışır.
+1. `WinAppMigrator-v0.7.3.exe` dosyasına **çift tıklayın**. Yüklenecek bir şey yoktur. Dosyayı nereye kaydettiyseniz oradan çalışır.
 2. **SmartScreen.** Windows [SmartScreen](Glossary#smartscreen), sık görmediği bir dosya için "Windows kişisel bilgisayarınızı korudu" ekranını gösterebilir. Gösterirse **Ek bilgi** seçeneğini seçin ve **Yine de çalıştır** düğmesini seçmeden önce yayımcının Randy Northrup olduğunu denetleyin.
 3. **Yönetici istemi.** Windows, uygulamanın değişiklik yapmasına izin verilip verilmeyeceğini sorar. Bu, [UAC istemidir](Glossary#uac-prompt). Uygulama bunu her zaman ister, çünkü başka bir bilgisayarın sürücüsünü ve yalnızca yöneticilerin okuyabildiği dosyaları okumak yönetici hakları gerektirir. İmzalı indirmede istem, doğrulanmış yayımcı olarak **Randy Northrup** adını gösterir. Bu dosya için "Bilinmeyen yayımcı" yazıyorsa dosya imzalı sürüm dosyası değildir; çalıştırmayın.
 4. **Pencere açılır.** Bunun yerine pencerenin açılamadığını ve Direct3D 12 gerektiğini söyleyen bir ileti görürseniz bkz. [Sorun giderme](Troubleshooting#the-window-could-not-open). Uygulamanın penceresi olmadan çalışmasının bir yolu yoktur.

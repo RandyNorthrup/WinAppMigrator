@@ -24,8 +24,8 @@ Ga naar de [nieuwste release](https://github.com/RandyNorthrup/WinAppMigrator/re
 
 | Bestand | Wat het is | Neem het als |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.2.exe` | De app zelf. Eén bestand, er hoeft niets te worden geïnstalleerd. | Je de app gewoon wilt gebruiken. Dit is het bestand dat de meeste mensen willen. |
-| `WinAppMigrator-v0.7.2-windows-x64.zip` | Dezelfde app, als `winappmigrator.exe`, met de README, het wijzigingslogboek, de licentie en de licenties van derden | Je ook de documenten erbij wilt |
+| `WinAppMigrator-v0.7.3.exe` | De app zelf. Eén bestand, er hoeft niets te worden geïnstalleerd. | Je de app gewoon wilt gebruiken. Dit is het bestand dat de meeste mensen willen. |
+| `WinAppMigrator-v0.7.3-windows-x64.zip` | Dezelfde app, als `winappmigrator.exe`, met de README, het wijzigingslogboek, de licentie en de licenties van derden | Je ook de documenten erbij wilt |
 | `SHA256SUMS.txt` | De controlesommen van de twee bestanden hierboven | Je je download wilt controleren |
 
 Het deel dat in elk installatieprogramma zit, de [installatiestub](Glossary#installer-stub), wordt nooit apart gepubliceerd. Het zit al in de app.
@@ -39,7 +39,7 @@ Dit is optioneel, maar de moeite waard. Elke controle hieronder staat op zichzel
 **1. De controlesom.** Een [hash](Glossary#hash) is een vingerafdruk van een bestand. Als er ook maar één byte verandert, verandert de hash.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.3.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Het lange getal van `Get-FileHash` moet overeenkomen met dat op de regel voor da
 **2. De handtekening.** Een [handtekening](Glossary#signature) laat zien wie het bestand heeft gemaakt, en dat het sindsdien niet is gewijzigd.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.3.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ Je kunt ook met de rechtermuisknop op het bestand klikken, **Eigenschappen** kie
 **3. Waar het is gemaakt.** Van elke release vanaf 0.5.0 is vastgelegd dat de eigen releaseworkflow van GitHub deze heeft gemaakt, vanuit deze repository. Die vastlegging heet een [attestatie](Glossary#attestation). Als je de [GitHub CLI](https://cli.github.com/) hebt, voer je dit uit:
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.3.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 Hetzelfde werkt voor het zip-bestand.
@@ -67,7 +67,7 @@ Hetzelfde werkt voor het zip-bestand.
 
 ## Starten
 
-1. **Dubbelklik** op `WinAppMigrator-v0.7.2.exe`. Er hoeft niets te worden geïnstalleerd. De app wordt uitgevoerd vanaf de plek waar je deze hebt opgeslagen.
+1. **Dubbelklik** op `WinAppMigrator-v0.7.3.exe`. Er hoeft niets te worden geïnstalleerd. De app wordt uitgevoerd vanaf de plek waar je deze hebt opgeslagen.
 2. **SmartScreen.** Windows [SmartScreen](Glossary#smartscreen) kan het scherm "Windows heeft uw pc beschermd" weergeven voor een bestand dat het niet vaak heeft gezien. Kies in dat geval **Meer informatie** en controleer of de uitgever Randy Northrup is voordat je **Toch uitvoeren** kiest.
 3. **De vraag om administratorrechten.** Windows vraagt of de app wijzigingen mag aanbrengen. Dit is de [UAC-prompt](Glossary#uac-prompt) van Gebruikersaccountbeheer. De app vraagt het altijd, omdat voor het lezen van het station van een andere pc, en van bestanden die alleen administrators mogen lezen, administratorrechten nodig zijn. Bij de ondertekende download noemt de prompt **Randy Northrup** als geverifieerde uitgever. Als er voor dit bestand "Onbekende uitgever" staat, is het niet het ondertekende releasebestand. Voer het dan niet uit.
 4. **Het venster wordt geopend.** Als je in plaats daarvan een melding ziet dat het venster niet kan worden geopend en dat Direct3D 12 nodig is, kijk dan in [Problemen oplossen](Troubleshooting#the-window-could-not-open). De app kan niet zonder venster worden uitgevoerd.

@@ -24,8 +24,8 @@
 
 | 파일 | 설명 | 이런 경우에 받으세요 |
 | --- | --- | --- |
-| `WinAppMigrator-v0.7.2.exe` | 앱 자체입니다. 설치할 필요가 없는 파일 하나입니다. | 앱을 사용하기만 하려는 경우. 대부분의 사용자에게 필요한 파일입니다. |
-| `WinAppMigrator-v0.7.2-windows-x64.zip` | 같은 앱(`winappmigrator.exe`)과 README, 변경 로그, 라이선스, 타사 라이선스 | 관련 문서도 함께 받으려는 경우 |
+| `WinAppMigrator-v0.7.3.exe` | 앱 자체입니다. 설치할 필요가 없는 파일 하나입니다. | 앱을 사용하기만 하려는 경우. 대부분의 사용자에게 필요한 파일입니다. |
+| `WinAppMigrator-v0.7.3-windows-x64.zip` | 같은 앱(`winappmigrator.exe`)과 README, 변경 로그, 라이선스, 타사 라이선스 | 관련 문서도 함께 받으려는 경우 |
 | `SHA256SUMS.txt` | 위 두 파일의 체크섬 | 다운로드한 파일을 확인하려는 경우 |
 
 모든 설치 관리자 안에 들어가는 설치 관리자 부분인 [설치 관리자 스텁](Glossary#installer-stub)은 따로 게시되지 않습니다. 이미 앱 안에 들어 있습니다.
@@ -39,7 +39,7 @@
 **1. 체크섬.** [해시](Glossary#hash)는 파일의 지문입니다. 1바이트만 바뀌어도 해시가 바뀝니다.
 
 ```powershell
-Get-FileHash .\WinAppMigrator-v0.7.2.exe -Algorithm SHA256
+Get-FileHash .\WinAppMigrator-v0.7.3.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -48,7 +48,7 @@ Get-Content .\SHA256SUMS.txt
 **2. 서명.** [서명](Glossary#signature)은 파일을 누가 만들었는지, 그리고 그 후로 파일이 변경되지 않았는지 알려 줍니다.
 
 ```powershell
-$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.2.exe
+$signature = Get-AuthenticodeSignature .\WinAppMigrator-v0.7.3.exe
 $signature.Status                     # should say Valid
 $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 ```
@@ -58,7 +58,7 @@ $signature.SignerCertificate.Subject  # should include CN=Randy Northrup
 **3. 빌드된 곳.** 0.5.0 이후의 각 릴리스에는 GitHub 자체 릴리스 워크플로가 이 리포지토리에서 빌드했다는 기록이 남습니다. 이 기록을 [증명](Glossary#attestation)이라고 합니다. [GitHub CLI](https://cli.github.com/)가 있으면 다음을 실행하세요.
 
 ```powershell
-gh attestation verify .\WinAppMigrator-v0.7.2.exe --repo RandyNorthrup/WinAppMigrator
+gh attestation verify .\WinAppMigrator-v0.7.3.exe --repo RandyNorthrup/WinAppMigrator
 ```
 
 zip 파일도 같은 방법으로 확인할 수 있습니다.
@@ -67,7 +67,7 @@ zip 파일도 같은 방법으로 확인할 수 있습니다.
 
 ## 시작
 
-1. `WinAppMigrator-v0.7.2.exe`를 **두 번 클릭**합니다. 설치할 필요가 없습니다. 저장한 위치에서 바로 실행됩니다.
+1. `WinAppMigrator-v0.7.3.exe`를 **두 번 클릭**합니다. 설치할 필요가 없습니다. 저장한 위치에서 바로 실행됩니다.
 2. **SmartScreen.** 자주 본 적이 없는 파일이면 Windows [SmartScreen](Glossary#smartscreen)에 "Windows의 PC 보호" 화면이 표시될 수 있습니다. 이 화면이 표시되면 **추가 정보**를 선택하고, 게시자가 Randy Northrup인지 확인한 다음 **실행**을 선택하세요.
 3. **관리자 확인 프롬프트.** Windows에서 앱이 변경할 수 있도록 허용할지 묻습니다. 이것이 [UAC 프롬프트](Glossary#uac-prompt)입니다. 다른 PC의 드라이브와 관리자만 읽을 수 있는 파일을 읽으려면 관리자 권한이 필요하므로 앱은 항상 이 프롬프트를 표시합니다. 서명된 다운로드 파일이면 프롬프트에 확인된 게시자로 **Randy Northrup**이 표시됩니다. 이 파일에 대해 "알 수 없는 게시자"라고 표시되면 서명된 릴리스 파일이 아니므로 실행하지 마세요.
 4. **창이 열립니다.** 창 대신 창을 열 수 없으며 Direct3D 12가 필요하다는 메시지가 표시되면 [문제 해결](Troubleshooting#the-window-could-not-open)을 참조하세요. 이 앱은 창 없이 실행할 수 없습니다.
