@@ -118,7 +118,7 @@ La lista se calcula para la ubicación que hay en el cuadro. Si cambias la ubica
 | Etiqueta | Qué es | Ejemplo de la línea de debajo |
 | --- | --- | --- |
 | **Servicio** | Un [servicio](Glossary#service): un programa que Windows ejecuta en segundo plano | "Ejecuta FabrikamSync.exe como NT AUTHORITY\LocalService, se inicia ahora y cada vez que se inicia este PC". Otros indican "se inicia ahora y poco después de cada inicio de este PC", "solo se inicia cuando algo lo solicita" o "está deshabilitado". |
-| **Controlador** | Un [controlador](Glossary#driver) propio de la aplicación | "Carga" un archivo "en el propio Windows". Siempre en ámbar. Ninguna prueba del proyecto ha cargado un controlador. |
+| **Controlador** | Un [controlador](Glossary#driver) propio de la aplicación | "Carga" un archivo "en el propio Windows". Siempre en ámbar. Uno que se inicia con Windows se inicia justo después de la instalación. El de VeraCrypt se cargó así a mano en un PC de prueba; la CI no carga ninguno. |
 | **Tarea programada** | Una [tarea programada](Glossary#scheduled-task) | "Se ejecuta como SYSTEM", o como una cuenta. "con los privilegios más altos que pueda tener" se marca en ámbar. Una tarea que en el PC antiguo se ejecutaba como una persona se ejecuta como quien la instale. |
 | **Se inicia automáticamente** | Un [elemento de inicio](Glossary#startup-item) | "Se ejecuta cuando inicias sesión", "Se ejecuta para todos los que inicien sesión" o "Un acceso directo en la carpeta Inicio, para ti" |
 | **Acceso directo** | Un [acceso directo](Glossary#shortcut) en el escritorio o en el menú Inicio | "Abre Fabrikam.exe, para todos los usuarios de este PC" o "para ti" |

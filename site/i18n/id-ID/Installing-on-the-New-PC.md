@@ -118,7 +118,7 @@ Daftar ini ditentukan untuk lokasi yang ada di kotak. Jika Anda mengubah lokasi,
 | Label | Apa itu | Contoh baris di bawahnya |
 | --- | --- | --- |
 | **Layanan** | [Layanan](Glossary#service): program yang dijalankan Windows di latar belakang | "Menjalankan FabrikamSync.exe sebagai NT AUTHORITY\LocalService, dimulai sekarang dan setiap kali PC ini dinyalakan". Yang lain berbunyi "dimulai sekarang dan tidak lama setelah setiap kali PC ini dinyalakan", "dimulai hanya jika ada yang memintanya", atau "dinonaktifkan". |
-| **Driver** | [Driver](Glossary#driver) milik aplikasi | "Memuat" sebuah file "ke dalam Windows itu sendiri". Selalu amber. Belum ada pengujian proyek yang memuat driver. |
+| **Driver** | [Driver](Glossary#driver) milik aplikasi | "Memuat" sebuah file "ke dalam Windows itu sendiri". Selalu amber. Driver yang dimulai bersama Windows langsung dimulai setelah instalasi. Driver VeraCrypt dimuat dengan cara ini secara manual di PC uji; CI tidak memuat driver. |
 | **Tugas terjadwal** | [Tugas terjadwal](Glossary#scheduled-task) | "Berjalan sebagai SYSTEM", atau sebagai sebuah akun. "dengan hak tertinggi yang dapat dimilikinya" ditandai amber. Tugas yang berjalan sebagai seseorang di PC lama akan berjalan sebagai siapa pun yang menginstalnya. |
 | **Mulai otomatis** | [Item startup](Glossary#startup-item) | "Berjalan saat Anda masuk", "Berjalan untuk semua orang yang masuk", atau "Pintasan di folder Startup, untuk Anda" |
 | **Pintasan** | [Pintasan](Glossary#shortcut) di Desktop atau di menu Mulai | "Membuka Fabrikam.exe, untuk semua orang di PC ini" atau "untuk Anda" |

@@ -118,7 +118,7 @@ A lista é calculada para o local que está na caixa. Se você mudar o local, el
 | Rótulo | O que é | Exemplo da linha abaixo dele |
 | --- | --- | --- |
 | **Serviço** | Um [serviço](Glossary#service): um programa que o Windows executa em segundo plano | “Executa FabrikamSync.exe como NT AUTHORITY\LocalService, inicia agora e sempre que este PC é iniciado”. Outros dizem “inicia agora e logo após cada inicialização deste PC”, “inicia só quando algo o solicita” ou “está desativado”. |
-| **Driver** | Um [driver](Glossary#driver) que pertence ao aplicativo | “Carrega” um arquivo “no próprio Windows”. Sempre em âmbar. Nenhum teste do projeto carregou um driver. |
+| **Driver** | Um [driver](Glossary#driver) que pertence ao aplicativo | “Carrega” um arquivo “no próprio Windows”. Sempre em âmbar. Um driver que inicia com o Windows é iniciado logo após a instalação. O do VeraCrypt foi carregado dessa forma, manualmente, em um PC de teste; a CI não carrega nenhum. |
 | **Tarefa agendada** | Uma [tarefa agendada](Glossary#scheduled-task) | “É executada como SYSTEM”, ou como uma conta. “com privilégios mais altos” fica em âmbar. Uma tarefa que era executada como uma pessoa no PC antigo é executada como quem a instalar. |
 | **Inicia automaticamente** | Um [item de inicialização](Glossary#startup-item) | “É executado quando você entrar”, “É executado para todos que entrarem” ou “Um atalho na pasta Inicializar, para você” |
 | **Atalho** | Um [atalho](Glossary#shortcut) na área de trabalho ou no menu Iniciar | “Abre Fabrikam.exe, para todos neste PC” ou “para você” |

@@ -118,7 +118,7 @@ De lijst wordt bepaald voor de locatie in het vak. Als je de locatie wijzigt, st
 | Label | Wat het is | Voorbeeld van de regel eronder |
 | --- | --- | --- |
 | **Service** | Een [service](Glossary#service): een programma dat Windows op de achtergrond uitvoert | "Voert FabrikamSync.exe uit als NT AUTHORITY\LocalService, start nu en telkens wanneer deze pc opstart". Andere zeggen "start nu en kort nadat deze pc is opgestart", "start alleen wanneer iets erom vraagt" of "is uitgeschakeld". |
-| **Stuurprogramma** | Een [stuurprogramma](Glossary#driver) dat van de app is | "Laadt" een bestand "in Windows zelf". Altijd oranje. Geen enkele test van het project heeft een stuurprogramma geladen. |
+| **Stuurprogramma** | Een [stuurprogramma](Glossary#driver) dat van de app is | "Laadt" een bestand "in Windows zelf". Altijd oranje. Een stuurprogramma dat met Windows start, wordt direct na de installatie gestart. Dat van VeraCrypt is op deze manier handmatig geladen op een test-pc; CI laadt er geen. |
 | **Geplande taak** | Een [geplande taak](Glossary#scheduled-task) | "Wordt uitgevoerd als SYSTEM", of als een account. "met de hoogst mogelijke rechten" is oranje gemarkeerd. Een taak die op de oude pc als een persoon werd uitgevoerd, wordt uitgevoerd als degene die installeert. |
 | **Start automatisch** | Een [opstartitem](Glossary#startup-item) | "Wordt uitgevoerd wanneer je je aanmeldt", "Wordt uitgevoerd voor iedereen die zich aanmeldt" of "Een snelkoppeling in de map Opstarten, voor jou" |
 | **Snelkoppeling** | Een [snelkoppeling](Glossary#shortcut) op het bureaublad of in het menu Start | "Opent Fabrikam.exe, voor iedereen op deze pc" of "voor jou" |

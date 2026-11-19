@@ -118,7 +118,7 @@ Liste, kutudaki konuma göre belirlenir. Konumu değiştirirseniz kısa bir sür
 | Etiket | Nedir | Altındaki satıra örnek |
 | --- | --- | --- |
 | **Hizmet** | Bir [hizmet](Glossary#service): Windows'un arka planda çalıştırdığı bir program | "FabrikamSync.exe dosyasını NT AUTHORITY\LocalService olarak çalıştırır; şimdi ve bu bilgisayar her başladığında başlar". Diğerlerinde "şimdi ve bu bilgisayar her başladıktan kısa süre sonra başlar", "yalnızca bir şey istediğinde başlar" veya "devre dışı" yazar. |
-| **Sürücü** | Uygulamaya ait bir [sürücü](Glossary#driver) | Bir dosya için "… dosyasını doğrudan Windows'a yükler". Her zaman sarıdır. Projenin hiçbir testi bir sürücü yüklemedi. |
+| **Sürücü** | Uygulamaya ait bir [sürücü](Glossary#driver) | Bir dosya için "… dosyasını doğrudan Windows'a yükler". Her zaman sarıdır. Windows ile başlayan bir sürücü, yüklemeden hemen sonra başlatılır. VeraCrypt'in sürücüsü bir test bilgisayarında bu şekilde elle yüklendi; CI bir sürücü yüklemez. |
 | **Zamanlanmış görev** | Bir [zamanlanmış görev](Glossary#scheduled-task) | "Çalıştığı hesap: SYSTEM" veya başka bir hesap. "alabileceği en yüksek haklarla" sarı ile işaretlenir. Eski bilgisayarda bir kişi olarak çalışan görev, onu yükleyen kişi olarak çalışır. |
 | **Otomatik başlayan** | Bir [başlangıç öğesi](Glossary#startup-item) | "Oturum açtığınızda çalışır", "Oturum açan herkes için çalışır" veya "Başlangıç klasöründe bir kısayol, sizin için" |
 | **Kısayol** | Masaüstünde veya Başlat menüsünde bir [kısayol](Glossary#shortcut) | "Fabrikam.exe dosyasını açar, bu bilgisayardaki herkes için" veya "sizin için" |

@@ -233,9 +233,9 @@ Those are small, well-behaved apps on clean machines, and this is how far that g
 - **Uninstalling.** CI runs the quiet command an entry in Settings records, `QuietUninstallString`, and only opens the
   windowed one. It has not clicked **Uninstall** in Settings or in the uninstaller's window.
 - **Signing.** `v0.5.0` is the first release that is signed, and `v0.6.0` the first whose client is. The signed client was run on 32-bit and 64-bit Windows 7 SP1 VMs with none of its later updates: it worked, and its signature read as untrusted on both, and as valid on the 64-bit one once Microsoft's 2020 root was added; the UAC prompt itself was not seen. A certificate of your own on an installer has only been tried with a throwaway one.
-- **What has not been tried at all.** An app with online activation, an app the size of an office suite, an app's own
-  updater after a move, and a restart afterward. A driver being loaded was tried once, by hand: VeraCrypt's, on a test PC,
-  where it started and mounted a volume. CI does not load one.
+- **What has not been tried at all.** An app with online activation, an app the size of an office suite, and an app's
+  own updater after a move. A driver being loaded, and a restart afterward, were tried once, by hand: VeraCrypt's driver,
+  on a test PC, where it started, mounted a volume, and loaded again after a restart. CI does neither.
 
 So try an installer before you rely on it.
 

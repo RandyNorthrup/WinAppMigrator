@@ -1121,6 +1121,9 @@ fn system_key_refusal(
     if !restored_services.contains(service) {
         return Some(t!("core-policy-service-not-restored"));
     }
+    if subkey.is_empty() && is_a_setting_named_for_its_service(service, entry) {
+        return None;
+    }
     if !SERVICE_SUBKEYS.contains(&subkey) {
         return Some(t!("core-policy-service-own-rules"));
     }
@@ -1136,6 +1139,52 @@ fn system_key_refusal(
     }
     None
 }
+
+/// What a service or driver keeps in its own key besides what Windows reads there, named after
+/// itself, as VeraCrypt's driver keeps `VeraCryptEnableMemoryProtection` in `Services\veracrypt`.
+/// Everything else in that key says what runs, how, as whom, and when, which only the service's own
+/// rules set, and nothing Windows reads there is let through, whatever the service is called.
+fn is_a_setting_named_for_its_service(service: &str, entry: &RegistryEntry) -> bool {
+    entry.value_name.as_deref().is_some_and(|name| {
+        let name = name.to_ascii_lowercase();
+        name.len() > service.len()
+            && name.starts_with(service)
+            && !SERVICE_VALUES_WINDOWS_READS.contains(&name.as_str())
+    })
+}
+
+/// Values the Service Control Manager and the I/O manager read in a service's own key.
+const SERVICE_VALUES_WINDOWS_READS: &[&str] = &[
+    "type",
+    "start",
+    "errorcontrol",
+    "imagepath",
+    "displayname",
+    "description",
+    "objectname",
+    "group",
+    "tag",
+    "dependonservice",
+    "dependongroup",
+    "delayedautostart",
+    "failureactions",
+    "failureactionsonnoncrashfailures",
+    "failurecommand",
+    "rebootmessage",
+    "requiredprivileges",
+    "servicesidtype",
+    "launchprotected",
+    "preshutdowntimeout",
+    "environment",
+    "servicedll",
+    "servicedllunloadonstop",
+    "wow64",
+    "userserviceflags",
+    "svchostsplitdisable",
+    "bootflags",
+    "driverpackageid",
+    "owners",
+];
 
 /// Under `EventLog`, only a source's own values. A log's key says where that log is kept and who
 /// may read it. Every file a source takes its messages from has to be one this package installs,
@@ -4145,6 +4194,75 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn a_restored_service_keeps_settings_named_for_it_in_its_own_key_and_nothing_windows_reads() {
+        use RegistryHive::LocalMachine;
+        let own = |name: &str| {
+            entry(
+                LocalMachine,
+                r"SYSTEM\CurrentControlSet\Services\AcmeSync",
+                Some(name),
+                "1",
+            )
+        };
+        for name in ["AcmeSyncEnableMemoryProtection", "ACMESYNCLevel"] {
+            assert_eq!(refusal(&own(name)), None, "{name}");
+        }
+        for name in [
+            "ImagePath",
+            "ObjectName",
+            "FailureCommand",
+            "Start",
+            "AcmeSync",
+            "Acme",
+            "EnableMemoryProtection",
+        ] {
+            assert!(refusal(&own(name)).is_some(), "{name}");
+        }
+        // The key's own default value is not a setting of its.
+        assert!(
+            refusal(&entry(
+                LocalMachine,
+                r"SYSTEM\CurrentControlSet\Services\AcmeSync",
+                None,
+                "x"
+            ))
+            .is_some()
+        );
+        // Nor is it for a service that is not restored, nor in another key of the service's.
+        assert!(
+            refusal(&entry(
+                LocalMachine,
+                r"SYSTEM\CurrentControlSet\Services\WinDefend",
+                Some("WinDefendLevel"),
+                "0"
+            ))
+            .is_some()
+        );
+        assert!(
+            refusal(&entry(
+                LocalMachine,
+                r"SYSTEM\CurrentControlSet\Services\AcmeSync\Security",
+                Some("AcmeSyncSecurity"),
+                "x"
+            ))
+            .is_some()
+        );
+        // A service named like a value Windows reads gets none of those through.
+        assert!(is_a_setting_named_for_its_service(
+            "image",
+            &entry(LocalMachine, "x", Some("ImageExtra"), "1")
+        ));
+        assert!(!is_a_setting_named_for_its_service(
+            "image",
+            &entry(LocalMachine, "x", Some("ImagePath"), "1")
+        ));
+        assert!(!is_a_setting_named_for_its_service(
+            "depend",
+            &entry(LocalMachine, "x", Some("DependOnService"), "1")
+        ));
     }
 
     #[test]

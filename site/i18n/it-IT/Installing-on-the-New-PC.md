@@ -118,7 +118,7 @@ L'elenco viene calcolato per il percorso indicato nella casella. Se cambi il per
 | Etichetta | Che cos'è | Esempio della riga sottostante |
 | --- | --- | --- |
 | **Servizio** | Un [servizio](Glossary#service): un programma che Windows esegue in background | "Esegue FabrikamSync.exe come NT AUTHORITY\LocalService, si avvia ora e a ogni avvio di questo PC". Altri indicano "si avvia ora e poco dopo ogni avvio di questo PC", "si avvia solo quando richiesto" oppure "è disabilitato". |
-| **Driver** | Un [driver](Glossary#driver) di proprietà dell'app | "Carica" un file "direttamente in Windows". Sempre color ambra. Nessun test del progetto ha caricato un driver. |
+| **Driver** | Un [driver](Glossary#driver) di proprietà dell'app | "Carica" un file "direttamente in Windows". Sempre color ambra. Un driver che si avvia con Windows viene avviato subito dopo l'installazione. Quello di VeraCrypt è stato caricato in questo modo, manualmente, in un PC di test; la CI non ne carica nessuno. |
 | **Attività pianificata** | Un'[attività pianificata](Glossary#scheduled-task) | "Viene eseguita come SYSTEM" o come un account. "con i privilegi più elevati" è segnalato in color ambra. Un'attività che nel vecchio PC veniva eseguita come una persona viene eseguita come l'utente che la installa. |
 | **Avvio automatico** | Un [elemento ad avvio automatico](Glossary#startup-item) | "Si avvia quando accedi", "Si avvia quando accede qualsiasi utente" o "Un collegamento nella cartella Esecuzione automatica, per te" |
 | **Collegamento** | Un [collegamento](Glossary#shortcut) sul desktop o nel menu Start | "Apre Fabrikam.exe, per tutti gli utenti di questo PC" o "per te" |

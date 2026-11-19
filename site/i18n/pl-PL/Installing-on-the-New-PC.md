@@ -118,7 +118,7 @@ Lista jest ustalana dla lokalizacji podanej w polu. Jeśli zmienisz lokalizację
 | Etykieta | Co to jest | Przykład wiersza pod nią |
 | --- | --- | --- |
 | **Usługa** | [Usługa](Glossary#service): program uruchamiany przez system Windows w tle | „Uruchamia plik FabrikamSync.exe jako NT AUTHORITY\LocalService; uruchamianie: od razu i przy każdym uruchomieniu komputera”. W innych na końcu jest „od razu i wkrótce po każdym uruchomieniu komputera”, „tylko na żądanie” lub „wyłączone”. |
-| **Sterownik** | [Sterownik](Glossary#driver) należący do aplikacji | „Ładuje plik” i jego nazwa „bezpośrednio do systemu Windows”. Zawsze bursztynowa. Żaden test projektu nie załadował sterownika. |
+| **Sterownik** | [Sterownik](Glossary#driver) należący do aplikacji | „Ładuje plik” i jego nazwa „bezpośrednio do systemu Windows”. Zawsze bursztynowa. Sterownik uruchamiany razem z systemem Windows jest uruchamiany zaraz po instalacji. Sterownik programu VeraCrypt został w ten sposób załadowany ręcznie na komputerze testowym; CI nie ładuje żadnego sterownika. |
 | **Zaplanowane zadanie** | [Zaplanowane zadanie](Glossary#scheduled-task) | „Działa jako SYSTEM” lub jako konto. Tekst „z najwyższymi możliwymi uprawnieniami” jest oznaczony na bursztynowo. Zadanie, które na starym komputerze działało jako konkretna osoba, działa jako osoba, która je instaluje. |
 | **Autostart** | [Element autostartu](Glossary#startup-item) | „Uruchamia się przy logowaniu bieżącego użytkownika”, „Uruchamia się przy logowaniu każdego użytkownika” lub „Skrót w folderze Autostart, tylko dla bieżącego użytkownika” |
 | **Skrót** | [Skrót](Glossary#shortcut) na Pulpicie lub w menu Start | „Otwiera plik Fabrikam.exe, dla wszystkich użytkowników tego komputera” lub „tylko dla bieżącego użytkownika” |

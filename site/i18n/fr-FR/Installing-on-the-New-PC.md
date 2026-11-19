@@ -118,7 +118,7 @@ La liste est établie pour l'emplacement indiqué dans la zone. Si vous changez 
 | Étiquette | De quoi il s'agit | Exemple de la ligne en dessous |
 | --- | --- | --- |
 | **Service** | Un [service](Glossary#service) : un programme que Windows exécute en arrière-plan | « Exécute FabrikamSync.exe en tant que NT AUTHORITY\LocalService, démarre maintenant et à chaque démarrage de ce PC ». D'autres indiquent « démarre maintenant et peu après chaque démarrage de ce PC », « démarre uniquement à la demande » ou « est désactivé ». |
-| **Pilote** | Un [pilote](Glossary#driver) qui appartient à l'application | « Charge » un fichier « dans Windows même ». Toujours en orange. Aucun test du projet n'a chargé de pilote. |
+| **Pilote** | Un [pilote](Glossary#driver) qui appartient à l'application | « Charge » un fichier « dans Windows même ». Toujours en orange. Un pilote qui démarre avec Windows est démarré juste après l'installation. Celui de VeraCrypt a été chargé ainsi à la main sur un PC de test ; la CI n'en charge aucun. |
 | **Tâche planifiée** | Une [tâche planifiée](Glossary#scheduled-task) | « S'exécute en tant que SYSTEM », ou en tant qu'un autre compte. « avec les autorisations maximales » est signalé en orange. Une tâche qui s'exécutait sous le compte d'une personne sur l'ancien PC s'exécute sous le compte de la personne qui l'installe. |
 | **Démarre automatiquement** | Un [élément de démarrage](Glossary#startup-item) | « S'exécute quand vous vous connectez », « S'exécute pour toute personne qui se connecte » ou « Un raccourci dans le dossier Démarrage, pour vous » |
 | **Raccourci** | Un [raccourci](Glossary#shortcut) sur le Bureau ou dans le menu Démarrer | « Ouvre Fabrikam.exe, pour tous les utilisateurs de ce PC » ou « pour vous » |

@@ -118,7 +118,7 @@ Die Liste wird für den Ort im Feld ermittelt. Wenn Sie den Ort ändern, steht d
 | Beschriftung | Was es ist | Beispiel für die Zeile darunter |
 | --- | --- | --- |
 | **Dienst** | Ein [Dienst](Glossary#service): ein Programm, das Windows im Hintergrund ausführt | „Führt FabrikamSync.exe als NT AUTHORITY\LocalService aus, startet jetzt und bei jedem Start dieses PCs“. Andere Zeilen lauten „startet jetzt und kurz nach jedem Start dieses PCs“, „startet nur, wenn er angefordert wird“ oder „ist deaktiviert“. |
-| **Treiber** | Ein [Treiber](Glossary#driver), der zur App gehört | „Lädt“ eine Datei „in Windows selbst“. Immer gelb. Kein Test des Projekts hat einen Treiber geladen. |
+| **Treiber** | Ein [Treiber](Glossary#driver), der zur App gehört | „Lädt“ eine Datei „in Windows selbst“. Immer gelb. Ein Treiber, der mit Windows startet, wird direkt nach der Installation gestartet. Der Treiber von VeraCrypt wurde auf diese Weise auf einem Test-PC von Hand geladen; die CI lädt keinen. |
 | **Geplante Aufgabe** | Eine [geplante Aufgabe](Glossary#scheduled-task) | „Ausgeführt als: SYSTEM“ oder als ein Konto. „mit höchsten Privilegien“ ist gelb markiert. Eine Aufgabe, die auf dem alten PC als eine Person ausgeführt wurde, wird als die Person ausgeführt, die sie installiert. |
 | **Autostart** | Ein [Autostart-Element](Glossary#startup-item) | „Wird bei Ihrer Anmeldung ausgeführt“, „Wird bei der Anmeldung jedes Benutzers ausgeführt“ oder „Eine Verknüpfung im Autostart-Ordner, für Sie“ |
 | **Verknüpfung** | Eine [Verknüpfung](Glossary#shortcut) auf dem Desktop oder im Startmenü | „Öffnet Fabrikam.exe, für alle auf diesem PC“ oder „für Sie“ |

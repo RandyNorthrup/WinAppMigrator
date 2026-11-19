@@ -1575,6 +1575,9 @@ fn app_driver_files(files: &[FileEntry]) -> Vec<AppDriverFile<'_>> {
         .collect()
 }
 
+/// Each driver is named. One the app owns goes in the installer and is set up again, and the list of
+/// what an install sets up says so, so it is only noted; another company's or Windows' own is what
+/// a person has to deal with.
 fn driver_component_warnings(drivers: &[DriverEntry]) -> Vec<Warning> {
     drivers
         .iter()
@@ -1582,7 +1585,11 @@ fn driver_component_warnings(drivers: &[DriverEntry]) -> Vec<Warning> {
             Warning::localized(
                 "driver_kernel_component_detected",
                 "core-warning-build-driver-detected",
-                WarningSeverity::Warning,
+                if driver.app_owned {
+                    WarningSeverity::Info
+                } else {
+                    WarningSeverity::Warning
+                },
                 Vec::new(),
                 Some(format!(
                     "{} -> {}",
@@ -1660,6 +1667,34 @@ mod tests {
         assert!(roots.contains(&PathBuf::from(r"C:\Vendor\Installer2\Display.NvApp")));
         assert!(roots.contains(&PathBuf::from(r"C:\Vendor\NVIDIA app")));
         assert!(roots.contains(&PathBuf::from(r"C:\Vendor\NVIDIA app\CEF")));
+    }
+
+    #[test]
+    fn a_driver_the_app_owns_is_noted_and_anyone_elses_is_a_warning() {
+        let driver = |app_owned| DriverEntry {
+            service_name: "veracrypt".to_owned(),
+            display_name: None,
+            image_path: PathBuf::from(r"C:\Windows\System32\drivers\veracrypt.sys"),
+            driver_kind: crate::models::DriverKind::Kernel,
+            start_type: Some("system".to_owned()),
+            account_name: None,
+            description: None,
+            requires_admin: true,
+            restore_instructions: String::new(),
+            app_owned,
+            signer: None,
+            hash_sha256: None,
+            package_relative_path: None,
+        };
+        let severities: Vec<WarningSeverity> =
+            driver_component_warnings(&[driver(true), driver(false)])
+                .into_iter()
+                .map(|warning| warning.severity)
+                .collect();
+        assert_eq!(
+            severities,
+            [WarningSeverity::Info, WarningSeverity::Warning]
+        );
     }
 
     #[test]

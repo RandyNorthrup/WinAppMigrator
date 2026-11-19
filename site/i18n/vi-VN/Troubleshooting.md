@@ -74,7 +74,10 @@ Danh sách đầy đủ, bao gồm những gì ứng dụng khách hiển thị 
 
 | Bạn thấy gì | Ý nghĩa | Cách xử lý |
 | --- | --- | --- |
-| “Không thể xem xét ứng dụng này” và một lý do | Việc xem xét đã thất bại. Một lý do thường gặp là mục hoàn toàn không có chương trình nào, chẳng hạn gói trình điều khiển. | Bấm **Thử lại**. Nếu lỗi lặp lại như cũ, mục đó có thể không phải là ứng dụng mà WinAppMigrator có thể chuyển. |
+| “Không thể xem xét ứng dụng này” và một lý do | Việc xem xét đã thất bại. | Bấm **Thử lại**. Nếu lỗi lặp lại như cũ, mục đó có thể không phải là ứng dụng mà WinAppMigrator có thể chuyển. |
+| “không còn ở đó nữa, dù bản ghi của ứng dụng này ghi nó là chương trình của ứng dụng” | Mục của ứng dụng trong danh sách ứng dụng chỉ đến một chương trình đã bị di chuyển hoặc gỡ bỏ | Hãy sửa chữa hoặc cài đặt lại ứng dụng trên PC này, rồi chọn lại ứng dụng đó. |
+| “Không tìm thấy chương trình riêng nào của” một ứng dụng, “nên không có gì để đưa vào trình cài đặt” | Mục đó không có chương trình riêng, điều thường gặp ở gói trình điều khiển như trình điều khiển đồ họa, ở thư viện thời gian chạy hoặc phần bổ trợ | Trên PC mới, hãy cài đặt trình điều khiển từ nhà sản xuất hoặc Windows Update, và cài đặt thư viện thời gian chạy hoặc phần bổ trợ cùng với ứng dụng sử dụng nó. |
+| “là một ứng dụng web mà trình duyệt đã cài đặt từ một trang web” | Một trang web được cài đặt như một ứng dụng, chẳng hạn Chrome Remote Desktop, không có chương trình riêng | Trên PC mới, hãy mở trang web đó trong cùng trình duyệt và cài đặt ứng dụng từ đó. |
 | “Đã dừng. Có thể tạo trình cài đặt sau khi ứng dụng này đã được xem xét.” | Bạn đã bấm **Dừng** | Bấm **Xem xét lại**. |
 | Việc xem xét mất nhiều thời gian | Ứng dụng lớn, ổ đĩa chậm hoặc sắp hỏng, hoặc nhiều tài khoản | Nếu ổ đĩa có thể sắp hỏng, hãy bấm **Dừng**, tạo [ảnh đĩa](Glossary#disk-image) của nó, rồi chọn ảnh đĩa đó thay vào, vì việc đọc một ổ đĩa sắp hỏng có thể khiến nó hỏng hẳn. Từ 0.6.0, hãy chọn ảnh đĩa bằng **Ảnh đĩa…**. Với 0.5.0, hãy gắn ảnh đĩa rồi chọn ổ đĩa của nó. Nếu không, hãy chờ. Trong lúc đó, bạn có thể chọn ứng dụng khác. |
 | Một hàng bạn muốn bị làm mờ và đã được chọn | Hàng đó chứa chương trình chính, hoặc những gì chương trình cần để khởi động | Hàng đó luôn được đưa vào. Xem [các hàng bạn không thể bỏ chọn](Building-an-Installer#the-groups). |

@@ -118,7 +118,7 @@ Danh sách được xác định cho vị trí trong ô. Nếu bạn thay đổi
 | Nhãn | Đây là gì | Ví dụ về dòng bên dưới |
 | --- | --- | --- |
 | **Dịch vụ** | Một [dịch vụ](Glossary#service): chương trình mà Windows chạy trong nền | “Chạy FabrikamSync.exe dưới tài khoản NT AUTHORITY\LocalService, khởi động ngay và mỗi khi PC này khởi động”. Các dịch vụ khác ghi “khởi động ngay và một lúc sau mỗi lần PC này khởi động”, “chỉ khởi động khi có thứ gì đó yêu cầu”, hoặc “đã bị tắt”. |
-| **Trình điều khiển** | Một [trình điều khiển](Glossary#driver) thuộc về ứng dụng | “Tải” một tệp “vào chính Windows”. Luôn có màu hổ phách. Chưa có bài kiểm tra nào của dự án tải trình điều khiển. |
+| **Trình điều khiển** | Một [trình điều khiển](Glossary#driver) thuộc về ứng dụng | “Tải” một tệp “vào chính Windows”. Luôn có màu hổ phách. Trình điều khiển khởi động cùng Windows sẽ được khởi động ngay sau khi cài đặt. Trình điều khiển của VeraCrypt đã được tải thủ công theo cách này trên một PC thử nghiệm; CI không tải trình điều khiển nào. |
 | **Tác vụ đã lên lịch** | Một [tác vụ đã lên lịch](Glossary#scheduled-task) | “Chạy với tư cách SYSTEM”, hoặc với tư cách một tài khoản. “với quyền cao nhất có thể” được đánh dấu màu hổ phách. Tác vụ từng chạy với tư cách một người trên PC cũ sẽ chạy với tư cách người cài đặt nó. |
 | **Tự khởi động** | Một [mục khởi động](Glossary#startup-item) | “Chạy khi bạn đăng nhập”, “Chạy khi bất kỳ ai đăng nhập”, hoặc “Một lối tắt trong thư mục Khởi động, cho bạn” |
 | **Lối tắt** | Một [lối tắt](Glossary#shortcut) trên màn hình nền hoặc trong menu Bắt đầu | “Mở Fabrikam.exe, cho mọi người trên PC này” hoặc “cho bạn” |

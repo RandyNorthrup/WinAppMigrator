@@ -437,6 +437,7 @@ pub fn restore_package_monitored(
         cancelled: false,
         stopped_services: Vec::new(),
         services_set_up: Vec::new(),
+        drivers_to_start: Vec::new(),
         app_name: &app_name,
         manifest: &manifest,
         package_files,
@@ -454,6 +455,7 @@ pub fn restore_package_monitored(
         refused,
         stopped_services,
         services_set_up,
+        drivers_to_start,
         ..
     } = run;
     let mut changes_logged = changes.in_order();
@@ -490,6 +492,14 @@ pub fn restore_package_monitored(
             install_id = Some(journal.id().to_owned());
             // Only now, with everything checked and the record finished, and if one will not start
             // that is for a person to know about and not a reason to take all of it back out.
+            // Drivers first, as a service of the app's can need its driver, and each with its
+            // settings already in place.
+            for name in &drivers_to_start {
+                match start_driver(name, &run_sc_start) {
+                    Ok(started) => changes_logged.push(started),
+                    Err(warning) => warnings.push(warning),
+                }
+            }
             let started = start_what_starts_by_itself(
                 &review.services,
                 &services_set_up,
@@ -1085,6 +1095,9 @@ struct Run<'a, 'p> {
     stopped_services: Vec<String>,
     /// Services this really set up, as a review's list can still lose one when it comes to it.
     services_set_up: Vec<String>,
+    /// Drivers this registered that start with Windows, to start once the install is checked and
+    /// their settings are in place.
+    drivers_to_start: Vec<String>,
     /// How the package's own files are checked.
     package_files: PackageFiles<'a>,
 }
@@ -2175,10 +2188,7 @@ impl Run<'_, '_> {
                 Ok(messages) => {
                     self.changes.drivers.extend(messages);
                     if starts_with_windows(driver.entry) {
-                        match start_driver(name, &run_sc_start) {
-                            Ok(started) => self.changes.drivers.push(started),
-                            Err(warning) => self.warnings.push(warning),
-                        }
+                        self.drivers_to_start.push(name.clone());
                     }
                 }
                 Err(warning) => self.record_failure(warning),
