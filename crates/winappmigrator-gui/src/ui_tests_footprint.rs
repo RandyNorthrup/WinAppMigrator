@@ -1022,6 +1022,19 @@ fn a_row_can_be_worked_from_the_keyboard_and_says_what_it_is() {
             .choices
             .is_left_out(&folder_id(&format!(r"{INSTALL}\samples")))
     );
+    // Working out what goes with that puts a note above the list and takes it away again. The row
+    // keeps the focus all the while: with ids that counted from the top it went to another row, and
+    // a key pressed then went there too (the 0.7.2 and 0.7.3 release builds failed on it here).
+    wait_until(&mut harness, "what goes with it is known", |app| {
+        app.also_is_current()
+    });
+    assert!(
+        harness
+            .get_by_label_contains("samples,")
+            .accesskit_node()
+            .is_focused(),
+        "the row lost the focus"
+    );
     let heading = harness.get_by_label_contains("Program Files,");
     assert_eq!(
         heading.accesskit_node().role(),
@@ -1030,14 +1043,37 @@ fn a_row_can_be_worked_from_the_keyboard_and_says_what_it_is() {
     heading.focus();
     harness.run_steps(1);
     harness.key_press(egui::Key::Enter);
-    // What goes with the choice above comes from a worker, and until it does the frames are busy. A slow
-    // runner took more than five seconds once (the 0.7.2 release build), so this waits up to thirty.
-    let closed = (0..3000).any(|_| {
-        harness.run_steps(1);
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        harness.query_by_label_contains("samples,").is_none()
+    harness.run_steps(3);
+    assert!(harness.query_by_label_contains("samples,").is_none());
+}
+
+#[test]
+fn a_heading_keeps_the_focus_while_a_note_above_it_comes_and_goes() {
+    let mut harness = harness_with(ThemeMode::Dark, ready_app);
+    harness.run_steps(2);
+    let heading = harness.get_by_label_contains("Program Files,");
+    heading.focus();
+    harness.run_steps(1);
+    // A choice made elsewhere starts the worker, whose note appears above the list until it is done.
+    let samples = folder_id(&format!(r"{INSTALL}\samples"));
+    harness.state_mut().set_included(&samples, false);
+    harness.run_steps(2);
+    assert!(!harness.state().also_is_current());
+    assert!(
+        harness
+            .get_by_label_contains("Program Files,")
+            .accesskit_node()
+            .is_focused()
+    );
+    wait_until(&mut harness, "what goes with it is known", |app| {
+        app.also_is_current()
     });
-    assert!(closed);
+    assert!(
+        harness
+            .get_by_label_contains("Program Files,")
+            .accesskit_node()
+            .is_focused()
+    );
 }
 
 #[test]

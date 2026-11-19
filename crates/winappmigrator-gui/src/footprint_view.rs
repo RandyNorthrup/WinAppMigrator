@@ -51,7 +51,7 @@ fn list_of_rows(
         ui.spacing_mut().item_spacing.y = 0.0;
         if count <= MOST_ROWS_IN_VIEW {
             for index in 0..count {
-                row(ui, index);
+                steady(ui, (id, index), |ui| row(ui, index));
             }
             return;
         }
@@ -66,7 +66,7 @@ fn list_of_rows(
             .max_height(height)
             .show_rows(ui, LIST_ROW_HEIGHT, count, |ui, range| {
                 for index in range {
-                    gained_focus |= row(ui, index);
+                    gained_focus |= steady(ui, (id, index), |ui| row(ui, index));
                 }
             });
         // A row brought into view by the keyboard is only in view of this list. The panel takes its
@@ -75,6 +75,20 @@ fn list_of_rows(
             ui.scroll_to_rect(output.inner_rect, None);
         }
     });
+}
+
+/// Draw something whose ids come from `key`, and not from what was drawn before it. A note such as
+/// "Working out what goes with this" comes and goes above the list as choices change, and with ids
+/// that count from the top, the keyboard's focus, and what a screen reader is on, would land on
+/// another row each time it did. `key` is unique on the screen.
+fn steady<R>(
+    ui: &mut egui::Ui,
+    key: impl std::hash::Hash + std::fmt::Debug,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let id = egui::Id::unique(("footprint", key));
+    ui.scope_builder(egui::UiBuilder::new().scope_id(id), add)
+        .inner
 }
 
 impl WinAppMigratorApp {
@@ -92,7 +106,10 @@ impl WinAppMigratorApp {
         summary: &str,
     ) -> bool {
         let open = self.is_open(group);
-        if widgets::disclosure_row(ui, theme, open, title, summary).clicked() {
+        let heading = steady(ui, ("heading", format!("{group:?}")), |ui| {
+            widgets::disclosure_row(ui, theme, open, title, summary)
+        });
+        if heading.clicked() {
             if open {
                 self.open_groups.remove(&group);
             } else {

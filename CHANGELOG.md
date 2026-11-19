@@ -36,6 +36,11 @@ did not fit.
   an executable" is now a plain note of why there is nothing to put in an installer, without **Try Again**.
 - **A program an install record names but that is not there says that.** Before, a missing program in another
   account's folders or Program Files (x86) was said to be someone else's.
+- **The keyboard's focus stays where it is in the list of what goes in an installer.** After a choice, a note that the
+  app is working out what goes with it appears above the list and goes again. Each time, the focus, and what a screen
+  reader was on, moved to another row or heading, and a key pressed then went there. Each row and heading now keeps
+  its own identity. A keyboard test that failed now and then, including on the 0.7.2 and first 0.7.3 release builds,
+  was this.
 
 ### Changed
 
