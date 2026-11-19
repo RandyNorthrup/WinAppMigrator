@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } staat niet op een schijf van deze p
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } staat in de mappen van een ander account of is niet van dit account, en volgens de eigen installatiegegevens van deze app hoort het daar niet, dus het is niet gelezen.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = kan geen uitvoerbaar bestand vinden voor { $app_name }. Een stuurprogramma, runtime of invoegtoepassing heeft mogelijk geen eigen programma om te verpakken.
+core-scan-nothing-to-package = Er is geen eigen programma van { $app_name } gevonden, dus er is niets om in een installatieprogramma te zetten. Bij stuurprogramma's, runtimes en invoegtoepassingen is dat vaak zo: installeer op de nieuwe pc een stuurprogramma via de fabrikant of Windows Update, en een runtime of invoegtoepassing samen met de app die deze gebruikt.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } is een web-app die een browser vanaf een website heeft geïnstalleerd. Deze heeft geen eigen programma, dus er is niets om in een installatieprogramma te zetten. Open op de nieuwe pc de website in die browser en installeer de app vanaf daar.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = { $path } is er niet meer, hoewel het in de installatiegegevens van deze app als het programma van de app wordt vermeld. De app is misschien verplaatst of deels verwijderd: als je de app op deze pc herstelt of opnieuw installeert, zou het terug moeten komen.
 # { $path } is the file that was picked.
 core-scan-not-a-file = scandoel is geen bestand: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

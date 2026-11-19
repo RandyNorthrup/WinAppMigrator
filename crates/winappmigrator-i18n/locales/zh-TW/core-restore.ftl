@@ -178,6 +178,8 @@ core-restore-placed-driver-image = 已放置驅動程式映像 { $source } -> { 
 core-restore-configured-driver = 已設定驅動程式 { $name }
 # { $name } is a driver's name.
 core-restore-created-driver = 已建立驅動程式 { $name }
+# { $name } is a driver's name.
+core-restore-started-driver = 已啟動驅動程式 { $name }
 core-restore-ensured-registry-key = 已確認登錄機碼 { $key } 存在
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = 已還原登錄 { $key } { $value }

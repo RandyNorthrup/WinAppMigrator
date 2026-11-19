@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } এই পিসির কোনো
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } অন্য একটি অ্যাকাউন্টের ফোল্ডারে আছে বা এই অ্যাকাউন্টের নয়, এবং এই অ্যাপের নিজস্ব রেকর্ডেও বলা নেই যে এটি সেখানে থাকার কথা, তাই এটি পড়া হয়নি।
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = { $app_name }-এর জন্য কোনো এক্সিকিউটেবল পাওয়া যায়নি। কোনো ড্রাইভার, রানটাইম বা অ্যাড-ইনের প্যাকেজ করার মতো নিজস্ব প্রোগ্রাম না-ও থাকতে পারে।
+core-scan-nothing-to-package = { $app_name }-এর নিজস্ব কোনো প্রোগ্রাম পাওয়া যায়নি, তাই ইনস্টলারে রাখার মতো কিছু নেই। ড্রাইভার, রানটাইম ও অ্যাড-ইন প্রায়ই এমন হয়: নতুন পিসিতে ড্রাইভারটি তার নির্মাতার কাছ থেকে বা Windows Update থেকে ইনস্টল করুন, আর রানটাইম বা অ্যাড-ইন সেটি ব্যবহার করে এমন অ্যাপের সঙ্গে ইনস্টল করুন।
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } একটি ওয়েব অ্যাপ, যা একটি ব্রাউজার একটি ওয়েবসাইট থেকে ইনস্টল করেছে। এর নিজস্ব কোনো প্রোগ্রাম নেই, তাই ইনস্টলারে রাখার মতো কিছু নেই। নতুন পিসিতে সেই ব্রাউজারে ওয়েবসাইটটি খুলুন এবং সেখান থেকে অ্যাপটি ইনস্টল করুন।
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = { $path } আর সেখানে নেই, যদিও এই অ্যাপের রেকর্ডে এটিকে অ্যাপের প্রোগ্রাম হিসেবে উল্লেখ করা আছে। অ্যাপটি হয়তো সরানো হয়েছে বা আংশিকভাবে মুছে ফেলা হয়েছে: এই পিসিতে এটি মেরামত বা পুনরায় ইনস্টল করলে এটি ফিরে আসার কথা।
 # { $path } is the file that was picked.
 core-scan-not-a-file = স্ক্যানের লক্ষ্যটি কোনো ফাইল নয়: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

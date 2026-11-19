@@ -178,6 +178,8 @@ core-restore-placed-driver-image = menempatkan citra driver { $source } -> { $de
 core-restore-configured-driver = mengonfigurasi driver { $name }
 # { $name } is a driver's name.
 core-restore-created-driver = membuat driver { $name }
+# { $name } is a driver's name.
+core-restore-started-driver = memulai driver { $name }
 core-restore-ensured-registry-key = memastikan kunci registri { $key }
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = memulihkan registri { $key } { $value }

@@ -178,6 +178,8 @@ core-restore-placed-driver-image = הוצבה תמונת מנהל ההתקן { $
 core-restore-configured-driver = הוגדר מנהל ההתקן { $name }
 # { $name } is a driver's name.
 core-restore-created-driver = נוצר מנהל ההתקן { $name }
+# { $name } is a driver's name.
+core-restore-started-driver = הופעל מנהל ההתקן { $name }
 core-restore-ensured-registry-key = אומת קיומו של מפתח הרישום { $key }
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = שוחזר ערך הרישום { $key } { $value }

@@ -545,6 +545,30 @@ fn a_person_who_picks_an_app_and_clicks_create_gets_an_installer()
 }
 
 #[test]
+fn a_folder_chosen_for_installers_is_kept_for_the_next_app_until_an_apps_own_is_used() {
+    let mut harness = harness_with(ThemeMode::Dark, |_| {});
+    let app = harness.state_mut();
+    app.select_app(1);
+    let first = app.apps[1].display_name.clone();
+    assert_eq!(app.output_dir, crate::default_output_for(&first));
+    app.output_dir = r" D:\Installers ".to_owned();
+    app.remember_the_output_folder(&first);
+    assert_eq!(app.chosen_output.as_deref(), Some(r"D:\Installers"));
+    app.select_app(0);
+    assert_eq!(
+        app.output_dir, r"D:\Installers",
+        "the next app goes there too"
+    );
+    // Building in an app's own folder, however it is written, goes back to each having its own.
+    let second = app.apps[0].display_name.clone();
+    app.output_dir = format!("{}/", crate::default_output_for(&second).to_uppercase());
+    app.remember_the_output_folder(&second);
+    assert_eq!(app.chosen_output, None);
+    app.select_app(1);
+    assert_eq!(app.output_dir, crate::default_output_for(&first));
+}
+
+#[test]
 fn the_first_time_it_takes_the_theme_windows_is_in_and_a_choice_stays() {
     let mut first = harness_with(ThemeMode::Dark, |app| {
         app.opening = Opening::new(crate::WINDOW_SIZES);

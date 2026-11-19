@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } befindet sich nicht auf einem Daten
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } befindet sich in den Ordnern eines anderen Kontos oder gehört nicht zu diesem Konto, und der eigene Installationseintrag dieser App gibt nicht an, dass die Datei dorthin gehört, daher wurde sie nicht gelesen.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = für { $app_name } wurde keine ausführbare Datei gefunden. Ein Treiber, eine Laufzeitkomponente oder ein Add-In hat möglicherweise kein eigenes Programm, das gepackt werden kann.
+core-scan-nothing-to-package = Für { $app_name } wurde kein eigenes Programm gefunden, daher gibt es nichts, was in ein Installationsprogramm aufgenommen werden kann. Bei Treibern, Laufzeitkomponenten und Add-Ins ist das oft so: Installieren Sie auf dem neuen PC einen Treiber vom Hersteller oder über Windows Update und eine Laufzeitkomponente oder ein Add-In zusammen mit der App, die sie verwendet.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } ist eine Web-App, die ein Browser von einer Website installiert hat. Sie hat kein eigenes Programm, daher gibt es nichts, was in ein Installationsprogramm aufgenommen werden kann. Öffnen Sie auf dem neuen PC die Website in diesem Browser, und installieren Sie die App von dort.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = { $path } ist nicht mehr vorhanden, obwohl der Installationseintrag dieser App die Datei als Programm der App angibt. Die App wurde möglicherweise verschoben oder teilweise entfernt: Wenn Sie sie auf diesem PC reparieren oder neu installieren, sollte die Datei wieder vorhanden sein.
 # { $path } is the file that was picked.
 core-scan-not-a-file = das Analyseziel ist keine Datei: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

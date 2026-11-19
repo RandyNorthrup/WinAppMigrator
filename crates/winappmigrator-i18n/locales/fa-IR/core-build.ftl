@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } روی دیسکی از این را�
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } در پوشه‌های حساب دیگری است یا متعلق به این حساب نیست، و سابقه خود این برنامه نمی‌گوید که به آنجا تعلق دارد، بنابراین خوانده نشد.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = فایل اجرایی برای { $app_name } پیدا نشد. شاید یک درایور، زمان اجرا یا افزونه، فایل اجرایی خودش را برای بسته‌بندی نداشته باشد.
+core-scan-nothing-to-package = هیچ فایل اجرایی متعلق به خود { $app_name } پیدا نشد، بنابراین چیزی برای قرار دادن در نصب‌کننده وجود ندارد. درایورها، زمان‌های اجرا و افزونه‌ها اغلب چنین‌اند: در رایانه جدید، درایور را از سازنده آن یا Windows Update نصب کنید، و زمان اجرا یا افزونه را همراه با برنامه‌ای که از آن استفاده می‌کند نصب کنید.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } یک برنامه وب است که یک مرورگر از یک وب‌سایت نصب کرده است. فایل اجرایی خودش را ندارد، بنابراین چیزی برای قرار دادن در نصب‌کننده وجود ندارد. در رایانه جدید، آن وب‌سایت را در همان مرورگر باز کنید و برنامه را از همان‌جا نصب کنید.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = { $path } دیگر آنجا نیست، هرچند سابقه این برنامه آن را فایل اجرایی برنامه معرفی می‌کند. شاید برنامه جابه‌جا شده یا بخشی از آن حذف شده باشد: تعمیر یا نصب دوباره آن در این رایانه باید آن را بازگرداند.
 # { $path } is the file that was picked.
 core-scan-not-a-file = مقصد اسکن یک فایل نیست: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

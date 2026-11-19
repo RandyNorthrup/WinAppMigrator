@@ -2,6 +2,40 @@
 
 All notable project changes are tracked here.
 
+## Unreleased
+
+Three more reports from Italy: VeraCrypt would not start after it was moved, the output folder had to be chosen again
+for every installer, and two kinds of entry in the list of apps said they "could not be looked at" with a reason that
+did not fit.
+
+### Fixed
+
+- **A driver an app keeps in its own folder, and Windows loads from a copy, goes with the app**
+  ([#7](https://github.com/RandyNorthrup/WinAppMigrator/issues/7)). VeraCrypt's setup keeps `veracrypt.sys` in
+  `C:\Program Files\VeraCrypt` and copies it to `System32\drivers`, which is what its driver service loads. Only drivers
+  inside the app's folder were taken as the app's, so the installer left VeraCrypt's out, and VeraCrypt then said
+  `veracrypt.sys` and `veracrypt-x64.sys` were missing and would not start. A driver whose file is byte for byte one in
+  the app's own folder is now the app's: it goes in the installer and is registered again on the new PC. Windows' own
+  drivers, and drivers installed from a driver package, never are.
+- **An installer starts a driver that starts with Windows** instead of leaving it for the next restart. VeraCrypt takes
+  a driver that is registered but not running for a leftover, and removes it. If the driver does not start, the
+  installer says so and Windows tries again at the next restart.
+- **A web app a browser installed says what it is** ([#8](https://github.com/RandyNorthrup/WinAppMigrator/issues/8)).
+  Chrome Remote Desktop, installed from Chrome, said its program was "in another account's folders". A web app has no
+  program of its own; the app now says so, and that it is installed again from its website on the new PC.
+- **An entry with no program of its own says so plainly** ([#8](https://github.com/RandyNorthrup/WinAppMigrator/issues/8)).
+  For a driver package such as NVIDIA's graphics driver, "This app could not be looked at: invalid input: could not find
+  an executable" is now a plain note of why there is nothing to put in an installer, without **Try Again**.
+- **A program an install record names but that is not there says that.** Before, a missing program in another
+  account's folders or Program Files (x86) was said to be someone else's.
+
+### Changed
+
+- **The output folder you choose is kept** ([#6](https://github.com/RandyNorthrup/WinAppMigrator/issues/6)). Once an
+  installer is built in a folder you chose, every app you pick after goes there too, also the next time the app
+  starts. It is kept in `%LOCALAPPDATA%\WinAppMigrator\output-folder.txt`. Building in an app's own folder again goes
+  back to a folder for each app.
+
 ## 0.7.2 — 2026-11-17
 
 Fixes for three problems reported from Italy: an installer that would not run after its records folder was opened in

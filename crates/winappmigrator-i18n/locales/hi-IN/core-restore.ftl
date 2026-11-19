@@ -178,6 +178,8 @@ core-restore-placed-driver-image = ड्राइवर इमेज { $source 
 core-restore-configured-driver = ड्राइवर { $name } कॉन्फ़िगर किया गया
 # { $name } is a driver's name.
 core-restore-created-driver = ड्राइवर { $name } बनाया गया
+# { $name } is a driver's name.
+core-restore-started-driver = ड्राइवर { $name } प्रारंभ किया गया
 core-restore-ensured-registry-key = रजिस्ट्री कुंजी { $key } का होना सुनिश्चित किया गया
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = रजिस्ट्री { $key } { $value } पुनर्स्थापित किया गया

@@ -31,8 +31,8 @@ use crate::license_scan::{
 };
 use crate::models::DependencySourceCategory;
 use crate::models::{
-    AppArchitecture, AppSelection, DependencyEntry, DotNetFlavor, DriverEntry, FileEntry,
-    InstallScope, InstalledApp, ProgramNeed, ProgramRole, RuntimePrerequisite,
+    AppArchitecture, AppSelection, DependencyEntry, DotNetFlavor, DriverEntry, FileClassification,
+    FileEntry, InstallScope, InstalledApp, ProgramNeed, ProgramRole, RuntimePrerequisite,
     RuntimePrerequisiteKind, SCAN_SCHEMA_VERSION, ScanOptions, ScanReport, ScheduledTaskEntry,
     ServiceEntry, ShortcutEntry, SourcePlatform, Warning, WarningSeverity,
 };
@@ -58,7 +58,9 @@ use crate::secret_rules::{
     names_who_ran_the_setup, take_inno_setup_logs, take_licenses_from_settings, take_secret_files,
     take_secrets_from_license_values, take_secrets_from_settings,
 };
-use crate::service_scan::{ServiceScanContext, scan_drivers, scan_services};
+use crate::service_scan::{
+    AppDriverFile, ServiceScanContext, scan_driver_copies, scan_drivers, scan_services,
+};
 use crate::shortcut_scan::{ShortcutScanContext, scan_shortcuts};
 use crate::system_context::SystemContext;
 use crate::task_scan::{TaskScanContext, scan_scheduled_tasks};
@@ -200,6 +202,12 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         AppSelection::InstalledApp(app) => Some((**app).clone()),
         AppSelection::ExecutablePath(_) => None,
     };
+    if let Some(app) = source_app.as_ref().filter(|app| is_a_browsers_web_app(app)) {
+        return Err(WinAppMigratorError::NothingToPackage(t!(
+            "core-scan-web-app",
+            app_name = app.display_name.as_str()
+        )));
+    }
     // A selection came from a listing, and is asked about like anything else on a drive.
     if let Some(app) = source_app.as_mut() {
         app.install_location = app
@@ -231,6 +239,14 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         } else {
             t!("core-scan-program-not-on-this-pc", path = path)
         }));
+    }
+    // An install record can outlive what it names, as one for Chrome Remote Desktop did when Chrome
+    // moved from Program Files (x86), and that is all there is to say of a file that is not there.
+    if !crate::source_fs::exists(&executable_path) {
+        return Err(WinAppMigratorError::InvalidInput(t!(
+            "core-scan-program-missing",
+            path = executable_path.display().to_string()
+        )));
     }
     // What an app is allowed to have in another account's folders is what its machine-wide record
     // says. An uninstall entry in an account's own registry can be written with no rights at all,
@@ -417,14 +433,12 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
         },
         &system,
     );
-    let (drivers, driver_warnings) = scan_drivers(
-        &ServiceScanContext {
-            executable_path: logical_executable.clone(),
-            install_location: logical_location.clone(),
-            also_the_apps: also_the_apps.clone(),
-        },
-        &system,
-    );
+    let driver_context = ServiceScanContext {
+        executable_path: logical_executable.clone(),
+        install_location: logical_location.clone(),
+        also_the_apps: also_the_apps.clone(),
+    };
+    let (mut drivers, driver_warnings) = scan_drivers(&driver_context, &system);
     let (mut scheduled_tasks, task_warnings) = scan_scheduled_tasks(
         &TaskScanContext {
             executable_path: logical_executable.clone(),
@@ -621,6 +635,20 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     );
     monitor.checkpoint()?;
     let near_matches = near_look.rows(&footprint_locations, &picks, &system);
+    // Only now is it known which driver files the app keeps in its own folder, and a driver that
+    // Windows loads from a copy of one of them is the app's as well.
+    let copied_drivers = scan_driver_copies(
+        &driver_context,
+        &app_driver_files(&file_inventory),
+        &drivers,
+        &system,
+    );
+    let driver_files_registered_by_copy: Vec<PathBuf> = copied_drivers
+        .iter()
+        .map(|copied| copied.copy_of.clone())
+        .collect();
+    drivers.extend(copied_drivers.into_iter().map(|copied| copied.driver));
+    drivers.sort_by(|left, right| left.service_name.cmp(&right.service_name));
 
     // What an entry in the registry points at says whose it is, so this comes after what the app has
     // is known. As its PC calls them, which is what those values say.
@@ -830,7 +858,12 @@ pub fn scan_app(options: &ScanOptions, monitor: &ScanMonitor) -> Result<ScanRepo
     warnings.extend(driver_component_warnings(&drivers));
     warnings.extend(license_warnings);
     warnings.extend(left_out_warnings(&left_out));
-    say_which_driver_files_stay(&mut warnings, &drivers, &system);
+    say_which_driver_files_stay(
+        &mut warnings,
+        &drivers,
+        &driver_files_registered_by_copy,
+        &system,
+    );
 
     let artifacts = artifact_paths(&options.output_dir);
 
@@ -1053,12 +1086,21 @@ fn selected_executable_path(
             .clone()
             .or_else(|| install_source.and_then(|source| primary_executable(app, source, system)))
             .ok_or_else(|| {
-                WinAppMigratorError::InvalidInput(t!(
-                    "core-scan-no-executable",
+                WinAppMigratorError::NothingToPackage(t!(
+                    "core-scan-nothing-to-package",
                     app_name = app.display_name.as_str()
                 ))
             }),
     }
+}
+
+/// A web app that Chrome, Edge, or another browser built on Chromium installed from a website. Its
+/// entry in the list of apps is the browser's, and the only program it names is the browser's own
+/// launcher, which says which app to take out with `--uninstall-app-id`.
+fn is_a_browsers_web_app(app: &InstalledApp) -> bool {
+    app.uninstall_string
+        .as_deref()
+        .is_some_and(|command| command.to_ascii_lowercase().contains("--uninstall-app-id="))
 }
 
 fn validate_scan_input(executable_path: &Path) -> Result<()> {
@@ -1493,11 +1535,13 @@ fn missing_dependency_warnings(
         .collect()
 }
 
-/// A driver the app registers goes with it. Any other driver file does not, and an app that loads
-/// its own on demand will not work without it, which is something to say and not just to note.
+/// A driver the app registers goes with it, and so does what a driver file in its folder is when
+/// Windows loads a copy of it. Any other driver file does not, and an app that loads its own on
+/// demand will not work without it, which is something to say and not just to note.
 fn say_which_driver_files_stay(
     warnings: &mut [Warning],
     drivers: &[DriverEntry],
+    registered_by_copy: &[PathBuf],
     system: &SystemContext,
 ) {
     for warning in warnings
@@ -1505,16 +1549,30 @@ fn say_which_driver_files_stay(
         .filter(|warning| warning.code == DRIVER_FILE_NOT_COPIED_CODE)
     {
         let registered = warning.source.as_deref().is_some_and(|source| {
-            drivers.iter().any(|driver| {
-                driver.app_owned
-                    && comparable_path(&driver.image_path)
-                        == comparable_path(&system.logical_path(Path::new(source)))
-            })
+            let source = comparable_path(&system.logical_path(Path::new(source)));
+            drivers
+                .iter()
+                .any(|driver| driver.app_owned && comparable_path(&driver.image_path) == source)
+                || registered_by_copy
+                    .iter()
+                    .any(|copy| comparable_path(copy) == source)
         });
         if !registered {
             warning.severity = WarningSeverity::Warning;
         }
     }
+}
+
+/// The driver files discovery found, which it keeps out of the package as files.
+fn app_driver_files(files: &[FileEntry]) -> Vec<AppDriverFile<'_>> {
+    files
+        .iter()
+        .filter(|file| file.classification == FileClassification::ManualRuntimeInstall)
+        .map(|file| AppDriverFile {
+            original_path: &file.original_path,
+            read_path: &file.path,
+        })
+        .collect()
 }
 
 fn driver_component_warnings(drivers: &[DriverEntry]) -> Vec<Warning> {
@@ -1602,6 +1660,30 @@ mod tests {
         assert!(roots.contains(&PathBuf::from(r"C:\Vendor\Installer2\Display.NvApp")));
         assert!(roots.contains(&PathBuf::from(r"C:\Vendor\NVIDIA app")));
         assert!(roots.contains(&PathBuf::from(r"C:\Vendor\NVIDIA app\CEF")));
+    }
+
+    #[test]
+    fn a_web_app_a_browser_installed_is_known_by_how_it_is_taken_out() {
+        let mut app = InstalledApp {
+            display_name: "Chrome Remote Desktop".to_owned(),
+            publisher: Some(r"Google\Chrome".to_owned()),
+            version: Some("1.0".to_owned()),
+            install_location: None,
+            uninstall_string: Some(
+                r#""C:\Program Files (x86)\Google\Chrome\Application\chrome_proxy.exe" --profile-directory=Default --uninstall-app-id=inomeogfingihgjfjlpeplalcfajhgai"#
+                    .to_owned(),
+            ),
+            main_executable: None,
+            registry_source_path: r"HKCU\Example".to_owned(),
+            architecture: AppArchitecture::X64,
+            install_scope: InstallScope::PerUser,
+            owner_profile: None,
+        };
+        assert!(is_a_browsers_web_app(&app));
+        app.uninstall_string = Some(r#""C:\Program Files\Acme\unins000.exe" /SILENT"#.to_owned());
+        assert!(!is_a_browsers_web_app(&app));
+        app.uninstall_string = None;
+        assert!(!is_a_browsers_web_app(&app));
     }
 
     #[test]

@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } tidak berada di disk PC ini, atau m
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } berada di folder akun lain atau bukan milik akun ini, dan catatan aplikasi ini sendiri tidak menyebutkan bahwa file itu semestinya ada di sana, jadi tidak dibaca.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = tidak dapat menemukan file yang dapat dieksekusi untuk { $app_name }. Driver, runtime, atau add-in mungkin tidak memiliki program sendiri untuk dikemas.
+core-scan-nothing-to-package = Tidak ditemukan program milik { $app_name } sendiri, jadi tidak ada apa pun untuk dimasukkan ke penginstal. Driver, runtime, dan add-in sering seperti ini: di PC baru, instal driver dari pembuatnya atau Windows Update, dan runtime atau add-in bersama aplikasi yang menggunakannya.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } adalah aplikasi web yang diinstal browser dari sebuah situs web. Aplikasi ini tidak memiliki program sendiri, jadi tidak ada apa pun untuk dimasukkan ke penginstal. Di PC baru, buka situs web tersebut di browser yang sama dan instal aplikasinya dari sana.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = { $path } sudah tidak ada, meskipun catatan aplikasi ini menyebutnya sebagai program aplikasi. Aplikasi mungkin telah dipindahkan atau dihapus sebagian: memperbaiki atau menginstal ulang aplikasi di PC ini seharusnya mengembalikannya.
 # { $path } is the file that was picked.
 core-scan-not-a-file = target pemindaian bukan file: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

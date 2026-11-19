@@ -28,6 +28,10 @@ pub enum WinAppMigratorError {
 
     InvalidInput(String),
 
+    /// What was picked has nothing of its own to put in an installer, such as a web app a browser
+    /// installed, or a driver with no program. Not a fault: the words say what to do instead.
+    NothingToPackage(String),
+
     Serialization(#[from] serde_json::Error),
 
     Archive(String),
@@ -55,6 +59,7 @@ impl fmt::Display for WinAppMigratorError {
                 detail = detail
             ),
             Self::InvalidInput(detail) => t!("core-error-invalid-input", detail = detail),
+            Self::NothingToPackage(explanation) => explanation.clone(),
             Self::Serialization(error) => {
                 t!("core-error-serialization", detail = error.to_string())
             }

@@ -178,6 +178,8 @@ core-restore-placed-driver-image = 드라이버 이미지 배치함: { $source }
 core-restore-configured-driver = 드라이버 구성함: { $name }
 # { $name } is a driver's name.
 core-restore-created-driver = 드라이버 만듦: { $name }
+# { $name } is a driver's name.
+core-restore-started-driver = 드라이버 시작함: { $name }
 core-restore-ensured-registry-key = 레지스트리 키 준비함: { $key }
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = 레지스트리 복원함: { $key } { $value }

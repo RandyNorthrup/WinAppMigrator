@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = Program { $path } nie znajduje się na dysku 
 # { $path } is the app's program.
 core-scan-program-someone-elses = Program { $path } znajduje się w folderach innego konta lub nie należy do tego konta, a zapis instalacji tej aplikacji nie wskazuje, że powinien się tam znajdować, więc nie został odczytany.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = nie można znaleźć pliku wykonywalnego aplikacji { $app_name }. Sterownik, środowisko uruchomieniowe lub dodatek mogą nie mieć własnego programu, który można spakować.
+core-scan-nothing-to-package = Nie znaleziono własnego programu aplikacji { $app_name }, więc nie ma nic do umieszczenia w instalatorze. Tak często jest ze sterownikami, środowiskami uruchomieniowymi i dodatkami: na nowym komputerze zainstaluj sterownik od producenta lub z usługi Windows Update, a środowisko uruchomieniowe lub dodatek razem z aplikacją, która z niego korzysta.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } to aplikacja internetowa, którą przeglądarka zainstalowała z witryny internetowej. Nie ma własnego programu, więc nie ma nic do umieszczenia w instalatorze. Na nowym komputerze otwórz tę witrynę w tej samej przeglądarce i zainstaluj aplikację stamtąd.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = Program { $path } już nie istnieje, choć zapis instalacji tej aplikacji wskazuje go jako jej program. Aplikacja mogła zostać przeniesiona lub częściowo usunięta: naprawienie lub ponowne zainstalowanie jej na tym komputerze powinno go przywrócić.
 # { $path } is the file that was picked.
 core-scan-not-a-file = element wybrany do analizy nie jest plikiem: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

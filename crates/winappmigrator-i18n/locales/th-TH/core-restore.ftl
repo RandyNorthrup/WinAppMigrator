@@ -178,6 +178,8 @@ core-restore-placed-driver-image = วางอิมเมจไดรเวอ
 core-restore-configured-driver = กำหนดค่าไดรเวอร์ { $name } แล้ว
 # { $name } is a driver's name.
 core-restore-created-driver = สร้างไดรเวอร์ { $name } แล้ว
+# { $name } is a driver's name.
+core-restore-started-driver = เริ่มไดรเวอร์ { $name } แล้ว
 core-restore-ensured-registry-key = ยืนยันว่ามีคีย์รีจิสทรี { $key } แล้ว
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = คืนค่ารีจิสทรี { $key } { $value } แล้ว

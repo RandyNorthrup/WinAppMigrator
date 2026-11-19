@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } bu bilgisayarın bir diskinde deği
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } başka bir hesabın klasörlerinde veya bu hesaba ait değil ve bu uygulamanın kendi kaydı orada olması gerektiğini belirtmiyor, bu nedenle okunmadı.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = { $app_name } için yürütülebilir dosya bulunamadı. Bir sürücünün, çalışma zamanının veya eklentinin paketlenecek kendi programı olmayabilir.
+core-scan-nothing-to-package = { $app_name } uygulamasına ait bir program bulunamadı, bu nedenle yükleyiciye konacak bir şey yok. Sürücüler, çalışma zamanları ve eklentiler genellikle böyledir: yeni bilgisayarda sürücüyü üreticisinden veya Windows Update'ten, çalışma zamanını ya da eklentiyi ise onu kullanan uygulamayla birlikte yükleyin.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name }, bir tarayıcının bir web sitesinden yüklediği bir web uygulamasıdır. Kendine ait bir programı yoktur, bu nedenle yükleyiciye konacak bir şey yok. Yeni bilgisayarda web sitesini aynı tarayıcıda açın ve uygulamayı oradan yükleyin.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = Bu uygulamanın kaydı { $path } dosyasını uygulamanın programı olarak gösterse de dosya artık orada değil. Uygulama taşınmış veya kısmen kaldırılmış olabilir: uygulamayı bu bilgisayarda onarmak veya yeniden yüklemek dosyayı geri getirmelidir.
 # { $path } is the file that was picked.
 core-scan-not-a-file = tarama hedefi bir dosya değil: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

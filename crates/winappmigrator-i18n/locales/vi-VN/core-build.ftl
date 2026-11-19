@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } không nằm trên đĩa của PC n
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } nằm trong thư mục của tài khoản khác hoặc không thuộc tài khoản này, và bản ghi của chính ứng dụng này không cho biết tệp đó thuộc về nơi đó, nên không được đọc.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = không tìm thấy tệp thực thi cho { $app_name }. Trình điều khiển, thư viện thời gian chạy hoặc phần bổ trợ có thể không có chương trình riêng để đóng gói.
+core-scan-nothing-to-package = Không tìm thấy chương trình riêng nào của { $app_name }, nên không có gì để đưa vào trình cài đặt. Trình điều khiển, thư viện thời gian chạy và phần bổ trợ thường như vậy: trên PC mới, hãy cài đặt trình điều khiển từ nhà sản xuất hoặc Windows Update, và cài đặt thư viện thời gian chạy hoặc phần bổ trợ cùng với ứng dụng sử dụng nó.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } là một ứng dụng web mà trình duyệt đã cài đặt từ một trang web. Ứng dụng này không có chương trình riêng, nên không có gì để đưa vào trình cài đặt. Trên PC mới, hãy mở trang web đó trong cùng trình duyệt và cài đặt ứng dụng từ đó.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = { $path } không còn ở đó nữa, dù bản ghi của ứng dụng này ghi nó là chương trình của ứng dụng. Ứng dụng có thể đã bị di chuyển hoặc bị gỡ một phần: sửa chữa hoặc cài đặt lại ứng dụng trên PC này sẽ đưa nó trở lại.
 # { $path } is the file that was picked.
 core-scan-not-a-file = đích quét không phải là tệp: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

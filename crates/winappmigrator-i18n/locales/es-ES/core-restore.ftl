@@ -178,6 +178,8 @@ core-restore-placed-driver-image = se ha colocado la imagen del controlador { $s
 core-restore-configured-driver = se ha configurado el controlador { $name }
 # { $name } is a driver's name.
 core-restore-created-driver = se ha creado el controlador { $name }
+# { $name } is a driver's name.
+core-restore-started-driver = se ha iniciado el controlador { $name }
 core-restore-ensured-registry-key = se ha comprobado que existe la clave del Registro { $key }
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = se ha restaurado en el Registro { $key } { $value }

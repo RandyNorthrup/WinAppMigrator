@@ -136,12 +136,18 @@ impl WinAppMigratorApp {
             Running(Option<ScanStep>),
             Ready,
             Failed(String),
+            NothingToPackage(String),
             Stopped,
         }
         let look = match &self.scan {
             ScanState::None => Look::Waiting,
             ScanState::Running { step, .. } => Look::Running(*step),
             ScanState::Ready(_) => Look::Ready,
+            ScanState::Failed {
+                message,
+                nothing_to_package: true,
+                ..
+            } => Look::NothingToPackage(message.clone()),
             ScanState::Failed { message, .. } => Look::Failed(message.clone()),
             ScanState::Stopped { .. } => Look::Stopped,
         };
@@ -221,6 +227,9 @@ impl WinAppMigratorApp {
                 {
                     self.scan_again();
                 }
+            }
+            Look::NothingToPackage(message) => {
+                widgets::notice(ui, theme, Role::Neutral, &message);
             }
             Look::Stopped => {
                 widgets::notice(ui, theme, Role::Neutral, &t!("app-scan-stopped"));

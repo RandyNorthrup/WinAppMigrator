@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } 不在這台電腦的磁碟上，�
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } 位於其他帳戶的資料夾中或不屬於此帳戶，且此應用程式本身的記錄並未說明它屬於該處，因此未讀取。
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = 找不到 { $app_name } 的執行檔。驅動程式、執行階段或增益集可能沒有可封裝的獨立程式。
+core-scan-nothing-to-package = 找不到 { $app_name } 本身的程式，因此沒有可放入安裝程式的內容。驅動程式、執行階段和增益集通常是這樣：請在新電腦上從製造商或 Windows Update 安裝驅動程式，並將執行階段或增益集與使用它的應用程式一起安裝。
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } 是瀏覽器從網站安裝的 Web 應用程式。它沒有自己的程式，因此沒有可放入安裝程式的內容。請在新電腦上用同一個瀏覽器開啟該網站，並從那裡安裝這個應用程式。
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = 此應用程式的記錄將 { $path } 列為應用程式的程式，但它已不在那裡。此應用程式可能已被移動或部分移除：在這台電腦上修復或重新安裝此應用程式，應該就能復原。
 # { $path } is the file that was picked.
 core-scan-not-a-file = 掃描目標不是檔案：{ $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

@@ -177,6 +177,8 @@ core-restore-placed-driver-image = sürücü görüntüsü yerleştirildi: { $so
 core-restore-configured-driver = sürücü yapılandırıldı: { $name }
 # { $name } is a driver's name.
 core-restore-created-driver = sürücü oluşturuldu: { $name }
+# { $name } is a driver's name.
+core-restore-started-driver = sürücü başlatıldı: { $name }
 core-restore-ensured-registry-key = kayıt defteri anahtarının var olması sağlandı: { $key }
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = kayıt defteri geri yüklendi: { $key } { $value }

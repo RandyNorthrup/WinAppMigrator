@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } אינו נמצא בדיסק של �
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } נמצא בתיקיות של חשבון אחר או אינו שייך לחשבון זה, והרשומה של אפליקציה זו עצמה אינה מציינת שמקומו שם, ולכן הוא לא נקרא.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = לא נמצא קובץ הפעלה עבור { $app_name }. ייתכן שלמנהל התקן, לרכיב זמן ריצה או לתוסף אין תוכנית משלו לאריזה.
+core-scan-nothing-to-package = לא נמצאה עבור { $app_name } תוכנית משלה, ולכן אין מה להכניס לתוכנית התקנה. כך קורה לעתים קרובות עם מנהלי התקנים, רכיבי זמן ריצה ותוספים: במחשב החדש יש להתקין את מנהל ההתקן מהיצרן או דרך Windows Update, ואת רכיב זמן הריצה או התוסף יחד עם האפליקציה שמשתמשת בו.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } היא אפליקציית אינטרנט שדפדפן התקין מאתר אינטרנט. אין לה תוכנית משלה, ולכן אין מה להכניס לתוכנית התקנה. במחשב החדש יש לפתוח את האתר באותו דפדפן ולהתקין את האפליקציה משם.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = { $path } כבר אינו שם, אף שהרשומה של אפליקציה זו מציינת אותו כתוכנית של האפליקציה. ייתכן שהאפליקציה הועברה או הוסרה בחלקה: תיקון או התקנה מחדש שלה במחשב זה אמורים להחזיר אותו.
 # { $path } is the file that was picked.
 core-scan-not-a-file = יעד הסריקה אינו קובץ: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

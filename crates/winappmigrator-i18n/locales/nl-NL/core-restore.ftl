@@ -178,6 +178,8 @@ core-restore-placed-driver-image = stuurprogrammabestand { $source } geplaatst i
 core-restore-configured-driver = stuurprogramma { $name } geconfigureerd
 # { $name } is a driver's name.
 core-restore-created-driver = stuurprogramma { $name } gemaakt
+# { $name } is a driver's name.
+core-restore-started-driver = stuurprogramma { $name } gestart
 core-restore-ensured-registry-key = registersleutel { $key } gemaakt of al aanwezig
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = register { $key } { $value } hersteld

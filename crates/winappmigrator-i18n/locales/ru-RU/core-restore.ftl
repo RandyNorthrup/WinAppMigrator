@@ -178,6 +178,8 @@ core-restore-placed-driver-image = размещен образ драйвера 
 core-restore-configured-driver = настроен драйвер { $name }
 # { $name } is a driver's name.
 core-restore-created-driver = создан драйвер { $name }
+# { $name } is a driver's name.
+core-restore-started-driver = запущен драйвер { $name }
 core-restore-ensured-registry-key = обеспечено наличие раздела реестра { $key }
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = восстановлен параметр реестра { $key } { $value }

@@ -191,7 +191,7 @@ in the one Windows is in until you choose. An installer goes by the same, where 
 | **Registry** | Yes, unless you untick a kind of it | The app's machine-wide keys, plus what points at a file it has: COM classes with their type libraries, interfaces, and AppIDs, file types, link protocols, menu commands, shell extensions, Default apps entries, and 32-bit Run and App Paths entries. Without User Data, an account's keys go only where Windows itself looks for an app, plus a value saying where the app is. Values outside the app's own keys and those kinds are a row of their own in what the installer lists |
 | **Firewall rules, fonts, ODBC, event log sources, compatibility settings** | Yes, unless you untick a kind of it | Each only for a file the app has. A font in `C:\Windows\Fonts` comes only if a machine-wide install record names it, and goes in the install folder |
 | **Certificates** | Reported only | The ones the app seems to rely on are named. They are never installed, because whether to trust one is for you to decide |
-| **Services and drivers** | Yes, unless you untick one | Services keep their arguments, settings, and built-in account, and one set to start by itself is started once the install has checked what it installed. One that will not start is a warning, and the app stays installed. A custom account's password cannot be moved, so that service is set up as LocalService and the installer says so. Drivers the app owns are re-registered, though no test has loaded one. Vendor and inbox drivers are reported instead, because they cannot be redistributed |
+| **Services and drivers** | Yes, unless you untick one | Services keep their arguments, settings, and built-in account, and one set to start by itself is started once the install has checked what it installed. One that will not start is a warning, and the app stays installed. A custom account's password cannot be moved, so that service is set up as LocalService and the installer says so. Drivers the app owns, in its folder or copied from there, are re-registered and started if they start with Windows; only VeraCrypt's has been loaded, by hand. Vendor and inbox drivers are reported instead, because they cannot be redistributed |
 | **Scheduled Tasks** | Yes, unless you untick one | A task that ran as a person runs as whoever installs it. With User Data off, one told to work on something in someone's folders stays behind |
 | **Shortcuts** | Yes, unless you untick one | One in your own folders goes without User Data only if it just opens the app, and then to the Desktop or Start Menu of whoever installs it. An app installed for one account keeps its own |
 | **Environment variables** | Yes, unless you untick that kind | Those that hold the app's path. A captured `Path` holds only the app's entries, and is merged into the target's, never replaced |
@@ -233,8 +233,9 @@ Those are small, well-behaved apps on clean machines, and this is how far that g
 - **Uninstalling.** CI runs the quiet command an entry in Settings records, `QuietUninstallString`, and only opens the
   windowed one. It has not clicked **Uninstall** in Settings or in the uninstaller's window.
 - **Signing.** `v0.5.0` is the first release that is signed, and `v0.6.0` the first whose client is. The signed client was run on 32-bit and 64-bit Windows 7 SP1 VMs with none of its later updates: it worked, and its signature read as untrusted on both, and as valid on the 64-bit one once Microsoft's 2020 root was added; the UAC prompt itself was not seen. A certificate of your own on an installer has only been tried with a throwaway one.
-- **What has not been tried at all.** An app with online activation, a driver being loaded, an app the size of an office
-  suite, an app's own updater after a move, and a restart afterward.
+- **What has not been tried at all.** An app with online activation, an app the size of an office suite, an app's own
+  updater after a move, and a restart afterward. A driver being loaded was tried once, by hand: VeraCrypt's, on a test PC,
+  where it started and mounted a volume. CI does not load one.
 
 So try an installer before you rely on it.
 
@@ -475,8 +476,9 @@ there is replaced.
 
 ## What It Keeps on Your PC
 
-- **The app** needs no install, and keeps only the light or dark mode you choose, in `%LOCALAPPDATA%\WinAppMigrator\theme.txt`.
-  What it builds goes in the output folder you give it, by default under `%USERPROFILE%\WinAppMigrator`.
+- **The app** needs no install, and keeps only what you choose in it, in `%LOCALAPPDATA%\WinAppMigrator`: the light or
+  dark mode, the language, and the output folder you built in last, if you chose one. What it builds goes in that folder,
+  by default under `%USERPROFILE%\WinAppMigrator`, in a folder for each app.
 - **`%ProgramData%\WinAppMigrator`**, which only administrators can get into, holds logs, what an install needs to undo itself,
   and while one runs, what it has unpacked. A scan of a connected drive, or of an account that is not signed in, also keeps copies
   of registry files there while it runs.

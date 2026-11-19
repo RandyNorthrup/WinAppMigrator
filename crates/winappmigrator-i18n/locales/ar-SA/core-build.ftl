@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = لم تتم قراءة { $path } لأنه ل�
 # { $path } is the app's program.
 core-scan-program-someone-elses = لم تتم قراءة { $path } لأنه موجود في مجلدات حساب آخر أو لا يخص هذا الحساب، ولا يذكر سجل هذا التطبيق نفسه أنه ينتمي إلى هناك.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = تعذر العثور على ملف تنفيذي لـ { $app_name }. قد لا يكون لبرنامج التشغيل أو مكتبة وقت التشغيل أو الوظيفة الإضافية برنامج خاص بها يمكن تجميعه في حزمة.
+core-scan-nothing-to-package = لم يُعثر على برنامج خاص بـ { $app_name }، لذا لا يوجد ما يُوضع في برنامج التثبيت. هذا شائع في برامج التشغيل ومكتبات وقت التشغيل والوظائف الإضافية: على الكمبيوتر الجديد، ثبّت برنامج التشغيل من الشركة المصنّعة أو من Windows Update، وثبّت مكتبة وقت التشغيل أو الوظيفة الإضافية مع التطبيق الذي يستخدمها.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } تطبيق ويب ثبّته مستعرض من موقع ويب. ليس له برنامج خاص به، لذا لا يوجد ما يُوضع في برنامج التثبيت. على الكمبيوتر الجديد، افتح موقع الويب في المستعرض نفسه وثبّت التطبيق من هناك.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = لم يعد { $path } موجودًا، مع أن سجل هذا التطبيق يذكره على أنه برنامج التطبيق. ربما نُقل التطبيق أو أُزيل جزء منه: إصلاحه أو إعادة تثبيته على هذا الكمبيوتر يُفترض أن يعيده.
 # { $path } is the file that was picked.
 core-scan-not-a-file = هدف الفحص ليس ملفًا: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

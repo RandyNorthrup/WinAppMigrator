@@ -23,8 +23,12 @@ const TASKBAR: f32 = 48.0;
 const SETTINGS_DIR: &str = "WinAppMigrator";
 const MODE_FILE: &str = "theme.txt";
 const LANGUAGE_FILE: &str = "language.txt";
+const OUTPUT_FOLDER_FILE: &str = "output-folder.txt";
 /// More than any word or language tag a setting holds.
 const MOST_SETTING_BYTES: u64 = 16;
+/// More than any folder a person picks, in UTF-8. Windows' own limit for a path is 32,767 UTF-16
+/// characters, but nobody types that, and a folder past this is just not remembered.
+const MOST_FOLDER_BYTES: u64 = 4096;
 
 fn settings_file(name: &str) -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
@@ -42,6 +46,38 @@ pub fn chosen_language() -> Option<String> {
     setting_in(&settings_file(LANGUAGE_FILE)?)
 }
 
+/// The folder a person last chose for installers, on this account, if they chose one of their own.
+/// Only a full path, with nothing in it that could not be in a name, is taken for one: it is only
+/// ever put in the Output Folder field, for them to see before anything is written there.
+pub fn chosen_output_folder() -> Option<PathBuf> {
+    output_folder_in(&settings_file(OUTPUT_FOLDER_FILE)?)
+}
+
+fn output_folder_in(path: &Path) -> Option<PathBuf> {
+    let text = setting_of_at_most(path, MOST_FOLDER_BYTES)?;
+    let folder = PathBuf::from(&text);
+    (folder.is_absolute() && !text.chars().any(char::is_control)).then_some(folder)
+}
+
+/// Remember the folder a person chose for installers, the same way as the mode. `None` forgets it,
+/// so each app gets its own folder again.
+pub fn remember_output_folder(folder: Option<&Path>) {
+    if let Some(path) = settings_file(OUTPUT_FOLDER_FILE) {
+        remember_output_folder_in(&path, folder);
+    }
+}
+
+fn remember_output_folder_in(path: &Path, folder: Option<&Path>) {
+    match folder.and_then(Path::to_str) {
+        Some(folder) => write_setting(path, folder),
+        // Only if it is a file. Through a link, nothing is removed but the link.
+        None if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_dir()) => {
+            let _ = fs::remove_file(path);
+        }
+        None => {}
+    }
+}
+
 fn mode_in(path: &Path) -> Option<ThemeMode> {
     ThemeMode::from_tag(&setting_in(path)?)
 }
@@ -50,16 +86,20 @@ fn mode_in(path: &Path) -> Option<ThemeMode> {
 /// change. So it is only ever a short word, and only if it is really a file there, as something
 /// else could be made to keep a window from opening.
 fn setting_in(path: &Path) -> Option<String> {
+    setting_of_at_most(path, MOST_SETTING_BYTES)
+}
+
+fn setting_of_at_most(path: &Path, most: u64) -> Option<String> {
     if !fs::symlink_metadata(path).ok()?.is_file() {
         return None;
     }
     let mut text = String::new();
     File::open(path)
         .ok()?
-        .take(MOST_SETTING_BYTES + 1)
+        .take(most + 1)
         .read_to_string(&mut text)
         .ok()?;
-    if text.len() as u64 > MOST_SETTING_BYTES {
+    if text.len() as u64 > most {
         return None;
     }
     Some(text.trim().to_owned())
@@ -484,6 +524,41 @@ mod tests {
         assert_eq!(setting_in(&file).as_deref(), Some("it-IT"));
         assert!(fs::write(&file, "it-IT".repeat(100)).is_ok());
         assert_eq!(setting_in(&file), None, "too long to be a tag");
+    }
+
+    #[test]
+    fn a_chosen_output_folder_is_read_back_and_forgotten_and_nothing_else_is_taken_for_one() {
+        let place = Place::new("output-folder");
+        let file = place.0.join(OUTPUT_FOLDER_FILE);
+        assert_eq!(output_folder_in(&file), None, "nothing is there");
+        let folder = Path::new(r"D:\Installers\Über 日本");
+        remember_output_folder_in(&file, Some(folder));
+        assert_eq!(output_folder_in(&file).as_deref(), Some(folder));
+        remember_output_folder_in(&file, None);
+        assert!(!file.exists(), "forgotten");
+        assert_eq!(output_folder_in(&file), None);
+        remember_output_folder_in(&file, None);
+        let with_a_bell = format!(r"D:\a{}b", '\u{7}');
+        for text in [r"relative\folder", "", with_a_bell.as_str()] {
+            assert!(fs::write(&file, text).is_ok());
+            assert_eq!(output_folder_in(&file), None, "{text:?}");
+        }
+        assert!(fs::write(&file, format!(r"D:\{}", "a".repeat(5000))).is_ok());
+        assert_eq!(output_folder_in(&file), None, "longer than anyone picks");
+        assert!(fs::write(&file, format!("{}\r\n", r"E:\Out")).is_ok());
+        assert_eq!(
+            output_folder_in(&file).as_deref(),
+            Some(Path::new(r"E:\Out"))
+        );
+    }
+
+    #[test]
+    fn forgetting_an_output_folder_removes_no_folder_of_that_name() {
+        let place = Place::new("output-folder-dir");
+        let file = place.0.join(OUTPUT_FOLDER_FILE);
+        assert!(fs::create_dir(&file).is_ok());
+        remember_output_folder_in(&file, None);
+        assert!(file.is_dir());
     }
 
     #[test]

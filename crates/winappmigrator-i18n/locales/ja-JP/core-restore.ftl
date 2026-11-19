@@ -178,6 +178,8 @@ core-restore-placed-driver-image = ドライバー イメージを配置しま�
 core-restore-configured-driver = ドライバーを構成しました：{ $name }
 # { $name } is a driver's name.
 core-restore-created-driver = ドライバーを作成しました：{ $name }
+# { $name } is a driver's name.
+core-restore-started-driver = ドライバーを開始しました：{ $name }
 core-restore-ensured-registry-key = レジストリ キーを用意しました：{ $key }
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = レジストリを復元しました：{ $key } { $value }

@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = Программа { $path } находитс
 # { $path } is the app's program.
 core-scan-program-someone-elses = Программа { $path } находится в папках другой учетной записи или не принадлежит этой учетной записи, а в собственной записи этого приложения не указано, что она должна там находиться, поэтому она не прочитана.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = не удалось найти исполняемый файл для { $app_name }. У драйвера, среды выполнения или надстройки может не быть собственной программы для упаковки.
+core-scan-nothing-to-package = Собственная программа { $app_name } не найдена, поэтому в установщик нечего поместить. Так часто бывает с драйверами, средами выполнения и надстройками: на новом компьютере установите драйвер от производителя или через Центр обновления Windows, а среду выполнения или надстройку — вместе с приложением, которое ее использует.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } — это веб-приложение, которое браузер установил с веб-сайта. У него нет собственной программы, поэтому в установщик нечего поместить. На новом компьютере откройте этот веб-сайт в том же браузере и установите приложение оттуда.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = Программы { $path } больше нет, хотя в записи этого приложения она указана как его программа. Возможно, приложение было перемещено или частично удалено: восстановление или повторная установка на этом компьютере должны ее вернуть.
 # { $path } is the file that was picked.
 core-scan-not-a-file = объект сканирования не является файлом: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

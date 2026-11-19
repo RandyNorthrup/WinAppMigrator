@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } no está en un disco de este PC, o 
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } está en las carpetas de otra cuenta o no es de esta cuenta, y la propia información de instalación de esta aplicación no indica que deba estar ahí, así que no se ha leído.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = no se ha encontrado ningún ejecutable para { $app_name }. Puede que un controlador, un entorno de ejecución o un complemento no tenga un programa propio que empaquetar.
+core-scan-nothing-to-package = No se ha encontrado ningún programa propio de { $app_name }, así que no hay nada que poner en un instalador. Suele ocurrir con los controladores, los entornos de ejecución y los complementos: en el PC nuevo, instala el controlador desde su fabricante o desde Windows Update, y el entorno de ejecución o el complemento junto con la aplicación que lo usa.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } es una aplicación web que un navegador instaló desde un sitio web. No tiene un programa propio, así que no hay nada que poner en un instalador. En el PC nuevo, abre el sitio web en ese navegador e instala la aplicación desde allí.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = { $path } ya no está ahí, aunque la información de instalación de esta aplicación lo indica como su programa. Puede que la aplicación se haya movido o quitado en parte: repararla o reinstalarla en este PC debería devolverlo a su sitio.
 # { $path } is the file that was picked.
 core-scan-not-a-file = el destino del análisis no es un archivo: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

@@ -538,16 +538,19 @@ impl WinAppMigratorApp {
             .hline(rect.x_range(), separator, Stroke::new(1.0, theme.border));
     }
 
-    /// Select an app and prefill the default output directory for it. What was chosen for another
-    /// app means nothing for this one, and any scan of that one stops the next time the window
-    /// looks. Selection is locked during a build: the build and its result belong to the app it
-    /// started with.
+    /// Select an app and prefill the output folder for it: the one a person chose for installers, or
+    /// else a folder of the app's own. What else was chosen for another app means nothing for this
+    /// one, and any scan of that one stops the next time the window looks. Selection is locked
+    /// during a build: the build and its result belong to the app it started with.
     pub(crate) fn select_app(&mut self, index: usize) {
         if self.is_building() || self.selected_app_index == Some(index) {
             return;
         }
         self.selected_app_index = Some(index);
-        self.output_dir = crate::default_output_for(&self.apps[index].display_name);
+        self.output_dir = self
+            .chosen_output
+            .clone()
+            .unwrap_or_else(|| crate::default_output_for(&self.apps[index].display_name));
         self.start_profile_lookup(self.apps[index].clone());
         self.forget_choices();
         // A fresh selection starts a fresh migration result.

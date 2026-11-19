@@ -155,6 +155,8 @@ avoid and code cannot: see [Known gaps](../SECURITY.md#known-gaps).
 
 ## Not in scope for this release line
 
+- One installer that holds several apps, to set up a reinstalled PC in one go
+  ([#9](https://github.com/RandyNorthrup/WinAppMigrator/issues/9)). Asked for on 2026-11-19 and kept open for later.
 - MSI/MSIX/setup installer output (the self-extracting `.exe` is the product).
 - A TUI.
 

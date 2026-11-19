@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = Файл { $path } розміщено не н
 # { $path } is the app's program.
 core-scan-program-someone-elses = Файл { $path } розміщено в папках іншого облікового запису або він не належить цьому обліковому запису, а власний запис цієї програми не вказує, що він має бути там, тому його не прочитано.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = не вдалося знайти виконуваний файл для { $app_name }. Драйвер, середовище виконання або надбудова можуть не мати власного виконуваного файлу, який можна запакувати.
+core-scan-nothing-to-package = Власного виконуваного файлу програми { $app_name } не знайдено, тож до інсталятора нема чого додати. Так часто буває з драйверами, середовищами виконання й надбудовами: на новому ПК інсталюйте драйвер від виробника або через Центр оновлення Windows, а середовище виконання чи надбудову — разом із програмою, яка їх використовує.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } — це вебпрограма, яку браузер інсталював із вебсайту. Вона не має власного виконуваного файлу, тож до інсталятора нема чого додати. На новому ПК відкрийте цей вебсайт у тому самому браузері й інсталюйте програму звідти.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = Файлу { $path } більше немає, хоча запис цієї програми вказує його як її виконуваний файл. Можливо, програму переміщено або частково видалено: відновлення чи повторна інсталяція на цьому ПК має його повернути.
 # { $path } is the file that was picked.
 core-scan-not-a-file = об'єкт сканування не є файлом: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

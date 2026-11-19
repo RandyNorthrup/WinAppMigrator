@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } اس PC کی کسی ڈسک پر ن�
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } کسی دوسرے اکاؤنٹ کے فولڈرز میں ہے یا اس اکاؤنٹ کا نہیں ہے، اور اس ایپ کا اپنا ریکارڈ یہ نہیں بتاتا کہ اس کی جگہ وہی ہے، اس لیے اسے پڑھا نہیں گیا۔
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = { $app_name } کے لیے کوئی قابل عمل فائل نہیں مل سکی۔ ہو سکتا ہے کسی ڈرائیور، رن ٹائم یا ایڈ ان کا پیکیج کرنے کے لیے اپنا کوئی پروگرام نہ ہو۔
+core-scan-nothing-to-package = { $app_name } کا اپنا کوئی پروگرام نہیں ملا، اس لیے انسٹالر میں ڈالنے کے لیے کچھ نہیں ہے۔ ڈرائیور، رن ٹائم اور ایڈ ان اکثر ایسے ہی ہوتے ہیں: نئے PC پر ڈرائیور اس کے بنانے والے یا Windows Update سے انسٹال کریں، اور رن ٹائم یا ایڈ ان اسے استعمال کرنے والی ایپ کے ساتھ انسٹال کریں۔
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } ایک ویب ایپ ہے جسے کسی براؤزر نے کسی ویب سائٹ سے انسٹال کیا ہے۔ اس کا اپنا کوئی پروگرام نہیں ہے، اس لیے انسٹالر میں ڈالنے کے لیے کچھ نہیں ہے۔ نئے PC پر اسی براؤزر میں وہ ویب سائٹ کھولیں اور وہیں سے ایپ انسٹال کریں۔
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = { $path } اب وہاں نہیں ہے، اگرچہ اس ایپ کا ریکارڈ اسے ایپ کا پروگرام بتاتا ہے۔ ہو سکتا ہے ایپ کو کہیں منتقل کیا گیا ہو یا جزوی طور پر ہٹا دیا گیا ہو: اس PC پر ایپ کی مرمت کرنے یا اسے دوبارہ انسٹال کرنے سے یہ واپس آ جانا چاہیے۔
 # { $path } is the file that was picked.
 core-scan-not-a-file = اسکین کا ہدف فائل نہیں ہے: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

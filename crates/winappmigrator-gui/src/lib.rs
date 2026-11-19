@@ -94,6 +94,9 @@ pub fn run() -> eframe::Result {
             let (opening, theme) = Opening::on_this_account(WINDOW_SIZES);
             let mut app = WinAppMigratorApp::new(cc.egui_ctx.clone(), theme.mode);
             app.opening = opening;
+            app.keeps_settings = true;
+            app.chosen_output =
+                window::chosen_output_folder().map(|folder| folder.display().to_string());
             app.theme.apply(&cc.egui_ctx);
             // Remove a stub temp directory left behind by an older version.
             sweep_legacy_stub_temp_dirs();
@@ -179,6 +182,9 @@ pub(crate) enum ScanState {
     Failed {
         key: ScanKey,
         message: String,
+        /// The app has nothing of its own to put in an installer, which is said as it is and not as
+        /// something that went wrong, nor as something trying again would change.
+        nothing_to_package: bool,
     },
     /// A person stopped it. It is not started again until they ask.
     Stopped {
@@ -217,6 +223,7 @@ enum ScanMessage {
     Step(u64, ScanStep),
     Finished(u64, Box<(ScanReport, Footprint)>),
     Failed(u64, String),
+    NothingToPackage(u64, String),
     Stopped,
 }
 
@@ -281,6 +288,11 @@ pub struct WinAppMigratorApp {
     sort_column: SortColumn,
     sort_ascending: bool,
     output_dir: String,
+    /// The folder a person chose for installers, which every app they pick after goes to as well,
+    /// until they choose another. Without one, each app has a folder of its own.
+    chosen_output: Option<String>,
+    /// Whether what a person chooses is kept for the next time the app starts. Not for a test.
+    keeps_settings: bool,
     backup_user_data: bool,
     backup_license: bool,
     /// Where apps are read from: the live OS, or a connected offline drive.
@@ -396,6 +408,8 @@ impl WinAppMigratorApp {
             sort_column: SortColumn::Name,
             sort_ascending: true,
             output_dir: String::new(),
+            chosen_output: None,
+            keeps_settings: false,
             backup_user_data: false,
             backup_license: false,
             scan_source: ScanSource::Live,
@@ -936,6 +950,7 @@ impl WinAppMigratorApp {
             progress_ctx.request_repaint();
         });
 
+        self.remember_the_output_folder(&app.display_name);
         let job = BuildJob {
             // Name the installer after the application, not the chosen folder, so
             // the deliverable is self-describing (e.g.
@@ -1140,22 +1155,31 @@ impl WinAppMigratorApp {
                     self.finish_scan(report, footprint);
                 }
                 ScanMessage::Failed(id, message) if Some(id) == current => {
-                    if let ScanState::Running { key, .. } = &self.scan {
-                        self.scan = ScanState::Failed {
-                            key: key.clone(),
-                            message,
-                        };
-                    }
+                    self.fail_scan(message, false);
+                }
+                ScanMessage::NothingToPackage(id, message) if Some(id) == current => {
+                    self.fail_scan(message, true);
                 }
                 // A scan only stops by itself when it was told to, which has been dealt with.
                 ScanMessage::Stopped
                 | ScanMessage::Step(..)
                 | ScanMessage::Finished(..)
-                | ScanMessage::Failed(..) => {}
+                | ScanMessage::Failed(..)
+                | ScanMessage::NothingToPackage(..) => {}
             }
         }
         if matches!(self.scan, ScanState::Running { .. }) {
             self.ctx.request_repaint_after(BUSY_REPAINT_INTERVAL);
+        }
+    }
+
+    fn fail_scan(&mut self, message: String, nothing_to_package: bool) {
+        if let ScanState::Running { key, .. } = &self.scan {
+            self.scan = ScanState::Failed {
+                key: key.clone(),
+                message,
+                nothing_to_package,
+            };
         }
     }
 
@@ -1197,6 +1221,20 @@ impl WinAppMigratorApp {
         self.build_progress = None;
         self.build_started = None;
         self.scroll_details_to_top = true;
+    }
+
+    /// The folder an installer is built in is the one the next app's goes in too, when a person
+    /// chose it. Building in an app's own folder goes back to each app having its own.
+    fn remember_the_output_folder(&mut self, app_name: &str) {
+        let folder = self.output_dir.trim();
+        let chosen = (!is_the_folder_of_its_own(folder, app_name)).then(|| folder.to_owned());
+        if chosen == self.chosen_output {
+            return;
+        }
+        if self.keeps_settings {
+            window::remember_output_folder(chosen.as_deref().map(Path::new));
+        }
+        self.chosen_output = chosen;
     }
 
     fn toggle_theme(&mut self) {
@@ -1405,6 +1443,10 @@ fn run_scan(job: ScanJob, sender: &Sender<ScanMessage>) {
     let message = match outcome {
         Ok(Ok(found)) => ScanMessage::Finished(id, Box::new(found)),
         Ok(Err(WinAppMigratorError::Cancelled)) => ScanMessage::Stopped,
+        Ok(Err(WinAppMigratorError::NothingToPackage(explanation))) => {
+            tracing::info!(%explanation, "an app has nothing of its own to package");
+            ScanMessage::NothingToPackage(id, explanation)
+        }
         Ok(Err(error)) => {
             tracing::warn!(%error, "an app could not be looked at");
             ScanMessage::Failed(id, error.to_string())
@@ -1484,6 +1526,15 @@ pub(crate) fn default_output_for(app_name: &str) -> String {
         })
         .display()
         .to_string()
+}
+
+/// Whether a folder is the one an app gets by itself, written however it was.
+fn is_the_folder_of_its_own(folder: &str, app_name: &str) -> bool {
+    let without_end = |text: &str| {
+        text.trim_end_matches(std::path::is_separator)
+            .to_lowercase()
+    };
+    without_end(folder) == without_end(&default_output_for(app_name))
 }
 
 /// Sanitize an application's display name into a safe file stem, which names the

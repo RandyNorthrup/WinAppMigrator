@@ -2172,7 +2172,15 @@ impl Run<'_, '_> {
             let earlier_place =
                 place_of_an_earlier_install(self.options, self.earlier_install_here);
             match place_and_register_driver(journal, driver, self.options, earlier_place) {
-                Ok(messages) => self.changes.drivers.extend(messages),
+                Ok(messages) => {
+                    self.changes.drivers.extend(messages);
+                    if starts_with_windows(driver.entry) {
+                        match start_driver(name, &run_sc_start) {
+                            Ok(started) => self.changes.drivers.push(started),
+                            Err(warning) => self.warnings.push(warning),
+                        }
+                    }
+                }
                 Err(warning) => self.record_failure(warning),
             }
         }
@@ -2678,6 +2686,41 @@ fn place_and_register_driver(
     Ok(messages)
 }
 
+/// Start a driver that was just registered, or say why it did not start. It is installed either
+/// way, and Windows tries again when the PC next starts.
+fn start_driver(
+    name: &str,
+    start: &dyn Fn(&str) -> StartAnswer,
+) -> std::result::Result<String, Warning> {
+    match start(name) {
+        StartAnswer::Running => Ok(t!("core-restore-started-driver", name = name)),
+        StartAnswer::StillStarting => Err(Warning::localized(
+            "driver_did_not_start",
+            "core-warning-restore-service-still-starting",
+            WarningSeverity::Warning,
+            vec![("name", name.into())],
+            Some(name.to_owned()),
+        )),
+        StartAnswer::Failed(reason) => Err(Warning::localized(
+            "driver_did_not_start",
+            "core-warning-restore-service-not-started",
+            WarningSeverity::Warning,
+            vec![("name", name.into()), ("reason", reason.into())],
+            Some(name.to_owned()),
+        )),
+    }
+}
+
+/// A driver Windows loads as it starts would otherwise wait for the next restart, and an app can
+/// take that for a driver that is not there: VeraCrypt then removes it, as a leftover, and looks for
+/// one beside itself. One that loads when asked is the app's to start.
+fn starts_with_windows(driver: &DriverEntry) -> bool {
+    matches!(
+        driver.start_type.as_deref(),
+        Some("boot" | "system" | "automatic")
+    )
+}
+
 /// The arguments for `sc.exe`. A driver's `ImagePath` is a path, not a command line, and
 /// the kernel does not remove quotes from it, so unlike a service's it stays bare.
 fn sc_driver_arguments(driver: &DriverEntry, image_path: &Path, exists: bool) -> Vec<OsString> {
@@ -2691,6 +2734,9 @@ fn sc_driver_arguments(driver: &DriverEntry, image_path: &Path, exists: bool) ->
     ];
     if !exists && let Some(start_type) = driver.start_type.as_deref().and_then(sc_start_type) {
         command.extend(["start=".into(), start_type.into()]);
+    }
+    if let Some(display_name) = driver.display_name.as_deref() {
+        command.extend(["DisplayName=".into(), display_name.into()]);
     }
     command
 }
@@ -4589,6 +4635,25 @@ mod tests {
                 r"D:\Program Files\Acme\flt.sys",
                 "start=",
                 "demand",
+            ]
+        );
+        let named = DriverEntry {
+            display_name: Some("Acme Filter".to_owned()),
+            ..driver
+        };
+        let arguments =
+            sc_driver_arguments(&named, Path::new(r"D:\Program Files\Acme\flt.sys"), true);
+        assert_eq!(
+            strings(&arguments),
+            [
+                "config",
+                "AcmeFlt",
+                "type=",
+                "kernel",
+                "binPath=",
+                r"D:\Program Files\Acme\flt.sys",
+                "DisplayName=",
+                "Acme Filter",
             ]
         );
     }
@@ -7143,5 +7208,35 @@ mod tests {
             "driver destination {destination:?} escaped target root"
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_driver_that_starts_with_windows_is_started_now_and_one_that_will_not_is_a_warning() {
+        let mut driver = test_driver(r"C:\Windows\System32\drivers\flt.sys");
+        for (start, now) in [
+            ("boot", true),
+            ("system", true),
+            ("automatic", true),
+            ("manual", false),
+            ("disabled", false),
+        ] {
+            driver.start_type = Some(start.to_owned());
+            assert_eq!(starts_with_windows(&driver), now, "{start}");
+        }
+        driver.start_type = None;
+        assert!(!starts_with_windows(&driver));
+        let started = start_driver("AcmeFlt", &|_| StartAnswer::Running);
+        assert!(started.is_ok_and(|said| said.contains("AcmeFlt")));
+        for answer in [
+            StartAnswer::StillStarting,
+            StartAnswer::Failed("not signed".to_owned()),
+        ] {
+            let not_started = start_driver("AcmeFlt", &move |_| answer.clone()).err();
+            assert!(not_started.is_some_and(|warning| {
+                warning.code == "driver_did_not_start"
+                    && warning.severity == WarningSeverity::Warning
+                    && warning.source.as_deref() == Some("AcmeFlt")
+            }));
+        }
     }
 }

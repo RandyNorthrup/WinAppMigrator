@@ -333,7 +333,13 @@ an app's own tree is.
 - `ManualRuntimeInstall` — `.sys` driver files. Not copied as plain files; an
   app-owned driver that backs a registered driver service is instead bundled and
   re-registered via the driver-service path, while vendor/inbox drivers get
-  precise reinstall guidance.
+  precise reinstall guidance. A driver service whose image is elsewhere, such as
+  `System32\drivers`, is the app's when its file is byte for byte one of these
+  (VeraCrypt keeps `veracrypt.sys` in its folder and loads a copy from
+  `System32\drivers`), unless it is signed as part of Windows or loaded from the
+  Driver Store (`service_scan::scan_driver_copies`). The installer places it under
+  the install location's `drivers` folder, registers it, and starts it if it starts
+  with Windows.
 - `WindowsSystem` / others — reported, not copied.
 
 Per-user `Documents`/`Saved Games` are resolved through that account's `User Shell Folders`

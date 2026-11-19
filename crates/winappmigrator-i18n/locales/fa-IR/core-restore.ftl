@@ -178,6 +178,8 @@ core-restore-placed-driver-image = تصویر درایور قرار داده ش�
 core-restore-configured-driver = درایور { $name } پیکربندی شد
 # { $name } is a driver's name.
 core-restore-created-driver = درایور { $name } ایجاد شد
+# { $name } is a driver's name.
+core-restore-started-driver = درایور { $name } شروع شد
 core-restore-ensured-registry-key = از وجود کلید رجیستری { $key } اطمینان حاصل شد
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = رجیستری بازیابی شد: { $key } { $value }

@@ -178,6 +178,8 @@ core-restore-placed-driver-image = Treiberdatei abgelegt: { $source } -> { $dest
 core-restore-configured-driver = Treiber konfiguriert: { $name }
 # { $name } is a driver's name.
 core-restore-created-driver = Treiber erstellt: { $name }
+# { $name } is a driver's name.
+core-restore-started-driver = Treiber gestartet: { $name }
 core-restore-ensured-registry-key = Registrierungsschlüssel sichergestellt: { $key }
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = Registrierungswert wiederhergestellt: { $key } { $value }

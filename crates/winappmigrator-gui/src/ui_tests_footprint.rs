@@ -1288,6 +1288,52 @@ fn a_failed_scan_says_why_and_can_be_tried_again() {
 }
 
 #[test]
+fn an_app_with_nothing_to_package_is_said_plainly_with_nothing_to_try_again() {
+    const EXPLANATION: &str = "Fabrikam Data Sync is a web app that a browser installed.";
+    for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        let mut harness = harness_with(mode, |app| {
+            select_first(app);
+            let runner: ScanRunner = Arc::new(|_: &ScanOptions, _: &ScanMonitor| {
+                Err(WinAppMigratorError::NothingToPackage(
+                    EXPLANATION.to_owned(),
+                ))
+            });
+            app.set_scan_runner(runner);
+        });
+        wait_until(&mut harness, "it was told", |app| {
+            matches!(
+                app.scan,
+                ScanState::Failed {
+                    nothing_to_package: true,
+                    ..
+                }
+            )
+        });
+        assert!(
+            harness.query_by_label(EXPLANATION).is_some(),
+            "said as it is"
+        );
+        assert!(
+            harness
+                .query_by_label_contains("could not be looked at")
+                .is_none(),
+            "nothing went wrong"
+        );
+        assert!(harness.query_by_label("Try Again").is_none());
+        assert!(
+            harness
+                .get_by_label("Create Installer")
+                .accesskit_node()
+                .is_disabled()
+        );
+        preview(
+            &mut harness,
+            &format!("footprint-nothing-to-package-{name}"),
+        );
+    }
+}
+
+#[test]
 fn stopping_a_scan_stays_stopped_until_asked() {
     for (mode, name) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
         let (mut harness, scan) = scanning_harness(mode);

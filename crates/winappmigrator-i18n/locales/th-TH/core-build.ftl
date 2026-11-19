@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path } ไม่ได้อยู่บ�
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path } อยู่ในโฟลเดอร์ของบัญชีอื่นหรือไม่ใช่ของบัญชีนี้ และบันทึกของแอปนี้เองไม่ได้ระบุ ว่าโปรแกรมควรอยู่ที่นั่น จึงไม่ได้อ่าน
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = ไม่พบไฟล์ปฏิบัติการสำหรับ { $app_name } ไดรเวอร์ รันไทม์ หรือส่วนเสริมอาจไม่มีโปรแกรมของตนเอง ให้นำไปสร้างแพคเกจ
+core-scan-nothing-to-package = ไม่พบโปรแกรมของ { $app_name } เอง จึงไม่มีสิ่งใดที่จะใส่ในตัวติดตั้ง ไดรเวอร์ รันไทม์ และส่วนเสริมมักเป็นเช่นนี้ บนพีซีเครื่องใหม่ ให้ติดตั้งไดรเวอร์จากผู้ผลิตหรือ Windows Update และติดตั้งรันไทม์หรือส่วนเสริมพร้อมกับแอปที่ใช้งาน
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name } เป็นเว็บแอปที่เบราว์เซอร์ติดตั้งจากเว็บไซต์ ไม่มีโปรแกรมของตัวเอง จึงไม่มีสิ่งใดที่จะใส่ในตัวติดตั้ง บนพีซีเครื่องใหม่ ให้เปิดเว็บไซต์นั้นในเบราว์เซอร์เดียวกันแล้วติดตั้งแอปจากที่นั่น
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = { $path } ไม่อยู่ที่นั่นแล้ว แม้ว่าบันทึกของแอปนี้จะระบุว่าเป็นโปรแกรมของแอป แอปอาจถูกย้ายหรือถูกลบออกบางส่วน การซ่อมแซมหรือติดตั้งแอปใหม่บนพีซีเครื่องนี้น่าจะนำกลับมาได้
 # { $path } is the file that was picked.
 core-scan-not-a-file = เป้าหมายการสแกนไม่ใช่ไฟล์: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

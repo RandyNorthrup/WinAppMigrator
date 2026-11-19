@@ -178,6 +178,8 @@ core-restore-placed-driver-image = đã đặt tệp trình điều khiển { $s
 core-restore-configured-driver = đã cấu hình trình điều khiển { $name }
 # { $name } is a driver's name.
 core-restore-created-driver = đã tạo trình điều khiển { $name }
+# { $name } is a driver's name.
+core-restore-started-driver = đã khởi động trình điều khiển { $name }
 core-restore-ensured-registry-key = đã đảm bảo có khóa sổ đăng ký { $key }
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = đã khôi phục sổ đăng ký { $key } { $value }

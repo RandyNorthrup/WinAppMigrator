@@ -13,7 +13,12 @@ core-scan-program-not-on-this-pc = { $path }은(는) 이 PC의 디스크에 있�
 # { $path } is the app's program.
 core-scan-program-someone-elses = { $path }은(는) 다른 계정의 폴더에 있거나 이 계정의 것이 아니며, 이 앱 자체의 기록에도 그 위치에 속한다는 내용이 없으므로 읽지 않았습니다.
 # { $app_name } is the app's name, as the list of apps calls it.
-core-scan-no-executable = { $app_name }의 실행 파일을 찾을 수 없습니다. 드라이버, 런타임 또는 추가 기능에는 패키지로 만들 자체 프로그램이 없을 수 있습니다.
+core-scan-nothing-to-package = { $app_name }의 자체 프로그램을 찾지 못했으므로 설치 관리자에 넣을 것이 없습니다. 드라이버, 런타임, 추가 기능은 흔히 이렇습니다. 새 PC에서 드라이버는 제조업체나 Windows 업데이트에서, 런타임이나 추가 기능은 그것을 사용하는 앱과 함께 설치하세요.
+# { $app_name } is the app's name, as the list of apps calls it. A web app is a website installed as an app, with
+# a window and a Start menu entry of its own.
+core-scan-web-app = { $app_name }은(는) 브라우저가 웹 사이트에서 설치한 웹앱입니다. 자체 프로그램이 없으므로 설치 관리자에 넣을 것이 없습니다. 새 PC에서 같은 브라우저로 해당 웹 사이트를 열고 거기서 앱을 설치하세요.
+# { $path } is the program the app's own record names, such as C:\Program Files\Acme\Acme.exe.
+core-scan-program-missing = 이 앱의 기록에는 { $path }이(가) 앱의 프로그램으로 되어 있지만 더 이상 그 위치에 없습니다. 앱이 이동되었거나 일부 제거되었을 수 있습니다. 이 PC에서 앱을 복구하거나 다시 설치하면 되돌아올 것입니다.
 # { $path } is the file that was picked.
 core-scan-not-a-file = 검사 대상이 파일이 아닙니다: { $path }
 # Names something left out of a package, in a list of what was left out and why. { $name } is the variable's name,

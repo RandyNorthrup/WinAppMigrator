@@ -178,6 +178,8 @@ core-restore-placed-driver-image = تم وضع صورة برنامج التشغ�
 core-restore-configured-driver = تم تكوين برنامج التشغيل { $name }
 # { $name } is a driver's name.
 core-restore-created-driver = تم إنشاء برنامج التشغيل { $name }
+# { $name } is a driver's name.
+core-restore-started-driver = تم بدء برنامج التشغيل { $name }
 core-restore-ensured-registry-key = تم التأكد من وجود مفتاح السجل { $key }
 # { $value } is the name of a value in the key.
 core-restore-restored-registry-value = تمت استعادة السجل { $key } { $value }

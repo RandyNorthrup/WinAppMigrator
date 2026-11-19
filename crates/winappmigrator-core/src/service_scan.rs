@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use winappmigrator_i18n::t_english;
 use winreg::enums::KEY_READ;
 
+use crate::hashing::sha256_file;
 use crate::models::{DriverEntry, DriverKind, ServiceEntry, Warning, WarningSeverity};
 use crate::path_utils::{
     POWERSHELL_IMPORT_SECURITY, POWERSHELL_UTF8_OUTPUT, escape_powershell_single, expand_env_vars,
@@ -170,7 +171,6 @@ pub fn scan_drivers(
             continue;
         }
 
-        let kind = driver_kind(service_type);
         // The file itself is wherever it can be read. The rest goes by what its PC called it.
         let readable = system.resolve_source_path(&binary_path);
         let app_owned = readable
@@ -183,31 +183,195 @@ pub fn scan_drivers(
                 signers_asked += 1;
                 driver_signer(file)
             });
-        let restore_instructions =
-            driver_restore_instructions(&service_name, &binary_path, &kind, app_owned, &signer);
-
-        drivers.push(DriverEntry {
-            service_name: service_name.clone(),
-            display_name: service_key.get_value::<String, _>("DisplayName").ok(),
-            image_path: binary_path,
-            driver_kind: kind,
-            start_type: service_key
-                .get_value::<u32, _>("Start")
-                .ok()
-                .map(start_type_label),
-            account_name: service_key.get_value::<String, _>("ObjectName").ok(),
-            description: service_key.get_value::<String, _>("Description").ok(),
-            requires_admin: true,
-            restore_instructions,
+        drivers.push(driver_entry(
+            &service_name,
+            &service_key,
+            service_type,
+            binary_path,
             app_owned,
             signer,
-            hash_sha256: None,
-            package_relative_path: None,
-        });
+        ));
     }
 
     drivers.sort_by(|left, right| left.service_name.cmp(&right.service_name));
     (drivers, warnings)
+}
+
+fn driver_entry(
+    service_name: &str,
+    service_key: &winreg::RegKey,
+    service_type: u32,
+    image_path: PathBuf,
+    app_owned: bool,
+    signer: Option<String>,
+) -> DriverEntry {
+    let kind = driver_kind(service_type);
+    let restore_instructions =
+        driver_restore_instructions(service_name, &image_path, &kind, app_owned, &signer);
+    DriverEntry {
+        service_name: service_name.to_owned(),
+        display_name: service_key.get_value::<String, _>("DisplayName").ok(),
+        image_path,
+        driver_kind: kind,
+        start_type: service_key
+            .get_value::<u32, _>("Start")
+            .ok()
+            .map(start_type_label),
+        account_name: service_key.get_value::<String, _>("ObjectName").ok(),
+        description: service_key.get_value::<String, _>("Description").ok(),
+        requires_admin: true,
+        restore_instructions,
+        app_owned,
+        signer,
+        hash_sha256: None,
+        package_relative_path: None,
+    }
+}
+
+/// A driver file found in the app's own folder: where its PC has it, and where it can be read.
+#[derive(Debug, Clone, Copy)]
+pub struct AppDriverFile<'a> {
+    pub original_path: &'a Path,
+    pub read_path: &'a Path,
+}
+
+/// A driver the app registered from a copy of a driver file in its own folder, and that file.
+#[derive(Debug, Clone)]
+pub struct CopiedDriver {
+    pub driver: DriverEntry,
+    pub copy_of: PathBuf,
+}
+
+/// Drivers Windows loads from somewhere else that are copies of a driver file the app keeps in its
+/// own folder. VeraCrypt's setup keeps `veracrypt.sys` in Program Files and puts a copy in
+/// `System32\drivers`, which is the one its service names. It is the same file byte for byte that
+/// makes such a driver the app's: a name alone could be anyone's. A driver Windows itself has, or
+/// one installed from a driver package, which Windows keeps in its Driver Store, is never one,
+/// whatever the app has a copy of.
+pub fn scan_driver_copies(
+    context: &ServiceScanContext,
+    app_files: &[AppDriverFile<'_>],
+    found: &[DriverEntry],
+    system: &SystemContext,
+) -> Vec<CopiedDriver> {
+    let in_the_apps_folders = |path: &Path| {
+        context
+            .install_location
+            .iter()
+            .chain(&context.also_the_apps)
+            .any(|root| path_is_strictly_inside(path, root))
+    };
+    let app_files: Vec<AppDriverFile<'_>> = app_files
+        .iter()
+        .copied()
+        .filter(|file| in_the_apps_folders(file.original_path))
+        .collect();
+    if app_files.is_empty() {
+        return Vec::new();
+    }
+    let Ok(services_key) = system.open_hklm(SERVICES_KEY, KEY_READ) else {
+        return Vec::new();
+    };
+    let windows_dir = logical_windows_dir(system);
+    let expand = |text: &str| system.expand_source_variables(text);
+    let mut copies = Vec::new();
+    let mut signers_asked = 0_usize;
+    for service_name in services_key.enum_keys().flatten() {
+        if found
+            .iter()
+            .any(|driver| driver.service_name.eq_ignore_ascii_case(&service_name))
+        {
+            continue;
+        }
+        let Ok(service_key) = services_key.open_subkey_with_flags(&service_name, KEY_READ) else {
+            continue;
+        };
+        let service_type = service_key.get_value::<u32, _>("Type").unwrap_or_default();
+        if !is_driver_service_type(service_type) {
+            continue;
+        }
+        let Ok(image_path) = service_key.get_value::<String, _>("ImagePath") else {
+            continue;
+        };
+        let binary_path = parse_image_path_with(&image_path, &windows_dir, &expand).path;
+        let named_alike: Vec<&AppDriverFile<'_>> = app_files
+            .iter()
+            .filter(|file| same_file_name(file.original_path, &binary_path))
+            .collect();
+        if named_alike.is_empty() || is_from_a_driver_package(&binary_path) {
+            continue;
+        }
+        let Some(image) = system.resolve_source_path(&binary_path) else {
+            continue;
+        };
+        let Some(copy_of) = named_alike
+            .iter()
+            .find(|file| same_contents(&image, file.read_path))
+        else {
+            continue;
+        };
+        if signers_asked >= MAX_DRIVER_SIGNERS_ASKED {
+            break;
+        }
+        signers_asked += 1;
+        let signer = driver_signer(&image);
+        if signer.as_deref().is_some_and(is_signed_as_part_of_windows) {
+            continue;
+        }
+        copies.push(CopiedDriver {
+            driver: driver_entry(
+                &service_name,
+                &service_key,
+                service_type,
+                binary_path,
+                true,
+                signer,
+            ),
+            copy_of: copy_of.original_path.to_path_buf(),
+        });
+    }
+    copies.sort_by(|left, right| left.driver.service_name.cmp(&right.driver.service_name));
+    copies
+}
+
+fn same_file_name(left: &Path, right: &Path) -> bool {
+    left.file_name()
+        .zip(right.file_name())
+        .is_some_and(|(left, right)| {
+            left.to_string_lossy()
+                .eq_ignore_ascii_case(&right.to_string_lossy())
+        })
+}
+
+/// Whether two files hold the same bytes. Sizes first, as most that differ differ in that.
+fn same_contents(left: &Path, right: &Path) -> bool {
+    let size = |path: &Path| crate::source_fs::metadata(path).ok().map(|meta| meta.len());
+    match (size(left), size(right)) {
+        (Some(left_size), Some(right_size)) if left_size == right_size => {}
+        _ => return false,
+    }
+    match (sha256_file(left), sha256_file(right)) {
+        (Ok(left), Ok(right)) => left.eq_ignore_ascii_case(&right),
+        _ => false,
+    }
+}
+
+/// A driver installed from a driver package is loaded from Windows' Driver Store, and goes back
+/// through that package, not by being registered as a service.
+fn is_from_a_driver_package(image_path: &Path) -> bool {
+    image_path
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .contains(r"\driverstore\")
+}
+
+/// Windows' own files are signed as Microsoft Windows. Drivers of other makers that Microsoft signs
+/// say `Microsoft Windows Hardware Compatibility Publisher`, and are not.
+fn is_signed_as_part_of_windows(subject: &str) -> bool {
+    subject
+        .split(',')
+        .next()
+        .is_some_and(|common_name| common_name.trim() == "CN=Microsoft Windows")
 }
 
 /// The Windows folder as the scanned PC calls it, which is what a path relative to it is
@@ -781,5 +945,50 @@ mod tests {
             driver_restore_instructions("AcmeFlt", image, &DriverKind::Kernel, false, &None);
         assert!(vendor.contains("signature unknown"), "{vendor}");
         assert!(vendor.contains("does not redistribute"), "{vendor}");
+    }
+
+    #[test]
+    fn a_copy_of_a_driver_is_known_by_its_bytes_and_not_by_its_name() -> std::io::Result<()> {
+        let folder = std::env::temp_dir().join(format!("wam-driver-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder)?;
+        let in_the_app = folder.join("veracrypt.sys");
+        let in_windows = folder.join("copy.sys");
+        let same_size = folder.join("other.sys");
+        std::fs::write(&in_the_app, b"MZ driver one")?;
+        std::fs::write(&in_windows, b"MZ driver one")?;
+        std::fs::write(&same_size, b"MZ driver two")?;
+        assert!(same_contents(&in_the_app, &in_windows));
+        assert!(!same_contents(&in_the_app, &same_size));
+        assert!(!same_contents(&in_the_app, &folder.join("missing.sys")));
+        let _ = std::fs::remove_dir_all(&folder);
+        Ok(())
+    }
+
+    #[test]
+    fn a_driver_of_windows_or_from_a_driver_package_is_never_a_copy_of_the_apps() {
+        assert!(is_signed_as_part_of_windows(
+            "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+        ));
+        assert!(!is_signed_as_part_of_windows(
+            "CN=Microsoft Windows Hardware Compatibility Publisher, O=Microsoft Corporation, \
+             L=Redmond, S=Washington, C=US"
+        ));
+        assert!(!is_signed_as_part_of_windows("CN=IDRIX SARL, O=IDRIX SARL"));
+        assert!(is_from_a_driver_package(Path::new(
+            r"C:\Windows\System32\DriverStore\FileRepository\nv.inf_amd64_1\nvlddmkm.sys"
+        )));
+        assert!(!is_from_a_driver_package(Path::new(
+            r"C:\Windows\System32\drivers\veracrypt.sys"
+        )));
+        let in_the_app = Path::new(r"C:\Program Files\VeraCrypt\veracrypt.sys");
+        assert!(same_file_name(
+            in_the_app,
+            Path::new(r"C:\Windows\System32\drivers\VERACRYPT.SYS")
+        ));
+        assert!(!same_file_name(
+            in_the_app,
+            Path::new(r"C:\Windows\System32\drivers\veracrypt-x64.sys")
+        ));
     }
 }
