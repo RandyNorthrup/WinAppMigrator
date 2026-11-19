@@ -40,4 +40,4 @@ body:
     id: version
     attributes:
       label: WinAppMigrator Version
-      placeholder: "0.7.2"
+      placeholder: "0.7.3"

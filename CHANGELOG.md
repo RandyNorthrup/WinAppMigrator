@@ -2,7 +2,7 @@
 
 All notable project changes are tracked here.
 
-## Unreleased
+## 0.7.3 — 2026-11-19
 
 Three more reports from Italy: VeraCrypt would not start after it was moved, the output folder had to be chosen again
 for every installer, and two kinds of entry in the list of apps said they "could not be looked at" with a reason that
@@ -17,9 +17,17 @@ did not fit.
   `veracrypt.sys` and `veracrypt-x64.sys` were missing and would not start. A driver whose file is byte for byte one in
   the app's own folder is now the app's: it goes in the installer and is registered again on the new PC. Windows' own
   drivers, and drivers installed from a driver package, never are.
-- **An installer starts a driver that starts with Windows** instead of leaving it for the next restart. VeraCrypt takes
-  a driver that is registered but not running for a leftover, and removes it. If the driver does not start, the
-  installer says so and Windows tries again at the next restart.
+- **An installer starts a driver that starts with Windows** instead of leaving it for the next restart, once the install
+  has checked its files, as it does a service. VeraCrypt takes a driver that is registered but not running for a
+  leftover, and removes it. If the driver does not start, the installer says so and Windows tries again at the next
+  restart.
+- **A service's or driver's own settings in its key come along when they are named for it.** VeraCrypt keeps
+  `VeraCryptEnableMemoryProtection` and `VeraCryptEnableScreenProtection` in its driver's key, and they were left out
+  with "a service's own settings are only restored through its rules". What Windows itself reads there, such as what
+  the service runs and as whom, still only goes through those rules.
+- **A driver the app owns is no longer a warning.** It goes in the installer and is listed among what the install sets
+  up, so "Driver or kernel component detected" is now only a note for it. Another company's driver, or Windows' own,
+  is still a warning.
 - **A web app a browser installed says what it is** ([#8](https://github.com/RandyNorthrup/WinAppMigrator/issues/8)).
   Chrome Remote Desktop, installed from Chrome, said its program was "in another account's folders". A web app has no
   program of its own; the app now says so, and that it is installed again from its website on the new PC.
