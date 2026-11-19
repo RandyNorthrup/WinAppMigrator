@@ -18,3 +18,4 @@ temp/
 /_site/
 __pycache__/
 .github/axe/node_modules/
+.github/cloudflare/node_modules/

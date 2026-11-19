@@ -1,6 +1,8 @@
 name: Website
 
-# Builds https://winappmigrator.com from the wiki and site/, and publishes it with GitHub Pages.
+# Builds https://winappmigrator.com from the wiki and site/, and publishes it with Cloudflare Pages (project
+# winappmigrator). GitHub Pages keeps its last deployment and its custom domain only so that the old
+# randynorthrup.github.io/WinAppMigrator addresses go on redirecting to winappmigrator.com.
 # Search engines do not read a GitHub wiki until its repository has 500 stars, so this is where they find the docs.
 # It runs when the site's own files change, when the wiki is edited, after a release is published, once a day, and by
 # hand.
@@ -115,26 +117,53 @@ jobs:
           node scan-site.mjs "${GITHUB_WORKSPACE}/_site" "${SITE_URL}"
 
       - name: Upload the site
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          name: site
           path: _site
+          if-no-files-found: error
+          retention-days: 3
 
   deploy:
     name: Publish the website
     needs: build
-    # Only main is published. The github-pages environment says the same; this keeps it so if that setting changes.
+    # Only main is published. The cloudflare-pages environment, which holds the token, says the same; this keeps it so
+    # if that setting changes.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
     environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      name: cloudflare-pages
+      url: ${{ env.SITE_URL }}
     steps:
-      - name: Deploy
-        id: deploy
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+      # Only the pinned deploy tool is taken from the repository; nothing it builds runs here.
+      - name: Checkout the deploy tool
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/cloudflare
+          sparse-checkout-cone-mode: false
+
+      - name: Download the site
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+          path: _site
+
+      - name: Deploy to Cloudflare Pages
+        # wrangler is pinned in .github/cloudflare/package-lock.json. The token may only edit Cloudflare Pages, in this
+        # one account.
+        working-directory: .github/cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          npm ci --ignore-scripts
+          npx --no-install wrangler pages deploy "${GITHUB_WORKSPACE}/_site" \
+            --project-name winappmigrator \
+            --branch main \
+            --commit-hash "${GITHUB_SHA}" \
+            --commit-message "Website from ${GITHUB_SHA::7}"
 
       - name: Tell search engines what changed
         if: needs.build.outputs.changed != ''

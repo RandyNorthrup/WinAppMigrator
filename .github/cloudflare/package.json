@@ -1,0 +1,9 @@
+{
+  "name": "winappmigrator-site-deploy",
+  "private": true,
+  "description": "Pins wrangler, which publishes the website to Cloudflare Pages. Installed with npm ci --ignore-scripts.",
+  "license": "MIT",
+  "dependencies": {
+    "wrangler": "4.165.0"
+  }
+}
