@@ -289,7 +289,7 @@ class LinkCollector(HTMLParser):
 
 def check_links(out: Path, base_url: str) -> list[str]:
     # Names exactly as built, so a link in the wrong case, or one that climbs out of the site, fails here as it would
-    # on GitHub Pages, and not only on a case-sensitive disk.
+    # on the web host, and not only on a case-sensitive disk.
     files = {path.relative_to(out).as_posix() for path in out.rglob("*") if path.is_file()}
     pages: dict[str, LinkCollector] = {}
     for name in sorted(f for f in files if f.endswith(".html")):
