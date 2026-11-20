@@ -428,7 +428,8 @@ def build(args: argparse.Namespace) -> None:
     (out / "images").mkdir(parents=True)
 
     for item in source.iterdir():
-        if item.is_file() and item.suffix in (".css", ".js", ".txt", ".png"):
+        # BingSiteAuth.xml proves the site to Bing Webmaster Tools, as the IndexNow key file does to IndexNow.
+        if item.is_file() and item.suffix in (".css", ".js", ".txt", ".png", ".xml"):
             shutil.copy2(item, out / item.name)
     # Response headers for Cloudflare Pages: security headers, and no indexing of the pages.dev copies.
     shutil.copy2(source / "_headers", out / "_headers")
