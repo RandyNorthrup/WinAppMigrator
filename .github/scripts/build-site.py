@@ -430,6 +430,8 @@ def build(args: argparse.Namespace) -> None:
     for item in source.iterdir():
         if item.is_file() and item.suffix in (".css", ".js", ".txt", ".png"):
             shutil.copy2(item, out / item.name)
+    # Response headers for Cloudflare Pages: security headers, and no indexing of the pages.dev copies.
+    shutil.copy2(source / "_headers", out / "_headers")
     for image in sorted((root / "docs" / "images").glob("*.png")):
         shutil.copy2(image, out / "images" / image.name)
     shutil.copy2(root / "crates" / "winappmigrator-ui" / "assets" / "winappmigrator.png", out / "icon.png")
