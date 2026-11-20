@@ -1,8 +1,7 @@
 name: Website
 
 # Builds https://winappmigrator.com from the wiki and site/, and publishes it with Cloudflare Pages (project
-# winappmigrator). GitHub Pages keeps its last deployment and its custom domain only so that the old
-# randynorthrup.github.io/WinAppMigrator addresses go on redirecting to winappmigrator.com.
+# winappmigrator). The repository has no GitHub Pages site any more.
 # Search engines do not read a GitHub wiki until its repository has 500 stars, so this is where they find the docs.
 # It runs when the site's own files change, when the wiki is edited, after a release is published, once a day, and by
 # hand.
